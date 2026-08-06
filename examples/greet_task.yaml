@@ -1,0 +1,17 @@
+task_id: T-greet-1
+prompt: |
+  在仓库根目录创建 greet.py，实现 greet(name) -> str，返回 "Hello, {name}!"。
+  同时创建 tests/test_greet.py 覆盖正常入参。不要改动其他文件。
+spec_ref: [AC-1]
+declared_paths: ["greet.py", "tests/test_greet.py"]
+declared_ops: []
+max_rounds: 3
+checks:
+  - name: greet-exists
+    command: test -f greet.py
+  - name: greet-returns-expected
+    command: python -c "import greet; print(greet.greet('world'))"
+    expect: stdout_contains
+    value: "Hello, world!"
+  - name: pytest-green
+    command: python -m pytest -q

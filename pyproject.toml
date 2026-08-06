@@ -1,0 +1,15 @@
+[project]
+name = "unmanned-factory"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "SQLAlchemy==2.0.50",
+    "PyYAML==6.0.2",
+]
+
+[dependency-groups]
+dev = ["pytest==9.0.3"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = ["smoke: 需要真实调用 claude CLI 的端到端测试"]

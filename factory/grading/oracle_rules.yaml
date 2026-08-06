@@ -1,0 +1,50 @@
+# 静态分级规则库。spec §3.3。
+# 规则顺序不影响结果：最严的命中规则胜出（D > C > B > A）。
+# 不命中任何规则 → A（全自动）。这是「默认放行」，所以下面的 C/D 段
+# 宁可写宽也不要写窄。
+rules:
+  # ---- D：不可逆。硬闸门、非旁路，agent 只能生成待执行脚本 ----
+  - class: D
+    reason: "D: schema migration"
+    patterns: ["*migrations/*", "*migration/*", "*alembic/*", "*.sql"]
+  - class: D
+    reason: "D: infrastructure as code"
+    patterns: ["*.tf", "*.tfvars", "*.tfstate", "*k8s/*", "*helm/*"]
+  - class: D
+    reason: "D: deploy script"
+    patterns: ["*deploy*.sh", "*deploy*.yml", "*deploy*.yaml",
+               "*.github/workflows/*"]
+  - class: D
+    reason: "D: irreversible operation declared"
+    ops: ["prod_deploy", "data_delete", "schema_migration", "force_push",
+          "drop_table", "truncate", "registry_push"]
+
+  # ---- C：无廉价裁判。永不无人 ----
+  - class: C
+    reason: "C: auth / authz"
+    patterns: ["*auth/*", "*auth.py", "*login*", "*permission*", "*rbac*",
+               "*session/*"]
+  - class: C
+    reason: "C: crypto / secrets"
+    patterns: ["*crypto*", "*secret*", "*.env", "*.env.*", "*credential*",
+               "*keystore*", "*token*"]
+  - class: C
+    reason: "C: payment / transaction boundary"
+    patterns: ["*payment*", "*billing*", "*invoice*", "*transaction*",
+               "*refund*"]
+  - class: C
+    reason: "C: new UX surface"
+    ops: ["new_ux", "visual_change"]
+
+  # ---- B：可判但影响面大。自动执行 + 对抗 review（P1 才有对抗 review）----
+  - class: B
+    reason: "B: public API surface"
+    patterns: ["*api/*", "*routes/*", "*endpoints/*", "*schema.py",
+               "*serializers*"]
+  - class: B
+    reason: "B: data model"
+    patterns: ["*models.py", "*models/*", "*entities/*"]
+  - class: B
+    reason: "B: shared config / core"
+    patterns: ["*settings*", "*config*", "*core/*", "pyproject.toml",
+               "package.json", "*Dockerfile*", "*docker-compose*"]

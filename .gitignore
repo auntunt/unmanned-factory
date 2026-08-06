@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.ruff_cache/
+
+# 审计库：本地运行产物，不进版本控制
+audit.db
+*.db
+*.db-journal
