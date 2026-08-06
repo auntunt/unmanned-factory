@@ -177,7 +177,7 @@ def utc_now() -> datetime               # naive UTC，全项目唯一时间来�
 
 **Steps:**
 
-- [ ] 写 `pyproject.toml`
+- [x] 写 `pyproject.toml`
 
 ```toml
 [project]
@@ -197,7 +197,7 @@ pythonpath = ["."]
 markers = ["smoke: 需要真实调用 claude CLI 的端到端测试"]
 ```
 
-- [ ] 写失败测试 `tests/test_audit_models.py`
+- [x] 写失败测试 `tests/test_audit_models.py`
 
 ```python
 import pytest
@@ -282,9 +282,9 @@ def test_supervisor_verdicts_cascade(session):
     assert session.query(SupervisorVerdict).count() == 0
 ```
 
-- [ ] 运行 `uv run pytest tests/test_audit_models.py` — 确认因 `ModuleNotFoundError: factory` 失败
+- [x] 运行 `uv run pytest tests/test_audit_models.py` — 确认因 `ModuleNotFoundError: factory` 失败
 
-- [ ] 实现 `factory/audit/models.py`（`factory/__init__.py` 与 `factory/audit/__init__.py` 留空）
+- [x] 实现 `factory/audit/models.py`（`factory/__init__.py` 与 `factory/audit/__init__.py` 留空）
 
 ```python
 """审计数据模型。spec §5 的 task_attempt 字段清单在这里落地。"""
@@ -391,8 +391,8 @@ class SupervisorVerdict(Base):
     attempt: Mapped[TaskAttempt] = relationship(back_populates="supervisors")
 ```
 
-- [ ] 运行 `uv run pytest tests/test_audit_models.py` — 5 个测试全过
-- [ ] 提交：`git add -A && git commit -m "feat(audit): task_attempt / supervisor_verdict ORM 模型"`
+- [x] 运行 `uv run pytest tests/test_audit_models.py` — 5 个测试全过
+- [x] 提交：`git add -A && git commit -m "feat(audit): task_attempt / supervisor_verdict ORM 模型"`
 
 ---
 
@@ -436,7 +436,7 @@ class AuditStore:
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_audit_store.py`
+- [x] 写失败测试 `tests/test_audit_store.py`
 
 ```python
 import pytest
@@ -540,9 +540,9 @@ def test_persists_across_store_instances(tmp_path):
     assert reopened.next_attempt_no("T-1") == 2
 ```
 
-- [ ] 运行 `uv run pytest tests/test_audit_store.py` — 确认因 `factory.audit.store` 不存在失败
+- [x] 运行 `uv run pytest tests/test_audit_store.py` — 确认因 `factory.audit.store` 不存在失败
 
-- [ ] 实现 `factory/audit/store.py`
+- [x] 实现 `factory/audit/store.py`
 
 ```python
 """审计存储。task_attempt 是原子审计单元，一次 attempt 一行。
@@ -689,8 +689,8 @@ class AuditStore:
             return row
 ```
 
-- [ ] 运行 `uv run pytest tests/test_audit_store.py` — 8 个测试全过
-- [ ] 提交：`git add -A && git commit -m "feat(audit): AuditStore 读写 API"`
+- [x] 运行 `uv run pytest tests/test_audit_store.py` — 8 个测试全过
+- [x] 提交：`git add -A && git commit -m "feat(audit): AuditStore 读写 API"`
 
 ---
 
@@ -735,7 +735,7 @@ class GradingEngine:
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_grading.py`
+- [x] 写失败测试 `tests/test_grading.py`
 
 ```python
 import pytest
@@ -837,9 +837,9 @@ def test_builtin_ruleset_ops_are_all_hard_gate(op):
     assert GradingEngine.default().grade(ops=[op]).oracle_class == OracleClass.D
 ```
 
-- [ ] 运行 `uv run pytest tests/test_grading.py` — 确认因模块不存在失败
+- [x] 运行 `uv run pytest tests/test_grading.py` — 确认因模块不存在失败
 
-- [ ] 实现 `factory/grading/oracle_rules.yaml`
+- [x] 实现 `factory/grading/oracle_rules.yaml`
 
 ```yaml
 # 静态分级规则库。spec §3.3。
@@ -894,7 +894,7 @@ rules:
                "package.json", "*Dockerfile*", "*docker-compose*"]
 ```
 
-- [ ] 实现 `factory/grading/rules.py`（`factory/grading/__init__.py` 留空）
+- [x] 实现 `factory/grading/rules.py`（`factory/grading/__init__.py` 留空）
 
 ```python
 """静态分级规则引擎。spec §3 按裁判成本分级。
@@ -1001,8 +1001,8 @@ class GradingEngine:
         return worst or Grade(OracleClass.A, DEFAULT_REASON, ())
 ```
 
-- [ ] 运行 `uv run pytest tests/test_grading.py` — 全过（含 13 个参数化用例）
-- [ ] 提交：`git add -A && git commit -m "feat(grading): 静态分级规则引擎 + 内置规则库"`
+- [x] 运行 `uv run pytest tests/test_grading.py` — 全过（含 13 个参数化用例）
+- [x] 提交：`git add -A && git commit -m "feat(grading): 静态分级规则引擎 + 内置规则库"`
 
 ---
 
@@ -1080,7 +1080,7 @@ keyword-only 的 `model`，因为模型分级是路由第一轴（用户明确�
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_task.py`
+- [x] 写失败测试 `tests/test_task.py`
 
 ```python
 from factory.task import CheckSpec, Task
@@ -1131,7 +1131,7 @@ def test_from_yaml_minimal_defaults(tmp_path):
     assert t.max_rounds == 3
 ```
 
-- [ ] 写失败测试 `tests/test_workspace.py`
+- [x] 写失败测试 `tests/test_workspace.py`
 
 ```python
 import subprocess
@@ -1210,9 +1210,9 @@ def test_diff_hash_is_stable_and_content_sensitive(repo):
     assert diff_hash(d1) != diff_hash(d2)
 ```
 
-- [ ] 运行 `uv run pytest tests/test_task.py tests/test_workspace.py` — 确认失败
+- [x] 运行 `uv run pytest tests/test_task.py tests/test_workspace.py` — 确认失败
 
-- [ ] 实现 `factory/task.py`
+- [x] 实现 `factory/task.py`
 
 ```python
 """任务定义。P0 从 YAML 读，P1 才由 PRD 自动生成。"""
@@ -1276,7 +1276,7 @@ class Task:
         )
 ```
 
-- [ ] 实现 `factory/harness/base.py`（`factory/harness/__init__.py` 留空）
+- [x] 实现 `factory/harness/base.py`（`factory/harness/__init__.py` 留空）
 
 ```python
 """harness 适配契约。spec §7.1。
@@ -1348,7 +1348,7 @@ class HarnessAdapter(Protocol):
     ) -> AttemptResult: ...
 ```
 
-- [ ] 实现 `factory/harness/workspace.py`
+- [x] 实现 `factory/harness/workspace.py`
 
 ```python
 """workspace diff 捕获。
@@ -1399,8 +1399,8 @@ def diff_hash(diff: str) -> str | None:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()
 ```
 
-- [ ] 运行 `uv run pytest tests/test_task.py tests/test_workspace.py` — 全过
-- [ ] 提交：`git add -A && git commit -m "feat(harness): 任务定义、diff 捕获、adapter 契约"`
+- [x] 运行 `uv run pytest tests/test_task.py tests/test_workspace.py` — 全过
+- [x] 提交：`git add -A && git commit -m "feat(harness): 任务定义、diff 捕获、adapter 契约"`
 
 ---
 
@@ -1433,7 +1433,7 @@ class ClaudeCodeAdapter:
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_transcript.py`
+- [x] 写失败测试 `tests/test_transcript.py`
 
 ```python
 import json
@@ -1500,7 +1500,7 @@ def test_parse_tool_calls_missing_file(tmp_path):
     assert parse_tool_calls(tmp_path / "gone.jsonl") == ()
 ```
 
-- [ ] 写失败测试 `tests/test_claude_code.py`（用假 `claude` 脚本，不真调模型）
+- [x] 写失败测试 `tests/test_claude_code.py`（用假 `claude` 脚本，不真调模型）
 
 ```python
 import json
@@ -1671,9 +1671,9 @@ def test_finds_transcript_and_tool_calls(tmp_path, repo):
     assert [c.name for c in res.tool_calls] == ["Edit"]
 ```
 
-- [ ] 运行 `uv run pytest tests/test_transcript.py tests/test_claude_code.py` — 确认失败
+- [x] 运行 `uv run pytest tests/test_transcript.py tests/test_claude_code.py` — 确认失败
 
-- [ ] 实现 `factory/harness/transcript.py`
+- [x] 实现 `factory/harness/transcript.py`
 
 ```python
 """transcript 定位与解析。
@@ -1751,7 +1751,7 @@ def parse_tool_calls(path: Path) -> tuple[ToolCall, ...]:
     )
 ```
 
-- [ ] 实现 `factory/harness/claude_code.py`
+- [x] 实现 `factory/harness/claude_code.py`
 
 ```python
 """Claude Code adapter。P0 只接这一个 harness。
@@ -1918,8 +1918,8 @@ class ClaudeCodeAdapter:
         )
 ```
 
-- [ ] 运行 `uv run pytest tests/test_transcript.py tests/test_claude_code.py` — 全过
-- [ ] 提交：`git add -A && git commit -m "feat(harness): ClaudeCodeAdapter + transcript 解析"`
+- [x] 运行 `uv run pytest tests/test_transcript.py tests/test_claude_code.py` — 全过
+- [x] 提交：`git add -A && git commit -m "feat(harness): ClaudeCodeAdapter + transcript 解析"`
 
 ---
 
@@ -1960,7 +1960,7 @@ class RegressionSupervisor:
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_regression.py`
+- [x] 写失败测试 `tests/test_regression.py`
 
 ```python
 import pytest
@@ -2065,9 +2065,9 @@ def test_review_with_no_checks_fails(ws):
     assert report.claims[0]["check"] == "no-checks-defined"
 ```
 
-- [ ] 运行 `uv run pytest tests/test_regression.py` — 确认失败
+- [x] 运行 `uv run pytest tests/test_regression.py` — 确认失败
 
-- [ ] 实现 `factory/supervisors/base.py`（`factory/supervisors/__init__.py` 留空）
+- [x] 实现 `factory/supervisors/base.py`（`factory/supervisors/__init__.py` 留空）
 
 ```python
 """监工层公共类型。spec §4：三个出证据，一个出意见。
@@ -2096,7 +2096,7 @@ class SupervisorReport:
         return self.verdict == Verdict.PASS
 ```
 
-- [ ] 实现 `factory/supervisors/regression.py`
+- [x] 实现 `factory/supervisors/regression.py`
 
 ```python
 """回归监工：跑命令、比对输出。确定性，零模型调用。
@@ -2212,8 +2212,8 @@ class RegressionSupervisor:
         )
 ```
 
-- [ ] 运行 `uv run pytest tests/test_regression.py` — 13 个测试全过
-- [ ] 提交：`git add -A && git commit -m "feat(supervisors): 回归监工（确定性、零模型成本）"`
+- [x] 运行 `uv run pytest tests/test_regression.py` — 13 个测试全过
+- [x] 提交：`git add -A && git commit -m "feat(supervisors): 回归监工（确定性、零模型成本）"`
 
 ---
 
@@ -2259,7 +2259,7 @@ class Dispatcher:
 
 **Steps:**
 
-- [ ] 写失败测试 `tests/test_routing.py`
+- [x] 写失败测试 `tests/test_routing.py`
 
 ```python
 from factory.audit.models import OracleClass
@@ -2300,7 +2300,7 @@ def test_builtin_table_starts_cheap_for_class_a():
     assert r.model_for(OracleClass.A, 3) == "opus"
 ```
 
-- [ ] 写失败测试 `tests/test_dispatcher.py`（用假 adapter，完全离线）
+- [x] 写失败测试 `tests/test_dispatcher.py`（用假 adapter，完全离线）
 
 ```python
 from dataclasses import replace
@@ -2520,9 +2520,9 @@ def test_max_rounds_from_task_is_respected(store, tmp_path):
     assert report.outcome == Outcome.ESCALATED
 ```
 
-- [ ] 运行 `uv run pytest tests/test_routing.py tests/test_dispatcher.py` — 确认失败
+- [x] 运行 `uv run pytest tests/test_routing.py tests/test_dispatcher.py` — 确认失败
 
-- [ ] 实现 `factory/routing.yaml`
+- [x] 实现 `factory/routing.yaml`
 
 ```yaml
 # 模型分级路由表。手工维护 —— 这是有意的选择：
@@ -2539,7 +2539,7 @@ by_class:
   D: [opus]
 ```
 
-- [ ] 实现 `factory/routing.py`
+- [x] 实现 `factory/routing.py`
 
 ```python
 """模型分级路由。第一轴是模型档位，第二轴（换 harness）留给 P1。"""
@@ -2574,7 +2574,7 @@ class Router:
         return ladder[idx]
 ```
 
-- [ ] 实现 `factory/dispatcher.py`
+- [x] 实现 `factory/dispatcher.py`
 
 ```python
 """编排循环。spec §4.2：全绿 → 合并；有红 → 带具体失败项打回，最多 3 轮；
@@ -2831,7 +2831,7 @@ class Dispatcher:
         )
 ```
 
-- [ ] `record_result` 多了 `harness_version` 参数 —— 回 Task 2 给 `AuditStore.record_result`
+- [x] `record_result` 多了 `harness_version` 参数 —— 回 Task 2 给 `AuditStore.record_result`
   加上 `harness_version: str | None = None`（非 None 时才覆盖写），并给
   `tests/test_audit_store.py` 补一条：
 
@@ -2846,8 +2846,8 @@ def test_record_result_updates_harness_version(store):
     assert store.get(aid).harness_version == "2.1.223"
 ```
 
-- [ ] 运行 `uv run pytest tests/test_routing.py tests/test_dispatcher.py tests/test_audit_store.py` — 全过
-- [ ] 提交：`git add -A && git commit -m "feat(dispatcher): 编排循环 + 三轮重试 + 双次分级硬闸门"`
+- [x] 运行 `uv run pytest tests/test_routing.py tests/test_dispatcher.py tests/test_audit_store.py` — 全过
+- [x] 提交：`git add -A && git commit -m "feat(dispatcher): 编排循环 + 三轮重试 + 双次分级硬闸门"`
 
 ---
 
@@ -2879,7 +2879,7 @@ python -m factory.cli show <task_id> --db audit.db
 
 **Steps:**
 
-- [ ] 写 `examples/greet_task.yaml`
+- [x] 写 `examples/greet_task.yaml`
 
 ```yaml
 task_id: T-greet-1
@@ -2901,7 +2901,7 @@ checks:
     command: python -m pytest -q
 ```
 
-- [ ] 写失败测试 `tests/test_cli.py`（离线，用假 claude）
+- [x] 写失败测试 `tests/test_cli.py`（离线，用假 claude）
 
 ```python
 import json
@@ -3011,7 +3011,7 @@ def test_show_prints_audit_trail(tmp_path, repo, task_file, capsys):
     assert "merged" in out
 ```
 
-- [ ] 写 `tests/test_e2e_smoke.py`（唯一真调 `claude` 的测试）
+- [x] 写 `tests/test_e2e_smoke.py`（唯一真调 `claude` 的测试）
 
 ```python
 """端到端 smoke：真的调 claude。默认不跑。
@@ -3094,9 +3094,9 @@ def test_class_a_task_end_to_end(tmp_path):
     assert (ws / "greet.py").exists()
 ```
 
-- [ ] 运行 `uv run pytest tests/test_cli.py` — 确认失败
+- [x] 运行 `uv run pytest tests/test_cli.py` — 确认失败
 
-- [ ] 实现 `factory/cli.py`
+- [x] 实现 `factory/cli.py`
 
 ```python
 """CLI 入口。
@@ -3204,7 +3204,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] `show` 用到了 `AuditStore.attempts_for` —— 回 Task 2 补上，并补测试：
+- [x] `show` 用到了 `AuditStore.attempts_for` —— 回 Task 2 补上，并补测试：
 
 ```python
 # factory/audit/store.py
@@ -3230,11 +3230,11 @@ def test_attempts_for_returns_in_attempt_order(store):
     assert [r.attempt_no for r in rows] == [1, 2]
 ```
 
-- [ ] 运行 `uv run pytest tests/test_cli.py tests/test_audit_store.py` — 全过
-- [ ] 运行全量离线测试：`uv run pytest -m "not smoke"` — 全过
-- [ ] 提交：`git add -A && git commit -m "feat(cli): run/show 入口 + 端到端 smoke"`
-- [ ] 跑真实端到端：`uv run pytest -m smoke -s` — 通过即达成 spec §9 的 P0 判据
-- [ ] 提交：`git add -A && git commit -m "test: P0 端到端 smoke 通过"`
+- [x] 运行 `uv run pytest tests/test_cli.py tests/test_audit_store.py` — 全过
+- [x] 运行全量离线测试：`uv run pytest -m "not smoke"` — 全过
+- [x] 提交：`git add -A && git commit -m "feat(cli): run/show 入口 + 端到端 smoke"`
+- [x] 跑真实端到端：`uv run pytest -m smoke -s` — 通过即达成 spec §9 的 P0 判据
+- [x] 提交：`git add -A && git commit -m "test: P0 端到端 smoke 通过"`
 
 ---
 
@@ -3242,17 +3242,17 @@ def test_attempts_for_returns_in_attempt_order(store):
 
 跑完 Task 8 后逐条核对，全部为真才算 P0 收口：
 
-- [ ] 一个 A 类任务从 task.yaml 到 merge 全自动跑通，人未介入
-- [ ] `task_attempt` 的 spec §5 字段全部有值：`task_id` / `attempt_no` / `spec_ref` /
+- [x] 一个 A 类任务从 task.yaml 到 merge 全自动跑通，人未介入
+- [x] `task_attempt` 的 spec §5 字段全部有值：`task_id` / `attempt_no` / `spec_ref` /
       `oracle_class` / `class_reason` / `harness` / `harness_version` / `diff_hash` /
       `transcript_path` / `tokens` / `cost` / `resolution`
-- [ ] `supervisors[]` 至少有 regression + risk 两条，FAIL 时 `claims` 写清期望与实得
-- [ ] 分级引擎跑了两次，后分级更严时 `oracle_class` 被改写且 `class_reason` 可回溯
-- [ ] 声明 `prod_deploy` 的任务被 D 类硬闸门拦住，adapter 一次都没被调用
-- [ ] 声明 `*auth/*` 路径的任务被 C 类拦住，adapter 一次都没被调用
-- [ ] 三轮不过升级给人，且每轮 `resolution` 分别是 reworked/reworked/escalated
-- [ ] 除 smoke 外全部测试离线可跑（`uv run pytest -m "not smoke"` 不需要网络与 API key）
-- [ ] 审计库里没有任何明文密码或 API key
+- [x] `supervisors[]` 至少有 regression + risk 两条，FAIL 时 `claims` 写清期望与实得
+- [x] 分级引擎跑了两次，后分级更严时 `oracle_class` 被改写且 `class_reason` 可回溯
+- [x] 声明 `prod_deploy` 的任务被 D 类硬闸门拦住，adapter 一次都没被调用
+- [x] 声明 `*auth/*` 路径的任务被 C 类拦住，adapter 一次都没被调用
+- [x] 三轮不过升级给人，且每轮 `resolution` 分别是 reworked/reworked/escalated
+- [x] 除 smoke 外全部测试离线可跑（`uv run pytest -m "not smoke"` 不需要网络与 API key）
+- [x] 审计库里没有任何明文密码或 API key
 
 ## 不在 P0 范围内（勿顺手做）
 
