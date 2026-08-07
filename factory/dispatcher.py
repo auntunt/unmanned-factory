@@ -32,6 +32,7 @@ from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.base import SupervisorReport
 from factory.supervisors.model_base import SUPERVISOR_ERROR_PREFIX
 from factory.supervisors.regression import RegressionSupervisor
+from factory.supervisors.scope import ScopeSupervisor
 from factory.supervisors.spec_review import SpecSupervisor
 from factory.task import Task
 
@@ -83,6 +84,9 @@ class Dispatcher:
         self._engine = engine or GradingEngine.default()
         self._router = router or Router.default()
         self._supervisor = supervisor or RegressionSupervisor()
+        # 范围监工默认开启，和两个模型监工相反 —— 它零成本、确定性，而且
+        # declared_paths 为空时一律 PASS，所以「默认开」不会给既有任务加新的红。
+        self._scope = ScopeSupervisor()
         # 两个调模型的监工默认关闭（None）。它们每轮都要花钱，而 P0 已证明
         # 确定性监工零成本就能跑通 A 类任务 —— 默认开启会让最便宜的路径变贵。
         self._spec = spec_supervisor
@@ -327,7 +331,16 @@ class Dispatcher:
             )
 
         checks = task.checks + self._runbook_checks(workspace, result)
-        reports = [self._supervisor.review(workspace, checks)]
+        reports = [
+            self._supervisor.review(workspace, checks),
+            # 范围监工放在回归监工旁边而不是后分级旁边：后分级问「危不危险」，
+            # 越界问「是不是离题」。越界是 worker 自己能修的（把无关文件改回去），
+            # 所以它必须走打回路径，而后分级的升级路径是不打回的。
+            self._scope.review(
+                changed_paths=result.changed_paths,
+                declared_paths=task.declared_paths,
+            ),
+        ]
         # 两个监工都要看周边既有代码，算一次共用：规格监工用它查 diff 引用到的
         # 实现，架构监工用它判约定和重复实现。
         context = neighbour_context(Path(workspace), result.changed_paths)

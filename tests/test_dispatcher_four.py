@@ -65,7 +65,12 @@ def test_model_supervisors_are_off_by_default(tmp_path):
     rep = d.run(_task(), tmp_path)
     assert rep.outcome == Outcome.MERGED
     roles = {v.role for v in store.get(rep.attempt_ids[0]).supervisors}
-    assert roles == {SupervisorRole.REGRESSION, SupervisorRole.RISK}
+    # scope 也在里面：它确定性、零成本，所以和 regression / risk 一样默认开着。
+    # 「默认关」针对的是花钱的监工。
+    assert roles == {SupervisorRole.REGRESSION, SupervisorRole.RISK,
+                     SupervisorRole.SCOPE}
+    costs = {v.role: v.cost_usd for v in store.get(rep.attempt_ids[0]).supervisors}
+    assert costs[SupervisorRole.SCOPE] == 0.0
 
 
 def test_all_four_verdicts_land_in_the_audit_row(tmp_path):
@@ -80,6 +85,7 @@ def test_all_four_verdicts_land_in_the_audit_row(tmp_path):
     assert {v.role for v in row.supervisors} == {
         SupervisorRole.REGRESSION, SupervisorRole.RISK,
         SupervisorRole.SPEC, SupervisorRole.ARCHITECTURE,
+        SupervisorRole.SCOPE,
     }
     costs = {v.role: v.cost_usd for v in row.supervisors}
     assert costs[SupervisorRole.SPEC] == 0.02

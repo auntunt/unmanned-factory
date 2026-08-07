@@ -49,6 +49,10 @@ class SupervisorRole(StrEnum):
     SPEC = "spec"
     ARCHITECTURE = "architecture"
     RISK = "risk"
+    # 范围监工独立成一个角色，不并进 RISK：RISK 每轮已经写恰好一条裁决（后分级
+    # PASS/FAIL）。共用角色会让同一个 attempt 出现两条方向相反的 RISK 裁决，
+    # §5.1 的 fired 和 passed 会同时 +1，那张表的裁剪结论就建在坏数字上。
+    SCOPE = "scope"
 
 
 class Base(DeclarativeBase):

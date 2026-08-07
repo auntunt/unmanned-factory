@@ -201,8 +201,11 @@ def test_post_diff_escalation_when_agent_touched_worse_paths(store, tmp_path):
 
 
 def test_post_diff_same_severity_does_not_escalate(store, tmp_path):
+    # 两个文件都得声明：这条测的是后分级的严重度比较，不是范围。
+    # 只声明 greet.py 会被范围监工拦下，测试就变成在测另一件事了。
     adapter = FakeAdapter([_result(paths=("greet.py", "utils.py"))])
-    report = _dispatcher(store, adapter).run(_task(), tmp_path)
+    task = _task(declared_paths=("greet.py", "utils.py"))
+    report = _dispatcher(store, adapter).run(task, tmp_path)
     assert report.outcome == Outcome.MERGED
     assert report.final_grade.oracle_class == OracleClass.A
 
