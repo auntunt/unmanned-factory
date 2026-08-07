@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 from factory.audit.models import Resolution
@@ -314,6 +315,11 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
                 print(f"#   - {u}", file=sys.stderr)
         return 0
 
+    # 补 check 必须在闸门之前：闸门的第一条硬拦截就是「没有可执行的 check」。
+    # 放在闸门之后等于永远补不上 —— 该补的那些草稿已经落进 needs-human 了。
+    if ns.propose_checks and not draft.checks:
+        draft = _propose_checks(draft, ns)
+
     if ns.queue:
         return _admit_to_queue(draft, ns)
 
@@ -331,6 +337,49 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
     print(f"\n下一步：确认 {written}，然后：")
     print(f"  factory run {written} --workspace <仓库路径> --db audit.db")
     return 0
+
+
+def _propose_checks(draft: DraftTask, ns: argparse.Namespace) -> DraftTask:
+    """acceptance → 探过针的 checks，补进草稿。
+
+    只在 draft.checks 为空时调用（见调用点）。用户自己写了验收命令就不覆盖：
+    他写的那条是需求的一部分，模型的提议只是补空缺。
+
+    失败一律**原样返回**，不抛：草稿带着空 checks 往下走，闸门那条
+    「没有可执行的 check」会把它拦进 needs-human。这是 fail-closed ——
+    提议失败的后果退回到「要人补」，也就是没有这个功能之前的状态。
+    """
+    from factory.intake.checkgen import CheckGenError, CheckProposer
+
+    if not ns.workspace:
+        print("  提议check  : 跳过 —— 没给 --workspace，探针无处可跑",
+              file=sys.stderr)
+        return draft
+
+    proposer = CheckProposer(binary=ns.binary, model=ns.intake_model)
+    try:
+        prop = proposer.propose(
+            acceptance=draft.acceptance,
+            prompt=draft.prompt,
+            workspace=Path(ns.workspace),
+        )
+    except CheckGenError as exc:
+        print(f"  提议check  : 失败 —— {exc}", file=sys.stderr)
+        return draft
+
+    for line in prop.lines():
+        print(f"  {line}")
+    if not prop.checks:
+        return draft
+
+    # tokens / cost 累加进草稿：提议这一步的钱是这张草稿花的，
+    # 不累加的话 metrics 里入口层的成本会少算一半。
+    return replace(
+        draft,
+        checks=prop.checks,
+        tokens=draft.tokens + prop.tokens,
+        cost_usd=draft.cost_usd + prop.cost_usd,
+    )
 
 
 def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
@@ -700,6 +749,11 @@ def main(argv: list[str] | None = None) -> int:
     prd.add_argument("--queue", default=None, metavar="DIR",
                      help="过闸门后直接进队列（不过则落 needs-human 等人）。"
                           "退出码 3 = 被闸门拦下")
+    prd.add_argument("--propose-checks", action="store_true",
+                     help="checks 为空时自动提议（需要 --workspace）。"
+                          "提议失败不抛，退化回「等人补 check」")
+    prd.add_argument("--workspace", default=None, metavar="DIR",
+                     help="仓库路径，供 --propose-checks 跑探针")
     prd.add_argument("--binary", default="claude", help="做提取的 CLI")
     prd.add_argument("--intake-model", default="sonnet",
                      help="提取用的模型档位（结构化转写，不需要最强档）")
