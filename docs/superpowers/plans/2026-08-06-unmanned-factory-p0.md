@@ -3263,8 +3263,8 @@ def test_attempts_for_returns_in_attempt_order(store):
 - ~~多 harness（codex / pi）→ P1，接口已备好，加一个 Protocol 实现即可~~
   **已完成**（`factory/harness/shell.py`，commit `dbf6515`）——「接口已备好」现在
   被第二个实现证伪过了：Protocol 本身没问题，但两个 adapter 的成败判据是相反的
-- ~~容器隔离 / worktree 并行 → P1~~ **worktree 并行已完成**（commit `10a0d9f`）；
-  容器隔离仍未做（它隔离的是副作用，不是工作树，见下）
+- ~~容器隔离 / worktree 并行 → P1~~ **两件都已完成**：worktree 并行（`10a0d9f`）+
+  副作用隔离（`1e3fb71`，落在 Seatbelt 而不是容器，理由见下）
 - ~~录音 → PRD 的入口层 → P1~~ **已完成**（`factory/intake/`，commit `2355e20`）
   - guard.py 确定性关键词扫描，declared_ops 只增不减，18 条 A 类说法 0 误报
   - 真跑：一句口述 → 7 条验收标准 → 两轮（haiku/sonnet）→ merged
@@ -3426,3 +3426,60 @@ D 类硬闸门同样真跑：「给 users 表加 last_login 字段，然后上�
 2. `spec_ref` 和 `acceptance` 必须分开。`spec_ref` 的语义是"引用外部已有文档的编号"。口述来源的任务没有外部文档，它本身就是规格。只有一个字段的话，所有口述任务都会永久被规格监工判"无标准可核"——入口层和验收层的接口对不上，而两边的单测都是绿的，唯有真跑才能暴露。
 
 3. guard 的误报率是入口层的核心质量指标，比漏报更早杀死无人工厂。18 条真实 A 类说法 0 误报是现在的基线；漏报由人一眼否掉（YAML 注释里写了怎么删），但误报让人人都要上人，工厂就白做了。两个边界要特别留意：「删掉没人用的那个函数」（"删"+"函数"，不应命中 data_delete）、「清理一下 import 顺序」（"清理"，不应命中 truncate/data_delete）。
+
+---
+
+## P1 副作用隔离：为什么是 Seatbelt 而不是容器（2026-08-07，commit `1e3fb71`）
+
+worktree 隔离的是**工作树**，这一层隔离的是**副作用**：装包、写 workspace 以外的路径、
+改系统配置。两者是不同的失效模式，各挡各的。
+
+本机 Docker（29.4.0）和 `sandbox-exec` 都可用，选了后者：
+
+- Docker 要把 worker 二进制**和它的认证**烤进镜像。`claude` 的凭据在 Keychain 里，
+  镜像里没有 Keychain —— 等于要另发一套凭据进容器。为了隔离副作用，反而多造了
+  一个密钥分发面，净收益是负的。
+- Seatbelt 是 argv 前缀，adapter 结构不用改，两个 harness 都接上了（各一个
+  `sandbox=False` 参数）。
+- **代价说清楚：Seatbelt 只管文件系统和进程，不管网络。** worker 必须能连 API，
+  所以网络是放开的。要断网得换容器，那是另一个决定，现在没做。
+
+策略形状（实测确定，不是猜的）：允许写 workspace + 该 workspace 的
+`--git-common-dir`，加一个本次派发私有的 TMPDIR；最后一行 deny 掉工厂自己的仓库。
+`--git-common-dir` 不能省：worktree 里的 `.git` 是指向父仓库的**文件**，worker 一跑
+`git add`（`capture_diff` 也依赖它）就要写父仓库的 `index.lock` 和 `refs`，只放开
+workspace 会让 git 直接 fatal。用 `--git-dir` 也不行 —— 它在 worktree 里返回
+`.git/worktrees/<name>`，缺 objects 和 refs，commit 照样失败。
+
+**真跑验证（经 CLI 派发，不是只有单测）：**
+
+| 场景 | 结果 |
+|------|------|
+| 真 `claude` worker + `--sandbox` | merged，交付的 `add_ints` 单测真的能跑过 |
+| 越界 worker + `--sandbox` | 写 `$HOME`、写工厂的 `oracle_rules.yaml` 都被 OS 拒绝；`delivered.txt` 正常写出 |
+| 同一个越界 worker，**不加** `--sandbox` | 两处都写成功 —— `oracle_rules.yaml` 真的被追加了一行（已 checkout 还原） |
+
+第三行是关键。没有它，第二行无法区分"沙箱起作用了"和"worker 本来就没写成功"。
+它也顺带演示了这一层真正防的是什么：**worker 有权改代码，而编排层自己的分级规则
+也是代码。** 能追加 `oracle_rules.yaml` 就能删掉 D 类规则，下一次派发就没有硬闸门了。
+所以工厂仓库是策略里唯一一条黑名单，且放在最后一行（实测确认 sbpl 最后匹配的规则胜出，
+所以即使有人把它塞进 `extra_writable`，deny 仍然赢）。
+
+**修掉一个实测才发现的洞。** `allow_tmp` 原来直接放开 `tempfile.gettempdir()`，
+而 `/var/folders` 下住着所有别的任务的临时目录 —— 并行派发时一个 worker 能写进另一个
+worker 的临时文件。发现方式值得记：单测全绿，是加了"经 adapter 端到端"那条测试才暴露的，
+因为 pytest 的 `tmp_path` 恰好就在那底下，越界写居然成功了。现在 `prepare()` 每次派发
+单独开目录并覆盖 `TMPDIR`。两条回归测试已反向验证（改回旧代码即 fail）。
+
+**两条边界，写下来防止以后自己放宽：**
+
+1. **沙箱不是 D 类硬闸门的替代，也不能成为放宽它的理由。** 硬闸门在派发**之前**判，
+   压根不启动 worker；沙箱只在 worker 跑起来之后限制它写本机文件。沙箱挡不住一个
+   已经拿到生产凭据的进程去调远端 API。`test_sandbox_does_not_relax_the_hard_gate`
+   用真的分级引擎把这条钉住了。
+2. **沙箱不可用时抛异常，不静默降级。** 调用方以为隔离生效了而实际没有，比压根不开
+   沙箱更危险。
+
+审计留痕走 `harness_version` 后缀（`2.1.224 (Claude Code)+sandbox`），不加列：加列要改
+schema，而改 schema 本身是 D 类不可逆操作 —— 为了记一个布尔值去动硬闸门管辖的东西不值得。
+没有这个后缀，两次 `merged` 长得一模一样，事后分不清哪个产出是在隔离下拿到的。
