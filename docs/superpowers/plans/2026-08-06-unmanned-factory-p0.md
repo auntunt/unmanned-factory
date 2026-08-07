@@ -3246,6 +3246,10 @@ def test_attempts_for_returns_in_attempt_order(store):
 - [x] `task_attempt` 的 spec §5 字段全部有值：`task_id` / `attempt_no` / `spec_ref` /
       `oracle_class` / `class_reason` / `harness` / `harness_version` / `diff_hash` /
       `transcript_path` / `tokens` / `cost` / `resolution`
+  - 这一条**当时漏了 `commit`**。§5 的字段清单里它就在 `diff_hash` 旁边，
+    但这条判据把它跳过了，于是「全部有值」在一个永远是 None 的字段上打了勾。
+    2026-08-08 补上（见下文「P1 落地」）—— 判据本身漏项，比实现漏项更难发现，
+    因为核对表读起来是绿的。
 - [x] `supervisors[]` 至少有 regression + risk 两条，FAIL 时 `claims` 写清期望与实得
 - [x] 分级引擎跑了两次，后分级更严时 `oracle_class` 被改写且 `class_reason` 可回溯
 - [x] 声明 `prod_deploy` 的任务被 D 类硬闸门拦住，adapter 一次都没被调用
