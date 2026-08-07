@@ -3824,6 +3824,17 @@ worktree 池）—— 循环一旦跑起来就没人看着了，第 40 分钟才
 一致性检查（目前只有分级在管改动范围，没有东西检查「做的是不是 PRD 要的那件
 事」）。
 
+> **这段的后半句写完就过期了**（2026-08-08 复核）。`factory/intake/` 落地后，
+> 「做的是不是 PRD 要的那件事」由**规格监工**在管：它的输入是 `criteria =
+> spec_ref + acceptance`，逐条核 diff 是否满足，任何一条无法从代码确认就判
+> fail 并给出 claim。P1 真跑里它第一轮就抓住了重复实现陷阱。
+>
+> 仍然缺的是**入口那一侧**：`factory prd` 生成的验收标准本身没有东西核 ——
+> 口述漏讲了一条，标准里就不会有它，规格监工也就不会去核它。所以 P2 的
+> 「PRD ↔ diff 一致性」实际含义是「PRD ↔ 口述原文一致性」，和 diff 无关。
+> 留着这条过期文字不删，是因为它记录了当时的判断依据；直接改掉会让
+> 「为什么后来建了规格监工」这条线索断掉。
+
 ## P1 跑批日志：无人循环留下的唯一现场（2026-08-07）
 
 队列层建好之后有个尴尬的发现：`store.py` 一直在创建 `log/` 目录，但**从来没人往
@@ -4570,3 +4581,110 @@ commit   : 6a2323ca9af6217b957c0e167b227600695980b3  (分支上已提交，主�
 正好 `greet.py`（`.pyc` 没漏进去）、主工作树 `git status` 干净、短 sha
 `attempt_by_commit` 反查回同一个 attempt。至此 spec §5 的字段清单**没有一个
 是恒为 None 的**，漏报回查路径端到端有数据可走。
+
+## P1 定时启动：「无人」原来只做到「起跑后无人」（2026-08-08）
+
+复核时发现的边界问题：`loop` 常驻也好、drain 也好，**都得人敲一次**。仓库里
+没有任何调度产物（`launchd` / `crontab` / plist 一个都没有），所以「无人」的
+实际含义一直是「起跑之后无人」，而不是「不需要人起跑」。
+
+补这一格的路上撞到一个真故障，而它比调度本身重要。
+
+### launchd 的 PATH 里没有 claude
+
+```
+$ command -v claude
+/Users/auntlee/.nvm/versions/node/v24.16.0/bin/claude
+
+$ env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin sh -c 'command -v claude'
+NOT FOUND (launchd 默认 PATH 下)
+```
+
+`claude` 装在 nvm 管的目录下，而 launchd 给的默认 PATH 是那四个系统目录。
+照着「怎么用」那节抄一个 plist 出来，夜跑会**每一次派发都失败**。
+
+难查的地方不在 PATH 本身，在于这个故障没有早期信号：
+
+- `build_adapter` 只校验 harness 的**名字**（`claude_code` / `shell`），
+  从不校验 binary 能不能跑；
+- `ClaudeCodeAdapter.version()` 吞掉 `OSError` 回 `"unknown"` —— 那是对的，
+  探针失败不该杀掉一次运行，但也意味着这里不会报警；
+- 于是队列被逐个刷成 `error`，第二天早上看到的是「昨晚 12 个任务全异常」，
+  指向哪儿都可能。
+
+这正是 `_cmd_loop` 自己的 docstring 写着要防的那类失败（「循环一旦跑起来就
+没人看着了，第 40 分钟才因为一个拼错的路径退出是最贵的失败方式」）——
+只是当时把 binary 这一格漏了。
+
+### `factory/harness/preflight.py` 的四个决定
+
+1. **只在 `loop` 的入口查，不在 `run` 里查。** `run` 是人敲的，敲错了当场就
+   看见报错；`loop` 没人看着。给 `run` 也加等于给最常用的路径加一次无谓的
+   `which`，而它换来的信息人已经有了。
+
+2. **查在 `Backlog.ensure()` 之前。** 不只是洁癖：`queue` 子命令看到目录存在
+   就认为队列已初始化，人会以为「队列是好的，任务没进来」，而真相是 loop
+   一次都没跑起来。一次配置错误不该留下半初始化的目录。
+
+3. **`--harness shell` 时查 `shell_argv[0]`，不查 `ns.binary`。** 查 binary
+   会让 shell harness 在没装 claude 的机器上过不了预检（它根本不需要
+   claude）；反过来，脚本不存在却因为 claude 在就放行 —— 预检对这条路径
+   完全失效。这一条被变异测试验过：改成永远查 `ns.binary`，
+   `test_loop_preflight_checks_shell_argv_not_the_claude_binary` 挂。
+
+4. **含斜杠时按路径处理，不查 PATH**，和 execvp 语义一致。否则
+   `--binary ./wrapper.sh` 会被拿去 PATH 里搜一遍，然后报一个误导人的
+   「不在 PATH 里」—— 而真正的问题是相对路径相对错了目录。
+
+报错必须带上**当时的 PATH**：这个故障的全部难点就是「PATH 和我以为的不一样」，
+只说「找不到 claude」会让人去查安装，而装是装好的。`test_..._names_the_path_
+it_searched` 钉住了这一点，连「得点出定时任务 PATH 更短」这句提示都在断言里。
+
+还钉了一条会过期的测试：`test_the_real_launchd_path_does_not_find_claude`
+断言在那四个系统目录下必须抛。哪天 claude 真装进 `/usr/bin`，这条会挂 ——
+那正是该重读这个模块还有没有必要的时候。
+
+### `examples/launchd/com.factory.loop.plist`
+
+给出来的是**样例不是即用件**，所有需要按本机改的行都标了「←」。三个会让夜跑
+静默失效的设置：
+
+| 设置 | 为什么必须这样 |
+|---|---|
+| `EnvironmentVariables.PATH` 含 nvm 的 bin | 上面那个故障 |
+| `StandardOutPath` / `StandardErrorPath` 分开两个文件 | 不设的话 stdout 进 /dev/null，「昨晚跑得怎么样」只能靠 audit.db 反推，而**队列侧的时间不在库里**；合在一个文件里则正常日报和异常栈没法分开 grep |
+| `RunAtLoad` = `false`，且**不设** `KeepAlive` | RunAtLoad 会让每次登录都多跑一轮 —— 按天算的预算被登录次数触发，`--budget-usd` 就失去意义。KeepAlive 会把 drain 模式的正常退出当崩溃再拉起来，变成无限循环 |
+
+`--idle drain` 而不是 `watch`：定时任务该跑完就退，常驻才用 watch。
+
+写这个文件时自己踩了一次 XML 的坑：注释里嵌 `<!-- ← -->` 让整个 plist 解析
+失败（XML 注释不能嵌套）。`plutil -lint` 一句话就指出了行号，而 launchctl
+只会说加载失败、不说哪一行 —— 所以文件头上写了「改完先跑 plutil -lint」。
+
+### 用 plist 的真实 argv 验过两遍
+
+不是读一遍就算数。把 plist 里的 argv 和 env 原样跑出来：
+
+```
+# launchd 的默认 PATH → 预检拦住，队列目录一个都没建
+PATH 里找不到 worker 可执行体 `claude`。
+  当前 PATH: /usr/bin:/bin:/usr/sbin:/sbin
+--- queue created? ---
+nothing created
+
+# plist 里那条 PATH → 起得来
+worker   : /Users/auntlee/.nvm/.../@anthropic-ai/claude-code/bin/claude.exe
+queue=/private/tmp/plisttest/q  workspace=/tmp/plisttest/ws  idle=drain
+== 停机：队列已抽干
+派发 0：合并 0 / 升级 0 / 硬闸门 0 / 异常 0，花费 $0.0000
+```
+
+顺带确认了 `.venv/bin/python -m factory.cli` 这条入口本身可用（没有
+`__main__.py`，靠 `cli.py` 末尾的 `if __name__` 生效），以及 `worker` 那行
+打出的是符号链接背后的真实路径。
+
+`_cmd_loop` 之前**一个 CLI 层测试都没有** —— 它 docstring 里写明存在理由的
+那段前置校验，此前没有任何东西验证。现在有三条，且两次变异（改成永远查
+`ns.binary`、把预检挪到 `ensure()` 之后）分别挂 1 条和 3 条。
+
+569 个测试全绿。

@@ -196,3 +196,53 @@ def test_no_sandbox_flag_is_recorded_too(tmp_path, repo, task_file):
         "--db", str(db), "--binary", _fake_claude(tmp_path, repo),
     ]) == 0
     assert not AuditStore(db).get(1).harness_version.endswith("+sandbox")
+
+
+def test_loop_refuses_to_start_when_the_worker_binary_is_missing(
+        tmp_path, repo, monkeypatch, capsys):
+    """launchd 场景：PATH 里没有 claude。必须在进入循环**之前**退出。
+
+    不拦的话，队列里每个任务都会被派发、失败、刷成 error —— 而 version()
+    吞掉 OSError 只回 "unknown"，日志里没有任何指向「binary 找不到」的信号。
+    """
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    q = tmp_path / "q"
+    code = main(["loop", "--queue", str(q), "--workspace", str(repo),
+                 "--db", str(tmp_path / "audit.db"), "--idle", "drain",
+                 "--no-sandbox"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "claude" in err and "PATH" in err
+
+
+def test_loop_preflight_runs_before_the_queue_is_even_created(
+        tmp_path, repo, monkeypatch):
+    """预检要在 Backlog.ensure() 之前 —— 否则一次配置错误会留下一地空目录。
+
+    这条不只是洁癖：`queue` 子命令看到目录存在就认为队列已初始化，
+    人会以为「队列是好的，任务没进来」，而真相是 loop 一次都没跑起来。
+    """
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    q = tmp_path / "q-never"
+    assert main(["loop", "--queue", str(q), "--workspace", str(repo),
+                 "--db", str(tmp_path / "audit.db"), "--idle", "drain",
+                 "--no-sandbox"]) == 2
+    assert not q.exists(), "配置错误不该留下半初始化的队列目录"
+
+
+def test_loop_preflight_checks_shell_argv_not_the_claude_binary(
+        tmp_path, repo, monkeypatch, capsys):
+    """--harness shell 时该查的是 shell_argv[0]。
+
+    查 ns.binary 会让 shell harness 在**没装 claude 的机器上**过不了预检，
+    而它根本不需要 claude；反过来，脚本不存在却因为 claude 在就放行，
+    等于预检对这条路径完全失效。
+    """
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    code = main(["loop", "--queue", str(tmp_path / "q"),
+                 "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
+                 "--idle", "drain", "--no-sandbox",
+                 "--harness", "shell",
+                 "--shell-argv", str(tmp_path / "nope.sh"), "{prompt}"])
+    assert code == 2
+    assert "nope.sh" in capsys.readouterr().err

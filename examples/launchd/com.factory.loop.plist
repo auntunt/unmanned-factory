@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  夜跑：每天 02:10 抽干队列后退出。
+
+  装：cp 到 ~/Library/LaunchAgents/ 后 `launchctl bootstrap gui/$UID <path>`。
+  文件里所有标了「←」的行都必须按本机改，没有一个能照抄。
+  改完先跑 `plutil -lint` —— XML 坏掉时 launchctl 只说加载失败，不说哪一行。
+
+  三个坑，每个都会让夜跑静默失效：
+
+  1. PATH。launchd 给的是 /usr/bin:/bin:/usr/sbin:/sbin，里面**没有** nvm 装的
+     claude（本机在 ~/.nvm/versions/node/v24.16.0/bin/claude）。所以下面显式设
+     PATH，并且 loop 的预检会在开跑前把解析到的路径打出来 —— 找不到就退 2，
+     不会带着一队任务去逐个失败。
+
+  2. StandardOutPath 必须设。不设的话 stdout 直接进 /dev/null，
+     「昨晚跑得怎么样」就只能靠 audit.db 反推，而队列侧的时间不在库里。
+
+  3. RunAtLoad 是 false。true 会让每次登录都多跑一轮 —— 一个按天算预算的
+     循环被登录次数触发，花费上限就失去意义了。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.loop</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/auntlee/workspace/自动化无人工厂实践/.venv/bin/python</string> <!-- ← -->
+    <string>-m</string>
+    <string>factory.cli</string>
+    <string>loop</string>
+    <string>--queue</string>
+    <string>/Users/auntlee/.factory/q</string>                                   <!-- ← -->
+    <string>--workspace</string>
+    <string>/Users/auntlee/repo</string>                                         <!-- ← -->
+    <string>--db</string>
+    <string>/Users/auntlee/.factory/audit.db</string>                            <!-- ← -->
+    <!-- drain 而不是 watch：定时任务该跑完就退，常驻是 watch 的活。 -->
+    <string>--idle</string>
+    <string>drain</string>
+    <!-- 预算上限必须给。0 = 无限，夜里没人看着。 -->
+    <string>--budget-usd</string>
+    <string>5</string>
+    <string>--worktree</string>
+    <string>--global-runbook</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/auntlee/workspace/自动化无人工厂实践</string>                     <!-- ← -->
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- ← 第 1 个坑。`command -v claude` 的目录必须在这里。 -->
+    <key>PATH</key>
+    <string>/Users/auntlee/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/auntlee</string>                                              <!-- ← -->
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>2</integer>
+    <!-- 10 而不是 0：整点是所有人的默认值。 -->
+    <key>Minute</key><integer>10</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- 第 2 个坑。两个文件分开：正常日报和异常栈混在一个文件里没法 grep。 -->
+  <key>StandardOutPath</key>
+  <string>/Users/auntlee/.factory/loop.out.log</string>                          <!-- ← -->
+  <key>StandardErrorPath</key>
+  <string>/Users/auntlee/.factory/loop.err.log</string>                          <!-- ← -->
+
+  <!-- 别设 KeepAlive：drain 模式正常退出后被拉起来会变成无限循环。 -->
+</dict>
+</plist>

@@ -39,6 +39,7 @@ from factory.dispatcher import Dispatcher, Outcome
 from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
+from factory.harness.preflight import PreflightError, resolve_binary
 from factory.harness.shell import ShellAdapter
 from factory.harness.worktree import WorktreePool
 from factory.intake.extract import DraftTask, IntakeError, TaskExtractor
@@ -456,8 +457,14 @@ def _cmd_loop(ns: argparse.Namespace) -> int:
         return rc
     try:
         build_adapter(ns.harness, binary=ns.binary, shell_argv=ns.shell_argv)
+        # binary 能不能跑，只在 loop 里查。build_adapter 只校验名字，
+        # 而 launchd 的 PATH 里通常没有 nvm 装的 claude —— 不在这儿拦，
+        # 整条队列会被逐个刷成 error，且 version() 吞掉 OSError 后毫无信号。
+        argv0 = ns.shell_argv[0] if ns.harness == "shell" and ns.shell_argv \
+            else ns.binary
+        print(f"worker   : {resolve_binary(argv0)}")
         _runbook_for(ns)
-    except (ValueError, RunbookError) as exc:
+    except (ValueError, RunbookError, PreflightError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
