@@ -3810,6 +3810,10 @@ factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
   --idle drain --budget-usd 5
 ```
 
+定时启动别照抄上面这条命令 —— launchd 的 PATH 里没有 nvm 装的 claude。
+用 `examples/launchd/com.factory.loop.plist`（标了「←」的行按本机改），
+理由见下文「P1 定时启动」。
+
 刻意**没有** `queue clear`：清队列的唯一正确方式是看清每个条目再删。一条命令把
 `needs-human/` 一起清掉，等于把「还没人看过的失败」当成垃圾扫了。
 
@@ -4688,3 +4692,41 @@ queue=/private/tmp/plisttest/q  workspace=/tmp/plisttest/ws  idle=drain
 `ns.binary`、把预检挪到 `ensure()` 之后）分别挂 1 条和 3 条。
 
 569 个测试全绿。
+
+### 写 README 时发现：`factory` 这个命令一直不存在
+
+设计文档从第一天就写着 `factory run ...` / `factory loop ...`，但：
+
+```
+$ uv run factory --help
+error: Failed to spawn: `factory`
+  Caused by: No such file or directory (os error 2)
+```
+
+`pyproject.toml` 里没有 `[project.scripts]`。也就是说本文档、plist、以及所有
+「怎么用」示例里的每一条命令都跑不起来 —— 而**没有任何测试会发现**，因为
+测试全部直接 `from factory.cli import main`，绕过了入口点。
+
+补入口点而不是改文档：文档描述的是意图中的接口，而 `python -m factory.cli`
+这种写法一旦进了文档就会渗到 plist、cron、README 的每一行去。加了
+`[project.scripts]` 和 hatchling 的 build-system（之前连 build-system 都没有，
+所以这个包从来没被真正安装过，靠 `pythonpath = ["."]` 撑着）。
+
+两条测试钉住它：一条断言 `[project.scripts]` 的声明，一条断言 `main()` 返回
+**int** —— 返回 None 会被 `sys.exit(None)` 变成退出码 0，于是 cron 认为
+「失败的那次也成功了」。
+
+plist 随之改成直接用 `.venv/bin/factory`：绝对路径的 console script 自带正确
+的 sys.path，不依赖 `WorkingDirectory`。改完用它的真实 argv 又验了一遍
+（`worker` 行正常、队列抽干、退出 0），launchd 默认 PATH 下仍然退 2 且不建目录。
+
+### `README.md`
+
+之前没有 README，唯一的入口是这份 4700 行的建造日志 —— 它按时间顺序记决定和
+理由（包括后来被证伪的判断），当手册用是错的。README 只回答「怎么跑」，
+并把「为什么是这样」指回这里。
+
+里面刻意重复了三条边界（只在 linked worktree 提交 / 只提交审过的那一组 /
+落地失败不改判决）。文档去重在这三条上是错的优化：它们是改代码时最容易
+"顺手放宽"的地方，而放宽的后果分别是往人的仓库里写 commit、审计两个字段
+描述不同内容、以及把全绿的任务判成升级。

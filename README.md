@@ -1,0 +1,82 @@
+# 自动化无人工厂
+
+一个调度 + 审计层：把任务派给 coding agent，用四道监工判收，全程留可回查的证据。
+
+设计文档是 `docs/superpowers/plans/2026-08-06-unmanned-factory-p0.md`（约 4700 行）。
+那是**建造日志**不是手册 —— 按时间顺序记着每个非显然决定和它的理由，包括
+后来被证伪的判断。想知道「为什么是这样」去那儿；想知道「怎么跑」看下面。
+
+## 30 秒跑一个任务
+
+```bash
+uv sync
+uv run factory run examples/greet_task.yaml --workspace ~/some-repo --db audit.db
+```
+
+产出落在任务分支上，主分支不动。`--workspace` 指到别人的仓库时**默认不开
+worktree**，此时不会提交（见「三条边界」第 1 条）。
+
+## 无人跑批
+
+```bash
+# 入队（一个失败则一个都不入队）
+uv run factory queue --queue ~/.factory/q tasks/*.yaml
+
+# 抽干就退，5 美元上限
+uv run factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
+  --idle drain --budget-usd 5 --worktree
+
+# 昨晚跑得怎么样
+uv run factory queue --queue ~/.factory/q --history 50
+```
+
+定时启动用 `examples/launchd/com.factory.loop.plist`，**别照抄上面那条命令** ——
+launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
+「←」的行按本机改，改完跑 `plutil -lint`。
+
+## 子命令
+
+| 命令 | 干什么 |
+|---|---|
+| `prd` | 录音 / 自由文本 → 任务 YAML 草稿，过入口闸门 |
+| `run` | 派发一个或多个任务 |
+| `queue` | 入队 / 看状态 / 看历史 |
+| `loop` | 跑批：不断认领队列里的任务并派发 |
+| `show` | 打印一个任务的完整审计轨迹 |
+| `override` | 人工定案 resolution（事后回填） |
+| `defect` | 事后挂 defect 捕获漏报，支持 `--commit <sha>` 反查 |
+| `metrics` | 监工命中率 / 漏报 / 单位命中成本 |
+
+## 四道监工
+
+两个确定性的（零成本）、两个调模型的：
+
+- **regression** — 跑任务声明的 check。没有可执行 check 就判 FAIL（fail-closed）
+- **scope** — 改动是否超出 `declared_paths`
+- **spec** — 逐条核 diff 是否满足验收标准，不给 build log（拿不到过程叙述）
+- **architecture** — 出**意见**，不能一票否决合并
+
+三轮不过升级给人。分级引擎把任务分 A/B/C/D，C/D 类在派发前就被硬闸门拦住。
+
+## 三条边界（改代码前先读）
+
+1. **只在 linked worktree 里提交。** 不加 `--worktree` 时 workspace 就是人的
+   仓库本身，那条路径**默认会走到** —— 人的检出目录里冒出一个没人要求过的
+   commit 是这一层能造成的最坏后果。
+2. **只提交监工审过的那一组文件**（`git add -- <paths>`，不是 `add -A`）。
+   check 命令自己会造 `__pycache__`，`add -A` 会让 `commit` 和 `diff_hash`
+   描述不同的内容。
+3. **落地失败不改判决。** 一个全绿的任务不该因为 `user.email` 没配变成
+   escalated。
+
+## 开发
+
+```bash
+uv run pytest -m "not smoke"   # 569 个，离线，不需要 API key
+uv run pytest -m smoke -s      # 真调 claude，约 6 分钟，花约 $0.5
+```
+
+`tests/__init__.py` 必须存在：site-packages 里有第三方装的顶层 `tests` 包，
+没有它本地测试会 `ModuleNotFoundError`。
+
+审计库里不许有明文密码或 key（`factory/redact.py` 管这个）。

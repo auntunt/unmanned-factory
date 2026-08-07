@@ -26,9 +26,9 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/auntlee/workspace/自动化无人工厂实践/.venv/bin/python</string> <!-- ← -->
-    <string>-m</string>
-    <string>factory.cli</string>
+    <!-- 用 venv 里的 factory 而不是 `python -m factory.cli`：绝对路径的
+         console script 自带正确的 sys.path，不依赖 WorkingDirectory。 -->
+    <string>/Users/auntlee/workspace/自动化无人工厂实践/.venv/bin/factory</string> <!-- ← -->
     <string>loop</string>
     <string>--queue</string>
     <string>/Users/auntlee/.factory/q</string>                                   <!-- ← -->

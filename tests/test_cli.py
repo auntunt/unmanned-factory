@@ -246,3 +246,26 @@ def test_loop_preflight_checks_shell_argv_not_the_claude_binary(
                  "--shell-argv", str(tmp_path / "nope.sh"), "{prompt}"])
     assert code == 2
     assert "nope.sh" in capsys.readouterr().err
+
+
+def test_the_factory_console_script_is_declared(tmp_path):
+    """文档里从第一天就写着 `factory run ...`，但入口点一直不存在。
+
+    `uv run factory --help` 报的是 "Failed to spawn: factory" —— 也就是说
+    README、设计文档、plist 里每一条示例命令都跑不起来，而没有任何测试会发现，
+    因为测试全部直接 import `main`。这条钉住声明本身。
+    """
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert cfg["project"]["scripts"]["factory"] == "factory.cli:main"
+
+
+def test_main_returns_an_int_so_the_console_script_can_exit_with_it(
+        tmp_path, capsys):
+    # console script 的返回值直接进 sys.exit。返回 None 会变成退出码 0,
+    # 于是 cron 认为「失败的那次也成功了」。
+    rc = main(["show", "T-does-not-exist", "--db", str(tmp_path / "a.db")])
+    assert isinstance(rc, int) and rc != 0
