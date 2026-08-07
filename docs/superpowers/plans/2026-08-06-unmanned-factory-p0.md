@@ -4246,3 +4246,99 @@ $ factory queue --queue /tmp/gq --history 50
 人看一眼，少报的代价是无人管道自己去动生产库。凭一个 anecdote 收紧词表，
 方向正好是往危险那边倒。现在有了 `[guard-ops]` 的命中计数，
 下次要不要收紧可以看数据 —— 这正是这套度量要解决的问题。
+
+## P1 归属：刚做出来的度量自己是错的（2026-08-08，commit 04468c3）
+
+上一节把「闸门拦得对不对」变成了 `[code]` 计数。这一节记的是：那份计数
+上线一个 commit 之后就发现是错的，以及为什么这个错值得单独写一节。
+
+### 缺陷
+
+`harden_ops` 返回的是并集：
+
+```python
+return have + tuple(f.op for f in findings), findings
+```
+
+也就是 guard 从原文里嗅到的 op 会被**塞进** `declared_ops`。闸门原来直接读
+`declared_ops` 来生成 `[declared-ops]`，再读 `guard_findings` 生成
+`[guard-ops]`。于是一个只有 guard 嗅到的 op 会同时命中两条编码：
+
+```
+codes: ('declared-ops', 'guard-ops')
+模型其实什么都没声明，却记了一次 declared-ops
+```
+
+而这两条编码存在的**全部**理由就是分辨这两件事：
+
+- `[declared-ops]`：模型自己读懂了，抽出来报了 —— 抽取是靠得住的
+- `[guard-ops]`：模型没抽出来，词表兜住了 —— 抽取漏了
+
+一个被 guard 命中数污染的 `[declared-ops]` 计数，回答不了「模型的抽取到底
+靠不靠谱」。而这正是将来判「哪条规则该松」时唯一要问的问题。度量本身错了
+比没有度量更糟：它会给出一个看起来能用的数字。
+
+### 修法
+
+只改归属，不改拦不拦。`findings` 里只含 guard 新加的（`harden_ops` 已经滤掉
+模型报过的），所以差集就是模型自己声明的那些：
+
+```python
+findings = getattr(draft, "guard_findings", ())
+sniffed = {f.op for f in findings}
+by_model = [o for o in getattr(draft, "declared_ops", ()) if o not in sniffed]
+```
+
+三种情形实测：
+
+```
+guard 独家嗅到 : ('guard-ops',)                | admitted = False
+只有模型声明   : ('declared-ops',)             | admitted = False
+两边各有一个   : ('declared-ops', 'guard-ops') | admitted = False
+```
+
+`admitted` 三条都是 False —— 归属改了，拦截行为一个字没动。有一个测试专门
+钉这一点（`test_fixing_the_attribution_did_not_loosen_the_block`），因为
+「修度量顺手放松了闸门」是这类改动最容易犯的错。
+
+### 测试必须走真的 harden_ops
+
+手搓 `declared_ops=("data_delete",), guard_findings=(...)` 两个字段的测试
+**测不出这个 bug** —— bug 只在并集语义下出现。所以新增的 5 个测试都从文本
+出发跑真的 `harden_ops`：
+
+```python
+def _real(text: str, declared=()) -> Admission:
+    ops, findings = harden_ops(text, declared=declared)
+    return admit(_draft(declared_ops=ops, guard_findings=findings))
+```
+
+反过来验了一次：把 gate 改回读并集，`test_an_op_only_guard_found_is_not_
+charged_to_the_model` 挂掉。
+
+### 顺带：truncate 的收紧方案被数据否掉了
+
+`\btruncate\b` 会把「加一个 truncate(s, n) 字符串截断函数」判成不可逆操作。
+看起来最顺的收法是「后面紧跟 `(` 就当函数」：`\btruncate\b(?!\s*\()`。
+实测：
+
+```
+良性  收紧后还拦得住？ False   加一个 truncate(s, n) 字符串截断函数
+危险  收紧后还拦得住？ False   调 conn.truncate("orders") 把订单表清掉
+危险  收紧后还拦得住？ False   session.truncate(Orders) 清空测试数据
+危险  收紧后还拦得住？ True    TRUNCATE TABLE orders
+```
+
+拿两个真·清表换一个良性函数名，方向正好反了。ORM 里清表本来就是函数调用，
+「带括号 = 安全」这个前提在这个域里不成立。
+
+所以**不收紧**，把反例写进 `guard.py` 的注释和两个测试里
+（`test_orm_style_table_truncation_is_still_caught` 钉危险的那两句，
+`test_a_benign_function_named_truncate_is_a_known_false_positive` 记下现状
+而不是掩盖它）。误报的代价是人看一眼 —— `[guard-ops]` 拦下的都落
+`needs-human`，本来就要人看。
+
+要不要收紧看数据不看直觉：`factory queue --history` 里的 `[guard-ops]` 命中数
+配上 `gate_overruled`（人放回 inbox 的次数）才是判据。而这个判据只在
+`[declared-ops]` 不再被 guard 命中数污染之后才成立 —— 这也是为什么归属这个
+修必须先落地。
