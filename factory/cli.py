@@ -1,5 +1,6 @@
 """无人工厂入口。
 
+    prd       录音 / 自由文本 → 任务 YAML 草稿（要人看过再 run）
     run       派发一个任务
     show      打印某个任务的审计轨迹
     override  人工定案 resolution（spec §5：此字段事后填写）
@@ -20,6 +21,9 @@ from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
 from factory.harness.shell import ShellAdapter
 from factory.harness.worktree import WorktreePool
+from factory.intake.extract import DraftTask, IntakeError, TaskExtractor
+from factory.intake.guard import KNOWN_OPS
+from factory.intake.transcribe import TranscribeError, read_source
 from factory.metrics import gate3_rework, supervisor_metrics
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.model_base import ClaudeJudge
@@ -188,6 +192,57 @@ def _run_pool(ns: argparse.Namespace, tasks: list[Task]) -> int:
     return 0 if merged == len(tasks) else 1
 
 
+def _cmd_prd(ns: argparse.Namespace) -> int:
+    """自由文本 / 录音 → Task YAML 草稿。
+
+    产物不直接进 dispatcher —— 要人看过才 factory run。
+    见 DraftTask.to_yaml() 里的注释块，原因在那里写得更清楚。
+    """
+    try:
+        description = read_source(
+            text=ns.text,
+            text_file=ns.text_file,
+            audio=ns.audio,
+            binary=ns.whisper_binary,
+            model=ns.whisper_model,
+            language=ns.language,
+        )
+    except TranscribeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    extractor = TaskExtractor(binary=ns.binary, model=ns.intake_model)
+    try:
+        draft: DraftTask = extractor.run(description)
+    except IntakeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if ns.dry_run:
+        print(draft.to_yaml())
+        if draft.unclear:
+            print(f"# 模型的疑问（共 {len(draft.unclear)} 条）—— "
+                  "改写描述后重跑：", file=sys.stderr)
+            for u in draft.unclear:
+                print(f"#   - {u}", file=sys.stderr)
+        return 0
+
+    out_path = Path(ns.output or f"tasks/{draft.task_id}.yaml")
+    written = draft.write(out_path)
+    print(f"已写入 {written}")
+    print(f"  task_id   : {draft.task_id}")
+    print(f"  ops       : {list(draft.declared_ops) or '[]'}")
+    if draft.guard_findings:
+        print(f"  guard补充 : {[f.op for f in draft.guard_findings]}")
+    if draft.unclear:
+        print(f"  待确认    : {list(draft.unclear)}")
+    cost = f"${draft.cost_usd:.4f}" if draft.cost_usd else "-"
+    print(f"  tokens    : {draft.tokens}  cost={cost}")
+    print(f"\n下一步：确认 {written}，然后：")
+    print(f"  factory run {written} --workspace <仓库路径> --db audit.db")
+    return 0
+
+
 def _cmd_show(ns: argparse.Namespace) -> int:
     attempts = AuditStore(ns.db).attempts_for(ns.task_id)
     if not attempts:
@@ -277,6 +332,26 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="factory")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    prd = sub.add_parser("prd", help="录音 / 自由文本 → 任务 YAML 草稿")
+    prd.add_argument("--text", default=None, help="直接给需求文字")
+    prd.add_argument("--text-file", default=None, help="从文件读需求")
+    prd.add_argument("--audio", default=None, help="录音文件（走 whisper 转录）")
+    prd.add_argument("-o", "--output", default=None,
+                     help="输出 YAML 路径，默认 tasks/<task_id>.yaml")
+    prd.add_argument("--dry-run", action="store_true",
+                     help="只打到 stdout，不落盘")
+    prd.add_argument("--binary", default="claude", help="做提取的 CLI")
+    prd.add_argument("--intake-model", default="sonnet",
+                     help="提取用的模型档位（结构化转写，不需要最强档）")
+    prd.add_argument("--whisper-binary", default="whisper")
+    prd.add_argument("--whisper-model", default="small")
+    prd.add_argument("--language", default=None,
+                     help="转录语言，例如 zh。省略则自动检测")
+    prd.add_argument("--list-ops", action="version",
+                     version="guard 识别的 ops: " + " ".join(KNOWN_OPS),
+                     help="打印 guard 能扫出的 declared_ops")
+    prd.set_defaults(func=_cmd_prd)
 
     run = sub.add_parser("run", help="派发一个或多个任务")
     run.add_argument("task", nargs="+", help="任务 YAML 路径（可多个）")

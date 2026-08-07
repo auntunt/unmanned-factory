@@ -331,7 +331,9 @@ class Dispatcher:
             reports.append(
                 self._spec.review(
                     diff=result.diff,
-                    criteria=task.spec_ref,
+                    # task.criteria = spec_ref + acceptance。口述来源的任务
+                    # 没有外部文档可引，验收标准写在 acceptance 里。
+                    criteria=task.criteria,
                     context=context,
                     withheld=(result.error_text, self._render(reports[0].claims)),
                 )
