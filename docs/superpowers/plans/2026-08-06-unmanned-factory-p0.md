@@ -3245,11 +3245,14 @@ def test_attempts_for_returns_in_attempt_order(store):
 - [x] 一个 A 类任务从 task.yaml 到 merge 全自动跑通，人未介入
 - [x] `task_attempt` 的 spec §5 字段全部有值：`task_id` / `attempt_no` / `spec_ref` /
       `oracle_class` / `class_reason` / `harness` / `harness_version` / `diff_hash` /
-      `transcript_path` / `tokens` / `cost` / `resolution`
+      `commit` / `transcript_path` / `tokens` / `cost` / `resolution`
   - 这一条**当时漏了 `commit`**。§5 的字段清单里它就在 `diff_hash` 旁边，
     但这条判据把它跳过了，于是「全部有值」在一个永远是 None 的字段上打了勾。
     2026-08-08 补上（见下文「P1 落地」）—— 判据本身漏项，比实现漏项更难发现，
     因为核对表读起来是绿的。
+- [x] `commit` 提交的文件集**正好**等于监工审过的那一组（`diff_hash` 的来源），
+      且主工作树未被写入 —— 这条只有真跑能查：check 命令自己会造 `__pycache__`
+- [x] 短 sha 能反查回 attempt（`attempt_by_commit`），即 git blame → 缺陷现场那一跳
 - [x] `supervisors[]` 至少有 regression + risk 两条，FAIL 时 `claims` 写清期望与实得
 - [x] 分级引擎跑了两次，后分级更严时 `oracle_class` 被改写且 `class_reason` 可回溯
 - [x] 声明 `prod_deploy` 的任务被 D 类硬闸门拦住，adapter 一次都没被调用
@@ -4479,3 +4482,76 @@ text.py only sha256: d123efc6dba85f922d34d98ffd0a71ab4867626b52ab67aaedee02a4451
 没有任何东西会去跑 `python3 -c`，所以 `__pycache__` 永远不会出现。这一条
 补了三个回归测试（一个在 `land()` 层，一个在 dispatcher 接线层，一个钉
 「删除的文件也要能落地」），并各自变异验证过。
+
+补一条那三个回归测试都没覆盖的时序：它们全从**干净 index** 出发，而真管线
+里 `land()` 拿到的 index 是脏的 —— `capture_diff` 为了让 diff 包含未跟踪文件，
+先跑过一次 `git add -A -N`，把所有未跟踪文件（含 `.pyc`）登记成 intent-to-add。
+从空 index 出发的测试哪怕退回 `add -A` 也照样绿。
+
+用 /tmp 探针先确认了 git 的语义：intent-to-add 的行**不会**被后续
+`git commit` 带进去，所以修法在真时序下依然成立。
+
+```
+--- simulate capture_diff ---
+ A src/__pycache__/text.pyc
+ A src/text.py
+=== committed files ===
+src/text.py
+```
+
+`test_an_index_already_polluted_by_capture_diff_still_commits_only_paths` 把这个
+时序钉住了，并且和 `test_only_the_reviewed_paths_are_committed` 一起变异验证：
+把 `add -- <paths>` 改回 `add -A`，两条同时挂。
+
+### 判据自己漏了一项（第二次）
+
+上面那条「§5 字段全部有值」的清单里补了 `commit` 之后，才发现核对表还缺
+**这个字段的内容对不对**。有值不等于对：`add -A` 那个缺陷下 `commit` 是有值的、
+40 位的、能反查的 —— 只是它描述的内容比监工审过的多两个文件。所以核对表又加了
+两条，都只有真跑能查：
+
+- 提交的文件集正好等于 `diff_hash` 的来源，且主工作树未被写入
+- 短 sha 能反查回 attempt
+
+同一张核对表在同一个字段上漏了两次（先漏字段，再漏字段的正确性）。这比实现
+漏项难发现得多，因为核对表读起来一直是绿的。
+
+### 端到端判据一直没覆盖 commit —— 因为它没开 worktree
+
+`test_class_a_task_end_to_end` 原来不加 `--worktree`，于是 workspace 就是
+临时仓库本身，`land()` 会（正确地）拒绝在主工作树提交 —— `commit` 永远是
+None。P0 判据当年漏掉 commit，和这个是同一个原因：**唯一能查它的那条测试
+恰好走在拒绝分支上。**
+
+改成 `--worktree --worktree-root`，并把三条断言加进去：产出在 worktree 里、
+`HEAD == row.commit`、`git show --name-only` 正好是 `greet.py`、主工作树
+`git status` 干净、短 sha 能反查回 attempt。
+
+`.pyc` 那个错配的判据放在这条真跑里而不是单元测试里，是因为它只在真的执行
+生成的 check 命令时才出现。
+
+### 整个测试套件收集失败，和这次的改动无关
+
+跑全量时两个模块直接 ImportError：
+
+```
+tests/test_dispatcher_four.py: No module named 'tests.test_dispatcher'
+tests/test_scope.py:           No module named 'tests.test_dispatcher'
+```
+
+这两个模块 `from tests.test_dispatcher import ...` 复用夹具。查下去发现
+`tests` 解析到了别的地方：
+
+```
+tests -> /opt/miniconda3/lib/python3.12/site-packages/tests/__init__.py
+```
+
+site-packages 里有个第三方库（conda / ultralytics / google-search-results
+的 RECORD 里都有 `tests/`）装了一个**顶层 `tests` 包**。我们的 `tests/` 没有
+`__init__.py`，只是命名空间包 —— 而命名空间包只在整条 sys.path 扫完都没找到
+真包时才生效，所以那个带 `__init__.py` 的赢了。
+
+加一个 `tests/__init__.py` 钉死。不是风格问题：**装了哪些第三方库不该决定
+这个仓的测试能不能收集。** 之前能跑纯属那个包还没装上。
+
+556 个测试全绿（`-m "not smoke"`）。

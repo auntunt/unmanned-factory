@@ -50,7 +50,12 @@ def test_class_a_task_end_to_end(tmp_path):
     )
 
     db = tmp_path / "audit.db"
+    # --worktree：不加的话 workspace 就是这个仓库本身，而 land() 会（正确地）
+    # 拒绝在主工作树提交 —— 于是 commit 字段永远是 None，这个判据就覆盖不到
+    # spec §5 的最后一个字段。P0 核对表当年漏掉 commit，也是同一个原因。
+    wt_root = tmp_path / "wts"
     code = main(["run", str(task), "--workspace", str(ws), "--db", str(db),
+                 "--worktree", "--worktree-root", str(wt_root),
                  "--max-turns", "20"])
     assert code == 0, "A 类任务应当自动 merge"
 
@@ -88,7 +93,26 @@ def test_class_a_task_end_to_end(tmp_path):
     assert row.created_at is not None
     roles = {v.role for v in row.supervisors}
     assert {"regression", "risk"} <= roles
-    assert (ws / "greet.py").exists()
+
+    # spec §5 的最后一个字段：commit。产出在任务分支上，**主工作树没被动过**。
+    assert row.commit and len(row.commit) == 40
+    wt = wt_root / "T-smoke-1"
+    assert (wt / "greet.py").exists(), "产出在 worktree 里，不在主工作树"
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == row.commit
+    # 提交的必须正好是监工审过的那一组 —— check 跑 `python -c "import greet"`
+    # 会留下 __pycache__，`add -A` 会把它一起提交，那时 commit 和 diff_hash
+    # 就描述不同的内容了。这个错配是真跑抓到的，所以判据放在真跑里。
+    names = subprocess.run(
+        ["git", "show", "--name-only", "--format=", row.commit], cwd=wt,
+        capture_output=True, text=True).stdout.split()
+    assert names == ["greet.py"], f"提交了监工没审过的东西：{names}"
+    assert not (ws / "greet.py").exists(), "主工作树不该被写入"
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=ws,
+                          capture_output=True, text=True).stdout.strip() == ""
+    # 回查那一跳：git blame 给短 sha，defect 要按它找回 attempt
+    assert AuditStore(db).attempt_by_commit(row.commit[:8]).id == row.id
 
     # 用了多轮的话，前几轮也该有完整记录 —— 打回的那一轮同样是审计现场。
     # 只查最后一轮会让「第一轮的 diff_hash 没写进去」这类缺陷躲过判据。

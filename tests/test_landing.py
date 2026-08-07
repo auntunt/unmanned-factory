@@ -286,3 +286,25 @@ def test_a_path_the_agent_never_touched_commits_nothing(wt):
     # changed_paths 里报了一个其实没改的文件 → 没有改动可提交，不是崩溃。
     got = land(wt, task_id="T-1", attempt_no=1, paths=("base.txt",))
     assert got.commit is None and "没有改动" in got.reason
+
+
+def test_an_index_already_polluted_by_capture_diff_still_commits_only_paths(wt):
+    """真实管线里 land() 拿到的 index 不是干净的 —— capture_diff 先跑过 `add -A -N`。
+
+    这条测试是唯一复现生产时序的：workspace.capture_diff 为了让 diff 包含未跟踪
+    文件，会 `git add -A -N` 把所有未跟踪文件登记成 intent-to-add，其中包括
+    check 命令自己产生的 __pycache__。上面那些测试都从空 index 出发，
+    所以哪怕 land() 退回 `add -A` 也照样绿 —— 它们证明不了这件事。
+    """
+    (wt / "src").mkdir()
+    (wt / "src" / "text.py").write_text("def f():\n    return 1\n")
+    cache = wt / "src" / "__pycache__"
+    cache.mkdir()
+    (cache / "text.cpython-312.pyc").write_bytes(b"\x00not source")
+    _git(wt, "add", "-A", "-N")  # ← capture_diff 干的事
+
+    got = land(wt, task_id="T-1", attempt_no=1, paths=("src/text.py",))
+
+    assert got.commit, got.reason
+    names = _git(wt, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    assert names == ["src/text.py"], f"intent-to-add 的 .pyc 漏进了 commit: {names}"
