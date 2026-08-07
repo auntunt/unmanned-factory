@@ -3265,7 +3265,12 @@ def test_attempts_for_returns_in_attempt_order(store):
   被第二个实现证伪过了：Protocol 本身没问题，但两个 adapter 的成败判据是相反的
 - ~~容器隔离 / worktree 并行 → P1~~ **worktree 并行已完成**（commit `10a0d9f`）；
   容器隔离仍未做（它隔离的是副作用，不是工作树，见下）
-- 录音 → PRD 的入口层 → P1
+- ~~录音 → PRD 的入口层 → P1~~ **已完成**（`factory/intake/`，commit `2355e20`）
+  - guard.py 确定性关键词扫描，declared_ops 只增不减，18 条 A 类说法 0 误报
+  - 真跑：一句口述 → 7 条验收标准 → 两轮（haiku/sonnet）→ merged
+  - D 类同样真跑：派发被 pre-dispatch 拦住，目标仓库 git 全干净
+  - 顺带修了接口错配：Task 新增 `acceptance` 字段；`criteria = spec_ref + acceptance`
+    （所有口述来源的任务 spec_ref 为空，原来规格监工永远判 supervisor-spec-no-criteria）
 - PRD ↔ diff 一致性检查 → P2
 
 ---
@@ -3389,3 +3394,35 @@ worker 是一条确定性脚本（把模块级常量收进 frozen dataclass）�
 
 副作用能量化：离线全量从 ~50s 降到 ~17s，原来那 33 秒是假 harness 被反复真跑掉的。
 两条回归测试已反向验证（改回旧代码即 fail）。
+
+---
+
+## P1 录音/口述入口层真跑记录（2026-08-07）
+
+任务描述（一句口述）：「在 text.py 里加一个 truncate_words(s, n)：按空格分词，超过 n 个词就截到 n 个词并在末尾接 '...'，不超过就原样返回。同时新建 test_text.py 覆盖截断和不截断两种情况。验收跑 python -m pytest -q。」
+
+`factory prd` 的产物：
+- `task_id: T-truncate-words-1`
+- `acceptance` 7 条（规格监工能逐条核对的验收标准）
+- `declared_ops: []`（guard 扫描 0 命中，无警告）
+- 3 条 `unclear`（截断后空格处理、边界行为未说明）
+- 入口层成本：$0.2727 / 28736 tokens
+
+派发 `--spec-review --architecture-review`：
+
+| 轮次 | 模型   | worker 成本  | 架构监工       | 规格监工     | 结论       |
+|------|--------|-------------|----------------|-------------|-----------|
+| 1    | haiku  | $0.37       | FAIL：truncate_words 只被测试调用，死代码 | PASS | reworked |
+| 2    | sonnet | $2.67       | PASS           | PASS        | merged    |
+
+最终交付：`text.py` + `test_text.py`，agent 在第 2 轮自行加了 `slugify_with_limit` 回应架构意见（复合函数，把两个工具函数接起来）。
+
+D 类硬闸门同样真跑：「给 users 表加 last_login 字段，然后上线到生产」→ guard 补 `schema_migration + prod_deploy` → pre-dispatch 拦住，目标仓库 git status 全干净，提交数未变。
+
+**三条非显然结论：**
+
+1. 入口层是**唯一一个由模型决定分级输入的地方**，所以 `declared_ops` 的加固必须是确定性的、且只增不减。分级引擎只看得到申报；申报里没有 `prod_deploy`，D 类硬闸门就永远不会触发，也没有第二次机会。把一个硬闸门的唯一守门人交给一次模型调用，等于给"非旁路"开了一条间接旁路。因此分工是固定的：模型负责结构（prompt / paths / checks），`guard.py` 的正则表负责 `declared_ops`，两者取**并集**——guard 只能加，不能减。
+
+2. `spec_ref` 和 `acceptance` 必须分开。`spec_ref` 的语义是"引用外部已有文档的编号"。口述来源的任务没有外部文档，它本身就是规格。只有一个字段的话，所有口述任务都会永久被规格监工判"无标准可核"——入口层和验收层的接口对不上，而两边的单测都是绿的，唯有真跑才能暴露。
+
+3. guard 的误报率是入口层的核心质量指标，比漏报更早杀死无人工厂。18 条真实 A 类说法 0 误报是现在的基线；漏报由人一眼否掉（YAML 注释里写了怎么删），但误报让人人都要上人，工厂就白做了。两个边界要特别留意：「删掉没人用的那个函数」（"删"+"函数"，不应命中 data_delete）、「清理一下 import 顺序」（"清理"，不应命中 truncate/data_delete）。
