@@ -4555,3 +4555,18 @@ site-packages 里有个第三方库（conda / ultralytics / google-search-result
 这个仓的测试能不能收集。** 之前能跑纯属那个包还没装上。
 
 556 个测试全绿（`-m "not smoke"`）。
+
+改完的真跑（375s，一次通过）：
+
+```
+task     : T-smoke-1
+outcome  : merged
+rounds   : 1
+class    : A  (no rule matched -> default A)
+commit   : 6a2323ca9af6217b957c0e167b227600695980b3  (分支上已提交，主分支未动)
+```
+
+五条新断言全部成立：40 位 sha、`HEAD == row.commit`、`git show --name-only`
+正好 `greet.py`（`.pyc` 没漏进去）、主工作树 `git status` 干净、短 sha
+`attempt_by_commit` 反查回同一个 attempt。至此 spec §5 的字段清单**没有一个
+是恒为 None 的**，漏报回查路径端到端有数据可走。
