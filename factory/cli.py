@@ -26,7 +26,14 @@ from factory.backlog.loop import (
     LoopLimits,
     TaskRun,
 )
-from factory.backlog.store import LOG, STATES, Backlog, BacklogError
+from factory.backlog.store import (
+    INBOX,
+    LOG,
+    NEEDS_HUMAN,
+    STATES,
+    Backlog,
+    BacklogError,
+)
 from factory.dispatcher import Dispatcher, Outcome
 from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
@@ -307,6 +314,9 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
                 print(f"#   - {u}", file=sys.stderr)
         return 0
 
+    if ns.queue:
+        return _admit_to_queue(draft, ns)
+
     out_path = Path(ns.output or f"tasks/{draft.task_id}.yaml")
     written = draft.write(out_path)
     print(f"已写入 {written}")
@@ -321,6 +331,51 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
     print(f"\n下一步：确认 {written}，然后：")
     print(f"  factory run {written} --workspace <仓库路径> --db audit.db")
     return 0
+
+
+def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
+    """草稿过闸门 → 进 inbox；不过 → 落 needs-human 等人。
+
+    这是「无人」最后一段：在这之前任务从哪来始终得有人动手。闸门不取消
+    DraftTask 那句「要人看一眼」，而是把它变成可判定的条件（见 intake/gate.py）。
+
+    不过闸门的草稿**照样落盘**，落在 needs-human/。丢掉的话，一次口述需求
+    就白说了，而人连"差什么"都看不到 —— 那比要求人确认更糟。
+
+    退出码：进队 0，被拦 3。3 而不是 1：被拦是闸门在正常工作，
+    不是错误；但也不能是 0，否则 `factory prd --queue && factory loop`
+    会在什么都没入队的情况下继续跑。
+    """
+    from factory.intake.gate import admit
+
+    verdict = admit(draft)
+    bl = Backlog(ns.queue).ensure()
+    state = INBOX if verdict.admitted else NEEDS_HUMAN
+    dst = bl.dir(state) / f"{draft.task_id}.yaml"
+    if dst.exists():
+        # 同名不覆盖，和 _park 一个道理：覆盖会让先到的那个静默消失。
+        n = 2
+        while dst.exists():
+            dst = dst.with_name(f"{draft.task_id}.{n}.yaml")
+            n += 1
+    draft.write(dst)
+
+    print(f"已写入 {dst}")
+    print(f"  task_id   : {draft.task_id}")
+    for w in verdict.warnings:
+        print(f"  提示      : {w}")
+
+    if verdict.admitted:
+        print("\n闸门通过 → 已进 inbox，等 `factory loop` 认领。")
+        print("  注意：闸门只判「声明可不可信」，不做分级。"
+              "C 类永不无人、D 类硬闸门仍在派发时判。")
+        return 0
+
+    print(f"\n闸门拦下（{len(verdict.reasons)} 条）→ 落在 needs-human，等人：")
+    for r in verdict.reasons:
+        print(f"  - {r}")
+    print(f"\n补齐后入队：factory queue {dst} --queue {ns.queue}")
+    return 3
 
 
 def _cmd_loop(ns: argparse.Namespace) -> int:
@@ -642,6 +697,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="输出 YAML 路径，默认 tasks/<task_id>.yaml")
     prd.add_argument("--dry-run", action="store_true",
                      help="只打到 stdout，不落盘")
+    prd.add_argument("--queue", default=None, metavar="DIR",
+                     help="过闸门后直接进队列（不过则落 needs-human 等人）。"
+                          "退出码 3 = 被闸门拦下")
     prd.add_argument("--binary", default="claude", help="做提取的 CLI")
     prd.add_argument("--intake-model", default="sonnet",
                      help="提取用的模型档位（结构化转写，不需要最强档）")
