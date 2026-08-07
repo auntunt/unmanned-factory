@@ -1,6 +1,7 @@
 import json
 import stat
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,55 @@ def test_finds_transcript_and_tool_calls(tmp_path, repo):
 
     assert res.transcript_path == str(proj / "sess-abc.jsonl")
     assert [c.name for c in res.tool_calls] == ["Edit"]
+
+
+def _cwd_recording_binary(tmp_path, log: str):
+    """假 harness：把自己被执行时的 cwd 记到 log，并往 cwd 里写一个文件。
+
+    真的 `claude --version` 只打印版本号，所以这个 bug 用真 binary 看不见。
+    """
+    script = tmp_path / "cwd_probe"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        f"pathlib.Path({log!r}).open('a').write(os.getcwd() + '\\n')\n"
+        "pathlib.Path('LEAKED.txt').write_text('i was here\\n')\n"
+        "print(json.dumps({'is_error': False}))\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def test_version_probe_never_runs_in_the_caller_cwd(tmp_path, monkeypatch):
+    """version() 必须在空临时目录里探针，不能在调用方 cwd。
+
+    没设 cwd 时，被探的可执行体会在**编排层自己的仓库**里跑一遍。
+    实际后果：out.py 被 git add -A 提交进了 10a0d9f。
+    """
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+
+    log = str(tmp_path / "cwds.txt")
+    adapter = ClaudeCodeAdapter(binary=_cwd_recording_binary(tmp_path, log))
+    adapter.version()
+
+    seen = [ln for ln in open(log, encoding="utf-8").read().splitlines() if ln]
+    assert seen, "探针没跑起来，这个测试就没测到东西"
+    for cwd in seen:
+        assert Path(cwd).resolve() != caller.resolve()
+        # 探针目录必须是干净的临时目录，且用完就没了
+        assert not (caller / "LEAKED.txt").exists()
+    assert list(caller.iterdir()) == [], "探针把文件写进了调用方 cwd"
+
+
+def test_version_probe_dir_is_removed_after_the_call(tmp_path, monkeypatch):
+    """探针目录用完即删，不靠 GC。长跑的工厂不能靠泄漏临时目录活着。"""
+    monkeypatch.chdir(tmp_path / "..")
+    log = str(tmp_path / "cwds2.txt")
+    adapter = ClaudeCodeAdapter(binary=_cwd_recording_binary(tmp_path, log))
+    adapter.version()
+
+    probe_dir = Path(open(log, encoding="utf-8").read().splitlines()[0])
+    assert not probe_dir.exists()

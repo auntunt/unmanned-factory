@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -28,13 +29,23 @@ class ClaudeCodeAdapter:
         self._projects_root = projects_root
 
     def version(self) -> str:
+        """探针跑在空临时目录里，不在调用方 cwd。
+
+        没设 cwd 的话，被探的程序就在**编排层自己的仓库**里执行一遍。
+        真实 claude --version 只打印版本号，看起来没事；但换成任何会写文件的
+        可执行体（测试里的假 harness、包装脚本），它就会往这个仓库里拉屎 ——
+        实际发生过：out.py 被 git add -A 提交进了 10a0d9f。
+        这是 ShellAdapter.version() 同一个坑，两处都修。
+        """
         try:
-            proc = subprocess.run(
-                [self._binary, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            with tempfile.TemporaryDirectory(prefix="factory-cc-ver-") as clean:
+                proc = subprocess.run(
+                    [self._binary, "--version"],
+                    cwd=clean,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
             return proc.stdout.strip() or "unknown"
         except (OSError, subprocess.SubprocessError):
             return "unknown"

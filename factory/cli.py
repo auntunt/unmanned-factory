@@ -18,6 +18,7 @@ from factory.audit.store import AuditStore
 from factory.dispatcher import Dispatcher, Outcome
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
+from factory.harness.shell import ShellAdapter
 from factory.harness.worktree import WorktreePool
 from factory.metrics import gate3_rework, supervisor_metrics
 from factory.supervisors.architecture import ArchitectureSupervisor
@@ -31,6 +32,24 @@ HARD_GATE_NOTE = (
 )
 
 
+def build_adapter(
+    harness: str, *, binary: str, shell_argv: list[str] | None = None
+):
+    """按名字选 harness。审计表的 harness 字段就是这个名字。
+
+    监工侧的 judge 始终是 claude —— 换 worker 不等于换裁判，
+    否则「换个 harness 顺手把审查也换松了」会成为一条绕过验收的路径。
+    """
+    if harness == "claude_code":
+        return ClaudeCodeAdapter(binary=binary)
+    if harness == "shell":
+        if not shell_argv:
+            raise ValueError("--harness shell 需要 --shell-argv，例如 "
+                             "--shell-argv ./codemod.py '{prompt}'")
+        return ShellAdapter(shell_argv, name="shell")
+    raise ValueError(f"未知 harness: {harness}")
+
+
 def build_dispatcher(
     db_path: str | Path,
     *,
@@ -40,13 +59,18 @@ def build_dispatcher(
     spec_review: bool = False,
     architecture_review: bool = False,
     judge_model: str = "sonnet",
+    harness: str = "claude_code",
+    shell_argv: list[str] | None = None,
+    judge_binary: str = "claude",
 ) -> Dispatcher:
     """两个调模型的监工默认关。它们每轮都花钱，开关交给调用方。"""
     def judge() -> ClaudeJudge:
-        return ClaudeJudge(binary=binary, model=judge_model, timeout_s=timeout_s)
+        return ClaudeJudge(
+            binary=judge_binary, model=judge_model, timeout_s=timeout_s
+        )
 
     return Dispatcher(
-        adapter=ClaudeCodeAdapter(binary=binary),
+        adapter=build_adapter(harness, binary=binary, shell_argv=shell_argv),
         store=AuditStore(db_path),
         spec_supervisor=SpecSupervisor(judge=judge()) if spec_review else None,
         architecture_supervisor=(
@@ -81,6 +105,14 @@ def _cmd_run(ns: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
 
+    # harness 配错要当场报错退出。绝不能默默退回 claude_code —— 那等于
+    # 在用户以为换了 worker 的情况下偷偷用了另一个，审计表也会记错。
+    try:
+        build_adapter(ns.harness, binary=ns.binary, shell_argv=ns.shell_argv)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     if len(tasks) == 1 and not ns.worktree:
         return _run_one(ns, tasks[0], Path(ns.workspace))
     return _run_pool(ns, tasks)
@@ -95,6 +127,10 @@ def _dispatcher_for(ns: argparse.Namespace) -> Dispatcher:
         spec_review=ns.spec_review,
         architecture_review=ns.architecture_review,
         judge_model=ns.judge_model,
+        harness=ns.harness,
+        shell_argv=ns.shell_argv,
+        # judge 固定用 claude：--binary 换的是 worker，不是裁判。
+        judge_binary=ns.judge_binary,
     )
 
 
@@ -261,6 +297,16 @@ def main(argv: list[str] | None = None) -> int:
                      help="开架构监工（调模型；其意见不能单独否决合并）")
     run.add_argument("--judge-model", default="sonnet",
                      help="两个调模型监工用的档位")
+    run.add_argument("--harness", default="claude_code",
+                     choices=("claude_code", "shell"),
+                     help="worker 用哪个 harness（默认 claude_code）")
+    # action="extend"：重复给 --shell-argv 要累加而不是覆盖。
+    # 默认的 nargs="+" 会让后一个 flag 顶掉前一个，于是 argv[0] 变成 "{prompt}"，
+    # 报出来是 "cannot launch {prompt}" —— 排查起来完全看不出是参数被吞了。
+    run.add_argument("--shell-argv", nargs="+", action="extend", default=None,
+                     help="--harness shell 的命令行，支持 {prompt} / {workspace} 占位符")
+    run.add_argument("--judge-binary", default="claude",
+                     help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
     run.set_defaults(func=_cmd_run)
 
     show = sub.add_parser("show", help="打印一个任务的审计轨迹")
