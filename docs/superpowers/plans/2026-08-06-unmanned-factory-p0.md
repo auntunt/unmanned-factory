@@ -3644,3 +3644,175 @@ workspace 内的规则文件：静默忽略的话，人以为项目规则生效�
 错误结束。
 
 测试数 359 → 362（`tests/test_runbook.py` 22 条）。
+
+## P1 任务队列与跑批循环：让工厂在没人敲命令的时候也在干活（2026-08-07）
+
+在这之前，这个工厂只在人敲 `factory run` 的那一刻动一下。所有的分级、沙箱、
+监工、runbook 都能自动跑，但**触发**这件事一直是人做的 —— 离「无人」还差最后
+一环。这一层补的就是这个：一个队列 + 一个循环，人只负责往队列里扔任务。
+
+### 为什么是目录而不是一张表
+
+审计已经有 SQLite 了，再开一个数据库表看起来更省事。没这么做，三个理由：
+
+1. **生产者是多个的。** `factory prd` 会生成任务，人会手写 YAML，也会 `cp` 一个
+   旧任务改改再跑。目录对这三种都是一行命令；表要为每种写一个入口。
+2. **审计和队列的生命周期是相反的。** 审计要永久留着（spec §5.1 的报表按它算），
+   队列条目跑完就该消失。放一张表里，「清理」和「不许删」会打起来。
+3. **崩溃语义是免费的。** 原子 rename / link 直接给出「要么在 inbox 要么在
+   running，不会两边都在」。同样的保证在表里要自己写事务。
+
+目录结构：`inbox/ running/ done/ needs-human/ blocked/ log/`。
+`blocked/` 和 `needs-human/` 刻意分开 —— 两者都要人介入，但要人做的事不一样：
+`blocked` 是「D 类硬闸门，脚本已生成，你自己去执行」，`needs-human` 是「跑过了
+没过验收，去看 diff」。混一个目录，`ls` 就分不出来该干哪件事。
+
+### 认领用 os.link，不用 os.rename
+
+这是整层最要紧的一个决定。`os.rename` 到一个**已存在**的目标会静默覆盖：两个
+worker 同时认领同一个条目，两边的 rename 都成功，两边都以为自己赢了，任务被
+派发两遍 —— 两倍花费、两份 diff，而在审计里看起来只是两个正常任务。回归之后
+没有任何症状，这正是真跑演示不了、只能靠测试钉住的那类行为
+（`test_second_claimer_loses_and_learns_it`）。
+
+`os.link` 在目标已存在时抛 `FileExistsError`，所以输的那一方拿到 `None`，
+`claim_next()` 会接着试下一个条目 —— 而不是报「队列空了」然后按 `--idle drain`
+直接退出。并发跑多个 loop 时，第一个条目**总是**被抢走的那个，只试
+`pending()[0]` 的实现会让后面每个 worker 都空手而归。
+
+### 没有任何一条路通回 inbox
+
+`finish()` 的四个 outcome 落到三个终态目录，`recover()` 把崩溃残留搬去
+`needs-human`。**没有一条路把任务放回 inbox。**
+
+重试是 dispatcher 的事（`max_rounds`，3 轮后升级）。队列层再叠一层自动重试的
+后果有两个：一个必然失败的任务会无限烧钱；而且每一轮在审计里都长得像一个新
+任务 —— 「这个任务试了 12 次」和「有 12 个相似任务各试了一次」在报表上区分不
+出来，spec §5.1 的通过率就废了。
+
+崩溃恢复同理。崩掉的那一轮可能已经烧掉了 token、可能已经在 worktree 里留了半
+个改动。自动重排等于允许重复计费和重复提交。让人看一眼再决定。
+
+### 判活优先于判龄
+
+`recover()` 的判据顺序是：claim 文件在不在 → 读不读得出来 → host 是不是本机 →
+pid 还活着吗。**本机 pid 还活着就一律不动，哪怕它已经跑了两天。** 一个还在跑的
+派发被当成僵尸抢走，结果就是同一个任务被派两遍 —— 和上面 rename 那个 bug 同一
+种伤害。
+
+只有在无法验证存活时才退回看时间：没有 claim 文件（谁都认领不了它，等下去不会
+变好，立刻回收），或者 claim 来自另一台机器（本机 pid 表查不到它，拿本机的表去
+判活会把活着的远端 worker 判死，所以只能看静置时长）。
+
+反过来，本机 pid 已经不在了就**立刻**回收，不等 `stale_after_s` —— 进程都没了
+没什么可等的，等 6 小时只是让队列白闲 6 小时。
+
+### 四个刻意的默认值
+
+| 默认 | 为什么不是另一个 |
+| --- | --- |
+| `--budget-usd 5` | 不是「不限」。无人循环最坏的失败模式是**一直跑**；忘了写这个 flag 应该意味着「早点停」，不是「一直刷卡」。`0` 能关，但会打印警告。 |
+| `--idle watch` | 不是 `drain`。「无人」的意思是队列空了它还在等下一个。cron 场景才用 `drain`。 |
+| `--worktree` 开 | 不是共用 workspace。共用的话，前一个任务未验收的改动会成为后一个的起点。 |
+| 优雅停机 | SIGINT/SIGTERM 只置标志，**当前任务跑完才退**。半路砍掉 agent 会留下没人看过的半个 diff 和一个孤儿 running/ 条目。第二次信号恢复 Python 默认行为 —— 一个「怎么都停不下来」的无人循环比一个留下孤儿的循环更糟。 |
+
+`escalated` 不计入退出码。3 轮后升级给人是**设计上的正常出口**，不是故障；算
+失败的话 cron 会天天报警，而天天报警的告警等于没有告警。只有 `error` 让 loop
+返回 1。
+
+### 预算闸门和账单看同一个数
+
+`_attempts_cost()` 从审计库读，不让 dispatcher 返回一份。两份数会在某次重构后
+悄悄分叉，而分叉的方向只有在账单上才看得出来。
+
+监工的花费记在 verdict 行上、不在 attempt 行上，所以要一起加。只算 attempt 的
+话，开了 `--spec-review` 的循环会系统性低估自己的开销 —— 低估的预算闸门等于没
+有闸门。
+
+### 真跑发现的两个 bug
+
+**一、给硬闸门任务开了 worktree。** 对抗性真跑（坏 YAML + D 类任务 + 好任务）跑
+完后，`.factory-worktrees/` 里留着一个 `T-deploy-thing/` —— 那个任务被硬闸门在
+**派发前**就拦掉了，一行都没跑，但目录已经建好了。单看是无害的空目录，问题在于
+worktree 目录的存在本身在别处是有含义的（「这里有产出没人验收」），堆着一堆空的
+会把那个信号淹掉。
+
+修法是 `_queued_workspace()`：预分级 C/D 的任务直接返回 `--workspace`，不开
+worktree。**这里重跑一次预分级不是闸门** —— 真正的判定在 `Dispatcher.run` 里，
+那条路径一步都没绕过；这里判错的最坏后果只是多开或少开一个空目录。测试
+`test_this_is_not_the_gate` 直接读源码断言这个函数里没有 `return True/False`
+也没有 `raise`，防止后来有人顺手把它改成一个绕过硬闸门的旁路。
+
+同一个 bug 还有个尾巴：任务的 note 里仍然写着 `worktree=/tmp/lqrepo`，指向的其实
+是 workspace 本身。看到这行的人会以为那里有产出可看。改成只在真开了 worktree 时
+才写。
+
+**二、`AuditStore.get()` 查不到时返回 `None` 而不是抛异常。** `_attempts_cost()`
+外面包了 `except Exception: continue`，注释写着「花费读不到不该让整个循环停」——
+但它兜不住 `None`，下一行 `row.cost_usd` 直接 `AttributeError`，而这个异常是在
+loop 的 `_one()` 外面抛的，会把整个循环带下去。写
+`test_an_unreadable_cost_row_does_not_stop_the_loop` 时才发现。一个只在审计库缺
+行时才触发的 bug，真跑一百次也碰不到。
+
+### 韧性：一条坏任务不能让没人看着的队列停摆
+
+`_one()` 兜住所有 `Exception`（不兜 `BaseException` —— `KeyboardInterrupt` 被兜住
+才是真的停不下来），归档成 `error`，异常原文进 `.result.json`。
+
+对抗性真跑证明了这条：坏 YAML 的 `ParserError` 全文进了 `needs-human/` 的
+`.result.json`，D 类任务撞上硬闸门，而**紧跟其后的那个好任务照样 merged**。
+
+```
+[1] broken  → error   ParserError: while parsing a flow sequence ...
+[2] deploy  → blocked_hard_gate   pre-dispatch D: deploy script [deploy.sh]
+[3] ok      → merged  worktree=/private/tmp/.factory-worktrees/T-after-bad
+== 停机：队列已抽干
+派发 3：合并 1 / 升级 0 / 硬闸门 1 / 异常 1
+```
+
+顺跑那次是 3 个 shell-harness 任务 `--idle drain`：`合并 3`，各自一棵 worktree，
+产出文件逐个核对过（`def go(): return 'beta.py'`），`done/` 里是 YAML +
+`.result.json` 成对。
+
+### 测试：53 个，全套 415 个
+
+`tests/test_backlog.py` 覆盖的重点是**并发和崩溃下才出现的行为**，真跑演示不了
+的那些：`os.link` 竞争中输的一方拿到 `None`、没有路通回 inbox、`_park` 同名加
+后缀（人改完判据重新入队时 basename 一样，覆盖掉第一次的失败证据就没了）、
+判活优先于判龄的四条分支、三个上限各自的停机、`Idle` 三种行为、`_one()` 兜异常、
+以及 C/D 类不开 worktree。
+
+时钟是注入的（`FakeClock`），所以测 `--max-runtime 100s` 不需要真跑 100 秒。
+`dispatch` 也是注入的 —— `BacklogLoop` 刻意不 import `dispatcher`。
+
+### 怎么用
+
+```bash
+# 入队（一个失败则一个都不入队 —— 部分成功比全失败更难收拾）
+factory queue --queue ~/.factory/q tasks/*.yaml
+
+# 看状态
+factory queue --queue ~/.factory/q
+
+# 常驻跑（默认 watch：队列空了继续等）
+factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
+  --global-runbook --budget-usd 20
+
+# cron 跑（抽干就退）
+factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
+  --idle drain --budget-usd 5
+```
+
+刻意**没有** `queue clear`：清队列的唯一正确方式是看清每个条目再删。一条命令把
+`needs-human/` 一起清掉，等于把「还没人看过的失败」当成垃圾扫了。
+
+`loop` 的所有配置错误都在进入循环之前验证（harness、sandbox、runbook 路径、
+worktree 池）—— 循环一旦跑起来就没人看着了，第 40 分钟才因为一个拼错的路径退出
+是最贵的失败方式。
+
+### 剩下的缺口
+
+队列这一层补上之后，「无人」还差的是**任务从哪来**。现在仍然要人写 YAML 或跑
+`factory prd`。P2 的方向是把 issue tracker 接成生产者，但那要先解决 PRD ↔ diff
+一致性检查（目前只有分级在管改动范围，没有东西检查「做的是不是 PRD 要的那件
+事」）。

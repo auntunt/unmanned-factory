@@ -2,6 +2,8 @@
 
     prd       录音 / 自由文本 → 任务 YAML 草稿（要人看过再 run）
     run       派发一个任务
+    queue     任务入队 / 看队列状态
+    loop      跑批循环：认领队列里的任务，直到预算或队列耗尽
     show      打印某个任务的审计轨迹
     override  人工定案 resolution（spec §5：此字段事后填写）
     defect    事后挂 defect，捕获漏报
@@ -16,7 +18,16 @@ from pathlib import Path
 
 from factory.audit.models import Resolution
 from factory.audit.store import AuditStore
+from factory.backlog.loop import (
+    DEFAULT_BUDGET_USD,
+    BacklogLoop,
+    Idle,
+    LoopLimits,
+    TaskRun,
+)
+from factory.backlog.store import STATES, Backlog, BacklogError
 from factory.dispatcher import Dispatcher, Outcome
+from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
 from factory.harness.shell import ShellAdapter
@@ -311,6 +322,159 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_loop(ns: argparse.Namespace) -> int:
+    """跑批循环。这是「无人」真正落地的地方 —— 前面所有子命令都要人敲一次。
+
+    配置错误全部在**进入循环之前**验证。循环一旦跑起来就没人看着了，
+    此时报「harness 名字打错了」意味着队列被整个刷成 error。
+    """
+    if (rc := _resolve_sandbox(ns)) != 0:
+        return rc
+    try:
+        build_adapter(ns.harness, binary=ns.binary, shell_argv=ns.shell_argv)
+        _runbook_for(ns)
+    except (ValueError, RunbookError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    bl = Backlog(ns.queue).ensure()
+    limits = LoopLimits(
+        max_tasks=ns.max_tasks,
+        budget_usd=ns.budget_usd,
+        max_runtime_s=ns.max_runtime,
+        poll_s=ns.poll,
+        idle=Idle(ns.idle),
+    )
+    if not limits.budget_usd:
+        print("⚠ --budget-usd 0：没有花费上限。这个循环会一直派发到队列空 "
+              "(--idle watch 下永不空)，没人看着的时候也一样。", file=sys.stderr)
+
+    pool = WorktreePool(Path(ns.workspace), root=ns.worktree_root) \
+        if ns.worktree else None
+    print(f"queue={bl.root}  workspace={ns.workspace}  idle={limits.idle}")
+    print(f"上限：任务 {limits.max_tasks or '∞'} / "
+          f"预算 ${limits.budget_usd or 0:.2f}" +
+          ("（无限）" if not limits.budget_usd else "") +
+          f" / 时长 {limits.max_runtime_s or '∞'}s")
+
+    loop = BacklogLoop(bl, lambda p: _dispatch_queued(ns, p, pool),
+                       limits=limits)
+    loop.install_signal_handlers()
+    report = loop.run()
+    if report.recovered:
+        print(f"另有 {report.recovered} 个崩溃残留被移到 needs-human")
+    # 退出码只看有没有异常。escalated 不算失败 —— 它是设计里的正常出口
+    # （3 轮没过就交给人），把它当失败会让 cron 每天都报警。
+    return 1 if report.errors else 0
+
+
+def _dispatch_queued(ns: argparse.Namespace, task_path: Path,
+                     pool: WorktreePool | None) -> TaskRun:
+    """派发队列里的一个条目，把 DispatchReport 翻成 TaskRun。
+
+    Task.from_yaml 的异常刻意不在这里接 —— 循环的 _one() 会把它归档成
+    error 并写进 .result.json，那里的处理比这里多（原文入档）。
+    """
+    task = Task.from_yaml(task_path)
+    workspace = _queued_workspace(ns, task, pool)
+    report = _dispatcher_for(ns).run(task, workspace)
+    cost = _attempts_cost(ns, report.attempt_ids)
+    note = report.escalation_reason.replace("\n", " ")[:400]
+    # 只有真的开了 worktree 才写进 note。C/D 类任务拿到的是 --workspace 本身，
+    # 标成 worktree= 会让人以为那里有产出可看，而实际上一行都没跑。
+    if workspace != Path(ns.workspace):
+        note = f"worktree={workspace}  {note}".strip()
+    return TaskRun(outcome=str(report.outcome), cost_usd=cost, note=note)
+
+
+def _queued_workspace(ns: argparse.Namespace, task: Task,
+                      pool: WorktreePool | None) -> Path:
+    """给这个任务准备工作目录。**预分级 C/D 的任务不开 worktree。**
+
+    实测发现的：一个 declared_paths 里有 deploy.sh 的任务会被硬闸门在派发前
+    拦掉，但 worktree 已经建好了 —— 于是 .factory-worktrees/ 里堆着一堆
+    空目录，每个都代表「一个从未跑过的任务」。而 worktree 目录的存在本身
+    在别处是有含义的（「这里有产出没人验收」），堆着空的会把那个信号淹掉。
+
+    这里重跑一次预分级只是为了决定要不要开目录，**不是**闸门 —— 真正的
+    判定在 Dispatcher.run 里，那条路径一步都没绕过。这里判错的最坏后果是
+    多开或少开一个空目录。
+    """
+    if pool is None:
+        return Path(ns.workspace)
+    grade = GradingEngine.default().grade(task.declared_paths,
+                                          task.declared_ops)
+    if not grade.unmanned_allowed:
+        return Path(ns.workspace)
+    return pool.acquire(task.task_id).path
+
+
+def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
+                   ) -> float:
+    """一次派发的真实花费 = 它所有 attempt 的 cost 之和。
+
+    从审计库读而不是让 dispatcher 返回：预算闸门必须和账单看同一个数。
+    dispatcher 另算一份的话，两个数会在某次重构后悄悄分叉，而分叉的方向
+    只有在账单上才看得出来。
+
+    监工的花费也要算：它们记在 verdict 行上，不在 attempt 行上。只算
+    attempt 的话，开了 --spec-review 的循环会系统性低估自己的开销 ——
+    低估的预算闸门等于没有闸门。
+    """
+    store = AuditStore(ns.db)
+    total = 0.0
+    for aid in attempt_ids:
+        try:
+            row = store.get(aid)
+        except Exception:   # noqa: BLE001 - 花费读不到不该让整个循环停
+            continue
+        if row is None:
+            continue        # get() 查不到时返回 None 而不是抛，上面兜不住
+        total += row.cost_usd or 0.0
+        total += sum(v.cost_usd or 0.0 for v in row.supervisors)
+    return total
+
+
+def _cmd_queue(ns: argparse.Namespace) -> int:
+    """入队 / 看状态。刻意没有 `queue clear` —— 见 _cmd_queue_status 的注释。"""
+    bl = Backlog(ns.queue).ensure()
+    if not ns.task:
+        return _cmd_queue_status(bl)
+    added = []
+    for p in ns.task:
+        try:
+            added.append(bl.add(p))
+        except BacklogError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2      # 一个都不入队：部分成功比全失败更难收拾
+    for path in added:
+        print(f"已入队 {path}")
+    print(f"\ninbox 现有 {len(bl.pending())} 个。开始跑：")
+    print(f"  factory loop --queue {bl.root} --workspace <仓库路径> --db audit.db")
+    return 0
+
+
+def _cmd_queue_status(bl: Backlog) -> int:
+    """打印各状态计数。
+
+    没有 `queue clear` 子命令是刻意的：done/ 和 needs-human/ 里的
+    .result.json 是「这个任务花了多久、为什么被打回」的唯一现场记录，
+    而 audit.db 里没有队列侧的时间。一个 clear 命令会让「清一下队列」
+    这种顺手操作把它们一起删掉。要删就自己 rm，那时你知道自己在删什么。
+    """
+    c = bl.counts()
+    print(f"queue: {bl.root}")
+    for state in STATES:
+        print(f"  {state:<12}{c[state]}")
+    if c["running"]:
+        print("\nrunning/ 里的条目：")
+        for p in bl.running():
+            claim = bl.read_claim(p)
+            print(f"  {p.name}  pid={claim.get('pid', '?')} "
+                  f"host={claim.get('host', '?')}")
+    return 0
+
+
 def _cmd_show(ns: argparse.Namespace) -> int:
     attempts = AuditStore(ns.db).attempts_for(ns.task_id)
     if not attempts:
@@ -397,6 +561,54 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _add_dispatch_args(p: argparse.ArgumentParser) -> None:
+    """run 和 loop 共用的派发参数。
+
+    共用一份而不是各写一遍：这里面有沙箱、规则库、judge binary 这些安全相关
+    的默认值。两份定义会漂移，而漂移的方向不可预测 —— 「loop 的沙箱默认没
+    跟上 run」这种 bug 不会有任何报错，只会在某天变成一个写了 $HOME 的 worker。
+    """
+    p.add_argument("--workspace", required=True, help="目标 git 仓库")
+    p.add_argument("--worktree-root", default=None,
+                   help="worktree 存放目录，默认仓库同级的 .factory-worktrees")
+    p.add_argument("--db", default="audit.db")
+    p.add_argument("--binary", default="claude")
+    p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--max-turns", type=int, default=None)
+    p.add_argument("--spec-review", action="store_true",
+                   help="开规格监工（调模型，按轮计费）")
+    p.add_argument("--architecture-review", action="store_true",
+                   help="开架构监工（调模型；其意见不能单独否决合并）")
+    p.add_argument("--judge-model", default="sonnet",
+                   help="两个调模型监工用的档位")
+    p.add_argument("--harness", default="claude_code",
+                   choices=("claude_code", "shell"),
+                   help="worker 用哪个 harness（默认 claude_code）")
+    # action="extend"：重复给 --shell-argv 要累加而不是覆盖。
+    # 默认的 nargs="+" 会让后一个 flag 顶掉前一个，于是 argv[0] 变成 "{prompt}"，
+    # 报出来是 "cannot launch {prompt}" —— 排查起来完全看不出是参数被吞了。
+    p.add_argument("--shell-argv", nargs="+", action="extend", default=None,
+                   help="--harness shell 的命令行，支持 {prompt} / {workspace} 占位符")
+    # 默认开（能开的话）。理由：这是个**无人**工厂 —— 靠人记得加 flag 的防护
+    # 等于没有防护。所以反过来，不要隔离得显式说 --no-sandbox，会打印一行提醒。
+    # 平台不支持时自动关，不报错：否则整条流水线在 Linux 上直接跑不起来。
+    p.add_argument("--sandbox", action="store_true", default=None,
+                   help="强制开启沙箱；平台不支持时报错退出（默认已在 macOS 上自动开）")
+    p.add_argument("--no-sandbox", dest="sandbox", action="store_false",
+                   help="关掉沙箱。worker 将能写 $HOME、系统目录、以及本工厂"
+                        "自己的代码（包括分级规则）")
+    p.add_argument("--judge-binary", default="claude",
+                   help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
+    # runbook 规则库（spec §8）。默认全关：升级工厂不该让既有任务的检查集
+    # 悄悄变大，那样多出来的打回没人对得上原因。
+    p.add_argument("--global-runbook", action="store_true",
+                   help="启用内置全局 runbook 规则（docker restart 陷阱等）")
+    p.add_argument("--runbook", default=None,
+                   help="项目规则 YAML 路径。同名规则覆盖全局。"
+                        "不能放在 workspace 里 —— worker 能写 workspace，"
+                        "从那儿读规则等于让它自己出卷子")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="factory")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -423,50 +635,42 @@ def main(argv: list[str] | None = None) -> int:
 
     run = sub.add_parser("run", help="派发一个或多个任务")
     run.add_argument("task", nargs="+", help="任务 YAML 路径（可多个）")
-    run.add_argument("--workspace", required=True, help="目标 git 仓库")
     run.add_argument("--worktree", action="store_true",
                      help="即使只有一个任务也开独立 worktree（多任务时自动开）")
-    run.add_argument("--worktree-root", default=None,
-                     help="worktree 存放目录，默认仓库同级的 .factory-worktrees")
     run.add_argument("--parallel", type=int, default=1,
                      help="同时跑几个任务（默认 1，串行）")
-    run.add_argument("--db", default="audit.db")
-    run.add_argument("--binary", default="claude")
-    run.add_argument("--timeout", type=int, default=900)
-    run.add_argument("--max-turns", type=int, default=None)
-    run.add_argument("--spec-review", action="store_true",
-                     help="开规格监工（调模型，按轮计费）")
-    run.add_argument("--architecture-review", action="store_true",
-                     help="开架构监工（调模型；其意见不能单独否决合并）")
-    run.add_argument("--judge-model", default="sonnet",
-                     help="两个调模型监工用的档位")
-    run.add_argument("--harness", default="claude_code",
-                     choices=("claude_code", "shell"),
-                     help="worker 用哪个 harness（默认 claude_code）")
-    # action="extend"：重复给 --shell-argv 要累加而不是覆盖。
-    # 默认的 nargs="+" 会让后一个 flag 顶掉前一个，于是 argv[0] 变成 "{prompt}"，
-    # 报出来是 "cannot launch {prompt}" —— 排查起来完全看不出是参数被吞了。
-    run.add_argument("--shell-argv", nargs="+", action="extend", default=None,
-                     help="--harness shell 的命令行，支持 {prompt} / {workspace} 占位符")
-    # 默认开（能开的话）。理由：这是个**无人**工厂 —— 靠人记得加 flag 的防护
-    # 等于没有防护。所以反过来，不要隔离得显式说 --no-sandbox，会打印一行提醒。
-    # 平台不支持时自动关，不报错：否则整条流水线在 Linux 上直接跑不起来。
-    run.add_argument("--sandbox", action="store_true", default=None,
-                     help="强制开启沙箱；平台不支持时报错退出（默认已在 macOS 上自动开）")
-    run.add_argument("--no-sandbox", dest="sandbox", action="store_false",
-                     help="关掉沙箱。worker 将能写 $HOME、系统目录、以及本工厂"
-                          "自己的代码（包括分级规则）")
-    run.add_argument("--judge-binary", default="claude",
-                     help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
-    # runbook 规则库（spec §8）。默认全关：升级工厂不该让既有任务的检查集
-    # 悄悄变大，那样多出来的打回没人对得上原因。
-    run.add_argument("--global-runbook", action="store_true",
-                     help="启用内置全局 runbook 规则（docker restart 陷阱等）")
-    run.add_argument("--runbook", default=None,
-                     help="项目规则 YAML 路径。同名规则覆盖全局。"
-                          "不能放在 workspace 里 —— worker 能写 workspace，"
-                          "从那儿读规则等于让它自己出卷子")
+    _add_dispatch_args(run)
     run.set_defaults(func=_cmd_run)
+
+    q = sub.add_parser("queue", help="任务入队 / 看队列状态")
+    q.add_argument("task", nargs="*", help="任务 YAML 路径。省略则打印队列状态")
+    q.add_argument("--queue", default="backlog", help="队列根目录")
+    q.set_defaults(func=_cmd_queue)
+
+    lp = sub.add_parser("loop", help="跑批：不断认领队列里的任务并派发")
+    lp.add_argument("--queue", default="backlog", help="队列根目录")
+    # 循环里默认开 worktree：一个接一个往同一棵工作树上写，前一个没验收的
+    # 改动会变成后一个的既有状态，两个任务的 diff 就分不开了。
+    lp.add_argument("--worktree", action="store_true", default=True,
+                    help="每个任务一棵 worktree（默认开）")
+    lp.add_argument("--no-worktree", dest="worktree", action="store_false",
+                    help="全部任务共用 --workspace。前一个任务未验收的改动会"
+                         "成为后一个的起点，只在确定性 codemod 上才安全")
+    lp.add_argument("--idle", default=Idle.WATCH.value,
+                    choices=[i.value for i in Idle],
+                    help="队列空了怎么办：watch 继续等（默认）/ drain 抽干就退"
+                         "（cron 用）/ once 只跑一个")
+    lp.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD,
+                    help=f"总花费上限，超了就停（默认 ${DEFAULT_BUDGET_USD:g}；"
+                         f"0 = 不限，会打印警告）")
+    lp.add_argument("--max-tasks", type=int, default=0,
+                    help="最多派发几个任务（0 = 不限）")
+    lp.add_argument("--max-runtime", type=float, default=0.0,
+                    help="最长运行秒数（0 = 不限）")
+    lp.add_argument("--poll", type=float, default=5.0,
+                    help="--idle watch 下队列空时的轮询间隔秒数")
+    _add_dispatch_args(lp)
+    lp.set_defaults(func=_cmd_loop, parallel=1)
 
     show = sub.add_parser("show", help="打印一个任务的审计轨迹")
     show.add_argument("task_id")
