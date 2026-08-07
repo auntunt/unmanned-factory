@@ -126,6 +126,13 @@ def _print_report(task: Task, report, *, workspace: Path | None = None) -> None:
     print(f"attempts : {list(report.attempt_ids)}")
     if workspace is not None:
         print(f"worktree : {workspace}")
+    if getattr(report, "commit", None):
+        print(f"commit   : {report.commit}  (分支上已提交，主分支未动)")
+    elif report.outcome is Outcome.MERGED and getattr(
+            report, "landing_note", ""):
+        # 判绿了但没落地，要说清楚 —— 否则人会以为产出已经提交了，
+        # 而实际上它是 worktree 里一堆未提交的改动，`git worktree remove` 会扔掉。
+        print(f"commit   : 未提交 —— {report.landing_note}")
     if report.escalation_reason:
         print(f"reason   : {report.escalation_reason}")
     if report.outcome is Outcome.BLOCKED_HARD_GATE:
@@ -501,6 +508,12 @@ def _dispatch_queued(ns: argparse.Namespace, task_path: Path,
     # 标成 worktree= 会让人以为那里有产出可看，而实际上一行都没跑。
     if workspace != Path(ns.workspace):
         note = f"worktree={workspace}  {note}".strip()
+    # sha 进 note 是给夜跑用的：第二天早上从 journal 就能直接 git show，
+    # 不必先查审计库。审计库仍是权威，这里只是近路。
+    if report.commit:
+        note = f"commit={report.commit[:12]}  {note}".strip()
+    elif report.outcome is Outcome.MERGED and report.landing_note:
+        note = f"未提交（{report.landing_note}）  {note}".strip()
     return TaskRun(outcome=str(report.outcome), cost_usd=cost, note=note)
 
 
@@ -668,13 +681,43 @@ def _cmd_override(ns: argparse.Namespace) -> int:
 
 
 def _cmd_defect(ns: argparse.Namespace) -> int:
+    """挂 defect。attempt_id 或 --commit 二选一。
+
+    --commit 走的是 spec §5 写明的漏报回查路径：发现 bug → git blame →
+    commit → task_id → 当时哪个监工放过了。
+    """
     store = AuditStore(ns.db)
-    if not store.exists(ns.attempt_id):
-        print(f"没有 attempt id={ns.attempt_id}")
+    attempt_id = ns.attempt_id
+
+    if ns.commit:
+        if attempt_id is not None:
+            print("attempt_id 和 --commit 只能给一个", file=sys.stderr)
+            return 2
+        row = store.attempt_by_commit(ns.commit)
+        if row is None:
+            # 两种情形合成一句：查不到，和短 sha 撞了多条。区分它们要多打一次
+            # 库，而人接下来的动作是一样的 —— 给全 sha 再试。
+            print(f"commit {ns.commit} 查不到唯一的 attempt"
+                  "（没这条记录，或者短 sha 命中多条 —— 给全 40 位再试）",
+                  file=sys.stderr)
+            return 1
+        attempt_id = row.id
+        print(f"commit {ns.commit} → task_id={row.task_id} "
+              f"attempt #{row.attempt_no} (id={attempt_id})")
+    elif attempt_id is None:
+        print("要么给 attempt_id，要么给 --commit", file=sys.stderr)
+        return 2
+    elif not store.exists(attempt_id):
+        print(f"没有 attempt id={attempt_id}")
         return 1
-    store.link_defect(ns.attempt_id, ns.defect_id)
-    row = store.get(ns.attempt_id)
-    print(f"attempt {ns.attempt_id} defects={list(row.linked_defects)}")
+
+    store.link_defect(attempt_id, ns.defect_id)
+    row = store.get(attempt_id)
+    print(f"attempt {attempt_id} defects={list(row.linked_defects)}")
+    # 漏报的意义在于「本该哪个监工拦住」，所以把当时的裁决一并打出来 ——
+    # 不打的话人还得再敲一次 show 才知道该改哪个监工。
+    for v in row.supervisors:
+        print(f"  当时 [{v.role}] 判了 {v.verdict}")
     return 0
 
 
@@ -848,8 +891,13 @@ def main(argv: list[str] | None = None) -> int:
     ov.set_defaults(func=_cmd_override)
 
     df = sub.add_parser("defect", help="事后挂 defect，捕获漏报")
-    df.add_argument("attempt_id", type=int)
+    # attempt_id 变成可选：spec §5 的回查路径起点是 git blame，那里只有 sha。
+    # 逼人先 show 一遍才能拿到 attempt_id，等于给漏报统计加一道摩擦。
+    df.add_argument("attempt_id", type=int, nargs="?", default=None)
     df.add_argument("defect_id")
+    df.add_argument("--commit", default=None, metavar="SHA",
+                    help="按 commit 反查 attempt（git blame 给的短 sha 就行）"
+                         "，替代 attempt_id")
     df.add_argument("--db", default="audit.db")
     df.set_defaults(func=_cmd_defect)
 

@@ -294,3 +294,142 @@ def test_a_merge_that_took_two_rounds_leaves_a_complete_audit_trail(store, tmp_p
     assert rows[0].diff_hash and len(rows[0].diff_hash) == 64
     assert rows[0].cost_usd > 0
     assert any(v.verdict == Verdict.FAIL for v in rows[0].supervisors)
+
+
+# ---------- 落地：spec §5 的 commit 字段 ----------
+
+def _wt(tmp_path):
+    """一棵真的 linked worktree。land() 拒绝在主工作树提交，所以假不了。"""
+    import subprocess
+
+    def g(root, *a):
+        return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                              text=True)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    g(repo, "init", "-q")
+    g(repo, "config", "user.email", "t@example.com")
+    g(repo, "config", "user.name", "t")
+    (repo / "base.txt").write_text("b\n")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-q", "-m", "base")
+    wt = tmp_path / "wt"
+    g(repo, "worktree", "add", "-q", "-b", "factory/t-1", str(wt), "HEAD")
+    return repo, wt, g
+
+
+def test_a_merged_attempt_records_the_commit_sha(store, tmp_path):
+    """判绿 → 提交 → sha 落审计库。
+
+    spec §5 把 commit 列为承重字段，而它一直写死 None，于是 spec 写明的
+    漏报回查路径（git blame → commit → task_id）没有数据可走。
+    """
+    repo, wt, g = _wt(tmp_path)
+    (wt / "greet.py").write_text("def greet(n): return n\n")
+
+    report = _dispatcher(store, FakeAdapter([_result()])).run(_task(), wt)
+
+    assert report.outcome is Outcome.MERGED
+    assert report.commit and len(report.commit) == 40
+    assert store.attempts_for("T-1")[-1].commit == report.commit
+    # 提交在任务分支上，主分支没动
+    assert g(wt, "rev-parse", "HEAD").stdout.strip() == report.commit
+    assert g(repo, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_reworked_rounds_are_not_committed(store, tmp_path):
+    """只有合并的那一轮提交，中途打回的不提交。
+
+    硬理由不是「打回的产出没人查」，而是 capture_diff 用 `git diff HEAD`：
+    中途提交会让下一轮的 diff 变成「相对上一轮的增量」而不是「这个任务改了
+    什么」—— 审计里 diff_hash 的含义会在多轮任务上悄悄换掉。
+    """
+    repo, wt, g = _wt(tmp_path)
+    (wt / "greet.py").write_text("def greet(n): return n\n")
+    base = g(wt, "rev-parse", "HEAD").stdout.strip()
+
+    report = _dispatcher(store, FakeAdapter([_result()]),
+                         supervisor=FailsThenPasses(1)).run(
+        _task(max_rounds=2), wt)
+
+    assert report.rounds == 2
+    rows = store.attempts_for("T-1")
+    assert rows[0].resolution == Resolution.REWORKED
+    assert rows[0].commit is None, "打回的那一轮不该有 commit"
+    # 断言最后一轮**确实落地了**，不能只写 rows[1].commit == report.commit ——
+    # 两边都是 None 时那条也成立。而「每轮都提交」这个缺陷的症状恰恰是：
+    # 第一轮把改动吃掉，合并那轮无改动可提交，两边一起变 None。
+    assert report.commit is not None, report.landing_note
+    assert rows[1].commit == report.commit
+    # 整个任务只多出一个 commit，不是每轮一个
+    log = g(wt, "log", "--format=%H", f"{base}..HEAD").stdout.split()
+    assert log == [report.commit]
+
+
+def test_a_failed_landing_does_not_change_the_verdict(store, tmp_path):
+    """落地失败不把绿的判成红。
+
+    退化后果只是 commit 仍为 None —— 也就是这个功能存在之前的状态。
+    让一个已经全绿的任务因为 user.email 没配变成 escalated，
+    是拿真问题换假问题。这里用主工作树触发拒绝（land 的第一条防线）。
+    """
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    import subprocess
+    for a in (["init", "-q"], ["config", "user.email", "t@e.com"],
+              ["config", "user.name", "t"]):
+        subprocess.run(["git", *a], cwd=repo, capture_output=True)
+    (repo / "base.txt").write_text("b\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "b"], cwd=repo,
+                   capture_output=True)
+    (repo / "greet.py").write_text("def greet(n): return n\n")
+
+    report = _dispatcher(store, FakeAdapter([_result()])).run(_task(), repo)
+
+    assert report.outcome is Outcome.MERGED, "落地失败不该改判决"
+    assert report.commit is None
+    assert "linked worktree" in report.landing_note
+    assert store.attempts_for("T-1")[-1].resolution == Resolution.MERGED
+
+
+def test_an_attempt_can_be_found_back_from_a_short_sha(store, tmp_path):
+    """git blame 给的是短 sha，回查必须接受它。
+
+    逼人手动补全 40 位等于给漏报统计加一道摩擦，而需要额外动作的度量
+    等于没有度量。
+    """
+    _, wt, _ = _wt(tmp_path)
+    (wt / "greet.py").write_text("def greet(n): return n\n")
+    report = _dispatcher(store, FakeAdapter([_result()])).run(_task(), wt)
+
+    row = store.attempt_by_commit(report.commit[:8])
+    assert row is not None and row.task_id == "T-1"
+    assert store.attempt_by_commit(report.commit).id == row.id
+    assert store.attempt_by_commit("0" * 12) is None
+    assert store.attempt_by_commit("") is None
+
+
+def test_the_commit_covers_exactly_what_diff_hash_covered(store, tmp_path):
+    """commit 和 diff_hash 必须描述同一组文件。
+
+    真跑抓到的：check 命令跑 `python3 -c "from src.text import f"` 留下
+    __pycache__/*.pyc，`add -A` 把它们一起提交了。diff_hash 只覆盖
+    src/text.py，commit 里却多两个 .pyc —— 监工审的是前者，出货的是后者。
+
+    钉的是 dispatcher 的接线（changed_paths 有没有真的传下去），
+    不只是 land() 自己的行为。
+    """
+    _, wt, g = _wt(tmp_path)
+    (wt / "greet.py").write_text("def greet(n): return n\n")
+    cache = wt / "__pycache__"
+    cache.mkdir()
+    (cache / "greet.cpython-312.pyc").write_bytes(b"\x00junk")
+
+    report = _dispatcher(store, FakeAdapter([_result(paths=("greet.py",))])
+                         ).run(_task(), wt)
+
+    assert report.commit, report.landing_note
+    names = g(wt, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    assert names == ["greet.py"], f"提交了监工没审过的东西：{names}"

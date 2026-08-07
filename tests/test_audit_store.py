@@ -195,3 +195,35 @@ def test_no_plaintext_secret_anywhere_in_the_db_file(tmp_path):
     blob = db.read_bytes()
     for secret in (b"Hunter2!x", b"eyJsecrettoken"):
         assert secret not in blob, f"明文泄漏进库文件: {secret!r}"
+
+
+# ---------- commit 回查（spec §5 漏报路径的中间一跳） ----------
+
+def test_record_commit_backfills_the_field(store):
+    aid = _open(store)
+    assert store.get(aid).commit is None
+    store.record_commit(aid, "b" * 40)
+    assert store.get(aid).commit == "b" * 40
+
+
+def test_an_ambiguous_short_sha_returns_none_rather_than_a_guess(store):
+    """前缀撞车时不许随便挑一条。
+
+    挂错 attempt 的 defect 会把漏报记到无关的监工头上，比查不到更糟 ——
+    查不到人会再试，挂错了没人知道，而 spec §5.1 的漏报数是裁剪监工的判据。
+    """
+    a, b = _open(store, "T-1"), _open(store, "T-2")
+    store.record_commit(a, "abc111" + "0" * 34)
+    store.record_commit(b, "abc222" + "0" * 34)
+
+    assert store.attempt_by_commit("abc") is None, "撞车必须返回 None"
+    # 前缀长到能区分就正常查到
+    assert store.attempt_by_commit("abc111").task_id == "T-1"
+    assert store.attempt_by_commit("abc222").task_id == "T-2"
+
+
+def test_attempts_with_no_commit_are_never_matched(store):
+    # commit 为 None 的行不该被任何前缀命中 —— 否则一个空 sha 会匹配到
+    # 所有还没落地的 attempt。
+    _open(store)
+    assert store.attempt_by_commit("a") is None

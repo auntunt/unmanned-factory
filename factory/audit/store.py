@@ -183,6 +183,17 @@ class AuditStore:
             row.class_reason = redact(class_reason)
             s.commit()
 
+    def record_commit(self, attempt_id: int, commit: str | None) -> None:
+        """回填 spec §5 的 commit 字段。
+
+        单独一个方法而不是让 record_result 带上它：sha 要等监工判绿之后才存在
+        （见 harness/landing.py —— 只有合并的那一轮才提交），而 record_result
+        跑在监工之前。硬塞进 record_result 就得把落地提前到判绿之前。
+        """
+        with self._session() as s:
+            s.get(TaskAttempt, attempt_id).commit = commit
+            s.commit()
+
     def finalize(self, attempt_id: int, resolution: Resolution) -> None:
         with self._session() as s:
             s.get(TaskAttempt, attempt_id).resolution = resolution
@@ -229,6 +240,28 @@ class AuditStore:
             rows = tuple(s.scalars(stmt))
             s.expunge_all()
             return rows
+
+    def attempt_by_commit(self, commit: str) -> TaskAttempt | None:
+        """按 commit sha 反查 attempt。spec §5 漏报回查路径的中间那一跳。
+
+        接受短 sha（前缀匹配）：git blame 给的是短的，让人手动补全 40 位
+        等于给回查加一道摩擦，而需要额外动作的度量就等于没有度量。
+
+        前缀撞车（多条命中）时返回 None 而不是随便挑一条：挂错 attempt 的
+        defect 会把漏报记到无关的监工头上，比查不到更糟 —— 查不到人会再试，
+        挂错了没人知道。
+        """
+        sha = str(commit).strip()
+        if not sha:
+            return None
+        with self._session() as s:
+            rows = tuple(s.scalars(
+                select(TaskAttempt)
+                .options(selectinload(TaskAttempt.supervisors))
+                .where(TaskAttempt.commit.startswith(sha))
+            ))
+            s.expunge_all()
+            return rows[0] if len(rows) == 1 else None
 
     def attempts_for(self, task_id: str) -> tuple[TaskAttempt, ...]:
         """按 attempt_no 升序返回某个任务的全部 attempt，供 CLI show 用。"""

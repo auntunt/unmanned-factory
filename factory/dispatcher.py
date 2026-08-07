@@ -25,6 +25,7 @@ from factory.audit.models import (
 from factory.audit.store import AuditStore
 from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
+from factory.harness.landing import land
 from factory.routing import Router
 from factory.harness.workspace import neighbour_context
 from factory.runbook import RunbookLibrary
@@ -63,6 +64,10 @@ class DispatchReport:
     rounds: int
     final_grade: Grade
     escalation_reason: str = ""
+    # merged 时产出被提交到了哪个 commit。None = 没落地（不在 worktree 里、
+    # 没有改动、或者提交失败）。landing_note 说明是哪一种，见 landing.Landing。
+    commit: str | None = None
+    landing_note: str = ""
 
 
 class Dispatcher:
@@ -236,9 +241,26 @@ class Dispatcher:
             merged = self._merge_reports(reports, is_last=is_last)
 
             if not merged.blocking:
+                # 全绿了才落地。中途打回的轮次刻意不提交 —— capture_diff 用的是
+                # `git diff HEAD`，中途提交会让下一轮的 diff 变成「相对上一轮的
+                # 增量」而不是「这个任务改了什么」，审计里 diff_hash 的含义会在
+                # 多轮任务上悄悄换掉。理由全文见 harness/landing.py 的 docstring。
+                #
+                # 落地失败**不改判决**：后果只是 commit 字段仍为 None，
+                # 也就是退回这个功能存在之前的状态。让一个已经全绿的任务因为
+                # user.email 没配变成 escalated，是拿真问题换假问题。
+                # paths 传的是 capture_diff 看到的那一组 —— 提交的必须正好是
+                # 监工审过的。真跑里 `add -A` 把 check 自己生成的 .pyc 也提交
+                # 了，于是 commit 和 diff_hash 开始描述不同的东西。
+                landed = land(workspace, task_id=task.task_id,
+                              attempt_no=round_no,
+                              paths=result.changed_paths)
+                if landed:
+                    self._store.record_commit(aid, landed.commit)
                 self._store.finalize(aid, Resolution.MERGED)
                 return DispatchReport(
-                    Outcome.MERGED, tuple(attempt_ids), round_no, grade
+                    Outcome.MERGED, tuple(attempt_ids), round_no, grade,
+                    commit=landed.commit, landing_note=landed.reason,
                 )
 
             if merged.faults:

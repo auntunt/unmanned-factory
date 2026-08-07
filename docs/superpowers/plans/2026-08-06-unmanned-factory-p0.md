@@ -4342,3 +4342,136 @@ charged_to_the_model` 挂掉。
 配上 `gate_overruled`（人放回 inbox 的次数）才是判据。而这个判据只在
 `[declared-ops]` 不再被 guard 命中数污染之后才成立 —— 这也是为什么归属这个
 修必须先落地。
+
+## P1 落地：spec §5 的 `commit` 字段不再永远是 None（2026-08-08）
+
+这是 P0 就写在 spec §5 里、但一直空着的一个字段。`record_result` 的调用点
+从第一天起就是 `commit=None`（见上文 dispatcher 代码块），于是 spec 写明的
+**漏报回查路径**没有任何数据可走：
+
+> `linked_defects` 捕获假阴性——四道监工都放过、事后才炸的问题。发现 bug 时靠
+> git blame → commit → task_id 反查当时裁决，才知道本该哪个监工拦住。
+
+`diff_hash` 顶不上它。diff_hash 是内容指纹：给你一行出问题的代码，你没有
+任何办法从它反推到一个 sha256。git blame 给的是 commit sha，所以链条上缺的
+就是这一环。
+
+还有一个更直接的症状：判绿的产出一直是 worktree 里**一堆未提交的改动**。
+`git worktree remove` 会把它们连带扔掉，而 CLI 打出来的正是
+「看完后手动 `git worktree remove <path>`」。
+
+### 三条边界
+
+1. **只在 linked worktree 里提交，主工作树一律拒绝。** 判据是
+   `--git-dir != --git-common-dir`（比「.git 是文件还是目录」稳，submodule
+   的 .git 也是文件）。这条是防线不是优化：`factory run` 不加 `--worktree`
+   时 workspace 就是人的仓库本身，所以这条路径**默认会走到**。人的检出目录
+   里冒出一个没人要求过的 commit，是这一层能造成的最坏后果。
+
+   顺带一个不显然的细节：拒绝那条路径必须在 `git add` **之前**返回。先 add
+   再检查会把人工作目录的 index 弄脏 —— 他下一次 `git commit` 会连带提交
+   agent 的改动，而他以为自己只提交了手写的那部分。
+
+2. **只提交合并的那一轮。** 硬理由不是「打回的产出没人查」，而是
+   `capture_diff` 用的是 `git diff HEAD`：中途提交会让下一轮的 diff 变成
+   「相对上一轮的增量」而不是「这个任务改了什么」—— 审计里 `diff_hash` 的
+   含义会在多轮任务上悄悄换掉，而这个变化在测试里看不出来。
+
+3. **落地失败不改判决。** 退化后果只是 `commit` 仍为 None，也就是这个功能
+   存在之前的状态。让一个已经全绿的任务因为 `user.email` 没配变成
+   escalated，是拿真问题换假问题。
+
+不碰 git config，不加 `--no-verify`：仓库的 pre-commit hook 该跑就跑，挂了
+就是提交失败（第 3 条）。身份缺失时只用 `-c` 临时注入，不写进任何配置文件 ——
+落 config 的后果是无人循环悄悄改了人的仓库设置，而 `.git/config` 不被版本
+控制，这个改动在 diff 里看不见。
+
+### 回查那一跳：`factory defect --commit`
+
+`factory defect` 原来只收 `attempt_id`。但回查路径的起点是 git blame，那里
+**只有 sha** —— 逼人先 `factory show` 一遍才能拿到 attempt_id，等于给漏报
+统计加一道摩擦，而需要额外动作的度量等于没有度量。
+
+```
+factory defect --commit 3f9a2b1 BUG-42
+→ commit 3f9a2b1 → task_id=T-add-titlecase-1 attempt #1 (id=1)
+  attempt 1 defects=['BUG-42']
+    当时 [regression] 判了 pass
+    当时 [scope] 判了 pass
+    当时 [risk] 判了 pass
+```
+
+最后那几行是刻意加的：漏报的意义在于「本该哪个监工拦住」，不打出来人还得
+再敲一次 `show`。
+
+短 sha 接受前缀匹配。**前缀撞车时返回 None 而不是随便挑一条**：挂错 attempt
+的 defect 会把漏报记到无关的监工头上，比查不到更糟 —— 查不到人会再试，
+挂错了没人知道，而 spec §5.1 的漏报数正是裁剪监工的判据。
+
+### 一个测试抓出的真 bug
+
+`_identity_args` 原来写的是 `[f"-c=user.name={...}", ...]`。git 报
+「未知选项：-c=user.name=factory」—— `-c` 必须是两个 argv。
+
+这条路径**只在身份完全没配时才走到**，而所有测试 fixture 都配了
+`user.email`，所以它一次都没被执行过。抓到它的测试是
+`test_a_repo_with_no_identity_anywhere_still_lands`，关键在于它把
+`GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` 都指到空文件 —— 不隔掉全局配置，
+本机跑起来永远走不到兜底分支，而 CI 容器里会。
+
+### 变异测试
+
+两条承重路径各故意破坏一次：
+
+| 破坏 | 该挂的测试 |
+|---|---|
+| `if not is_linked_worktree(root)` → `if False` | `test_a_commit_is_never_made_in_the_main_worktree`、`test_a_failed_landing_does_not_change_the_verdict` |
+| 把 `land()` 挪到每一轮都跑 | `test_a_merged_attempt_records_the_commit_sha`、`test_reworked_rounds_are_not_committed` |
+
+第二条第一次跑的时候**没挂**。原因是 `test_reworked_rounds_are_not_committed`
+写的是 `rows[1].commit == report.commit` —— 两边都是 None 时这条也成立。而
+「每轮都提交」这个缺陷的症状恰恰是：第一轮把改动吃掉，合并那轮无改动可提交，
+两边一起变 None。加上 `assert report.commit is not None` 之后才真的挂。
+
+一个在缺陷存在时仍然通过的断言，比没有断言更糟。
+
+### 真跑抓到的：`add -A` 让 commit 和 diff_hash 描述不同的东西
+
+第一次真跑就出问题。任务是给 `src/text.py` 加一个 `titlecase`，merged、
+$0.4874、三监工全 pass、sha 落库了。但 `git show --stat` 是这样的：
+
+```
+ src/__pycache__/__init__.cpython-312.pyc | Bin 0 -> 171 bytes
+ src/__pycache__/text.cpython-312.pyc     | Bin 0 -> 510 bytes
+ src/text.py                              |   4 ++++
+```
+
+那两个 `.pyc` 是**我们自己的 check 命令**留下的 —— 生成的 check 是
+`python3 -c "from src.text import titlecase; ..."`，一跑就写 `__pycache__`。
+
+问题不在「多了两个垃圾文件」。`capture_diff` 算 diff_hash 时看到的
+`changed_paths` 只有 `src/text.py`，而 commit 里多了两个文件。也就是说
+**审计的两个承重字段开始描述不同的内容**：监工审的是 diff_hash 覆盖的那一份，
+出货的是 commit 那一份，中间那段差额没有任何人看过。
+
+实测确认了这个错配：把 commit 里 `src/text.py` 的 diff 单独 sha256，
+
+```
+text.py only sha256: d123efc6dba85f922d34d98ffd0a71ab4867626b52ab67aaedee02a445196f9e
+库里记的 diff_hash  : d123efc6dba85f922d34d98ffd0a71ab4867626b52ab67aaedee02a445196f9e
+```
+
+一模一样 —— 两者相差的正好就是那两个 `.pyc`。
+
+改法是把 `changed_paths` 传给 `land()`，`git add -- <paths>` 而不是
+`add -A`：**提交的必须正好是监工审过的那一组。** `.pyc` 留在工作区里没被删 ——
+删它不是这一层的事。
+
+`paths` 为空时退化成 `add -A`，给不报 changed_paths 的 harness（shell adapter
+那类）留路。这是刻意的退化：那条路径上「提交多了」好过「什么都没提交」，
+因为 diff_hash 在那里本来也是全量算的。
+
+**550 个测试全绿，没有一个能抓到它。** 抓到它的是一次真跑 —— 单元测试里
+没有任何东西会去跑 `python3 -c`，所以 `__pycache__` 永远不会出现。这一条
+补了三个回归测试（一个在 `land()` 层，一个在 dispatcher 接线层，一个钉
+「删除的文件也要能落地」），并各自变异验证过。
