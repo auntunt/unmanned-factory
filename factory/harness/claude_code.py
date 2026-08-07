@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
+from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits, ToolCall
 from factory.harness.transcript import find_transcript, parse_tool_calls
 from factory.harness.workspace import capture_diff, diff_hash
@@ -23,10 +26,17 @@ class ClaudeCodeAdapter:
     name = "claude_code"
 
     def __init__(
-        self, binary: str = "claude", projects_root: Path | None = None
+        self,
+        binary: str = "claude",
+        projects_root: Path | None = None,
+        *,
+        sandbox: bool = False,
     ) -> None:
         self._binary = binary
         self._projects_root = projects_root
+        # 默认关：沙箱只在 macOS 上有，开了在别的平台会直接抛。
+        # 显式开启和 worktree 一个道理 —— 最便宜的路径不该因为多了一层而变贵。
+        self._sandbox = sandbox
 
     def version(self) -> str:
         """探针跑在空临时目录里，不在调用方 cwd。
@@ -46,9 +56,10 @@ class ClaudeCodeAdapter:
                     text=True,
                     timeout=30,
                 )
-            return proc.stdout.strip() or "unknown"
+            raw = proc.stdout.strip() or "unknown"
         except (OSError, subprocess.SubprocessError):
-            return "unknown"
+            raw = "unknown"
+        return sb.tag_version(raw, self._sandbox)
 
     def _argv(self, task: Task, limits: Limits, model: str | None) -> list[str]:
         argv = [
@@ -79,30 +90,39 @@ class ClaudeCodeAdapter:
         version = self.version()
         started = time.monotonic()
 
-        try:
-            proc = subprocess.run(
-                self._argv(task, limits, model),
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                timeout=limits.timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            return self._result(
-                workspace,
-                ExitStatus.TIMEOUT,
-                version,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-                error_text=f"timeout after {limits.timeout_s}s",
-            )
-        except OSError as exc:
-            return self._result(
-                workspace,
-                ExitStatus.ERROR,
-                version,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-                error_text=f"cannot launch {self._binary}: {exc}",
-            )
+        with contextlib.ExitStack() as stack:
+            argv = self._argv(task, limits, model)
+            env: dict[str, str] | None = None
+            if self._sandbox:
+                # 沙箱不可用时**抛**，不静默降级：调用方以为隔离生效了，
+                # 实际没有 —— 那比不开沙箱更危险。
+                argv, overrides = sb.prepare(argv, Path(workspace), stack)
+                env = {**os.environ, **overrides}
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=workspace,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=limits.timeout_s,
+                )
+            except subprocess.TimeoutExpired:
+                return self._result(
+                    workspace,
+                    ExitStatus.TIMEOUT,
+                    version,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error_text=f"timeout after {limits.timeout_s}s",
+                )
+            except OSError as exc:
+                return self._result(
+                    workspace,
+                    ExitStatus.ERROR,
+                    version,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error_text=f"cannot launch {self._binary}: {exc}",
+                )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
 

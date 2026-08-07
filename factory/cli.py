@@ -37,20 +37,27 @@ HARD_GATE_NOTE = (
 
 
 def build_adapter(
-    harness: str, *, binary: str, shell_argv: list[str] | None = None
+    harness: str,
+    *,
+    binary: str,
+    shell_argv: list[str] | None = None,
+    sandbox: bool = False,
 ):
     """按名字选 harness。审计表的 harness 字段就是这个名字。
 
     监工侧的 judge 始终是 claude —— 换 worker 不等于换裁判，
     否则「换个 harness 顺手把审查也换松了」会成为一条绕过验收的路径。
+
+    sandbox 只加在 **worker** 上，不加在监工上：监工只读 diff 文本、不落地
+    文件，而且它跑在自己的空 tempdir 里（见 ClaudeJudge 的四个独立性 flag）。
     """
     if harness == "claude_code":
-        return ClaudeCodeAdapter(binary=binary)
+        return ClaudeCodeAdapter(binary=binary, sandbox=sandbox)
     if harness == "shell":
         if not shell_argv:
             raise ValueError("--harness shell 需要 --shell-argv，例如 "
                              "--shell-argv ./codemod.py '{prompt}'")
-        return ShellAdapter(shell_argv, name="shell")
+        return ShellAdapter(shell_argv, name="shell", sandbox=sandbox)
     raise ValueError(f"未知 harness: {harness}")
 
 
@@ -66,6 +73,7 @@ def build_dispatcher(
     harness: str = "claude_code",
     shell_argv: list[str] | None = None,
     judge_binary: str = "claude",
+    sandbox: bool = False,
 ) -> Dispatcher:
     """两个调模型的监工默认关。它们每轮都花钱，开关交给调用方。"""
     def judge() -> ClaudeJudge:
@@ -74,7 +82,9 @@ def build_dispatcher(
         )
 
     return Dispatcher(
-        adapter=build_adapter(harness, binary=binary, shell_argv=shell_argv),
+        adapter=build_adapter(
+            harness, binary=binary, shell_argv=shell_argv, sandbox=sandbox
+        ),
         store=AuditStore(db_path),
         spec_supervisor=SpecSupervisor(judge=judge()) if spec_review else None,
         architecture_supervisor=(
@@ -135,6 +145,7 @@ def _dispatcher_for(ns: argparse.Namespace) -> Dispatcher:
         shell_argv=ns.shell_argv,
         # judge 固定用 claude：--binary 换的是 worker，不是裁判。
         judge_binary=ns.judge_binary,
+        sandbox=ns.sandbox,
     )
 
 
@@ -380,6 +391,10 @@ def main(argv: list[str] | None = None) -> int:
     # 报出来是 "cannot launch {prompt}" —— 排查起来完全看不出是参数被吞了。
     run.add_argument("--shell-argv", nargs="+", action="extend", default=None,
                      help="--harness shell 的命令行，支持 {prompt} / {workspace} 占位符")
+    run.add_argument("--sandbox", action="store_true",
+                     help="worker 跑在 macOS 沙箱里：只能写 workspace 和它的 "
+                          ".git，写不了 $HOME、系统目录、以及本工厂自己的代码。"
+                          "网络不受限（worker 要连 API）。非 macOS 上会直接报错")
     run.add_argument("--judge-binary", default="claude",
                      help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
     run.set_defaults(func=_cmd_run)

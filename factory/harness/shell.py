@@ -19,6 +19,7 @@ P0 只接了 claude_code 一家，"接口已备好"在只有一个实现时是�
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import shutil
@@ -27,6 +28,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits
 from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
@@ -59,6 +61,7 @@ class ShellAdapter:
         env: dict[str, str] | None = None,
         exit_code_ok: tuple[int, ...] = (0,),
         probe_version: bool = False,
+        sandbox: bool = False,
     ) -> None:
         if not argv_template:
             raise ValueError("argv_template 不能为空")
@@ -69,6 +72,9 @@ class ShellAdapter:
         self._extra_env = dict(env or {})
         self._exit_code_ok = exit_code_ok
         self._probe_version = probe_version
+        # 沙箱包在 run() 的 argv 外层，不包 version() 探针 —— 探针已经跑在
+        # 空临时目录里，而那个目录不在策略白名单内，包了反而会假失败。
+        self._sandbox = sandbox
 
     def version(self) -> str:
         """审计用的版本串。默认**不执行**目标程序。
@@ -83,6 +89,9 @@ class ShellAdapter:
         （codex/aider 这类正规 CLI）显式传 probe_version=True 打开，
         而且探针跑在空临时目录里，不在 workspace 也不在调用方 cwd。
         """
+        return sb.tag_version(self._raw_version(), self._sandbox)
+
+    def _raw_version(self) -> str:
         if not self._probe_version:
             return self._static_version()
         with tempfile.TemporaryDirectory(prefix="factory-shell-ver-") as clean:
@@ -143,11 +152,17 @@ class ShellAdapter:
         version = self.version()
         started = time.monotonic()
 
+        stack = contextlib.ExitStack()
         try:
+            argv = self._argv(task, Path(workspace))
+            env = self._env(task, model)
+            if self._sandbox:
+                argv, env_overrides = sb.prepare(argv, Path(workspace), stack)
+                env.update(env_overrides)
             proc = subprocess.run(
-                self._argv(task, Path(workspace)),
+                argv,
                 cwd=workspace,
-                env=self._env(task, model),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=limits.timeout_s,
@@ -168,6 +183,9 @@ class ShellAdapter:
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 error_text=f"cannot launch {self._argv_template[0]}: {exc}",
             )
+        finally:
+            # 每条返回路径都要清掉策略临时文件，包括上面两个 except 里的 return。
+            stack.close()
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         ok = proc.returncode in self._exit_code_ok
