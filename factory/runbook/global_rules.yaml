@@ -1,0 +1,72 @@
+# 全局 runbook 规则。spec §8：通用陷阱，一次学会、全局生效。
+#
+# 写新规则前想清三件事：
+#   1. 命令里用 `{files}` 只查**本次改动的文件**，别扫整棵树。全树扫描下，
+#      仓库里任何一处既有违规都会打回一个压根没动过那些文件的 worker ——
+#      实测在本工厂自己的仓库上就误报了两次（.venv 第三方代码、规则文件
+#      匹配到自己写的模式）。那样的规则库在存量项目上没法开，等于白做。
+#   2. `when` 留空 = 宣称这条在所有项目所有任务上都成立。多数规则不该留空。
+#   3. `why` 不是注释，是这份文件唯一的复利来源。没有 why 的规则，后人
+#      看到一条不知为何存在的命令，会直接删掉它。
+#
+# 规则失败会**打回 worker**，所以命令必须是 worker 修得动的东西。
+# 环境问题（没装 docker、端口被别的进程占）用 `requires` 探针跳过，
+# 不要变成 claim —— worker 修不了环境，那是白烧一轮。
+#
+# 误报比漏报贵：漏报只是少查一项，误报会无理由打回，烧掉一整轮还降低
+# 「上人平均打回次数」这个 P1 指标的可信度。宁可写窄。
+
+rules:
+  # ---- Docker：spec §8 点名的两个坑 ----
+  - name: docker-compose-no-restart-only
+    command: "! grep -In -E '^[^#]*docker[ -]compose[^|&;]*\\brestart\\b' {files}"
+    when: ["*docker-compose*", "*compose.yml", "*compose.yaml", "*deploy*.sh"]
+    why: >
+      docker restart / compose restart 不会重新拉起新镜像，只是重启现有容器。
+      改了镜像还用 restart，部署"成功"但跑的是旧代码 —— 这个坑最贵的地方在于
+      它没有任何报错。要换镜像必须 up -d --force-recreate 或先 down 再 up。
+
+  - name: docker-buildx-needs-load
+    command: "! grep -In -E 'buildx build' {files} | grep -v -E '\\-\\-load|\\-\\-push|\\-o[= ]'"
+    when: ["*Dockerfile*", "*build*.sh", "*deploy*.sh", "*.github/workflows/*"]
+    why: >
+      buildx 默认把产物留在 build cache 里，不进本地镜像库。没有 --load
+      （或 --push / -o）的话 build 成功但 docker images 里找不到那个 tag，
+      随后的 run 会拉到一个旧的同名镜像。同样是无报错失败。
+
+  # ---- 产物里不许出现本机地址 ----
+  - name: no-localhost-in-shipped-config
+    command: "! grep -In -E 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' {files}"
+    when: ["*docker-compose*", "*.env", "*.env.*", "*config*", "*settings*",
+           "*nginx*", "*.conf"]
+    why: >
+      本机能跑、部署到别处连不上，是配置类改动最常见的返工原因。
+      本机地址写进随产物走的配置文件里，在开发机上永远测不出来。
+
+  # ---- Python 通用 ----
+  # 用内置 compile() 在内存里编译，不用 py_compile：py_compile 一定要写一个
+  # .pyc 出来，实测把 cfile 指到 /dev/null 会让它对**每个合法文件**都报错
+  # （"non-regular file"），也就是这条规则会把正确的代码判成失败。
+  - name: python-files-compile
+    command: |
+      python3 -c "import sys,pathlib
+      bad=[]
+      for a in sys.argv[1:]:
+          p=pathlib.Path(a)
+          if not p.is_file(): continue
+          try: compile(p.read_text(encoding='utf-8'), a, 'exec')
+          except (SyntaxError,ValueError,UnicodeDecodeError) as e: bad.append(f'{a}: {e}')
+      print('\n'.join(bad)); sys.exit(1 if bad else 0)" {files}
+    when: ["*.py"]
+    requires: "command -v python3"
+    why: >
+      语法错误应当在最便宜的地方被挡住。这条不替代测试：它只保证改动的 .py
+      能被编译，是"任务连语法都没跑通"的兜底 —— 那种情况下跑单测只会得到
+      一个更难读的 ImportError。
+
+  - name: no-debug-leftovers
+    command: "! grep -In -E '^[[:space:]]*(breakpoint\\(\\)|import pdb|pdb\\.set_trace\\(\\))' {files}"
+    when: ["*.py"]
+    why: >
+      留下的断点会让 CI 挂在等 stdin 上，表现为"卡住"而不是"失败"，
+      比直接报错难查得多。

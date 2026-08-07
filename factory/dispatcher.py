@@ -27,6 +27,7 @@ from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
 from factory.routing import Router
 from factory.harness.workspace import neighbour_context
+from factory.runbook import RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.base import SupervisorReport
 from factory.supervisors.model_base import SUPERVISOR_ERROR_PREFIX
@@ -74,6 +75,7 @@ class Dispatcher:
         supervisor: RegressionSupervisor | None = None,
         spec_supervisor: SpecSupervisor | None = None,
         architecture_supervisor: ArchitectureSupervisor | None = None,
+        runbook: RunbookLibrary | None = None,
         limits: Limits | None = None,
     ) -> None:
         self._adapter = adapter
@@ -85,6 +87,10 @@ class Dispatcher:
         # 确定性监工零成本就能跑通 A 类任务 —— 默认开启会让最便宜的路径变贵。
         self._spec = spec_supervisor
         self._architecture = architecture_supervisor
+        # runbook 规则库（spec §8）。默认 None = 只跑任务自带的 check。
+        # 不默认加载全局规则：那会让每个既有任务的检查集在升级工厂后悄悄变大，
+        # 突然多出来的打回没人能对上原因。要继承得显式说。
+        self._runbook = runbook
         self._limits = limits or Limits()
 
     # ---------- 预分级：不通过就一次都不派发 ----------
@@ -320,7 +326,8 @@ class Dispatcher:
                 ),
             )
 
-        reports = [self._supervisor.review(workspace, task.checks)]
+        checks = task.checks + self._runbook_checks(workspace, result)
+        reports = [self._supervisor.review(workspace, checks)]
         # 两个监工都要看周边既有代码，算一次共用：规格监工用它查 diff 引用到的
         # 实现，架构监工用它判约定和重复实现。
         context = neighbour_context(Path(workspace), result.changed_paths)
@@ -347,6 +354,22 @@ class Dispatcher:
                 )
             )
         return tuple(reports)
+
+    def _runbook_checks(self, workspace: Path, result) -> tuple:
+        """runbook 规则库选出的检查，接在任务自带 check 后面。
+
+        走回归监工而不是新开一个监工角色：这些规则是**确定性命令**，
+        和回归监工的裁决方式完全一样（跑命令、比对输出、零模型调用）。
+        另立一个角色只会让 §5.1 的命中率报表多一个分母，而这两类检查
+        的失败对 worker 来说是同一件事 —— 都是"具体哪条命令没过"。
+
+        规则库自身出问题（YAML 坏了、路径不存在）**不吞**：那是配置错误，
+        静默跳过等于人以为规则生效了而实际没有。让它往上抛，当场失败。
+        """
+        if self._runbook is None:
+            return ()
+        selection = self._runbook.select(tuple(result.changed_paths), workspace)
+        return selection.checks
 
     def _blocked(
         self, check: str, command: str, expected: str, got: str

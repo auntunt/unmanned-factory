@@ -25,6 +25,7 @@ from factory.intake.extract import DraftTask, IntakeError, TaskExtractor
 from factory.intake.guard import KNOWN_OPS
 from factory.intake.transcribe import TranscribeError, read_source
 from factory.metrics import gate3_rework, supervisor_metrics
+from factory.runbook import RunbookError, RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.model_base import ClaudeJudge
 from factory.supervisors.spec_review import SpecSupervisor
@@ -74,6 +75,7 @@ def build_dispatcher(
     shell_argv: list[str] | None = None,
     judge_binary: str = "claude",
     sandbox: bool = False,
+    runbook: RunbookLibrary | None = None,
 ) -> Dispatcher:
     """两个调模型的监工默认关。它们每轮都花钱，开关交给调用方。"""
     def judge() -> ClaudeJudge:
@@ -82,6 +84,7 @@ def build_dispatcher(
         )
 
     return Dispatcher(
+        runbook=runbook,
         adapter=build_adapter(
             harness, binary=binary, shell_argv=shell_argv, sandbox=sandbox
         ),
@@ -155,6 +158,15 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    # 规则库配错也要在派发**之前**炸。等到监工阶段才发现 YAML 坏了，
+    # worker 的 token 已经烧完了 —— 而且那一轮会以一个跟规则库毫无字面
+    # 关联的错误结束。
+    try:
+        _runbook_for(ns)
+    except RunbookError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     if len(tasks) == 1 and not ns.worktree:
         return _run_one(ns, tasks[0], Path(ns.workspace))
     return _run_pool(ns, tasks)
@@ -174,6 +186,23 @@ def _dispatcher_for(ns: argparse.Namespace) -> Dispatcher:
         # judge 固定用 claude：--binary 换的是 worker，不是裁判。
         judge_binary=ns.judge_binary,
         sandbox=ns.sandbox,
+        runbook=_runbook_for(ns),
+    )
+
+
+def _runbook_for(ns: argparse.Namespace) -> RunbookLibrary | None:
+    """按 flag 装配规则库。都没给就返回 None（只跑任务自带的 check）。
+
+    不默认开全局规则：那会让每个既有任务的检查集在升级工厂后悄悄变大，
+    突然多出来的打回没人对得上原因。要继承得显式说。
+    """
+    project = getattr(ns, "runbook", None)
+    if not getattr(ns, "global_runbook", False) and project is None:
+        return None
+    return RunbookLibrary.load(
+        project=project,
+        workspace=Path(ns.workspace),
+        include_global=getattr(ns, "global_runbook", False),
     )
 
 
@@ -429,6 +458,14 @@ def main(argv: list[str] | None = None) -> int:
                           "自己的代码（包括分级规则）")
     run.add_argument("--judge-binary", default="claude",
                      help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
+    # runbook 规则库（spec §8）。默认全关：升级工厂不该让既有任务的检查集
+    # 悄悄变大，那样多出来的打回没人对得上原因。
+    run.add_argument("--global-runbook", action="store_true",
+                     help="启用内置全局 runbook 规则（docker restart 陷阱等）")
+    run.add_argument("--runbook", default=None,
+                     help="项目规则 YAML 路径。同名规则覆盖全局。"
+                          "不能放在 workspace 里 —— worker 能写 workspace，"
+                          "从那儿读规则等于让它自己出卷子")
     run.set_defaults(func=_cmd_run)
 
     show = sub.add_parser("show", help="打印一个任务的审计轨迹")
