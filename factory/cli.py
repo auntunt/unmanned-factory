@@ -409,6 +409,18 @@ def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
             n += 1
     draft.write(dst)
 
+    # 判决写进队列日志，和 loop 的 dispatch 事件同一份文件。
+    # 只打 stdout 是不够的：闸门的误拒率要用「拦了什么」对上「人后来怎么处置」，
+    # 而 stdout 在下一次 prd 之后就没了。Journal.event 写不进去也不抛。
+    Journal(bl.dir(LOG)).event(
+        "gate",
+        task_id=draft.task_id,
+        admitted=verdict.admitted,
+        codes=list(verdict.codes),
+        path=str(dst),
+        cost_usd=draft.cost_usd,
+    )
+
     print(f"已写入 {dst}")
     print(f"  task_id   : {draft.task_id}")
     for w in verdict.warnings:
@@ -554,8 +566,23 @@ def _cmd_queue(ns: argparse.Namespace) -> int:
         except BacklogError as exc:
             print(str(exc), file=sys.stderr)
             return 2      # 一个都不入队：部分成功比全失败更难收拾
+    # 从 needs-human/ 入队 = 人推翻了闸门的判决。这是误拒的**唯一**信号：
+    # 闸门自己永远不知道它拦错了，只有人把那份草稿原样放行才说明它该过。
+    # 记在这里而不是等人填表 —— 需要额外动作的度量等于没有度量。
+    journal = Journal(bl.dir(LOG))
+    parked = bl.dir(NEEDS_HUMAN).resolve()
+    overruled = set()
+    for src, dst in zip(ns.task, added):
+        if Path(src).expanduser().resolve().parent == parked:
+            journal.event("gate_overruled", task_id=dst.stem, path=str(dst),
+                          note="人把 needs-human 的草稿放回 inbox")
+            overruled.add(dst)
+
     for path in added:
         print(f"已入队 {path}")
+        if path in overruled:
+            print("  ↑ 人推翻了闸门判决，已记进日志"
+                  "（factory queue --history 里看误拒率）")
     print(f"\ninbox 现有 {len(bl.pending())} 个。开始跑：")
     print(f"  factory loop --queue {bl.root} --workspace <仓库路径> --db audit.db")
     return 0

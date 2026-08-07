@@ -33,6 +33,32 @@ from dataclasses import dataclass, field
 _OPS_REASON = "声明了不可逆操作，抽取可能漏项，分级输入必须人核对"
 
 
+# 每条拦截理由都带一个 [code] 前缀。文案是给人看的、会随时改写，而
+# 「哪条规则拦得最多、拦得对不对」要的是一个不会随文案漂移的键。
+# 没有它，误拒率只能靠 grep 中文串来数 —— 改一次措辞历史数据就断了。
+RULE_CODES: tuple[str, ...] = (
+    "unclear-no-acceptance",
+    "no-checks",
+    "no-acceptance",
+    "declared-ops",
+    "guard-ops",
+)
+
+
+def rule_code(reason: str) -> str:
+    """从一条 reason 里取回 [code]。取不到返回 "other"。
+
+    宽容而不是抛：历史日志里可能有加 code 之前写下的理由，
+    一条读不出编码的旧记录不该让整份统计不可用。
+    """
+    text = str(reason).lstrip()
+    if text.startswith("[") and "]" in text:
+        code = text[1:text.index("]")].strip()
+        if code:
+            return code
+    return "other"
+
+
 @dataclass(frozen=True)
 class Admission:
     """能不能自动进队，以及不能的原因。
@@ -47,6 +73,11 @@ class Admission:
     @property
     def admitted(self) -> bool:
         return not self.reasons
+
+    @property
+    def codes(self) -> tuple[str, ...]:
+        """命中的规则编码，用于统计。顺序和 reasons 一致。"""
+        return tuple(rule_code(r) for r in self.reasons)
 
 
 def admit(draft) -> Admission:
@@ -76,31 +107,31 @@ def admit(draft) -> Admission:
             warnings.append(f"模型有 {n} 条疑问，但 acceptance 已划定边界，"
                             f"未穷尽的行为由 worker 自定")
         else:
-            reasons.append(f"模型有 {n} 条待确认问题，且没有验收标准兜底")
+            reasons.append(f"[unclear-no-acceptance] 模型有 {n} 条待确认问题，且没有验收标准兜底")
 
     # 2. 没有 check → 回归监工无从判定。
     #    这条不是「检查缺失」这么轻：没有 check 的任务在回归监工那里拿到的是
     #    no-checks-defined FAIL，三轮全红然后上人。放它进队等于确定烧三轮钱
     #    换一次「这任务没写验收方式」，而这句话现在就能免费说出来。
     if not getattr(draft, "checks", ()):
-        reasons.append("没有可执行的 check，进队只会烧三轮再上人")
+        reasons.append("[no-checks] 没有可执行的 check，进队只会烧三轮再上人")
 
     # 3. 验收标准为空 → 只有 check 没有标准时，「全绿」的含义取决于 check 写得
     #    多严。人写 YAML 时能自己权衡，自动进队没人权衡。
     if not getattr(draft, "acceptance", ()) and not getattr(draft, "spec_ref", ()):
-        reasons.append("acceptance 和 spec_ref 都为空，没有可核对的验收标准")
+        reasons.append("[no-acceptance] acceptance 和 spec_ref 都为空，没有可核对的验收标准")
 
     # 4. 声明了不可逆操作
     if getattr(draft, "declared_ops", ()):
         ops = ", ".join(draft.declared_ops)
-        reasons.append(f"{_OPS_REASON}：{ops}")
+        reasons.append(f"[declared-ops] {_OPS_REASON}：{ops}")
 
     # 5. guard 从原文里额外嗅到了不可逆操作 —— 模型没抽出来但关键词在。
     #    这正是第 4 条担心的「少抽了」的实例，所以它是拒绝而不是提示。
     findings = getattr(draft, "guard_findings", ())
     if findings:
         ops = ", ".join(sorted({f.op for f in findings}))
-        reasons.append(f"guard 另外嗅到不可逆操作（模型未声明）：{ops}")
+        reasons.append(f"[guard-ops] guard 另外嗅到不可逆操作（模型未声明）：{ops}")
 
     # 以下是提示，不拦：它们让任务更可能被打回，但都是 worker 修得了的，
     # 或者不影响分级输入的可信度。拦下来只会把闸门变成一个吹毛求疵的东西。

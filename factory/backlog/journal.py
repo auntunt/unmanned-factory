@@ -112,6 +112,8 @@ class Rollup:
         self.starts = [e for e in events if e.get("kind") == "run_start"]
         self.tasks = [e for e in events if e.get("kind") == "dispatch"]
         self.recovered = [e for e in events if e.get("kind") == "recover"]
+        self.gate = [e for e in events if e.get("kind") == "gate"]
+        self.overruled = [e for e in events if e.get("kind") == "gate_overruled"]
 
     @property
     def cost_usd(self) -> float:
@@ -143,6 +145,34 @@ class Rollup:
         ended = {e.get("run_id") for e in self.runs}
         return sum(1 for e in self.starts if e.get("run_id") not in ended)
 
+    @property
+    def gate_blocked(self) -> tuple[dict, ...]:
+        return tuple(e for e in self.gate if not e.get("admitted"))
+
+    @property
+    def gate_rule_hits(self) -> dict[str, int]:
+        """每条规则拦了多少次。用 code 而不是文案，见 gate.RULE_CODES。"""
+        hits: dict[str, int] = {}
+        for e in self.gate_blocked:
+            for code in (e.get("codes") or ["other"]):
+                hits[str(code)] = hits.get(str(code), 0) + 1
+        return dict(sorted(hits.items(), key=lambda kv: -kv[1]))
+
+    @property
+    def false_reject_rate(self) -> float | None:
+        """误拒率 = 被人放回 inbox 的 / 被拦下的。没拦过返回 None。
+
+        分母是**拦下的次数**而不是全部判决：这个数回答的是「闸门拦的时候
+        拦错了多少」。混进放行的那些只会把它稀释成一个总是很小的数字，
+        而那个小数字改不动任何一条规则。
+
+        它是个下界：人懒得放回、或者干脆自己改了 YAML 重新 prd 的，都不算进来。
+        所以这个数偏低 —— 用它判「哪条规则该松」是安全的，
+        用它判「闸门整体够准了」不安全。
+        """
+        n = len(self.gate_blocked)
+        return len(self.overruled) / n if n else None
+
     def lines(self) -> list[str]:
         out = [f"任务 {len(self.tasks)} 个，花费 ${self.cost_usd:.4f}，"
                f"待人介入 {len(self.needs_human)} 个"]
@@ -151,6 +181,15 @@ class Rollup:
         if self.crashed_runs:
             out.append(f"⚠ 循环非正常退出 {self.crashed_runs} 次"
                        f"（有 run_start 无 run_end）")
+        if self.gate:
+            blocked = len(self.gate_blocked)
+            out.append(f"闸门判决 {len(self.gate)} 次，拦下 {blocked} 个")
+            if (rate := self.false_reject_rate) is not None and self.overruled:
+                out.append(f"  误拒（人放回 inbox）{len(self.overruled)} 个 "
+                           f"= {rate:.0%} —— 这是下界，见 false_reject_rate")
+            for code, n in self.gate_rule_hits.items():
+                out.append(f"  [{code}] 拦下 {n}")
+
         if (p := self.priciest):
             out.append(f"最贵：{p.get('task_id')} "
                        f"${float(p['cost_usd']):.4f} → {p.get('outcome')}")
