@@ -37,6 +37,19 @@ _D_PATTERNS: dict[str, tuple[str, ...]] = {
     "drop_table": (
         r"删(?:除)?(?:掉)?(?:整张)?表", r"表\s*删(?:除|掉)", r"drop\s+table", r"删库",
     ),
+    # `\btruncate\b` 会把「加一个 truncate(s, n) 字符串截断函数」也判成不可逆
+    # 操作。这是已知的误报，**刻意不收紧**。
+    #
+    # 看起来最顺的收法是「后面紧跟 ( 就当函数」（`\btruncate\b(?!\s*\()`），
+    # 实测下来它同时放掉这两句：
+    #     conn.truncate("orders") 把订单表清掉
+    #     session.truncate(Orders) 清空测试数据
+    # 也就是拿两个真·清表换一个良性函数名 —— 方向正好反了。
+    # ORM 里清表本来就是函数调用，「带括号 = 安全」这个前提在这个域里不成立。
+    #
+    # 误报的代价是人看一眼（`[guard-ops]` 拦下的都落 needs-human，本来就要人看）。
+    # 要不要收紧看数据不看直觉：`factory queue --history` 里的 [guard-ops] 命中数
+    # 配上 gate_overruled（人放回 inbox 的次数）才是判据。
     "truncate": (
         r"清空(?:一下)?(?:整张)?(?:表|数据|库)", r"\btruncate\b",
     ),

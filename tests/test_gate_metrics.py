@@ -214,3 +214,68 @@ def test_a_draft_parked_then_overruled_gives_a_computable_rate(tmp_path):
     roll = Rollup(Journal(Backlog(tmp_path).dir(LOG)).tail(limit=50))
     assert roll.false_reject_rate == 1.0
     assert roll.gate_rule_hits == {"no-checks": 1, "no-acceptance": 1}
+
+
+# ------------------------------------- ops 的归属：谁报的，别记到对方账上
+
+from factory.intake.guard import harden_ops   # noqa: E402
+
+
+def _real(text: str, declared=()) -> Admission:
+    """走真的 harden_ops —— 这个 bug 只在并集语义下出现，手搓字段测不出来。"""
+    ops, findings = harden_ops(text, declared=declared)
+    return admit(_draft(declared_ops=ops, guard_findings=findings))
+
+
+def test_an_op_only_guard_found_is_not_charged_to_the_model():
+    # harden_ops 是并集：guard 扫出的 op 会被塞进 declared_ops。直接读
+    # declared_ops 会让同一个 op 记进两条编码，而这两条编码的全部意义
+    # 就是分辨「模型自己报的」和「模型漏了 guard 补的」。
+    v = _real("把订单数据删除", declared=())
+    assert v.codes == ("guard-ops",)
+
+
+def test_an_op_only_the_model_declared_is_not_charged_to_guard():
+    # 「把老数据处理掉」绕着说，词表扫不出来，但模型读得懂。
+    v = _real("把老数据处理掉", declared=("data_delete",))
+    assert v.codes == ("declared-ops",)
+
+
+def test_both_codes_fire_when_each_side_found_a_different_op():
+    v = _real("把订单数据删除", declared=("prod_deploy",))
+    assert set(v.codes) == {"declared-ops", "guard-ops"}
+
+
+def test_fixing_the_attribution_did_not_loosen_the_block():
+    # 归属改了，拦不拦不能变。guard 嗅到的照样进 needs-human。
+    for text, declared in (("把订单数据删除", ()),
+                           ("把老数据处理掉", ("data_delete",)),
+                           ("把订单数据删除", ("prod_deploy",))):
+        assert not _real(text, declared=declared).admitted
+
+
+def test_the_model_declared_ops_appear_in_the_reason_text():
+    # 人打开 needs-human 要看到具体是哪个 op，不能只有编码。
+    r = "\n".join(_real("把老数据处理掉", declared=("data_delete",)).reasons)
+    assert "data_delete" in r
+
+
+def test_orm_style_table_truncation_is_still_caught():
+    """钉住上面那条注释：不要用「后面跟 ( 就是函数」来收紧 truncate。
+
+    ORM 里清表本身就是函数调用，所以「带括号 = 安全」在这个域里不成立。
+    收紧会拿两个真·清表换一个良性函数名。
+    """
+    from factory.intake.guard import scan_ops
+    for text in ('调 conn.truncate("orders") 把订单表清掉',
+                 "session.truncate(Orders) 清空测试数据",
+                 "TRUNCATE TABLE orders"):
+        assert "truncate" in {f.op for f in scan_ops(text)}, text
+
+
+def test_a_benign_function_named_truncate_is_a_known_false_positive():
+    # 记下现状而不是掩盖它：这条误报是刻意留的，代价是人看一眼。
+    # 哪天真要收紧，是这个测试该改 —— 改之前先看 [guard-ops] 的命中数。
+    from factory.intake.guard import scan_ops
+    assert "truncate" in {
+        f.op for f in scan_ops("加一个 truncate(s, n) 字符串截断函数")}

@@ -121,17 +121,30 @@ def admit(draft) -> Admission:
     if not getattr(draft, "acceptance", ()) and not getattr(draft, "spec_ref", ()):
         reasons.append("[no-acceptance] acceptance 和 spec_ref 都为空，没有可核对的验收标准")
 
-    # 4. 声明了不可逆操作
-    if getattr(draft, "declared_ops", ()):
-        ops = ", ".join(draft.declared_ops)
-        reasons.append(f"[declared-ops] {_OPS_REASON}：{ops}")
-
-    # 5. guard 从原文里额外嗅到了不可逆操作 —— 模型没抽出来但关键词在。
-    #    这正是第 4 条担心的「少抽了」的实例，所以它是拒绝而不是提示。
+    # 4/5. 声明了不可逆操作。两条规则，但要先把功劳分清楚。
+    #
+    #   harden_ops 取的是并集：guard 扫出来的 op 会被**塞进 declared_ops**。
+    #   所以直接读 declared_ops 会让 guard 嗅到的那个同时记进两条编码 ——
+    #   而这两条编码的全部意义就是分辨「模型自己报的」和「模型漏了 guard 补的」。
+    #   一个被 guard 的命中数污染的 [declared-ops] 计数，回答不了
+    #   「模型的抽取到底靠不靠谱」，也就没法拿来判哪条规则该松。
+    #
+    #   findings 里只含 guard 新加的（harden_ops 已经滤掉模型报过的），
+    #   所以差集就是模型自己声明的那些。
+    #
+    #   **拦不拦的行为没有变**：guard 嗅到的照样命中第 5 条。这里改的只是归属。
     findings = getattr(draft, "guard_findings", ())
+    sniffed = {f.op for f in findings}
+    by_model = [o for o in getattr(draft, "declared_ops", ()) if o not in sniffed]
+
+    if by_model:
+        reasons.append(f"[declared-ops] {_OPS_REASON}：{', '.join(by_model)}")
+
+    # guard 从原文里额外嗅到了不可逆操作 —— 模型没抽出来但关键词在。
+    # 这正是第 4 条担心的「少抽了」的实例，所以它是拒绝而不是提示。
     if findings:
-        ops = ", ".join(sorted({f.op for f in findings}))
-        reasons.append(f"[guard-ops] guard 另外嗅到不可逆操作（模型未声明）：{ops}")
+        reasons.append("[guard-ops] guard 另外嗅到不可逆操作（模型未声明）："
+                       + ", ".join(sorted(sniffed)))
 
     # 以下是提示，不拦：它们让任务更可能被打回，但都是 worker 修得了的，
     # 或者不影响分级输入的可信度。拦下来只会把闸门变成一个吹毛求疵的东西。
