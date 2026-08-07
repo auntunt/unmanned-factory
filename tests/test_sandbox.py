@@ -388,3 +388,68 @@ def test_tmp_is_private_not_the_whole_tmp_root(tmp_path):
 
     assert proc.returncode != 0
     assert not shared_tmp_victim.exists(), "worker 写进了共享 TMPDIR 根"
+
+
+# ── transcript 边界：projects 可写、~/.claude 其余不可写 ──────────────────
+
+def test_transcript_dir_is_writable(tmp_path):
+    """worker 必须能写会话记录，否则审计悄悄丢东西。
+
+    实测踩到过（2026-08-07）：整个 ~/.claude 被拒时，`claude` 不报错，只是
+    transcript 写不出来 —— find_transcript() 返回 None，审计里的 tool_calls
+    静默变空。**审计少了东西比大声失败更糟**：merged 看起来一样，但事后
+    没法还原 worker 到底动了什么。是 e2e 冒烟测试才发现的。
+    """
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.is_dir():
+        pytest.skip("本机没有 ~/.claude/projects")
+
+    ws = git_workspace(tmp_path / "ws")
+    probe = projects / ".factory-sandbox-transcript-probe"
+    probe.unlink(missing_ok=True)
+    try:
+        proc = run_sandboxed(policy_for(ws), f"echo ok > {probe}", cwd=ws)
+        assert proc.returncode == 0, f"transcript 目录不可写：{proc.stderr}"
+        assert probe.exists()
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def test_claude_settings_stays_denied(tmp_path):
+    """放开 projects 不等于放开整个 ~/.claude。
+
+    settings.json 就在 projects 隔壁，能写它就能塞 hook —— 那是编排层
+    下一次启动时的任意代码执行，而且是以编排层的身份、在沙箱**外面**跑。
+    换句话说，放宽这条边界等于给沙箱开一条延迟生效的越狱通道。
+    所以 policy_for 只放 projects 子目录，这条测试钉住"隔壁仍然被拒"。
+    """
+    ws = git_workspace(tmp_path / "ws")
+    claude_dir = Path.home() / ".claude"
+    if not claude_dir.is_dir():
+        pytest.skip("本机没有 ~/.claude")
+
+    settings = claude_dir / "settings.json"
+    before = settings.read_bytes() if settings.exists() else None
+
+    proc = run_sandboxed(policy_for(ws), f"echo '// evil' >> {settings}", cwd=ws)
+    assert proc.returncode != 0, "settings.json 可写 —— 等于允许注入 hook"
+    after = settings.read_bytes() if settings.exists() else None
+    assert after == before, "settings.json 被改了"
+
+
+def test_arbitrary_dotfile_in_claude_dir_stays_denied(tmp_path):
+    """上一条只测了 settings.json 这一个文件名。
+
+    真正的边界是"~/.claude 下除 projects 以外都不可写" —— 否则日后
+    Claude Code 新增一个配置文件，这层保护就凭文件名漏掉了。
+    """
+    ws = git_workspace(tmp_path / "ws")
+    claude_dir = Path.home() / ".claude"
+    if not claude_dir.is_dir():
+        pytest.skip("本机没有 ~/.claude")
+
+    target = claude_dir / ".factory-sandbox-should-not-exist"
+    target.unlink(missing_ok=True)
+    proc = run_sandboxed(policy_for(ws), f"echo bad > {target}", cwd=ws)
+    assert proc.returncode != 0
+    assert not target.exists(), f"~/.claude 下被写出了文件：{target}"

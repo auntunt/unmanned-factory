@@ -173,6 +173,16 @@ def policy_for(
     if common:
         writable.append(common)
 
+    # worker 的会话记录（transcript）落在 ~/.claude/projects 下，而审计要靠它
+    # 还原 tool_calls。不放开的话不会报错 —— transcript_path 变成 None，
+    # tool_calls 静默变空。**审计悄悄少了东西比大声失败更糟**，所以必须放开。
+    # 只放 projects 子目录，不放整个 ~/.claude：settings.json 在那里，能写它
+    # 就能塞 hook，等于在编排层下一次启动时任意执行代码。已实测这条边界成立
+    # （projects 可写、settings.json 被拒）。
+    projects = Path.home() / ".claude" / "projects"
+    if projects.is_dir():
+        writable.append(projects.resolve())
+
     root = Path(factory_root).resolve() if factory_root else Path(__file__).resolve().parents[2]
     return SandboxPolicy(
         workspace=ws,

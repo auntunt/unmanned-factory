@@ -109,7 +109,35 @@ def _print_report(task: Task, report, *, workspace: Path | None = None) -> None:
         print(HARD_GATE_NOTE)
 
 
+def _resolve_sandbox(ns: argparse.Namespace) -> int:
+    """把三态的 --sandbox/--no-sandbox 化成布尔，并把选择打给人看。
+
+    默认开而不是默认关：无人工厂里"靠人记得加 flag"的防护等于没有防护。
+    但 `--sandbox` 显式要求时平台不支持要**报错**，不能静默降级 —— 那正是
+    "以为隔离生效而实际没有"的情形。没显式要求时静默关掉，好让流水线在
+    Linux 上仍能跑（那边该用容器，不是这一层）。
+    """
+    from factory.harness import sandbox as sb
+
+    if ns.sandbox is False:
+        print("⚠ 沙箱已关闭：worker 能写 $HOME、系统目录、以及本工厂自己的代码"
+              "（含分级规则）。", file=sys.stderr)
+        return 0
+    if sb.available():
+        ns.sandbox = True
+        return 0
+    if ns.sandbox is True:
+        print(f"--sandbox 要求隔离，但本机没有 {sb.SANDBOX_BINARY}（非 macOS?）。"
+              "不静默降级：要么去掉 --sandbox，要么换容器。", file=sys.stderr)
+        return 2
+    ns.sandbox = False
+    print("提示：本平台无 Seatbelt，worker 未隔离副作用。", file=sys.stderr)
+    return 0
+
+
 def _cmd_run(ns: argparse.Namespace) -> int:
+    if (rc := _resolve_sandbox(ns)) != 0:
+        return rc
     tasks = [Task.from_yaml(p) for p in ns.task]
     ids = [t.task_id for t in tasks]
     if len(set(ids)) != len(ids):
@@ -391,10 +419,14 @@ def main(argv: list[str] | None = None) -> int:
     # 报出来是 "cannot launch {prompt}" —— 排查起来完全看不出是参数被吞了。
     run.add_argument("--shell-argv", nargs="+", action="extend", default=None,
                      help="--harness shell 的命令行，支持 {prompt} / {workspace} 占位符")
-    run.add_argument("--sandbox", action="store_true",
-                     help="worker 跑在 macOS 沙箱里：只能写 workspace 和它的 "
-                          ".git，写不了 $HOME、系统目录、以及本工厂自己的代码。"
-                          "网络不受限（worker 要连 API）。非 macOS 上会直接报错")
+    # 默认开（能开的话）。理由：这是个**无人**工厂 —— 靠人记得加 flag 的防护
+    # 等于没有防护。所以反过来，不要隔离得显式说 --no-sandbox，会打印一行提醒。
+    # 平台不支持时自动关，不报错：否则整条流水线在 Linux 上直接跑不起来。
+    run.add_argument("--sandbox", action="store_true", default=None,
+                     help="强制开启沙箱；平台不支持时报错退出（默认已在 macOS 上自动开）")
+    run.add_argument("--no-sandbox", dest="sandbox", action="store_false",
+                     help="关掉沙箱。worker 将能写 $HOME、系统目录、以及本工厂"
+                          "自己的代码（包括分级规则）")
     run.add_argument("--judge-binary", default="claude",
                      help="监工用的 CLI。换 worker 不换裁判，所以和 --binary 分开")
     run.set_defaults(func=_cmd_run)
