@@ -55,15 +55,29 @@ def test_class_a_task_end_to_end(tmp_path):
     assert code == 0, "A 类任务应当自动 merge"
 
     # 审计记录字段完整性 —— 这是完成判据的后半句
-    row = AuditStore(db).get(1)
+    #
+    # 取**最后一次** attempt，不是 get(1)。max_rounds=2 意味着模型第一轮写错、
+    # 第二轮改对是完全正常的一次 merge：那时 attempt 1 的 resolution 是
+    # reworked，assert ... == "merged" 会挂。写死 get(1) 等于在断言
+    # 「模型一次就写对」—— 那是模型的运气，不是工厂的行为，而这个测试
+    # 是 P0 的完成判据，判的必须是后者。
+    #
+    # 这条曾经真的间歇性失败过（同一份代码，全量跑挂、单独跑过，用了 2 轮）。
+    # 一个分不清「真的坏了」和「模型这次多用了一轮」的判据，
+    # 在无人夜跑里等于没有判据。
+    attempts = AuditStore(db).attempts_for("T-smoke-1")
+    assert attempts, "至少要有一次 attempt"
+    row = attempts[-1]
     assert row.task_id == "T-smoke-1"
-    assert row.attempt_no == 1
+    assert row.attempt_no == len(attempts)
     assert row.spec_ref == ["AC-1"]
     assert row.oracle_class == "A"
     assert row.class_reason
     assert row.harness == "claude_code"
     assert row.harness_version and row.harness_version != "unknown"
-    assert row.model == "haiku"
+    # 模型按 A 类的重试阶梯 [haiku, sonnet, opus] 走，第几轮就是第几档。
+    # 写死 "haiku" 是同一个 get(1) 假设的第二处实例：只在一轮就过时成立。
+    assert row.model == ("haiku", "sonnet", "opus")[min(row.attempt_no - 1, 2)]
     assert row.diff_hash and len(row.diff_hash) == 64
     assert row.transcript_path and row.transcript_path.endswith(".jsonl")
     assert row.tokens_in > 0 and row.tokens_out > 0
@@ -75,3 +89,15 @@ def test_class_a_task_end_to_end(tmp_path):
     roles = {v.role for v in row.supervisors}
     assert {"regression", "risk"} <= roles
     assert (ws / "greet.py").exists()
+
+    # 用了多轮的话，前几轮也该有完整记录 —— 打回的那一轮同样是审计现场。
+    # 只查最后一轮会让「第一轮的 diff_hash 没写进去」这类缺陷躲过判据。
+    for prev in attempts[:-1]:
+        assert prev.resolution == "reworked", (
+            f"attempt #{prev.attempt_no} 不是最后一轮，"
+            f"resolution 应当是 reworked，实际 {prev.resolution}")
+        assert prev.diff_hash and len(prev.diff_hash) == 64
+        assert prev.cost_usd > 0
+        # 打回必须有理由：至少一个监工判了 fail，否则这一轮为什么重跑无从解释。
+        assert any(v.verdict == "fail" for v in prev.supervisors), \
+            f"attempt #{prev.attempt_no} 被打回却没有 fail 裁决"

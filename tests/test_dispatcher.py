@@ -260,3 +260,37 @@ def test_task_without_checks_never_merges(store, tmp_path):
     claims = _verdict(store.get(report.attempt_ids[0]),
                       SupervisorRole.REGRESSION).claims
     assert claims[0]["check"] == "no-checks-defined"
+
+
+def test_a_merge_that_took_two_rounds_leaves_a_complete_audit_trail(store, tmp_path):
+    """多轮 merge 的审计记录 —— 这些是 e2e smoke 判据依赖的不变式。
+
+    smoke 测试原来写死 `get(1)` 和 `model == "haiku"`，等于在断言「模型一次
+    就写对」。真的用了两轮时它会挂，而那是一次完全正常的 merge —— 于是
+    「真的坏了」和「模型这次多用了一轮」在夜跑里分不开。
+
+    smoke 改成取最后一轮之后，多轮这条路就只有靠模型偶尔失手才被走到。
+    这个测试用 FailsThenPasses 把它钉成确定性的：不打模型、几毫秒跑完。
+    """
+    adapter = FakeAdapter([_result()])
+    report = _dispatcher(store, adapter, supervisor=FailsThenPasses(1)).run(
+        _task(max_rounds=2), tmp_path)
+
+    assert report.outcome is Outcome.MERGED
+    assert report.rounds == 2
+
+    rows = store.attempts_for("T-1")
+    assert [r.attempt_no for r in rows] == [1, 2]
+
+    # 最后一轮：merged。前面每一轮：reworked 而不是 pending 或 escalated。
+    assert rows[-1].resolution == Resolution.MERGED
+    assert rows[0].resolution == Resolution.REWORKED
+
+    # A 类阶梯 [haiku, sonnet, opus]：第几轮就该是第几档。
+    assert [m for _, m in adapter.calls] == ["haiku", "sonnet"]
+    assert [r.model for r in rows] == ["haiku", "sonnet"]
+
+    # 打回的那一轮同样是审计现场：字段要齐，而且要能解释「为什么重跑」。
+    assert rows[0].diff_hash and len(rows[0].diff_hash) == 64
+    assert rows[0].cost_usd > 0
+    assert any(v.verdict == Verdict.FAIL for v in rows[0].supervisors)
