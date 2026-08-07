@@ -241,3 +241,58 @@ def test_gate3_exclusion_holds_against_the_real_dispatcher(tmp_path):
     g = gate3_rework(s)
     assert g.tasks == 0
     assert g.mean_reworks is None
+
+
+# ---------- 监工故障不是告警 ----------
+
+def _fault_claim(role="spec"):
+    return [{"check": f"supervisor-{role}-unavailable", "expected": "裁决",
+             "got": "timeout after 300s"}]
+
+
+def test_supervisor_fault_does_not_count_as_an_alarm(store):
+    """超时不是「它报了个警」。混进 fired 会污染命中率分母，
+    而裁剪决定就建在那个分母上。"""
+    aid = store.open_attempt(
+        task_id="T-f", spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="A", harness="h", harness_version="v", model="haiku",
+    )
+    store.record_verdict(aid, role=SupervisorRole.SPEC, verdict=Verdict.FAIL,
+                         claims=_fault_claim(), cost_usd=0.05)
+    store.finalize(aid, Resolution.ESCALATED)
+
+    m = supervisor_metrics(store)["spec"]
+    assert m.faults == 1
+    assert m.fired == 0
+    assert m.unadjudicated == 0
+    assert m.hit_rate is None
+    assert m.cost_usd == 0.05        # 烧掉的钱还是要记
+
+
+def test_faults_dominating_says_fix_availability_first(store):
+    aid = store.open_attempt(
+        task_id="T-f2", spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="A", harness="h", harness_version="v", model="haiku",
+    )
+    store.record_verdict(aid, role=SupervisorRole.SPEC, verdict=Verdict.FAIL,
+                         claims=_fault_claim())
+    store.finalize(aid, Resolution.ESCALATED)
+    assert "先修可用性" in supervisor_metrics(store)["spec"].verdict_line()
+
+
+def test_a_real_alarm_alongside_a_fault_still_counts(store):
+    """故障归故障，真报的警照算 —— 两者分开计数而不是互相吞掉。"""
+    for claims, res in ((_fault_claim(), Resolution.ESCALATED),
+                        ([{"check": "AC-1", "expected": "x", "got": "y"}],
+                         Resolution.REWORKED)):
+        aid = store.open_attempt(
+            task_id="T-f3", spec_ref=[], oracle_class=OracleClass.A,
+            class_reason="A", harness="h", harness_version="v", model="haiku",
+        )
+        store.record_verdict(aid, role=SupervisorRole.SPEC,
+                             verdict=Verdict.FAIL, claims=claims)
+        store.finalize(aid, res)
+
+    m = supervisor_metrics(store)["spec"]
+    assert (m.faults, m.fired, m.true_positives) == (1, 1, 1)
+    assert m.hit_rate == 1.0

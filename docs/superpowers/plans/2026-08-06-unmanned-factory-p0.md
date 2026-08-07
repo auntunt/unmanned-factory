@@ -3256,10 +3256,42 @@ def test_attempts_for_returns_in_attempt_order(store):
 
 ## 不在 P0 范围内（勿顺手做）
 
-- 规格监工、架构监工（要调模型）→ P1
+- ~~规格监工、架构监工（要调模型）→ P1~~ **已完成**（`factory/supervisors/`，commit `77cc039`）
+  - 四独立性 flag 探针已测（`--tools ""` `--safe-mode` `--exclude-dynamic-system-prompt-sections` + 空 cwd）
+  - 真跑发现两个非测试可发现的 bug，均已修并 pin：①监工 cwd 泄漏自身仓库上下文；②规格监工因差异集不含引用文件而误判
+- ~~监工命中率报表（两周数据攒够后再做）→ P1~~ **已完成**（`factory/metrics.py`，三修剪指标 + 故障桶独立记账，不污染命中率分母）
 - 录音 → PRD 的入口层 → P1
 - 多 harness（codex / pi）→ P1，接口已备好，加一个 Protocol 实现即可
 - 容器隔离 / worktree 并行 → P1
 - PRD ↔ diff 一致性检查 → P2
-- 监工命中率报表（两周数据攒够后再做）→ P1
+
+---
+
+## P1 四监工真跑记录（2026-08-06，第二次，两个 bug 修完后）
+
+任务 `T-p1-slug`：新建 `titles.py` 实现 `make_slug`，仓库里**已有** `text.py:slugify` ——
+故意埋的重复实现陷阱。`--spec-review --architecture-review --judge-model sonnet`。
+
+| 轮 | risk | regression | spec | architecture | resolution |
+|---|---|---|---|---|---|
+| 1 | pass $0 | pass $0 | **fail** $0.0424 | **fail** $0.0496 | reworked |
+| 2 | pass $0 | pass $0 | pass $0.1420 | **fail** $0.0442 | reworked |
+| 3 | pass $0 | pass $0 | pass $0.0493 | pass $0.3213 | **merged** |
+
+单任务总成本约 $0.65，全部落在两个模型监工上；两个确定性监工零成本。
+
+三个值得记的结论：
+
+1. **陷阱被第一轮抓住，两个监工独立命中同一处。** spec 从 AC-2 判据切入，
+   architecture 从「重复实现」类目切入，措辞和引用位置都不同 —— 说明独立性是结构性的
+   （扣输入 + 干净上下文），不是两份提示词各自复读同一句话。
+2. **两个 bug 的修复都在这次生效。** 架构监工的 claim 全部指向被审仓库自己的文件
+   （`titles.py` / `text.py`），不再引用编排层仓库；规格监工第二轮转 pass，因为
+   `neighbour_context` 把 `text.py` 带进去了，它终于能确认 `slugify` 返回 `str`。
+3. **软意见的去处按设计走了。** 第二轮 architecture 报「死代码：`make_slug` 没人调」，
+   这是软意见，因为不是末轮所以打回 worker，第三轮 worker 补了 `main()` 后转 pass。
+   末轮 architecture 单独 fail 不拦合并 —— 这条被 `tests/test_dispatcher_four.py` pin 住。
+
+闸门 3（上人平均打回次数 ≤ 1）目前 **2.00，未达标**，但样本只有 1 个任务。
+其中一次打回来自软意见（死代码），不是判据写错 —— 攒够样本前不动 checks。
 

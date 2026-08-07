@@ -17,11 +17,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from factory.audit.models import NOT_DISPATCHED, Resolution, Verdict
+from factory.supervisors.model_base import SUPERVISOR_ERROR_PREFIX
 
 # FAIL 之后，这些 resolution 说明告警是真的 / 是假的 / 还没判
 _TRUE_POSITIVE = {Resolution.REWORKED}
 _FALSE_POSITIVE = {Resolution.HUMAN_OVERRIDE, Resolution.MERGED}
 _UNADJUDICATED = {Resolution.ESCALATED, Resolution.PENDING}
+
+
+def _is_fault(verdict) -> bool:
+    """监工自身故障 vs 真报了个问题。靠 claim 的 check 前缀区分，
+    和 dispatcher._merge_reports 用的是同一个前缀 —— 两处判据必须一致，
+    否则「拦了合并」和「算进命中率」会对不上。"""
+    return any(
+        str(c.get("check", "")).startswith(SUPERVISOR_ERROR_PREFIX)
+        for c in (verdict.claims or ())
+    )
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,7 @@ class SupervisorMetrics:
     false_positives: int = 0
     unadjudicated: int = 0      # 报了 FAIL 但人还没定案
     false_negatives: int = 0    # 报 PASS 却事后挂上 defect
+    faults: int = 0             # 监工自己坏了（超时、拿不到裁决），不是告警
     cost_usd: float = 0.0
     tokens: int = 0
 
@@ -56,6 +68,9 @@ class SupervisorMetrics:
 
     def verdict_line(self) -> str:
         """spec §5.1 的三条裁剪建议，按本监工的数据给一条。"""
+        # 故障率高先修故障：命中率是在「它真的审了」的前提下才有意义
+        if self.faults and self.faults >= max(1, self.fired):
+            return "多数轮次是监工自己故障 → 先修可用性，命中率还谈不上"
         if self.adjudicated == 0 and self.false_negatives == 0:
             return "数据不足，继续攒"
         # hit_rate is None 且有漏报 = 从没报对过、却漏了东西，是「没干活」最强的情形。
@@ -82,7 +97,8 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
         return acc.setdefault(
             role,
             dict(fired=0, passed=0, true_positives=0, false_positives=0,
-                 unadjudicated=0, false_negatives=0, cost_usd=0.0, tokens=0),
+                 unadjudicated=0, false_negatives=0, faults=0,
+                 cost_usd=0.0, tokens=0),
         )
 
     for row in store.all_attempts(task_id=task_id):
@@ -92,7 +108,11 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
             b = bucket(str(v.role))
             b["cost_usd"] += v.cost_usd
             b["tokens"] += v.tokens
-            if v.verdict == Verdict.FAIL:
+            if _is_fault(v):
+                # 监工超时不是「它报了个警」。混进 fired 会污染命中率分母，
+                # 而裁剪决定就建在那个分母上。
+                b["faults"] += 1
+            elif v.verdict == Verdict.FAIL:
                 b["fired"] += 1
                 if resolution in _TRUE_POSITIVE:
                     b["true_positives"] += 1
