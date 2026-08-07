@@ -28,7 +28,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Literal
 
-from factory.backlog.store import Backlog, Claim
+from factory.backlog.journal import Journal
+from factory.backlog.store import LOG, Backlog, Claim
 
 # outcome 用 Dispatcher 的原词（见 store.OUTCOME_DIR），循环只多一个 error。
 Outcome = Literal["merged", "escalated", "blocked_hard_gate", "error"]
@@ -107,6 +108,7 @@ class BacklogLoop:
         log: Callable[[str], None] = print,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.monotonic,
+        journal: Journal | None = None,
     ) -> None:
         self._backlog = backlog
         self._dispatch = dispatch
@@ -115,6 +117,9 @@ class BacklogLoop:
         self._sleep = sleep
         self._now = now
         self._stopping = ""
+        # 默认落在队列的 log/ 里。这个目录在 store 里一直被创建但没人写过 ——
+        # 一个建好就空着的目录比没有这个目录更容易让人以为「日志在别处」。
+        self._journal = journal or Journal(backlog.dir(LOG))
 
     # ---------- 停机 ----------
 
@@ -156,13 +161,35 @@ class BacklogLoop:
     # ---------- 主循环 ----------
 
     def run(self) -> LoopReport:
-        started = self._now()
+        """跑到某个停机条件成立。
+
+        run_end 走 finally，所以异常退出也会落一行 —— 而**没有** run_end 的
+        run_start 正是 Rollup 用来数「循环自己崩了」的信号。
+        """
         report = LoopReport()
+        self._journal.event("run_start", queue=str(self._backlog.root),
+                            budget_usd=self._limits.budget_usd,
+                            idle=str(self._limits.idle))
+        try:
+            return self._run(report)
+        finally:
+            self._journal.event("run_end", stopped_by=report.stopped_by,
+                                dispatched=report.dispatched,
+                                cost_usd=round(report.cost_usd, 6),
+                                merged=report.merged,
+                                escalated=report.escalated,
+                                blocked=report.blocked,
+                                errors=report.errors)
+
+    def _run(self, report: LoopReport) -> LoopReport:
+        started = self._now()
 
         stale = self._backlog.recover()
         for entry in stale:
             report.recovered += 1
             self._log(f"[recover] {entry.task_id} 上次没跑完 → needs-human")
+            self._journal.event("recover", task_id=entry.task_id,
+                                reason=entry.reason)
 
         while True:
             stop = self._limit_hit(report, started)
@@ -184,12 +211,18 @@ class BacklogLoop:
             report.dispatched += 1
             self._log(f"\n[{report.dispatched}] {claim.task_id}  "
                       f"→ 派发（已花 ${report.cost_usd:.4f}）")
+            t0 = self._now()
             run = self._one(claim)
             report.cost_usd += run.cost_usd
             report.bump(run.outcome)
             self._backlog.finish(claim, run.outcome, note=run.note)
             self._log(f"    {run.outcome} "
                       f"(+${run.cost_usd:.4f})  {run.note}".rstrip())
+            self._journal.event("dispatch", task_id=claim.task_id,
+                                outcome=run.outcome,
+                                cost_usd=round(run.cost_usd, 6),
+                                wall_clock_s=round(self._now() - t0, 3),
+                                note=run.note)
 
         self._log(f"\n== 停机：{report.stopped_by}")
         self._log(report.summary())

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from factory.audit.models import Resolution
 from factory.audit.store import AuditStore
+from factory.backlog.journal import Journal, Rollup
 from factory.backlog.loop import (
     DEFAULT_BUDGET_USD,
     BacklogLoop,
@@ -25,7 +26,7 @@ from factory.backlog.loop import (
     LoopLimits,
     TaskRun,
 )
-from factory.backlog.store import STATES, Backlog, BacklogError
+from factory.backlog.store import LOG, STATES, Backlog, BacklogError
 from factory.dispatcher import Dispatcher, Outcome
 from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
@@ -438,6 +439,8 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
 def _cmd_queue(ns: argparse.Namespace) -> int:
     """入队 / 看状态。刻意没有 `queue clear` —— 见 _cmd_queue_status 的注释。"""
     bl = Backlog(ns.queue).ensure()
+    if getattr(ns, "history", 0):
+        return _cmd_queue_history(bl, ns.history)
     if not ns.task:
         return _cmd_queue_status(bl)
     added = []
@@ -451,6 +454,24 @@ def _cmd_queue(ns: argparse.Namespace) -> int:
         print(f"已入队 {path}")
     print(f"\ninbox 现有 {len(bl.pending())} 个。开始跑：")
     print(f"  factory loop --queue {bl.root} --workspace <仓库路径> --db audit.db")
+    return 0
+
+
+def _cmd_queue_history(bl: Backlog, limit: int) -> int:
+    """回答「昨晚跑得怎么样」。
+
+    退出码刻意**总是 0**，包括有待人介入的任务时。这是个查询命令，不是闸门；
+    非零退出会让它没法放进 `&&` 链，也会让 cron 的日报邮件变成告警邮件。
+    """
+    journal = Journal(bl.dir(LOG))
+    events = journal.tail(limit=limit)
+    if not events:
+        print(f"{bl.dir(LOG)} 里还没有日志（跑过 factory loop 才会有）")
+        return 0
+    roll = Rollup(events)
+    print(f"最近 {len(events)} 条事件（{bl.dir(LOG)}）")
+    for line in roll.lines():
+        print(f"  {line}")
     return 0
 
 
@@ -645,6 +666,10 @@ def main(argv: list[str] | None = None) -> int:
     q = sub.add_parser("queue", help="任务入队 / 看队列状态")
     q.add_argument("task", nargs="*", help="任务 YAML 路径。省略则打印队列状态")
     q.add_argument("--queue", default="backlog", help="队列根目录")
+    q.add_argument("--history", nargs="?", type=int, const=50, default=0,
+                   metavar="N",
+                   help="不看当前状态，看跑批日志汇总：花了多少、"
+                        "有几个待人介入、循环有没有非正常退出（默认最近 50 条）")
     q.set_defaults(func=_cmd_queue)
 
     lp = sub.add_parser("loop", help="跑批：不断认领队列里的任务并派发")
