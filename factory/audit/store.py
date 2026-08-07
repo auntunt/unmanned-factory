@@ -145,11 +145,22 @@ class AuditStore:
             s.commit()
 
     def link_defect(self, attempt_id: int, defect_id: str) -> None:
+        """幂等：同一个 defect 重复挂只留一条。
+
+        漏报数直接来自 len(linked_defects)，重复计数会让 spec §5.1 的
+        「漏报数」虚高，进而把一个其实在干活的监工判成没干活。
+        """
         with self._session() as s:
             row = s.get(TaskAttempt, attempt_id)
+            if defect_id in row.linked_defects:
+                return
             # JSON 列必须整体重新赋值，原地 append 不会被 ORM 检测为脏
             row.linked_defects = [*row.linked_defects, defect_id]
             s.commit()
+
+    def exists(self, attempt_id: int) -> bool:
+        with self._session() as s:
+            return s.get(TaskAttempt, attempt_id) is not None
 
     def get(self, attempt_id: int) -> TaskAttempt:
         with self._session() as s:
@@ -160,6 +171,20 @@ class AuditStore:
             )
             s.expunge_all()
             return row
+
+    def all_attempts(self, *, task_id: str | None = None) -> tuple[TaskAttempt, ...]:
+        """全库（或单任务）的 attempt，含 supervisors。给 spec §5.1 报表用。"""
+        with self._session() as s:
+            stmt = (
+                select(TaskAttempt)
+                .options(selectinload(TaskAttempt.supervisors))
+                .order_by(TaskAttempt.id)
+            )
+            if task_id is not None:
+                stmt = stmt.where(TaskAttempt.task_id == task_id)
+            rows = tuple(s.scalars(stmt))
+            s.expunge_all()
+            return rows
 
     def attempts_for(self, task_id: str) -> tuple[TaskAttempt, ...]:
         """按 attempt_no 升序返回某个任务的全部 attempt，供 CLI show 用。"""

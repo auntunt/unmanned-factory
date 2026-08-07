@@ -1,13 +1,22 @@
-"""无人工厂 P0 入口：run 派发一个任务，show 打印审计轨迹。"""
+"""无人工厂入口。
+
+    run       派发一个任务
+    show      打印某个任务的审计轨迹
+    override  人工定案 resolution（spec §5：此字段事后填写）
+    defect    事后挂 defect，捕获漏报
+    metrics   spec §5.1 的三个数，用于两周后裁剪监工
+"""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+from factory.audit.models import Resolution
 from factory.audit.store import AuditStore
 from factory.dispatcher import Dispatcher, Outcome
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
+from factory.metrics import supervisor_metrics
 from factory.task import Task
 
 HARD_GATE_NOTE = (
@@ -80,6 +89,48 @@ def _cmd_show(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_override(ns: argparse.Namespace) -> int:
+    store = AuditStore(ns.db)
+    if not store.exists(ns.attempt_id):
+        print(f"没有 attempt id={ns.attempt_id}")
+        return 1
+    store.finalize(ns.attempt_id, Resolution(ns.resolution))
+    print(f"attempt {ns.attempt_id} → resolution={ns.resolution}")
+    return 0
+
+
+def _cmd_defect(ns: argparse.Namespace) -> int:
+    store = AuditStore(ns.db)
+    if not store.exists(ns.attempt_id):
+        print(f"没有 attempt id={ns.attempt_id}")
+        return 1
+    store.link_defect(ns.attempt_id, ns.defect_id)
+    row = store.get(ns.attempt_id)
+    print(f"attempt {ns.attempt_id} defects={list(row.linked_defects)}")
+    return 0
+
+
+def _cmd_metrics(ns: argparse.Namespace) -> int:
+    report = supervisor_metrics(AuditStore(ns.db), task_id=ns.task_id)
+    if not report:
+        print("没有裁决数据")
+        return 0
+
+    for role, m in sorted(report.items()):
+        rate = "—" if m.hit_rate is None else f"{m.hit_rate:.0%}"
+        per_hit = "—" if m.cost_per_hit is None else f"${m.cost_per_hit:.4f}"
+        print(f"[{role}]")
+        print(f"  命中率      : {rate}"
+              f"  (真阳性 {m.true_positives} / 已定案 {m.adjudicated})")
+        print(f"  漏报        : {m.false_negatives}")
+        print(f"  单位命中成本: {per_hit}"
+              f"  (总 ${m.cost_usd:.4f} / {m.tokens} tokens)")
+        print(f"  报警 {m.fired} 次，放行 {m.passed} 次，"
+              f"未定案 {m.unadjudicated} 次")
+        print(f"  → {m.verdict_line()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="factory")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -97,6 +148,23 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("task_id")
     show.add_argument("--db", default="audit.db")
     show.set_defaults(func=_cmd_show)
+
+    ov = sub.add_parser("override", help="人工定案 resolution（事后回填）")
+    ov.add_argument("attempt_id", type=int)
+    ov.add_argument("resolution", choices=[r.value for r in Resolution])
+    ov.add_argument("--db", default="audit.db")
+    ov.set_defaults(func=_cmd_override)
+
+    df = sub.add_parser("defect", help="事后挂 defect，捕获漏报")
+    df.add_argument("attempt_id", type=int)
+    df.add_argument("defect_id")
+    df.add_argument("--db", default="audit.db")
+    df.set_defaults(func=_cmd_defect)
+
+    mx = sub.add_parser("metrics", help="监工命中率 / 漏报 / 单位命中成本")
+    mx.add_argument("--task-id", default=None, help="省略则统计全库")
+    mx.add_argument("--db", default="audit.db")
+    mx.set_defaults(func=_cmd_metrics)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)
