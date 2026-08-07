@@ -3440,7 +3440,7 @@ worktree 隔离的是**工作树**，这一层隔离的是**副作用**：装包
   镜像里没有 Keychain —— 等于要另发一套凭据进容器。为了隔离副作用，反而多造了
   一个密钥分发面，净收益是负的。
 - Seatbelt 是 argv 前缀，adapter 结构不用改，两个 harness 都接上了（各一个
-  `sandbox=False` 参数）。
+  `sandbox` 参数）。
 - **代价说清楚：Seatbelt 只管文件系统和进程，不管网络。** worker 必须能连 API，
   所以网络是放开的。要断网得换容器，那是另一个决定，现在没做。
 
@@ -3478,8 +3478,60 @@ worker 的临时文件。发现方式值得记：单测全绿，是加了"经 ad
    已经拿到生产凭据的进程去调远端 API。`test_sandbox_does_not_relax_the_hard_gate`
    用真的分级引擎把这条钉住了。
 2. **沙箱不可用时抛异常，不静默降级。** 调用方以为隔离生效了而实际没有，比压根不开
-   沙箱更危险。
+   沙箱更危险。（CLI 层的三态处理见下一节，那里有一处刻意的不对称。）
 
 审计留痕走 `harness_version` 后缀（`2.1.224 (Claude Code)+sandbox`），不加列：加列要改
 schema，而改 schema 本身是 D 类不可逆操作 —— 为了记一个布尔值去动硬闸门管辖的东西不值得。
 没有这个后缀，两次 `merged` 长得一模一样，事后分不清哪个产出是在隔离下拿到的。
+
+### 补一刀：默认开，以及 transcript 的那条缝（2026-08-07，commit `df0c161`）
+
+上面那版做完就发现两个问题，都是**静默失效**型，不是功能缺失。功能缺失会被看见，
+静默失效不会 —— 所以它们比"少做了一层"更值得记。
+
+**一、`--sandbox` 是 opt-in，等于没有。** 这是个**无人**工厂：靠人记得加 flag 的
+防护不存在。翻成默认开（macOS 上自动生效），要裸跑得显式写 `--no-sandbox`，而且
+会打一行提示说清放弃了什么（worker 能写 `$HOME`、系统目录、以及工厂自己的分级规则）。
+
+三态解析里有一处刻意的不对称，值得写下来：
+
+| 情形 | 行为 |
+|------|------|
+| 不给 flag，平台支持 | 开 |
+| 不给 flag，平台不支持 | 关，打提示，**继续跑** |
+| 显式 `--sandbox`，平台不支持 | **退出码 2，不跑** |
+| 显式 `--no-sandbox` | 关，打警告 |
+
+为什么第三行要报错而第二行不要：显式 `--sandbox` 时静默降级，人会以为隔离生效而实际
+在裸奔 —— 这比压根跑不起来危险，因为跑不起来会被立刻发现。反过来没显式要求时静默关掉，
+是为了让流水线在 Linux 上仍能跑（那边该用容器，不是这一层）。
+
+**二、拒掉整个 `~/.claude` 把审计弄瘸了。** worker 的 transcript 落在
+`~/.claude/projects` 下，而审计要靠它还原 `tool_calls`。策略拒掉之后 `claude`
+**不报错**，只是 `find_transcript()` 返回 `None`、`tool_calls` 静默变空 ——
+两次 `merged` 长得一模一样，但事后没法还原 worker 到底动了什么。
+**审计悄悄少东西比大声失败更糟。** 是 e2e 冒烟测试才发现的：
+`assert row.transcript_path and ...endswith(".jsonl")` → `None`。
+
+修法是放行**到 `~/.claude/projects` 为止**，不是整个 `~/.claude`。因为
+`settings.json` 就在隔壁，能写它就能塞 hook —— 那是编排层下一次启动时、以编排层
+身份、在**沙箱外面**的任意代码执行。换句话说，放宽这一格等于给沙箱开一条延迟生效
+的越狱通道：worker 这次被关着，但它能在门外埋一个下次自动执行的东西。
+
+三条新测试钉住这条缝，且都做过反向验证（把边界改坏，确认对应测试真的红）：
+
+- 去掉 `projects` 放行 → 只有 `test_transcript_dir_is_writable` 红
+- 放开整个 `~/.claude` → `test_claude_settings_stays_denied` 和
+  `test_arbitrary_dotfile_in_claude_dir_stays_denied` 两条红
+
+第三条测试专门不按文件名测：真正的边界是"`~/.claude` 下除 `projects` 以外都不可写"，
+只钉 `settings.json` 的话，日后 Claude Code 新增一个配置文件，这层保护就凭文件名漏掉了。
+
+真跑验证（**不带任何 flag**，走默认路径）：`merged`，1 轮，四个监工全过，$0.164068，
+`harness_version = 2.1.224 (Claude Code)+sandbox`，`transcript_path` 已记录
+（修之前是 `None`），交付的 `test_fizz.py` 真的 `Ran 3 tests OK`。
+测试 331 → 340。
+
+CLI 侧另加两条端到端断言，因为解析函数测对了不代表值传下去了 —— 默认跑一次断言审计里
+有 `+sandbox`，`--no-sandbox` 跑一次断言没有。少了后一条，前一条无法区分"默认开生效了"
+和"后缀永远都在"。
