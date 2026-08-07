@@ -4083,3 +4083,166 @@ def slugify(s):
   最值钱的改动，但它会让抽取器开始替用户做验收决定 —— 得先想清楚怎么防它编一条
   永远为真的 check。
 - **闸门的判据还没有命中率数据**。它现在是纯规则，两周后该像监工一样统计误拒率。
+
+## P1 从验收标准反推 check（2026-08-08，commit `883a960`）
+
+闸门上线之后暴露的第一件事：它的第一条硬拦截是「没有可执行的 check」，
+而用户口述需求时几乎不会自带验证命令。结果是绝大多数草稿停在 needs-human，
+无人路径形同虚设 —— 闸门放行的条件和人自然写出的需求之间有个结构性缺口。
+
+`factory/intake/checkgen.py` 补这个缺口：acceptance → 可跑的 command。
+
+### 为什么不放进 extract.py
+
+两个模块的可见性要求正好相反。extract 是**无工具**的：它看不到仓库，所以
+不可能凭空编出 `declared_paths`。而写一条**真能跑**的命令必须知道测试放哪、
+用什么跑 —— 那是仓库信息。合成一个模块就得给 extract 开工具，
+它编 declared_paths 的路也就同时开了。所以分两步。
+
+### 红前绿后：靠子进程退出码，不靠提示词
+
+提示词里写「不要写假验收」是没有约束力的。每条候选 check 都在**活还没干**的
+仓库里真跑一遍，按结果分三类：
+
+| verdict | 含义 | 处置 |
+|---|---|---|
+| `fail_missing` | 现在红的，命令本身没坏 | **留下**（唯一被采纳的） |
+| `already_green` | 功能还没写就已经绿了 | 扔掉 —— 它证明不了改动做成了 |
+| `broken` | 命令本身坏了（127/126/语法错） | 扔掉 —— 改完还是红的，白烧三轮 |
+
+`already_green` 这一类抓的就是模型最爱写的三种假验收，静态看都不出问题：
+
+```
+true                      → exit 0  → already_green
+test -f src/text.py       → exit 0  → already_green   （文件存在证明不了行为对）
+python3 -c "pass"         → exit 0  → already_green
+pyhton3 -c "print(1)"     → exit 127 → broken
+python3 -c "print(1)      → exit 2  → broken（shell 语法错，stderr 认出来）
+python3 -c "from src.text import slugify"  → exit 1 → fail_missing ✓
+```
+
+**退出码 2 不单独判 broken。** pytest 收集失败也是 2，而收集失败常常正是
+「功能还没写」—— 按码一刀切会把好 check 扔掉。所以 2 要再看一眼 stderr 措辞
+（`syntax error` / `command not found` / …）才算坏。
+
+### repo_digest 递什么、不递什么
+
+只递目录结构和构建配置的存在性，**不递任何文件内容**。写验收命令需要知道
+「测试放哪、用什么跑」，不需要知道任何一个函数长什么样。少递一样东西，
+就少一条它把仓库里现成代码抄进 command 的路。
+
+### 接进 prd 的三条边界
+
+- **提议跑在闸门之前。** 放在之后等于永远补不上 —— 该补的草稿已经落进
+  needs-human 了。
+- **只在 `draft.checks` 为空时跑。** 用户自己写的验收命令是需求的一部分，
+  不覆盖；模型的提议只补空缺。
+- **失败原样返回，不抛。** fail-closed：草稿带着空 checks 进闸门，
+  被那条「没有可执行的 check」拦进 needs-human。也就是退回到没有这个功能
+  之前的状态，而不是把整条 prd 打断。
+
+### 实测
+
+同一句需求，加 `--propose-checks --workspace` 前后：
+
+```
+（前）rc=3  落 /tmp/cgq/needs-human/  —— 「没有可执行的 check，进队只会烧三轮再上人」
+
+（后）rc=0  提议 1 条，探针留下 1 条
+            ○ 无法机器验收：本次改动只涉及 src/text.py 文件
+      落 /tmp/cgq/inbox/T-add-slugify-1.yaml → 闸门通过
+```
+
+生成的 check（`expect: stdout_contains` 是模型自己选的，比 exit_zero 更严）：
+
+```yaml
+- name: slugify-basic
+  command: python3 -c "from src.text import slugify; assert slugify('Hello World') == 'hello-world'; print('OK')"
+  expect: stdout_contains
+  value: OK
+```
+
+`factory loop` 13.2s 合并，A 类，三个监工全过（risk / regression / scope），
+$0.1912。产出 `def slugify(s): return s.lower().replace(" ", "-")`，
+check 在 worktree 里独立重跑通过。
+
+值得记的一点：另一条 acceptance「本次改动只涉及 src/text.py」被**正确地**
+判为无法机器验收 —— 那是范围监工的活，不是一条 shell 命令的活。模型没有
+为了凑数把它写成 `git diff --name-only | grep -c ...`。
+
+## P1 闸门的误拒率：让「拦得对不对」变成一个数（2026-08-08，commit `1ee30f4`）
+
+闸门上线时留了个洞：它的五条规则一条实证数据都没有。哪条拦得最多、
+拦得对不对，全靠看 stdout —— 而 stdout 在下一次 `prd` 之后就没了。
+这个洞的危险不在于「不知道」，而在于**没有数据的时候，松规则和紧规则
+听起来一样有道理**。
+
+### 三处改动凑成一个可算的数
+
+1. **每条 reason 加 `[code]` 前缀**（`RULE_CODES`）。文案是给人看的、
+   会随时改写；统计要的是不会随文案漂移的键。没有编码就只能 grep 中文串，
+   改一次措辞历史数据就断了。`rule_code()` 读不出编码时返回 `"other"`
+   而不是抛 —— 加编码之前的旧日志不该让整份统计不可用。
+
+2. **判决写进队列日志**，和 `loop` 的 dispatch 事件同一份 JSONL。
+   放行的也记：分母需要，而且「闸门判了多少次」本身就是个数。
+
+3. **从 `needs-human/` 入队 = 人推翻了闸门。** 这是误拒的**唯一**信号 ——
+   闸门自己永远不知道它拦错了。记在 `queue` 命令里而不是等人填表：
+   需要额外动作的度量等于没有度量。
+
+### 分母为什么只取「拦下的次数」
+
+`false_reject_rate = 被人放回的 / 被拦下的`，不是 `/ 全部判决`。
+
+这个数要回答的是「闸门拦的时候拦错了多少」。把放行的那些混进分母，
+会把它稀释成一个总是很小的数字，而那个小数字改不动任何一条规则 ——
+90% 的草稿都放行时，就算每一次拦截都是错的，总体误拒率也只有 10%。
+
+**它是个下界。** 人懒得放回、或者干脆自己改 YAML 重新 `prd` 的，都不算进来。
+所以报表里明写「下界」：用它判「哪条规则该松」是安全的，
+用它判「闸门整体够准了」不安全。
+
+`false_reject_rate` 在没拦过时返回 `None` 而不是 `0.0` —— 0% 会被读成
+「一次都没拦错」，而没数据和拦得很准是两件事。
+
+### 实测
+
+```
+$ factory prd --text "...上线到生产环境。" --queue /tmp/gq
+rc=3
+闸门拦下（2 条）→ 落在 needs-human，等人：
+  - [no-checks] 没有可执行的 check，进队只会烧三轮再上人
+  - [declared-ops] 声明了不可逆操作，抽取可能漏项，分级输入必须人核对：prod_deploy
+
+$ cat /tmp/gq/log/*.jsonl
+{"kind": "gate", "task_id": "T-upper-first-cap-1", "admitted": false,
+ "codes": ["no-checks", "declared-ops"], ...}
+
+$ factory queue /tmp/gq/needs-human/T-upper-first-cap-1.yaml --queue /tmp/gq
+已入队 /private/tmp/gq/inbox/T-upper-first-cap-1.yaml
+  ↑ 人推翻了闸门判决，已记进日志（factory queue --history 里看误拒率）
+
+$ factory queue --queue /tmp/gq --history 50
+  闸门判决 1 次，拦下 1 个
+    误拒（人放回 inbox）1 个 = 100% —— 这是下界，见 false_reject_rate
+    [no-checks] 拦下 1
+    [declared-ops] 拦下 1
+```
+
+从别处入队的任务**不**计入误拒（测试钉住了这条）：算进去会让误拒率虚高，
+而虚高的误拒率会把规则一路松成一个不拦任何东西的闸门。
+
+规则命中数按 **code** 计而不是按草稿计 —— 一份草稿常同时命中几条，
+按草稿数会让「哪条规则最该松」看不出来。
+
+### 顺带发现的一个 guard 误报
+
+测试过程中撞到的：需求「加一个 `truncate(s, n)` 函数」被 guard 判成
+不可逆操作 `truncate`（词表里 `\btruncate\b` 是为 SQL `TRUNCATE TABLE` 写的），
+于是这个纯函数任务被 `[declared-ops]` + `[guard-ops]` 两条一起拦下。
+
+**没有改词表。** guard 的文档里写明「宁可多报」是刻意的取舍：多报的代价是
+人看一眼，少报的代价是无人管道自己去动生产库。凭一个 anecdote 收紧词表，
+方向正好是往危险那边倒。现在有了 `[guard-ops]` 的命中计数，
+下次要不要收紧可以看数据 —— 这正是这套度量要解决的问题。
