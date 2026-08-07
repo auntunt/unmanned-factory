@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from factory.audit.models import Resolution
@@ -16,6 +18,7 @@ from factory.audit.store import AuditStore
 from factory.dispatcher import Dispatcher, Outcome
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
+from factory.harness.worktree import WorktreePool
 from factory.metrics import gate3_rework, supervisor_metrics
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.model_base import ClaudeJudge
@@ -53,9 +56,38 @@ def build_dispatcher(
     )
 
 
+def _print_report(task: Task, report, *, workspace: Path | None = None) -> None:
+    print(f"task     : {task.task_id}")
+    print(f"outcome  : {report.outcome.value}")
+    print(f"rounds   : {report.rounds}")
+    print(f"class    : {report.final_grade.oracle_class.value}"
+          f"  ({report.final_grade.reason})")
+    print(f"attempts : {list(report.attempt_ids)}")
+    if workspace is not None:
+        print(f"worktree : {workspace}")
+    if report.escalation_reason:
+        print(f"reason   : {report.escalation_reason}")
+    if report.outcome is Outcome.BLOCKED_HARD_GATE:
+        print(HARD_GATE_NOTE)
+
+
 def _cmd_run(ns: argparse.Namespace) -> int:
-    task = Task.from_yaml(ns.task)
-    dispatcher = build_dispatcher(
+    tasks = [Task.from_yaml(p) for p in ns.task]
+    ids = [t.task_id for t in tasks]
+    if len(set(ids)) != len(ids):
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        # 同一 task_id 并行跑会撞 attempt_no，也会抢同一个 worktree 目录。
+        print(f"task_id 重复：{dupes}。同一任务不能在一次派发里出现两次。",
+              file=sys.stderr)
+        return 2
+
+    if len(tasks) == 1 and not ns.worktree:
+        return _run_one(ns, tasks[0], Path(ns.workspace))
+    return _run_pool(ns, tasks)
+
+
+def _dispatcher_for(ns: argparse.Namespace) -> Dispatcher:
+    return build_dispatcher(
         ns.db,
         binary=ns.binary,
         timeout_s=ns.timeout,
@@ -64,19 +96,60 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         architecture_review=ns.architecture_review,
         judge_model=ns.judge_model,
     )
-    report = dispatcher.run(task, Path(ns.workspace))
 
-    print(f"task     : {task.task_id}")
-    print(f"outcome  : {report.outcome.value}")
-    print(f"rounds   : {report.rounds}")
-    print(f"class    : {report.final_grade.oracle_class.value}"
-          f"  ({report.final_grade.reason})")
-    print(f"attempts : {list(report.attempt_ids)}")
-    if report.escalation_reason:
-        print(f"reason   : {report.escalation_reason}")
-    if report.outcome is Outcome.BLOCKED_HARD_GATE:
-        print(HARD_GATE_NOTE)
+
+def _run_one(ns: argparse.Namespace, task: Task, workspace: Path) -> int:
+    report = _dispatcher_for(ns).run(task, workspace)
+    _print_report(task, report)
     return 0 if report.outcome is Outcome.MERGED else 1
+
+
+def _run_pool(ns: argparse.Namespace, tasks: list[Task]) -> int:
+    """每个任务一棵 worktree，最多 ns.parallel 个同时跑。
+
+    每个线程建自己的 Dispatcher（也就是自己的 AuditStore/adapter/judge）——
+    共享一个 Session 不是线程安全的，而 SQLite 侧的并发已经在 store 里处理了。
+    """
+    pool = WorktreePool(Path(ns.workspace), root=ns.worktree_root)
+    n = max(1, min(ns.parallel, len(tasks)))
+    print(f"派发 {len(tasks)} 个任务，并发 {n}，worktree 根目录 {pool.root}\n")
+
+    def one(task: Task) -> tuple[Task, object, Path | None, str]:
+        try:
+            wt = pool.acquire(task.task_id)
+        except Exception as exc:  # worktree 开不出来 → 这个任务算失败，别拖累别的
+            return task, None, None, f"worktree 创建失败：{exc}"
+        try:
+            report = _dispatcher_for(ns).run(task, wt.path)
+        except Exception as exc:
+            return task, None, wt.path, f"派发异常：{type(exc).__name__}: {exc}"
+        return task, report, wt.path, ""
+
+    results: list[tuple[Task, object, Path | None, str]] = []
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        futures = {ex.submit(one, t): t for t in tasks}
+        for fut in as_completed(futures):
+            results.append(fut.result())
+
+    results.sort(key=lambda r: tasks.index(r[0]))
+    merged = 0
+    for task, report, path, err in results:
+        if err:
+            print(f"task     : {task.task_id}")
+            print(f"outcome  : error")
+            if path is not None:
+                print(f"worktree : {path}")
+            print(f"reason   : {err}\n")
+            continue
+        _print_report(task, report, workspace=path)
+        print()
+        if report.outcome is Outcome.MERGED:
+            merged += 1
+
+    print(f"== {merged}/{len(tasks)} merged")
+    print("worktree 保留未删：产出还没人验收过。看完后手动 "
+          "`git worktree remove <path>`。")
+    return 0 if merged == len(tasks) else 1
 
 
 def _cmd_show(ns: argparse.Namespace) -> int:
@@ -169,9 +242,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="factory")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    run = sub.add_parser("run", help="派发一个任务")
-    run.add_argument("task", help="任务 YAML 路径")
+    run = sub.add_parser("run", help="派发一个或多个任务")
+    run.add_argument("task", nargs="+", help="任务 YAML 路径（可多个）")
     run.add_argument("--workspace", required=True, help="目标 git 仓库")
+    run.add_argument("--worktree", action="store_true",
+                     help="即使只有一个任务也开独立 worktree（多任务时自动开）")
+    run.add_argument("--worktree-root", default=None,
+                     help="worktree 存放目录，默认仓库同级的 .factory-worktrees")
+    run.add_argument("--parallel", type=int, default=1,
+                     help="同时跑几个任务（默认 1，串行）")
     run.add_argument("--db", default="audit.db")
     run.add_argument("--binary", default="claude")
     run.add_argument("--timeout", type=int, default=900)

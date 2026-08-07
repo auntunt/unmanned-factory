@@ -3,13 +3,24 @@
 resolution 和 linked_defects 是承重字段 —— 两周后算监工命中率
 （监工报 FAIL 的 attempt 里有多少真的 reworked；监工报 PASS 的里有多少事后
 挂上了 linked_defects）全靠这两个字段，所以宁可留空也不要写错。
+
+并发（P1 并行派发）下三处要防，都是实测出来的，不是预防性设计：
+  1. 8 个线程同时 `AuditStore(同一路径)` 会在 create_all 上撞 “table already
+     exists” —— SQLAlchemy 的 checkfirst 是「先查后建」，本身不是原子的。
+     用 _SCHEMA_LOCK 把建表串起来。
+  2. 默认 journal 模式下并发写会直接 “database is locked”。开 WAL +
+     busy_timeout，让读写不互斥、写写排队而不是报错。
+  3. attempt_no 是「读 max 再插」，并发下会算出同一个号。靠 UniqueConstraint
+     兜住并重试 —— 不能改成自增，因为 attempt_no 是任务内的轮次语义。
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from factory.audit.models import (
@@ -23,14 +34,32 @@ from factory.audit.models import (
 )
 from factory.redact import redact
 
+# 建表跨实例串行化。同一进程内多个 AuditStore 指向同一文件是并行派发的常态。
+_SCHEMA_LOCK = threading.Lock()
+
+_BUSY_TIMEOUT_MS = 10_000
+_INSERT_RETRIES = 8
+
 
 class AuditStore:
     def __init__(self, db_path: str | Path) -> None:
-        url = "sqlite://" if str(db_path) == ":memory:" else f"sqlite:///{db_path}"
+        memory = str(db_path) == ":memory:"
+        url = "sqlite://" if memory else f"sqlite:///{db_path}"
         # in-memory 时同一个 engine 内的连接池会复用同一条连接，
         # 所以同一 AuditStore 实例里的多次 Session 看到的是同一个库。
         self._engine = create_engine(url)
-        Base.metadata.create_all(self._engine)
+
+        @event.listens_for(self._engine, "connect")
+        def _pragmas(dbapi_conn, _record) -> None:  # pragma: no cover - 驱动回调
+            cur = dbapi_conn.cursor()
+            cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            if not memory:
+                # :memory: 不支持 WAL，设了会报错。
+                cur.execute("PRAGMA journal_mode=WAL")
+            cur.close()
+
+        with _SCHEMA_LOCK:
+            Base.metadata.create_all(self._engine)
 
     def _session(self) -> Session:
         return Session(self._engine)
@@ -57,20 +86,35 @@ class AuditStore:
         harness_version: str,
         model: str,
     ) -> int:
-        with self._session() as s:
-            row = TaskAttempt(
-                task_id=task_id,
-                attempt_no=self._max_attempt_no(s, task_id) + 1,
-                spec_ref=spec_ref,
-                oracle_class=oracle_class,
-                class_reason=redact(class_reason),
-                harness=harness,
-                harness_version=harness_version,
-                model=model,
-            )
-            s.add(row)
-            s.commit()
-            return row.id
+        """并发下 attempt_no 会撞号，撞了就重算重插。
+
+        不改成全局自增：attempt_no 是「这个任务的第几轮」，`show` 和闸门 3 的
+        打回计数都按它读。让它变成全库序号，审计轨迹就没法看了。
+        UniqueConstraint(task_id, attempt_no) 是这里唯一可靠的裁判。
+        """
+        for _ in range(_INSERT_RETRIES):
+            with self._session() as s:
+                row = TaskAttempt(
+                    task_id=task_id,
+                    attempt_no=self._max_attempt_no(s, task_id) + 1,
+                    spec_ref=spec_ref,
+                    oracle_class=oracle_class,
+                    class_reason=redact(class_reason),
+                    harness=harness,
+                    harness_version=harness_version,
+                    model=model,
+                )
+                s.add(row)
+                try:
+                    s.commit()
+                except IntegrityError:
+                    s.rollback()
+                    continue
+                return row.id
+        raise RuntimeError(
+            f"task_id={task_id} 的 attempt_no 连续 {_INSERT_RETRIES} 次撞号。"
+            "同一任务不应被并行派发多次 —— 检查调度器是否重复投递了同一个任务。"
+        )
 
     def record_result(
         self,
