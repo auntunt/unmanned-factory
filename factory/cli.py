@@ -16,7 +16,7 @@ from factory.audit.store import AuditStore
 from factory.dispatcher import Dispatcher, Outcome
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
-from factory.metrics import supervisor_metrics
+from factory.metrics import gate3_rework, supervisor_metrics
 from factory.task import Task
 
 HARD_GATE_NOTE = (
@@ -111,10 +111,10 @@ def _cmd_defect(ns: argparse.Namespace) -> int:
 
 
 def _cmd_metrics(ns: argparse.Namespace) -> int:
-    report = supervisor_metrics(AuditStore(ns.db), task_id=ns.task_id)
+    store = AuditStore(ns.db)
+    report = supervisor_metrics(store, task_id=ns.task_id)
     if not report:
         print("没有裁决数据")
-        return 0
 
     for role, m in sorted(report.items()):
         rate = "—" if m.hit_rate is None else f"{m.hit_rate:.0%}"
@@ -128,6 +128,20 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
         print(f"  报警 {m.fired} 次，放行 {m.passed} 次，"
               f"未定案 {m.unadjudicated} 次")
         print(f"  → {m.verdict_line()}")
+
+    # 闸门 3 是 spec §9 的 P1 判据。它不随 --task-id 收窄：单个任务的
+    # 打回次数说明不了验收系统好不好，只有跨任务的均值有意义。
+    g = gate3_rework(store)
+    mean = "—" if g.mean_reworks is None else f"{g.mean_reworks:.2f}"
+    print("[闸门 3]")
+    print(f"  上人平均打回次数: {mean}  (目标 ≤ {g.target:g}，"
+          f"{g.total_reworks} 次打回 / {g.tasks} 个已派发任务)")
+    if g.meets_p1_target is None:
+        print("  → 尚无已派发任务，P1 判据待测")
+    elif g.meets_p1_target:
+        print("  → 达标：验收系统的判据基本对得上人的判断")
+    else:
+        print("  → 未达标：打回多是判据没写对，不是 agent 不行 —— 改 checks")
     return 0
 
 

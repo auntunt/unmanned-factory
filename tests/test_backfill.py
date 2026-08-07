@@ -81,3 +81,45 @@ def test_metrics_command_prints_three_numbers(db, capsys):
 def test_metrics_on_empty_db_says_so(tmp_path, capsys):
     assert main(["metrics", "--db", str(tmp_path / "empty.db")]) == 0
     assert "没有" in capsys.readouterr().out
+
+
+def test_metrics_command_reports_gate3(db, capsys):
+    """P1 判据要能一眼看到，不然它就不是判据只是个字段。"""
+    main(["override", "1", "reworked", "--db", str(db)])
+    capsys.readouterr()
+
+    assert main(["metrics", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "[闸门 3]" in out
+    assert "上人平均打回次数: 1.00" in out
+    assert "目标 ≤ 1" in out
+    assert "达标" in out
+
+
+def test_metrics_gate3_flags_a_failing_acceptance_system(db, capsys):
+    """打回两次就超标，提示指向 checks 而不是 agent 能力。"""
+    s = AuditStore(db)
+    for _ in range(2):
+        aid = s.open_attempt(
+            task_id="T-bf", spec_ref=[], oracle_class=OracleClass.A,
+            class_reason="A", harness="claude_code",
+            harness_version="2.1", model="haiku",
+        )
+        s.finalize(aid, Resolution.REWORKED)
+    main(["override", "1", "merged", "--db", str(db)])
+    capsys.readouterr()
+
+    assert main(["metrics", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "上人平均打回次数: 2.00" in out
+    assert "未达标" in out
+    assert "改 checks" in out
+
+
+def test_metrics_gate3_shows_pending_when_nothing_dispatched(tmp_path, capsys):
+    """空库也要有闸门 3 这一段，不能因为没数据就整块消失。"""
+    assert main(["metrics", "--db", str(tmp_path / "e.db")]) == 0
+    out = capsys.readouterr().out
+    assert "没有裁决数据" in out
+    assert "[闸门 3]" in out
+    assert "P1 判据待测" in out

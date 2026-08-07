@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from factory.audit.models import Resolution, Verdict
+from factory.audit.models import NOT_DISPATCHED, Resolution, Verdict
 
 # FAIL 之后，这些 resolution 说明告警是真的 / 是假的 / 还没判
 _TRUE_POSITIVE = {Resolution.REWORKED}
@@ -106,3 +106,47 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
                     b["false_negatives"] += 1
 
     return {role: SupervisorMetrics(role=role, **vals) for role, vals in acc.items()}
+
+
+@dataclass(frozen=True)
+class Gate3Rework:
+    """spec §9 的 P1 判据：闸门 3 上人平均要打回几次才能验收通过。
+
+    spec 同时说明这个指标检验的是**验收系统本身**而非 agent 能力：
+    若每次都需人下去读代码找问题，说明问题在闸门 1（验收条件不够机器可判定）。
+    """
+
+    tasks: int = 0
+    total_reworks: int = 0
+    target: float = 1.0
+
+    @property
+    def mean_reworks(self) -> float | None:
+        if self.tasks == 0:
+            return None
+        return self.total_reworks / self.tasks
+
+    @property
+    def meets_p1_target(self) -> bool | None:
+        """没数据返回 None —— 「没跑过任务」不等于「达标」。"""
+        if self.mean_reworks is None:
+            return None
+        return self.mean_reworks <= self.target
+
+
+def gate3_rework(store, *, target: float = 1.0) -> Gate3Rework:
+    """按任务（不是按 attempt）统计打回次数。
+
+    分母排除预分级就拦下、从未派发的任务：它们没进过闸门 3。
+    不排除的话，C/D 类拦得越多平均打回次数越好看，指标会奖励错误的行为。
+    """
+    reworks: dict[str, int] = {}
+    for row in store.all_attempts():
+        if row.harness_version == NOT_DISPATCHED:
+            continue
+        reworks.setdefault(row.task_id, 0)
+        if row.resolution == Resolution.REWORKED:
+            reworks[row.task_id] += 1
+    return Gate3Rework(
+        tasks=len(reworks), total_reworks=sum(reworks.values()), target=target
+    )

@@ -34,6 +34,11 @@ class Resolution(StrEnum):
     ESCALATED = "escalated"
 
 
+# 预分级就拦下的 attempt 从没调过 harness。用它区分「派发过」和「没派发过」——
+# P1 判据「闸门 3 上人平均打回次数」的分母必须排除这些，否则拦得越多指标越好看。
+NOT_DISPATCHED = "n/a"
+
+
 class Verdict(StrEnum):
     PASS = "pass"
     FAIL = "fail"

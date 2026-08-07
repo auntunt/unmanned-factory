@@ -2,13 +2,14 @@
 import pytest
 
 from factory.audit.models import (
+    NOT_DISPATCHED,
     OracleClass,
     Resolution,
     SupervisorRole,
     Verdict,
 )
 from factory.audit.store import AuditStore
-from factory.metrics import supervisor_metrics
+from factory.metrics import gate3_rework, supervisor_metrics
 
 
 @pytest.fixture
@@ -148,3 +149,95 @@ def test_trim_verdict_follows_spec_5_1(store, verdicts, resolution, defects,
     _attempt(store, "T-v", verdicts=verdicts, resolution=resolution,
              defects=defects)
     assert expected in supervisor_metrics(store)["spec"].verdict_line()
+
+
+# ---------- P1 判据：闸门 3 上人平均打回次数 ≤ 1 ----------
+
+def test_gate3_rework_is_zero_when_everything_merges_first_round(store):
+    _attempt(store, "T-g1",
+             verdicts=[(SupervisorRole.REGRESSION, Verdict.PASS, 0.0)],
+             resolution=Resolution.MERGED)
+    g = gate3_rework(store)
+    assert g.tasks == 1
+    assert g.total_reworks == 0
+    assert g.mean_reworks == 0.0
+    assert g.meets_p1_target is True
+
+
+def test_gate3_counts_reworks_per_task_not_per_attempt(store):
+    """两轮返工后合并 → 这个任务打回 2 次，不是 3 次 attempt。"""
+    for _ in range(2):
+        _attempt(store, "T-g2",
+                 verdicts=[(SupervisorRole.SPEC, Verdict.FAIL, 0.1)],
+                 resolution=Resolution.REWORKED)
+    _attempt(store, "T-g2",
+             verdicts=[(SupervisorRole.SPEC, Verdict.PASS, 0.1)],
+             resolution=Resolution.MERGED)
+    g = gate3_rework(store)
+    assert g.tasks == 1
+    assert g.total_reworks == 2
+    assert g.mean_reworks == 2.0
+    assert g.meets_p1_target is False       # 2 > 1
+
+
+def test_gate3_averages_across_tasks(store):
+    _attempt(store, "T-g3", verdicts=[], resolution=Resolution.MERGED)
+    _attempt(store, "T-g4", verdicts=[], resolution=Resolution.REWORKED)
+    _attempt(store, "T-g4", verdicts=[], resolution=Resolution.MERGED)
+    g = gate3_rework(store)
+    assert g.tasks == 2
+    assert g.mean_reworks == 0.5
+    assert g.meets_p1_target is True
+
+
+def test_gate3_excludes_tasks_blocked_before_dispatch(store):
+    """C/D 类预分级拦下的任务从没进过闸门 3，不能进分母。
+
+    否则拦得越多、平均打回次数看着越好，指标会奖励错误的行为。
+    """
+    _attempt(store, "T-g5", verdicts=[], resolution=Resolution.REWORKED)
+    _attempt(store, "T-g5", verdicts=[], resolution=Resolution.MERGED)
+    aid = store.open_attempt(
+        task_id="T-blocked", spec_ref=[], oracle_class=OracleClass.D,
+        class_reason="D: prod_deploy", harness="h",
+        harness_version=NOT_DISPATCHED,   # dispatcher 拦下时就是这个值
+        model="opus",
+    )
+    store.finalize(aid, Resolution.ESCALATED)
+    g = gate3_rework(store)
+    assert g.tasks == 1, "被预分级拦下的任务不该进分母"
+    assert g.mean_reworks == 1.0
+
+
+def test_gate3_on_empty_db(store):
+    g = gate3_rework(store)
+    assert g.tasks == 0
+    assert g.mean_reworks is None
+    assert g.meets_p1_target is None     # 没数据不等于达标
+
+
+def test_gate3_exclusion_holds_against_the_real_dispatcher(tmp_path):
+    """不用手造行：真跑一次 D 类拦截，确认它不进闸门 3 分母。
+
+    手造的 harness_version 可能和 dispatcher 实际写的值不一致，
+    那样这条排除规则就是假通过的。
+    """
+    from factory.dispatcher import Dispatcher, Outcome
+    from factory.task import CheckSpec, Task
+
+    class NeverCalled:
+        name = "claude_code"
+
+        def run(self, *a, **kw):        # pragma: no cover
+            raise AssertionError("D 类不该派发")
+
+    s = AuditStore(tmp_path / "g.db")
+    d = Dispatcher(adapter=NeverCalled(), store=s)
+    task = Task(task_id="T-hardgate", prompt="deploy",
+                declared_ops=("prod_deploy",),
+                checks=(CheckSpec(name="noop", command="true"),))
+    assert d.run(task, tmp_path).outcome == Outcome.BLOCKED_HARD_GATE
+
+    g = gate3_rework(s)
+    assert g.tasks == 0
+    assert g.mean_reworks is None

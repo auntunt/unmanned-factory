@@ -16,7 +16,12 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
-from factory.audit.models import Resolution, SupervisorRole, Verdict
+from factory.audit.models import (
+    NOT_DISPATCHED,
+    Resolution,
+    SupervisorRole,
+    Verdict,
+)
 from factory.audit.store import AuditStore
 from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
@@ -68,7 +73,7 @@ class Dispatcher:
             oracle_class=grade.oracle_class,
             class_reason=grade.reason,
             harness=self._adapter.name,
-            harness_version="n/a",
+            harness_version=NOT_DISPATCHED,
             model=model,
         )
         self._store.record_verdict(
