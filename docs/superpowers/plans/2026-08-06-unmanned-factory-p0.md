@@ -3260,9 +3260,12 @@ def test_attempts_for_returns_in_attempt_order(store):
   - 四独立性 flag 探针已测（`--tools ""` `--safe-mode` `--exclude-dynamic-system-prompt-sections` + 空 cwd）
   - 真跑发现两个非测试可发现的 bug，均已修并 pin：①监工 cwd 泄漏自身仓库上下文；②规格监工因差异集不含引用文件而误判
 - ~~监工命中率报表（两周数据攒够后再做）→ P1~~ **已完成**（`factory/metrics.py`，三修剪指标 + 故障桶独立记账，不污染命中率分母）
+- ~~多 harness（codex / pi）→ P1，接口已备好，加一个 Protocol 实现即可~~
+  **已完成**（`factory/harness/shell.py`，commit `dbf6515`）——「接口已备好」现在
+  被第二个实现证伪过了：Protocol 本身没问题，但两个 adapter 的成败判据是相反的
+- ~~容器隔离 / worktree 并行 → P1~~ **worktree 并行已完成**（commit `10a0d9f`）；
+  容器隔离仍未做（它隔离的是副作用，不是工作树，见下）
 - 录音 → PRD 的入口层 → P1
-- 多 harness（codex / pi）→ P1，接口已备好，加一个 Protocol 实现即可
-- 容器隔离 / worktree 并行 → P1
 - PRD ↔ diff 一致性检查 → P2
 
 ---
@@ -3295,3 +3298,94 @@ def test_attempts_for_returns_in_attempt_order(store):
 闸门 3（上人平均打回次数 ≤ 1）目前 **2.00，未达标**，但样本只有 1 个任务。
 其中一次打回来自软意见（死代码），不是判据写错 —— 攒够样本前不动 checks。
 
+
+---
+
+## P1 worktree 隔离 + 并行派发（2026-08-07，commit `10a0d9f`）
+
+`factory/harness/worktree.py` + CLI `run` 支持多 task YAML、`--parallel N`。
+
+选 worktree 不选 clone/容器的理由：clone 每次拷全量对象库，大仓库上单任务就要
+几十秒；worktree 共享 `.git`，创建是常数时间。容器隔离的是**副作用**（装包、改系统），
+worktree 隔离的是**工作树** —— 并行派发第一个撞的是后者：两个 agent 同时改同一棵树，
+diff 会互相污染，`diff_hash` 就不再对应任何一个任务的改动。容器留给 P1 后半段。
+
+### 三个并发 bug，都是探针实测出来的，不是预防性设计
+
+1. **`create_all` 撞车。** 8 个线程同时 `AuditStore(同一路径)` 报
+   `table task_attempt already exists` —— SQLAlchemy 的 `checkfirst` 是
+   「先查后建」，不是原子的。用模块级 `_SCHEMA_LOCK` 把建表串起来。
+2. **并发写直接 `database is locked`。** 默认 journal 模式下读写互斥。
+   改 WAL + `busy_timeout=10s`，让写写排队而不是报错。用
+   `@event.listens_for(engine, "connect")` 设置，保证每条连接都生效
+   （`:memory:` 不支持 WAL，要跳过，否则所有单测全挂）。
+3. **`attempt_no` 撞号。** 它是「读 max 再插」，并发下两个线程会算出同一个号。
+   靠 `UniqueConstraint(task_id, attempt_no)` 兜住并重试。
+   **不能改成全局自增**：`attempt_no` 是「这个任务的第几轮」，`show` 和闸门 3 的
+   打回计数都按它读，变成全库序号审计轨迹就没法看了。
+
+实测：8 线程 × 12 次写 = 96 行，无丢行、无撞号、裁决全部挂在正确的 attempt 上。
+
+### 两个刻意的默认值
+
+- **单任务默认不开 worktree。** P0 的最便宜路径不能因为 P1 变贵，要隔离显式加
+  `--worktree`。
+- **跑完不删 worktree。** agent 干完活、监工判了绿，但合并是人的动作。
+  自动删等于把还没人看过的产出扔了。`release(discard=False)` 见到未提交改动
+  直接拒绝删并返回 `False`。
+
+---
+
+## P1 第二个 harness：ShellAdapter（2026-08-07，commit `dbf6515`）
+
+`factory/harness/shell.py`。存在的理由不是「多一个选择」，而是**验证
+`HarnessAdapter` 这个 Protocol 真的可替换** —— 只有一个实现时，
+「接口已备好」是无法证伪的说法。
+
+和 `ClaudeCodeAdapter` 的契约**相反**，这是接第三个 harness 前必须先分清的事：
+
+| | 判成败靠 |
+|---|---|
+| `ClaudeCodeAdapter` | 退出码恒为 0，只能读 JSON 里的 `is_error` |
+| `ShellAdapter` | 退出码就是真相，没有 JSON 可读 |
+
+**刻意不用 `shell=True`。** prompt 是任务文件里的自由文本，将来还会由 PRD
+生成器产出。走 shell 就等于把它当命令拼起来执行，一个反引号就能越权。
+`test_prompt_with_shell_metacharacters_is_not_executed` 是这个决定的锚点。
+
+### 真跑（2026-08-07）：一个零成本的 codemod 任务
+
+worker 是一条确定性脚本（把模块级常量收进 frozen dataclass），根本不调模型。
+`--spec-review --architecture-review --judge-model sonnet`：
+
+| | 结果 | 成本 | 耗时 |
+|---|---|---|---|
+| worker（shell） | 一轮做对 | **$0** | 24 ms |
+| 四监工 | 全 pass | $0.397 | ~40 s |
+
+**验收比生产贵 —— 而且是 100% 对 0%。** 这不是异常，是 A/B 类确定性任务的常态：
+能写成脚本的活，成本全在「证明它做对了」那一侧。它直接指向 spec §5.1 的修剪问题：
+对这类任务，两个模型监工的单位命中成本是无穷大（零命中、$0.397 支出）。
+攒够样本后第一个该砍的就是**确定性 worker 上的模型监工**，而不是监工本身。
+
+审计侧确认：`harness` 字段记的是 `shell`（不是 `claude_code`），
+`harness_version` 是脚本内容的 `sha256:6a11ebb44fda` —— 脚本改了哈希就变，
+能看出「这次和上次不是同一个 worker」。`cost_usd=0` 是真话，不是缺省值。
+
+### 顺带修掉一个 P0 就存在的真 bug：`version()` 探针的 cwd 泄漏
+
+两个 adapter 的 `version()` 都在 `subprocess.run` 里没设 `cwd`，于是被探的
+可执行体在**编排层自己的仓库**里跑了一遍。真 `claude --version` 只打印版本号，
+所以 P0 全程看不出来；但任何会写文件的可执行体（测试里的假 harness、包装脚本）
+都会往这个仓库里写东西 —— `out.py` 就是这么被 `git add -A` 带进 `10a0d9f` 的。
+
+这和四监工那次的 cwd bug 是**同一个坑的第二次**（那次是 `claude -p` 把 cwd 和
+`git status` 塞进系统提示词）。共同的教训：**任何 `subprocess.run` 都必须显式
+决定 cwd**，默认继承调用方目录在这个项目里从来不是想要的行为。
+
+修法：探针跑在空临时目录里，且**默认不探** —— 裸脚本不认 `--version`，
+会被整个执行一遍，所以默认改成对文件内容取哈希，正规 CLI 才显式
+`probe_version=True`。
+
+副作用能量化：离线全量从 ~50s 降到 ~17s，原来那 33 秒是假 harness 被反复真跑掉的。
+两条回归测试已反向验证（改回旧代码即 fail）。
