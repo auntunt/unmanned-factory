@@ -78,3 +78,56 @@ def test_capture_diff_without_baseline_raises(tmp_path):
     _git(tmp_path, "init", "-q")
     with pytest.raises(RuntimeError, match="commit"):
         capture_diff(tmp_path)
+
+
+# ---------- 架构监工的周边代码 ----------
+
+def test_neighbour_context_gives_sibling_code_but_not_the_changed_file(tmp_path):
+    """改动本身在 diff 里已经给过。重复给会让「哪些是新写的」变模糊，
+    而判重复实现恰恰要分清这个。"""
+    from factory.harness.workspace import neighbour_context
+
+    pkg = tmp_path / "factory"
+    pkg.mkdir()
+    (pkg / "text.py").write_text("def slugify(s): return s.lower()\n")
+    (pkg / "new.py").write_text("def slugify(s): return s.lower()\n")
+
+    ctx = neighbour_context(tmp_path, ("factory/new.py",))
+    assert "factory/text.py" in ctx
+    assert "factory/new.py" not in ctx
+
+
+def test_neighbour_context_skips_noise_and_non_code(tmp_path):
+    from factory.harness.workspace import neighbour_context
+
+    pkg = tmp_path / "src"
+    pkg.mkdir()
+    (pkg / "a.py").write_text("x = 1\n")
+    (pkg / "notes.md").write_text("# 不是代码\n")
+    cache = pkg / "__pycache__"
+    cache.mkdir()
+    (cache / "a.pyc").write_text("junk")
+
+    ctx = neighbour_context(tmp_path, ("src/b.py",))
+    assert "src/a.py" in ctx
+    assert "notes.md" not in ctx
+    assert "pycache" not in ctx
+
+
+def test_neighbour_context_is_empty_for_a_missing_directory(tmp_path):
+    from factory.harness.workspace import neighbour_context
+
+    assert neighbour_context(tmp_path, ("nope/x.py",)) == ""
+
+
+def test_neighbour_context_respects_the_byte_budget(tmp_path):
+    """给监工的上下文必须有上限，否则一个大目录能把 prompt 撑爆。"""
+    from factory.harness.workspace import neighbour_context
+
+    pkg = tmp_path / "big"
+    pkg.mkdir()
+    for i in range(5):
+        (pkg / f"f{i}.py").write_text("# pad\n" * 500)
+
+    ctx = neighbour_context(tmp_path, ("big/new.py",), max_bytes=1000)
+    assert 0 < len(ctx) < 4000

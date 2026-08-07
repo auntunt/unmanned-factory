@@ -17,6 +17,9 @@ from factory.dispatcher import Dispatcher, Outcome
 from factory.harness.base import Limits
 from factory.harness.claude_code import ClaudeCodeAdapter
 from factory.metrics import gate3_rework, supervisor_metrics
+from factory.supervisors.architecture import ArchitectureSupervisor
+from factory.supervisors.model_base import ClaudeJudge
+from factory.supervisors.spec_review import SpecSupervisor
 from factory.task import Task
 
 HARD_GATE_NOTE = (
@@ -31,10 +34,21 @@ def build_dispatcher(
     binary: str = "claude",
     timeout_s: int = 900,
     max_turns: int | None = None,
+    spec_review: bool = False,
+    architecture_review: bool = False,
+    judge_model: str = "sonnet",
 ) -> Dispatcher:
+    """两个调模型的监工默认关。它们每轮都花钱，开关交给调用方。"""
+    def judge() -> ClaudeJudge:
+        return ClaudeJudge(binary=binary, model=judge_model, timeout_s=timeout_s)
+
     return Dispatcher(
         adapter=ClaudeCodeAdapter(binary=binary),
         store=AuditStore(db_path),
+        spec_supervisor=SpecSupervisor(judge=judge()) if spec_review else None,
+        architecture_supervisor=(
+            ArchitectureSupervisor(judge=judge()) if architecture_review else None
+        ),
         limits=Limits(max_turns=max_turns, timeout_s=timeout_s),
     )
 
@@ -42,7 +56,13 @@ def build_dispatcher(
 def _cmd_run(ns: argparse.Namespace) -> int:
     task = Task.from_yaml(ns.task)
     dispatcher = build_dispatcher(
-        ns.db, binary=ns.binary, timeout_s=ns.timeout, max_turns=ns.max_turns
+        ns.db,
+        binary=ns.binary,
+        timeout_s=ns.timeout,
+        max_turns=ns.max_turns,
+        spec_review=ns.spec_review,
+        architecture_review=ns.architecture_review,
+        judge_model=ns.judge_model,
     )
     report = dispatcher.run(task, Path(ns.workspace))
 
@@ -156,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--binary", default="claude")
     run.add_argument("--timeout", type=int, default=900)
     run.add_argument("--max-turns", type=int, default=None)
+    run.add_argument("--spec-review", action="store_true",
+                     help="开规格监工（调模型，按轮计费）")
+    run.add_argument("--architecture-review", action="store_true",
+                     help="开架构监工（调模型；其意见不能单独否决合并）")
+    run.add_argument("--judge-model", default="sonnet",
+                     help="两个调模型监工用的档位")
     run.set_defaults(func=_cmd_run)
 
     show = sub.add_parser("show", help="打印一个任务的审计轨迹")

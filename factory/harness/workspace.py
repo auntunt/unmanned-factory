@@ -40,3 +40,52 @@ def diff_hash(diff: str) -> str | None:
     if not diff:
         return None
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()
+
+
+_CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"}
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "dist", "build"}
+
+
+def neighbour_context(
+    root: Path,
+    changed_paths: tuple[str, ...],
+    *,
+    max_files: int = 12,
+    max_bytes: int = 40_000,
+) -> str:
+    """改动文件的同目录既有代码，给架构监工判断约定和重复实现用。
+
+    只取同目录、只取未改动的文件：改动本身在 diff 里已经给过一遍，
+    重复给会让「哪些是新写的」变模糊，而这正是判重复实现要分清的。
+    """
+    changed = set(changed_paths)
+    picked: list[str] = []
+    for p in changed_paths:
+        directory = (root / p).parent
+        if not directory.is_dir():
+            continue
+        for f in sorted(directory.iterdir()):
+            if not f.is_file() or f.suffix not in _CODE_SUFFIXES:
+                continue
+            if any(part in _SKIP_DIRS for part in f.parts):
+                continue
+            try:
+                rel = str(f.relative_to(root))
+            except ValueError:
+                continue
+            if rel in changed or rel in picked:
+                continue
+            picked.append(rel)
+
+    chunks: list[str] = []
+    budget = max_bytes
+    for rel in picked[:max_files]:
+        try:
+            body = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if budget <= 0:
+            break
+        chunks.append(f"--- {rel} ---\n{body[:budget]}")
+        budget -= len(body)
+    return "\n\n".join(chunks)

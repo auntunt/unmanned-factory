@@ -26,8 +26,12 @@ from factory.audit.store import AuditStore
 from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
 from factory.routing import Router
+from factory.harness.workspace import neighbour_context
+from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.base import SupervisorReport
+from factory.supervisors.model_base import SUPERVISOR_ERROR_PREFIX
 from factory.supervisors.regression import RegressionSupervisor
+from factory.supervisors.spec_review import SpecSupervisor
 from factory.task import Task
 
 
@@ -35,6 +39,19 @@ class Outcome(StrEnum):
     MERGED = "merged"
     ESCALATED = "escalated"
     BLOCKED_HARD_GATE = "blocked_hard_gate"
+
+
+@dataclass(frozen=True)
+class Merged:
+    """一轮里所有监工裁决的合并结果。
+
+    feedback 和 faults 分开，因为去处不同：feedback 打回 worker，
+    faults 直接升级给人（worker 修不了监工的故障）。
+    """
+
+    blocking: bool
+    feedback: tuple[dict, ...] = ()
+    faults: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +72,8 @@ class Dispatcher:
         engine: GradingEngine | None = None,
         router: Router | None = None,
         supervisor: RegressionSupervisor | None = None,
+        spec_supervisor: SpecSupervisor | None = None,
+        architecture_supervisor: ArchitectureSupervisor | None = None,
         limits: Limits | None = None,
     ) -> None:
         self._adapter = adapter
@@ -62,6 +81,10 @@ class Dispatcher:
         self._engine = engine or GradingEngine.default()
         self._router = router or Router.default()
         self._supervisor = supervisor or RegressionSupervisor()
+        # 两个调模型的监工默认关闭（None）。它们每轮都要花钱，而 P0 已证明
+        # 确定性监工零成本就能跑通 A 类任务 —— 默认开启会让最便宜的路径变贵。
+        self._spec = spec_supervisor
+        self._architecture = architecture_supervisor
         self._limits = limits or Limits()
 
     # ---------- 预分级：不通过就一次都不派发 ----------
@@ -188,24 +211,39 @@ class Dispatcher:
                     aid, role=SupervisorRole.RISK, verdict=Verdict.PASS, claims=[]
                 )
 
-            report = self._review(task, workspace, result)
-            self._store.record_verdict(
-                aid,
-                role=report.role,
-                verdict=report.verdict,
-                claims=list(report.claims),
-                tokens=report.tokens,
-                cost_usd=report.cost_usd,
-            )
+            reports = self._review(task, workspace, result)
+            for report in reports:
+                self._store.record_verdict(
+                    aid,
+                    role=report.role,
+                    verdict=report.verdict,
+                    claims=list(report.claims),
+                    tokens=report.tokens,
+                    cost_usd=report.cost_usd,
+                )
 
-            if report.passed:
+            is_last = round_no == task.max_rounds
+            merged = self._merge_reports(reports, is_last=is_last)
+
+            if not merged.blocking:
                 self._store.finalize(aid, Resolution.MERGED)
                 return DispatchReport(
                     Outcome.MERGED, tuple(attempt_ids), round_no, grade
                 )
 
-            feedback = report.claims
-            is_last = round_no == task.max_rounds
+            if merged.faults:
+                # 监工自己坏了，重试也是坏的。当场上人，不浪费剩余轮次。
+                self._store.finalize(aid, Resolution.ESCALATED)
+                return DispatchReport(
+                    Outcome.ESCALATED,
+                    tuple(attempt_ids),
+                    round_no,
+                    grade,
+                    "监工不可用，未完成审查（不打回 worker）：\n"
+                    + self._render(merged.faults),
+                )
+
+            feedback = merged.feedback
             self._store.finalize(
                 aid, Resolution.ESCALATED if is_last else Resolution.REWORKED
             )
@@ -220,39 +258,103 @@ class Dispatcher:
 
     # ---------- 监工调用 ----------
 
-    def _review(self, task, workspace, result) -> SupervisorReport:
-        """harness 报错 / 空 diff 都算这一轮红，且不去跑 check。
+    @staticmethod
+    def _merge_reports(
+        reports: tuple[SupervisorReport, ...], *, is_last: bool
+    ) -> Merged:
+        """合裁决。回归/规格是硬的，架构是软的，监工自身故障是第三类。
+
+        架构监工出的是意见不是证据（spec §4.1），没有客观裁判能证明它对。
+        让意见能否决合并，等于给一个爱挑刺的监工一票否决权，每个任务都能被
+        拖到三轮上人 —— P1 判据「上人平均打回次数 ≤ 1」当场就废了。
+        所以：它的意见前两轮当返工建议带回去，最后一轮不再拦，照样入库留证。
+
+        监工故障（超时、拿不到裁决）要拦住合并 —— 没审过不等于没问题 ——
+        但**不能打回 worker**：worker 修不了监工的故障，那会白烧三轮。
+        所以故障单独拎出来，直接升级给人。
+        """
+        faults: list[dict] = []
+        hard: list[dict] = []
+        soft: list[dict] = []
+
+        for r in reports:
+            for c in r.claims:
+                if str(c.get("check", "")).startswith(SUPERVISOR_ERROR_PREFIX):
+                    faults.append(c)
+                elif r.role == SupervisorRole.ARCHITECTURE:
+                    soft.append(c)
+                else:
+                    hard.append(c)
+
+        feedback = list(hard)
+        if soft and not is_last:
+            feedback.extend(soft)
+        return Merged(
+            blocking=bool(feedback) or bool(faults),
+            feedback=tuple(feedback),
+            faults=tuple(faults),
+        )
+
+    def _review(self, task, workspace, result) -> tuple[SupervisorReport, ...]:
+        """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
         原因：check 全绿但 agent 什么都没改，说明 check 太弱或任务已完成，
-        两种都需要人看一眼，不能静默 merge。
+        两种都需要人看一眼，不能静默 merge。没有 diff 时调模型监工纯烧钱。
         """
         if not result.ok:
-            return SupervisorReport(
-                role=SupervisorRole.REGRESSION,
-                verdict=Verdict.FAIL,
-                claims=(
-                    {
-                        "check": "harness",
-                        "command": self._adapter.name,
-                        "expected": "exit_status ok",
-                        "got": f"{result.exit_status.value}: {result.error_text}",
-                    },
+            return (
+                self._blocked(
+                    "harness",
+                    self._adapter.name,
+                    "exit_status ok",
+                    f"{result.exit_status.value}: {result.error_text}",
                 ),
             )
         if not result.changed_paths:
-            return SupervisorReport(
-                role=SupervisorRole.REGRESSION,
-                verdict=Verdict.FAIL,
-                claims=(
-                    {
-                        "check": "diff",
-                        "command": "git diff HEAD",
-                        "expected": "至少一个文件改动",
-                        "got": "no changes produced",
-                    },
+            return (
+                self._blocked(
+                    "diff",
+                    "git diff HEAD",
+                    "至少一个文件改动",
+                    "no changes produced",
                 ),
             )
-        return self._supervisor.review(workspace, task.checks)
+
+        reports = [self._supervisor.review(workspace, task.checks)]
+        # 两个监工都要看周边既有代码，算一次共用：规格监工用它查 diff 引用到的
+        # 实现，架构监工用它判约定和重复实现。
+        context = neighbour_context(Path(workspace), result.changed_paths)
+
+        if self._spec is not None:
+            # 扣掉的输入显式传进去校验：build log 和上一轮监工结论都不许进 prompt。
+            # spec §4.1「不给 build log」在这里是可执行约束，不是注释。
+            reports.append(
+                self._spec.review(
+                    diff=result.diff,
+                    criteria=task.spec_ref,
+                    context=context,
+                    withheld=(result.error_text, self._render(reports[0].claims)),
+                )
+            )
+        if self._architecture is not None:
+            reports.append(
+                self._architecture.review(
+                    diff=result.diff,
+                    context=context,
+                    withheld=(result.error_text, self._render(reports[0].claims)),
+                )
+            )
+        return tuple(reports)
+
+    def _blocked(
+        self, check: str, command: str, expected: str, got: str
+    ) -> SupervisorReport:
+        return SupervisorReport(
+            role=SupervisorRole.REGRESSION,
+            verdict=Verdict.FAIL,
+            claims=({"check": check, "command": command,
+                     "expected": expected, "got": got},),
+        )
 
     # ---------- 打回时的 prompt ----------
 
@@ -268,6 +370,6 @@ class Dispatcher:
             return task.prompt
         return (
             f"{task.prompt}\n\n"
-            "上一轮被回归监工打回。以下是具体失败项，逐条修掉，不要改动无关文件：\n"
+            "上一轮被监工打回。以下是具体失败项，逐条修掉，不要改动无关文件：\n"
             f"{self._render(feedback)}\n"
         )
