@@ -27,8 +27,10 @@ from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
+from factory.harness.verdict_probe import judge_files_touched, probe
 from factory.harness.workspace import (
     changed_hooks,
+    diff_suppressed,
     hook_fingerprint,
     neighbour_context,
     runner_hooks,
@@ -511,9 +513,68 @@ class Dispatcher:
                 ),
             )
 
+        # diff 正文被 .gitattributes 关掉的路径。放在 check 之前 —— 它伤的
+        # 不是那份绿（check 照跑照红），是两个**看 diff 正文**的模型监工的
+        # 输入。一行 `*.py -diff` 就让 `git diff HEAD` 里的 a.py 退化成
+        # 「Binary files a/a.py and b/a.py differ」，实测 `"pdb.set_trace"
+        # in diff` 变成 False，而 changed_paths 完全不受影响 —— 范围监工和
+        # runbook 照常工作。三道闸门里两道行为正常，是这个洞难被发现的原因。
+        #
+        # 不改成 `git diff --text` 硬穿：实测一个 5120 字节的 PNG 会摊成 28
+        # 行原始字节，真有大二进制文件时会把监工的 prompt 冲掉。所以是定点
+        # 检测，不是全局开关。
+        #
+        # 判据是「这一轮才被关掉」而不是「有没有被关」：本仓库有 uv.lock，
+        # 一个合法的 `*.lock -diff` 会让每次改锁文件的任务都判红。基线取自
+        # `git check-attr --source=HEAD`，不需要提前快照。
+        if muted := diff_suppressed(Path(workspace), tuple(result.changed_paths)):
+            return (
+                self._blocked(
+                    "diff-suppressed",
+                    "git check-attr diff（对比 --source=HEAD）",
+                    "改动的源码文件在 diff 里能看到正文",
+                    f"{len(muted)} 个路径这一轮被 .gitattributes 关掉了 diff，"
+                    f"监工看不到改了什么：{_listed(muted)}",
+                ),
+            )
+
         checks = task.checks + self._runbook_checks(workspace, result)
+        regression = self._supervisor.review(workspace, checks)
+
+        # 金丝雀：这一轮动了「能改变裁决」的文件（conftest.py / pyproject.toml
+        # 之类）时，验一次那份绿还能不能被推翻。
+        #
+        # 为什么另立一条而不是扩 runner_hooks：那条判的是「**新增**了 runner
+        # 自动加载的文件」，而伪造绿不需要新增。实测三条都拿到退出码 0 ——
+        # 改已存在的 tests/conftest.py 追加 makereport hookwrapper、
+        # 同一个 conftest 里改 session.exitstatus、pyproject.toml 的
+        # `addopts = "-p myplug"` 加载本地插件。前两条 runner_hooks 报不出来，
+        # 第三条的文件名还在它的刻意排除名单里（任务合法要改 pyproject）。
+        #
+        # 只在回归监工 PASS 之后验：红的绿不用验，省一次探针。
+        # 只在这类文件被改动时验：本仓库 55 次提交里 conftest.py 和
+        # pyproject.toml 各改过 2 次（约 7%），所以绝大多数轮次不多花这一次。
+        # 而合法改动的金丝雀是红的（实测：加夹具、加 marker 都是非 0），
+        # 所以这 7% 也不会变成误拒。
+        if regression.verdict is Verdict.PASS and (
+            touched_judges := judge_files_touched(result.changed_paths)
+        ):
+            for spec in checks:
+                res = probe(Path(workspace), spec.command,
+                            timeout_s=spec.timeout_s)
+                if res.fake_green:
+                    return (
+                        self._blocked(
+                            "fake-green",
+                            spec.command,
+                            "塞进一条必然失败的测试之后 check 变红",
+                            f"{res.reason}。这一轮改过："
+                            f"{_listed(touched_judges)}",
+                        ),
+                    )
+
         reports = [
-            self._supervisor.review(workspace, checks),
+            regression,
             # 范围监工放在回归监工旁边而不是后分级旁边：后分级问「危不危险」，
             # 越界问「是不是离题」。越界是 worker 自己能修的（把无关文件改回去），
             # 所以它必须走打回路径，而后分级的升级路径是不打回的。

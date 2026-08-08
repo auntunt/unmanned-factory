@@ -5646,3 +5646,249 @@ M33 把基线挪回循环内即被杀。
 这个坑一个会话里踩过三回）。
 
 离线套件 715 → 737。
+
+## 补：第六个洞 —— 伪造绿不需要新增文件
+
+第五个洞收工之后再问同一句：**这个判定的输入是谁给的，它能不能是假的。**
+这次问的是刚建好的那道 `runner_hooks`。它的判据是「这一轮**新增**了 runner
+自动加载的文件」，而伪造绿根本不需要新增。三条实测，全部拿到退出码 0：
+
+| 手法 | 退出码 | `runner_hooks` |
+|---|---|---|
+| 改**已存在**的 `tests/conftest.py`，追加 `makereport` hookwrapper | 0 | 空 |
+| 同一个 conftest 里 `pytest_sessionfinish` 改 `session.exitstatus = 0` | 0 | 空 |
+| `pyproject.toml` 的 `addopts = "-p myplug"` 加载本地插件 | 0 | 空 |
+
+前两条不是新增，所以 `added_paths` 里没有它们。第三条更难办：
+`pyproject.toml` 在 `_RUNNER_HOOKS` 里是**刻意排除**的 —— 那张表的判据是
+「本来不存在、runner 会自己去找它」，把任务合法要改的 `pyproject.toml`
+列进去会让检测在正常任务上响。
+
+顺手枚举了 8 种 `addopts`，只有加载插件这一手能拿到 0：
+
+```
+0 ← -p myplug          0 ← --collect-only / --co
+1 ← -p no:cacheprovider  1 ← --exitfirst
+4 ← -k not important
+5 ← --ignore=tests     5 ← --deselect tests/test_real.py
+```
+
+`--ignore=tests` 给的是 5（no tests collected）不是 0 —— 又一次印证
+上一轮那条「`items.clear()` 给 5 不给 0」的观察，退出码 5 不是绿。
+
+### 换问法：不问 worker 干了什么，问那份绿是不是真的
+
+前三道检测都在猜机制（文件被 .gitignore 挡住 / 新增了 conftest.py），
+猜机制有个共同的天花板 —— 机制是可枚举的，而枚举永远落后一步。
+
+这一条改成往测试目录里塞一条 `assert 1 == 2`，再跑同一条 check：
+
+```
+金丝雀非 0 → 这份绿能被推翻，是真的
+金丝雀 0   → 一条 assert 1 == 2 都红不起来，那份绿是假的
+```
+
+三种机制、以及任何将来的新写法，只要**效果**是「红不起来」就都会被抓到，
+因为判据就是效果本身。实测四条路径：
+
+```
+干净树         : 金丝雀 1 → 放过
+makereport     : 金丝雀 0 → 拦下
+sessionfinish  : 金丝雀 0 → 拦下
+addopts -p     : 金丝雀 0 → 拦下
+合法加夹具     : 金丝雀 1 → 放过
+合法加 marker  : 金丝雀 1 → 放过
+```
+
+### 金丝雀放哪、叫什么名字，都是踩出来的
+
+**第一版把它叫 `_factory_canary_.py` 放在仓库根**，结果干净树上探针也
+返回 0 —— pytest 只收集匹配 `test_*.py` 的文件，根本没看它。
+于是「红不起来」和「树是干净的」长得一模一样，这道闸门在任何情况下
+都判「绿是真的」。名字必须以 `test_` 开头，位置必须是已经有测试的目录。
+为它写了一条专门盯文件名的断言，M42 改回旧名字杀掉 7 条测试。
+
+**内容用 `assert 1 == 2` 不用语法错误。** 语法错让整场收集失败（退出码 2），
+那和「check 本来就在 collect 阶段挂了」混在一起分不开。一条正常收集、
+正常执行、必然失败的测试才是干净的信号 —— 测试里断言的正是「退出码
+是 1 不是 2」。
+
+**没有测试目录就不验，也不造。** 造出来的目录会进 `git status`，而这道
+探针跑在 `capture_diff` 之后、判绿之前 —— 多一个目录会让「提交的正好是
+监工审过的那一组」这条不变量出现一个没人审过的成员。M45 让它自己造
+`tests/`，被杀。
+
+**金丝雀一定删（finally），连 `.pyc` 一起。** 留下来的后果不是「多个垃圾
+文件」：它进下一轮的 `git diff HEAD`，changed_paths 里冒出一个没人要求过的
+文件，范围监工判越界，worker 拿到一条他看不懂的打回。M41 去掉 unlink，
+杀掉 3 条。
+
+### 两个「什么时候验」的门，都是为了噪音
+
+**只在回归监工 PASS 之后验。** 红的绿不用验，省一次探针（探针要真跑
+一次 check，这是这个仓库里最贵的一道检测）。M47 改成红也验，被杀。
+
+**只在这一轮改动了裁判权文件时验。** 本仓库 55 次提交里 `conftest.py`
+改过 2 次、`pyproject.toml` 改过 2 次 —— 约 7% 的轮次会触发，其余
+93% 零成本。而那 7% 也不会变成误拒，因为合法改动的金丝雀是红的
+（实测：加夹具、加 marker 都是非 0）。
+
+`_JUDGE_FILES` 和 `workspace._RUNNER_HOOKS` 是**第三对不许合并的词表**
+（前两对：`_SKIP_DIRS` vs `_VENDOR_DIRS`）。差别在语义：
+
+- `_RUNNER_HOOKS` 答「这一轮新增了自动发现的文件吗」，只看新增、只看
+  文件名，因为它要在**跑 check 之前**拦下来。所以它必须排除
+  `pyproject.toml`（列进去就在正常任务上响）。
+- `_JUDGE_FILES` 答「要不要为这一轮多花一次探针」，新增和修改都算，
+  而且**包含** `pyproject.toml` —— 进来的代价只是多跑一次金丝雀，
+  而合法改动不会被拦。
+
+M43 把 `pyproject.toml` 从 `_JUDGE_FILES` 里删掉（= 合表），被杀。
+
+### `skipped` 和 `fake_green=False` 分开
+
+没验（没有测试目录、命令不是 pytest、探针自己超时）不等于验过了。
+混成一个 bool 会让「没验」在报表上和「验过是真的」长得一样 ——
+这是这个会话里 [[silent-degradation-always-looks-healthier]] 的同一个形状。
+
+探针自己超时/报错时返回 `skipped`，**不判红**。理由和落地失败不改判决
+同一条：让一个已经全绿的任务因为探针超时变成 escalated，是拿真问题换
+假问题。代价是这种情况下伪造绿会漏过去，所以 reason 里留了痕。
+
+### 变异 M40–M48，全部被杀
+
+| 变异 | 改了什么 | 死于 |
+|---|---|---|
+| M40 | 拆掉接线（`if False`） | 3 条 |
+| M41 | 不删金丝雀 | 3 条 |
+| M42 | 金丝雀名字不带 `test_` 前缀 | 7 条 |
+| M43 | `_JUDGE_FILES` 丢掉 `pyproject.toml` | addopts 那条 |
+| M44 | `applies_to` 永远 True（非 pytest 也验） | 2 条 |
+| M45 | 没有 tests/ 时自己造一个 | 不造目录那条 |
+| M46 | 撞名字也覆盖 | 不覆盖那条 |
+| M47 | 回归监工判红也跑探针 | 省探针那条 |
+| M48 | 查到假绿也不拦 | 2 条 |
+
+23 条测试。离线套件 737 → 760。
+
+## 补：第七个洞 —— 一行 `.gitattributes` 让监工审一份空白
+
+前六个洞攻击的都是**裁决**：影子代码污染那份绿、runner hook 改写退出码、
+git hook 改写出货内容。这一条不碰裁决，它攻击的是**监工的输入**。
+
+`.gitattributes` 里一行：
+
+```
+*.py -diff
+```
+
+`git diff HEAD` 里那个文件的正文就没了：
+
+```
+diff --git a/a.py b/a.py
+index 8b13789..b1e6722 100644
+Binary files a/a.py and b/a.py differ
+```
+
+实测同一次改动：
+
+| 闸门 | 看的是什么 | 结果 |
+| --- | --- | --- |
+| 范围监工 | `changed_paths` | **正常**，`('.gitattributes', 'a.py')` |
+| runbook | grep 真实文件 | **正常**，抓到 `pdb.set_trace` |
+| spec 监工 | diff **正文** | 瞎了，`"pdb.set_trace" in diff` 是 `False` |
+| architecture 监工 | diff **正文** | 瞎了 |
+
+三道里两道行为完全正常，是这个洞难被发现的原因 —— 报表上看不出任何异常，
+只有两个模型监工在审一份「Binary files differ」并如实地说「看不出问题」。
+
+而且它连新增文件都不需要：仓库本来有 `.gitattributes` 的话，追加一行就行。
+`git diff HEAD --name-only --diff-filter=A` 是空的，`runner_hooks` 那条判
+新增的检测看不见它。
+
+### 为什么不是 `git diff --text`
+
+`--text` 确实能硬穿 `-diff`。但实测拿一个 5120 字节的 PNG 试：
+
+```
+$ git diff --text HEAD -- img.png | wc -l
+28
+```
+
+28 行原始字节。真有大二进制文件改动时，这会把监工的 prompt 冲掉 —— 用一个
+拒真换掉一个纳伪，不划算。所以是定点检测，不是全局开关。
+
+### 判据：「这一轮才被关掉」，不是「有没有被关」
+
+第一版判据是「diff 属性正常吗」，直接拿 `git check-attr diff` 的输出比
+`unspecified`。跑本仓库就发现问题：本仓库有 `uv.lock`，而 `*.lock -diff`
+是**标准做法**（谁也不想在 review 里读 3000 行锁文件 diff）。这版判据会让
+每个改锁文件的任务都判红。一道天天误报的闸门等于一道被关掉的闸门。
+
+要判的是差异，而差异需要基线。基线不用自己快照：
+
+```
+$ git check-attr --source=HEAD diff -- a.py uv.lock
+a.py: diff: unspecified      ← HEAD 里是正常的，这一轮才被关掉 → 拦
+uv.lock: diff: unset         ← HEAD 里就是 unset，本来的规矩 → 放过
+```
+
+`--source=<tree>` 让 git 用那棵树里的 `.gitattributes` 判属性。本机 git
+2.55.0，2.40+ 都有。这和 hook 那条闸门是同一个形状 —— **判「仓库本来有」
+和「这一轮被动了」的差别**，只不过那条得自己在派发前取指纹，这条 git 白送。
+
+顺手一个自己写出来的 bug：`check-attr` 的输出格式是 `<path>: diff: <值>`，
+而路径里可以带 `: diff: `。第一版切完 `rpartition` 之后我又多写了一次
+`path.rpartition(": diff")[0] or path`，会把这种路径截断。用一个真叫
+`weird: diff: name.py` 的文件验出来的，现在是一条测试。
+
+### 一条删掉代码也不会红的测试
+
+变异 M51 存活了：把 `if not paths: return ()` 改成 `if False:`，19 条测试
+全过。当时那条测试的说法是「不带路径会读 stdin 挂住」。验证这个说法本身：
+
+```
+$ git check-attr diff --
+错误：No file specified
+rc=129
+```
+
+不挂住，立刻 129 退出，而函数里 `if proc.returncode != 0: return {}` 把它
+变成同一个空结果。**我的注释是错的，M51 存活是对的** —— 它确实不改变任何
+可观察行为，那条早返回只是省两次 fork。
+
+所以两处都改了：注释改成说真话（"不是为了防挂住，纯粹是省两次进程"），测试
+改成断言真正的不变量 —— monkeypatch `_git` 记录调用，断言 `calls == []`。
+断言「返回空」在早返回被删掉之后照样通过，断言「一个 git 都没 fork」不会。
+
+这和本会话早先那条「变异脚本必须 assert 子串」是一家的，但更隐蔽一层：那条
+是变异**没打中**，这条是变异**打中了而测试无所谓**。前者靠 `assert old in s`
+兜住，后者只有靠变异存活报出来 —— 存活不总是意味着漏了一个攻击面，有时是
+在说「你这条测试断言的东西和你以为的不是一回事」。
+
+### 闸门放在 check 之前
+
+前两条（影子代码、runner hook）必须在 check 之前，因为它们污染的正是那份绿。
+这条不一样：check 照跑照红，`.gitattributes` 动不了退出码。但还是放在 check
+之前 —— 已经知道监工看不见改了什么，再花一次 check 的钱没有意义。判据是钱，
+不是正确性。
+
+第四个 claim 名 `diff-suppressed`，和 `shadow-code` / `runner-hook-added` /
+`git-hook-touched` 分开。worker 的补救动作又不一样：「别在 .gitattributes 里
+关掉源码的 diff」。四道闸门四条指令，糊成一条会让打回的指令变模糊，白烧一轮。
+
+### 变异 M49–M56，全部被杀
+
+| 变异 | 改了什么 | 结果 |
+| --- | --- | --- |
+| M49 | 判据退回「有没有被关」 | 杀（`uv.lock` 误拒） |
+| M50 | 只判 `unset`，放过自定义 driver | 杀（`diff=nodiff` 那条） |
+| M51 | 空 paths 不早返回 | **先存活** → 改测试后杀 |
+| M52 | 路径用 `partition` 正向切 | 杀（`weird: diff: name.py`） |
+| M53 | 闸门整条摘掉 | 杀（合并了） |
+| M54 | 基线也用工作树 | 杀（等于 M49） |
+| M55 | `check-attr` 失败当成「全被压」 | 杀（非仓库那条） |
+| M56 | 闸门挪到 check 之后 | 杀（check 跑了） |
+
+19 条测试：3 条证洞（正文退化 / changed_paths 完好 / 不需要新增文件）、
+10 条判据、6 条接线。

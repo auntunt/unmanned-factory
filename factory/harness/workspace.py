@@ -266,3 +266,70 @@ def neighbour_context(
         chunks.append(f"--- {rel} ---\n{body[:budget]}")
         budget -= len(body)
     return "\n\n".join(chunks)
+
+
+#: `git check-attr diff` 的正常回答。除此之外都意味着这个路径的 diff 被
+#: 改过 driver —— `unset` 是 `-diff`（输出退化成 "Binary files differ"），
+#: 任何别的值是自定义 driver（配 textconv 能让整段 diff **消失**）。
+_DIFF_ATTR_OK = "unspecified"
+
+
+def diff_suppressed(root: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
+    """这些路径里，diff 正文被 `.gitattributes` 压掉的那些。
+
+    洞的形状：`capture_diff` 用 `git diff HEAD`，而 `.gitattributes` 里
+    一行 `*.py -diff` 就让正文退化成 `Binary files a/x.py and b/x.py differ`。
+    实测：
+
+      changed_paths : ('.gitattributes', 'a.py')   ← 照常，两个都在
+      diff 正文     : a.py 只有一行 "Binary files ... differ"
+      "pdb.set_trace" in diff : False              ← 监工看不到
+
+    受害的是**审 diff 正文**的两个模型监工（规格、架构）—— 它们拿到的
+    是一句「二进制变了」。范围监工和 runbook 靠 `--name-only` 和真实
+    文件树，所以照常工作，这也是这个洞不容易发现的原因：三道闸门里
+    两道正常。
+
+    用 `git check-attr` 而不是解析 `.gitattributes`：属性可以来自任意层级
+    的 `.gitattributes`、`.git/info/attributes`、`core.attributesFile`，
+    自己解析那套优先级规则等于重写 git。check-attr 还顺手区分了
+    `unset`（`-diff`）和自定义 driver（`diff=nodiff`），两者危害不同但
+    都要拦。
+    """
+    # 空 paths 就别 fork 两个 git 了。**不是**为了防挂住 —— 实测
+    # `git check-attr diff --` 不读 stdin，立刻以 129 退出，下面
+    # `returncode != 0` 那条路本来就兜得住。纯粹是省两次进程。
+    if not paths:
+        return ()
+    now = _diff_attrs(root, paths)
+    if not now:
+        return ()
+    # 基线：`--source=HEAD` 让 git 用 **HEAD 里那份** .gitattributes 判属性。
+    # 没有它这道检测会误拒合法用途 —— 一个 `*.lock -diff` 的仓库里，改
+    # uv.lock 的任务每次都判红（实测本仓库就有 uv.lock）。要判的是
+    # 「这个路径的 diff 是**这一轮**才被关掉的」，不是「有没有被关」。
+    base = _diff_attrs(root, paths, source="HEAD")
+    return tuple(
+        p for p, v in now.items()
+        if v != _DIFF_ATTR_OK and base.get(p, _DIFF_ATTR_OK) == _DIFF_ATTR_OK
+    )
+
+
+def _diff_attrs(
+    root: Path, paths: tuple[str, ...], *, source: str | None = None
+) -> dict[str, str]:
+    """`git check-attr diff` 的结果，路径 → 属性值。"""
+    args = ["check-attr"]
+    if source:
+        args.append(f"--source={source}")
+    proc = _git(root, *args, "diff", "--", *paths)
+    if proc.returncode != 0:
+        return {}
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        # 格式是 `<path>: diff: <value>`，而 path 里可能带 `: `，所以从右边切。
+        if ": diff: " not in line:
+            continue
+        path, _, value = line.rpartition(": diff: ")
+        out[path] = value.strip()
+    return out
