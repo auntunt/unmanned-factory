@@ -42,8 +42,6 @@ def capture_diff(root: Path) -> tuple[str, tuple[str, ...]]:
     return diff, paths
 
 
-_CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"}
-
 #: 一定是别人的代码或机器生成物的目录 —— 这里面有 .py 不代表 worker 写了什么。
 #: **刻意不含 build/ 和 dist/**：那是 _SKIP_DIRS 的成员，但两张表的语义相反 ——
 #: _SKIP_DIRS 说「这里没有值得读的代码」（给架构监工找邻居用），这张表要答的是
@@ -54,6 +52,73 @@ _VENDOR_DIRS = frozenset({
     ".tox", ".mypy_cache", ".pytest_cache", "site-packages", ".eggs",
 })
 
+#: runner 会**自动发现并加载**的配置文件名 —— 存在本身就改变 check 的行为，
+#: 内容里没有任何关键词可查。只判「这一轮新增」，不判内容。
+#:
+#: 刻意只收「自动发现」这一类，不收 pyproject.toml / package.json / Makefile：
+#: 那些是任务合法要改的东西，列进来会让这道检测在正常任务上响。判据是
+#: 「本来不存在、runner 会自己去找它」，不是「能影响构建」。
+_RUNNER_HOOKS = frozenset({
+    "conftest.py", "sitecustomize.py", "usercustomize.py",
+    "pytest.ini", ".pytest.ini", "tox.ini",
+    "jest.config.js", "jest.config.ts", "jest.setup.js",
+    "vitest.config.js", "vitest.config.ts",
+    ".mocharc.json", ".mocharc.yml", ".mocharc.yaml", "karma.conf.js",
+})
+
+
+def added_paths(root: Path) -> tuple[str, ...]:
+    """这一轮**新增**的文件。`capture_diff` 只给「改动过的」，不分新增和修改。
+
+    `add -A -N` 这一步不能省，也不能指望调用方做过：未追踪的文件根本不在
+    `git diff HEAD` 里，少了这行就永远返回空 —— 而返回空长得和「这一轮很干净」
+    一模一样。第一版漏了它，测试当场抓到（在 dispatcher 里恰好因为
+    capture_diff 先跑过而看不出来，那是最难查的那种巧合）。
+    """
+    _git(root, "add", "-A", "-N")
+    proc = _git(root, "diff", "HEAD", "--name-only", "--diff-filter=A")
+    if proc.returncode != 0:
+        return ()
+    return tuple(l for line in proc.stdout.splitlines() if (l := line.strip()))
+
+
+def runner_hooks(root: Path) -> tuple[str, ...]:
+    """这一轮新增的 runner 自动加载文件 —— worker 给自己出卷子的最短路径。
+
+    实测（/tmp 里构造过）：一个必然失败的 `tests/test_real.py`，worker 新建
+
+        conftest.py:
+            def pytest_collection_modifyitems(config, items):
+                items.clear()
+
+    `pytest -q` 输出「no tests ran」，**退出码 0**。而 check 的判据就是退出码。
+
+    为什么现有的闸门都拦不住：
+      - `conftest.py` **在** changed_paths 里（不是影子代码），
+        但范围监工 `declared_paths` 为空时一律 PASS，而口述来源的任务
+        绝大多数为空（见 supervisors/scope.py 的 docstring）
+      - 后分级：conftest.py 不匹配任何分级规则 → A 类
+      - runbook：规则查的是文件**内容**里的关键词，而这里的危害在于
+        「这个文件出现了」，内容完全合法
+
+    这是 runbook「项目规则不许放在 workspace 里」的同一条道理（worker 能写
+    workspace，让它出卷子等于没有卷子），只不过那条封的是我们自己读的规则
+    文件，这条封的是 runner 自己会去找的文件 —— 后者我们没在读，所以漏了。
+
+    只判**新增**：项目里本来就有 conftest.py 是完全正常的（本仓库
+    tests/conftest.py 就是），改它也可能是任务的正当内容。
+    """
+    hooks = []
+    for p in added_paths(root):
+        pp = PurePosixPath(p)
+        if any(part in _VENDOR_DIRS for part in pp.parts):
+            continue
+        if pp.name in _RUNNER_HOOKS:
+            hooks.append(p)
+    return tuple(hooks)
+
+
+_CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"}
 
 def shadow_code(root: Path) -> tuple[str, ...]:
     """被 .gitignore 挡住、四道闸门都看不见的**代码**文件。

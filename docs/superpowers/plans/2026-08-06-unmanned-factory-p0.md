@@ -5460,3 +5460,67 @@ prompt 写着 force push、declared_ops 空
 顺带发现三个相关测试用的 `SimpleNamespace` 替身根本没有 `prompt` 字段 ——
 也就是说它们从未验证过 prompt 参与判定。补字段时 AttributeError 当场暴露了
 这件事；补完之后加了一条真的会失败的测试（M28 杀）。
+
+## 补：worker 给自己出卷子 —— check 的结果由 workspace 里的文件决定
+
+问法继续往下：**check 命令的结果是谁给的？** 答案是 workspace 里的文件，而
+worker 对 workspace 有写权限。runbook 已经封住了一半（「项目规则不许放在
+workspace 里，让 worker 出卷子等于没有卷子」），但那条封的是**我们自己读的**
+规则文件。runner 自己会去找的文件没人管。
+
+实测（先量错了一次，见下）：
+
+```
+tests/test_real.py:  def test_important(): assert 1 == 2     ← 必然失败
+基线 pytest -q 退出码 1
+
+worker 新建 conftest.py:
+  @pytest.hookimpl(hookwrapper=True)
+  def pytest_runtest_makereport(item, call):
+      out = yield; rep = out.get_result()
+      if rep.outcome == "failed": rep.outcome = "passed"; rep.longrepr = None
+
+pytest -q 退出码 **0**
+```
+
+三道闸门各有各的不管的理由，所以都放它过：
+
+  范围监工   `declared_paths` 为空时一律 PASS，而口述来源的任务绝大多数为空
+             （见 supervisors/scope.py 自己的 docstring）
+  后分级     conftest.py 不匹配任何分级规则 → A 类
+  runbook    规则查的是文件**内容**里的关键词，而危害在于「这个文件出现了」，
+             内容完全合法
+
+注意这和影子代码不同：conftest.py **在** changed_paths 里，闸门看得见它，
+只是没有一道闸门的判据能表达「新增了这类文件」。
+
+修法 `runner_hooks`：只判**新增** + 只判 runner 会自动发现的文件名。
+词表刻意不含 `pyproject.toml` / `package.json` / `Makefile` —— 它们能影响构建，
+但任务合法要改它们，列进来就回到「每次都响」。判据是「本来不存在、runner 会
+自己去找它」，不是「能影响构建」。
+
+### 我把这个洞量错了一次：读的是 tail 的退出码
+
+第一次测量用的是 `items.clear()`（清空收集），命令写成
+`python -m pytest -q 2>&1 | tail -2` 然后 `echo $?` —— 那个 `$?` 是 **tail** 的
+退出码，恒为 0。于是我记下「清空收集 → 退出码 0」，写进了测试。
+
+测试当场判红：清空收集的真实退出码是 **5**（no tests collected），不是 0。
+真正能拿到 0 的是改判裁决那一手（上面那段）。洞是真的，但我一开始认的机制是假的。
+
+和「变异脚本必须 assert 子串」是同一类错：管道里的 `$?` 属于最后一个命令，
+而**看起来对的结果和真的对长得一样**。要读某个命令的退出码就别接管道，
+`cmd >/dev/null 2>&1; echo $?`。
+
+### 第一版 added_paths 永远返回空，而 dispatcher 里看不出来
+
+`added_paths` 用 `git diff HEAD --diff-filter=A`，但漏了 `add -A -N` ——
+未追踪的文件根本不在 `git diff HEAD` 里，所以它永远返回空元组。
+
+在 dispatcher 里**看不出来**：`capture_diff` 在同一轮里先跑过，那一步做了
+`add -A -N`，于是 `added_paths` 恰好能工作。一个「依赖调用者先做过某件事」的
+函数，在真实调用链里正确、在单测里全错 —— 而返回空元组长得和「这一轮很干净」
+一模一样（又是静默降级朝着更好看）。
+
+单测抓到了它，因为单测刻意不调 `capture_diff`。这条现在是一条显式测试
+（`test_added_paths_needs_no_prior_capture_diff`），M30 变异杀 6 条。

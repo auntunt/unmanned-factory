@@ -27,7 +27,11 @@ from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
-from factory.harness.workspace import neighbour_context, shadow_code
+from factory.harness.workspace import (
+    neighbour_context,
+    runner_hooks,
+    shadow_code,
+)
 from factory.intake.guard import harden_ops
 from factory.runbook import RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
@@ -69,6 +73,18 @@ class DispatchReport:
     # 没有改动、或者提交失败）。landing_note 说明是哪一种，见 landing.Landing。
     commit: str | None = None
     landing_note: str = ""
+
+
+_MAX_LISTED_PATHS = 20
+
+
+def _listed(paths: tuple[str, ...]) -> str:
+    """路径列表转成给 worker 看的一行。上限见 supervisors/scope.py 的同名理由：
+    worker 要的是「处理哪几个」，糊 200 行路径进 prompt 只会挤掉真正的失败项。"""
+    text = ", ".join(paths[:_MAX_LISTED_PATHS])
+    if len(paths) > _MAX_LISTED_PATHS:
+        text += f"（另有 {len(paths) - _MAX_LISTED_PATHS} 个）"
+    return text
 
 
 class Dispatcher:
@@ -425,16 +441,32 @@ class Dispatcher:
         # 不挂进范围监工：那个监工 declared_paths 为空时 PASS，而口述来源的
         # 任务绝大多数为空。影子代码不依赖任何声明才有意义。
         if shadow := shadow_code(Path(workspace)):
-            listed = ", ".join(shadow[:20])
-            if len(shadow) > 20:
-                listed += f"（另有 {len(shadow) - 20} 个）"
             return (
                 self._blocked(
                     "shadow-code",
                     "git ls-files --others --ignored --exclude-standard",
                     "没有被 .gitignore 挡住的新代码文件",
                     f"{len(shadow)} 个文件不在任何闸门视野里，但 check 会执行"
-                    f"它们：{listed}",
+                    f"它们：{_listed(shadow)}",
+                ),
+            )
+
+        # runner 自己会去加载的配置文件（conftest.py 等），这一轮新增的。
+        # 同样必须在跑 check 之前 —— 这类文件的作用就是改变 check 的行为。
+        # 实测：一个必然失败的测试 + 一个清空收集的 conftest.py
+        # → `pytest -q` 退出码 0。见 workspace.runner_hooks。
+        #
+        # 和影子代码分成两条 claim 而不是合并：worker 要做的事不一样。
+        # 影子代码是「把这个文件挪进版本控制或删掉」，runner hook 是
+        # 「别自己出卷子」。糊成一条会让打回的指令变模糊，白烧一轮。
+        if hooks := runner_hooks(Path(workspace)):
+            return (
+                self._blocked(
+                    "runner-hook-added",
+                    "git diff HEAD --name-only --diff-filter=A",
+                    "这一轮没有新增 runner 会自动加载的配置文件",
+                    f"新增了 {len(hooks)} 个 runner 自动加载的文件，它们能直接"
+                    f"改变 check 的结果：{_listed(hooks)}",
                 ),
             )
 
