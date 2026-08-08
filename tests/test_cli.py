@@ -280,7 +280,7 @@ def test_main_returns_an_int_so_the_console_script_can_exit_with_it(
     assert isinstance(rc, int) and rc != 0
 
 
-def _row(cost, claims_got=None, attempt_no=1, transcript=None):
+def _row(cost, claims_got=None, attempt_no=1, transcript=None, error_text=""):
     class V:
         claims = [{"got": g} for g in (claims_got or [])]
     class R:
@@ -288,6 +288,7 @@ def _row(cost, claims_got=None, attempt_no=1, transcript=None):
         supervisors = [V()]
         transcript_path = transcript
     R.attempt_no = attempt_no
+    R.error_text = error_text
     return R()
 
 
@@ -436,3 +437,52 @@ def test_a_normally_priced_dispatch_is_not_flagged(
     run = _dispatch_with_cost(tmp_path, repo, task_file, monkeypatch,
                               (0.42, False))
     assert run.unpriced is False and run.cost_usd == 0.42
+
+
+# ---------- 漏账的第二条来源：格式漂移 ----------
+#
+# 加这条之前实测确认过那个洞：JSON 字段改名 → 每次派发都记 $0 →
+# **熔断器完全看不见**（没有 timeout 字样）→ 预算上限形同虚设，
+# 而报表上每个任务都显示成功且免费。超时至少还留下了 timeout 字样。
+
+def test_a_format_drift_attempt_counts_as_untracked_spend():
+    """漂移和超时是同一类事：花了钱但 cost_usd 记 0，所以走同一个熔断器。"""
+    from factory.cli import is_untracked_spend
+
+    row = _row(0.0, ["error: harness-format-drift: 输出 JSON 缺少承重字段 "
+                     "total_cost_usd"])
+    assert is_untracked_spend(row)
+
+
+def test_drift_in_error_text_is_also_caught():
+    """error_text 这条路也要认。
+
+    dispatcher 把 error_text 塞进 claim 的 got，所以正常情况下上面那条就够了。
+    但 error_text 是漂移信息的**源头**，两条路都认更稳 —— 中间那一层的
+    格式将来改了，熔断器不该跟着瞎。
+    """
+    from factory.cli import is_untracked_spend
+
+    row = _row(0.0, [], error_text="harness-format-drift: 缺少 usage")
+    assert is_untracked_spend(row)
+
+
+def test_the_drift_marker_string_matches_what_the_adapter_writes():
+    """两边必须是同一个对象，而不是同一个巧合。
+
+    现在 `_LEAK_MARKERS` 直接 import `DRIFT_MARKER`，这条基本恒真。留着是因为
+    它钉住的是**接线方式**：谁把它改回手抄字面量，这条就会在下次改串时挂掉。
+    抄一遍的版本挂不掉 —— 漂移会静默退回成 $0，而且全绿。
+    """
+    from factory.cli import _LEAK_MARKERS
+    from factory.harness.claude_code import DRIFT_MARKER
+
+    assert DRIFT_MARKER in _LEAK_MARKERS
+
+
+def test_a_normal_zero_cost_attempt_is_still_not_flagged():
+    """确定性监工的 attempt 本来就是 $0。加了第二个 marker 不能把它们卷进来。"""
+    from factory.cli import is_untracked_spend
+
+    assert not is_untracked_spend(_row(0.0, ["expected exit 0, got 1"]))
+    assert not is_untracked_spend(_row(0.0, [], error_text="某个普通错误"))

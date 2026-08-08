@@ -5104,3 +5104,64 @@ dispatcher 的策略决定，让数据访问层抛异常等于把策略藏进 ge
 
 647 → 656 通过（+30 新断言），真跑 E2E merged（commit `47461c3`），
 0 残留进程。
+
+## 补：格式漂移 —— 每个降级方向都朝着「更好看」
+
+spec §10 风险 6 写了「解析器加格式检测与告警」，一直没建。补之前先量了洞：
+造一行 `cost_usd=0.0`、没有 timeout 字样的 attempt，`is_untracked_spend`
+返回 `False`。也就是说 claude CLI 的 JSON 字段一改名：
+
+| 改名的字段 | 我们读到的 | 报表上长什么样 |
+|---|---|---|
+| `total_cost_usd` | `payload.get(k, 0)` → 0 | 每个任务免费，预算上限形同虚设 |
+| `is_error` | `payload.get(k)` → None → falsy | **每个任务都成功** |
+| `usage` | `{}` → token 全 0 | 单位成本指标失效 |
+
+三个方向全都朝着「看起来更好」。这不是巧合：`.get(k, default)` 的 default
+必然是「无事发生」那一侧，所以静默降级永远显示为健康。这也是为什么漂移
+不能靠看报表发现 —— 报表越漂亮越可疑，而没人会去查一份漂亮的报表。
+
+### 两个非显然决定
+
+**一、判成 ERROR，不是只加个标记。**
+我第一版只在 `error_text` 里加了 marker。然后发现最恶劣的那种漂移
+（`is_error` 自己改名）会让 `result.ok == True`：`dispatcher._review` 的
+`if not result.ok` 分支不进，任务一路走到监工，拿着一个可能是空的 diff
+判绿，然后 merge。一份我们读不懂的输出不能当成功。改成
+`status = ExitStatus.ERROR` 后它落进已有的 harness 报错路，熔断器顺带也
+能看见它 —— 没有新增第二条通路。
+
+**二、只判键在不在，不判值合不合理。**
+`total_cost_usd: 0` 是完全正常的（确定性监工那一路本来就 $0）。把 0 当
+漂移会让熔断器天天误报，而一个天天误报的熔断器等于被关掉的熔断器。所以
+判据是 `name not in payload`，不是 `not payload.get(name)`。变异 M3
+（改成判值）杀掉 7 条测试，其中就有「$0 不算漂移」那条。
+
+### 顺手补上的：`is_untracked_spend` 一直没有单元测试
+
+只有 `loop` 层的间接覆盖。这意味着我给它加的 `error_text` 那条路，
+在 `_row` 没有这个属性的情况下，靠 `getattr(row, "error_text", "")`
+兜底 —— 不崩，但**完全没被测到**。这和「一道谁都没接上的闸门在报表上
+和接上了长得一样」是同一件事的另一个面：一条不崩的兜底路和一条被测过的
+路，在绿色的测试输出里也长得一样。
+
+### 字面量去重
+
+`_LEAK_MARKERS` 里那个串原本是手抄的 `"harness-format-drift"`。改成
+`from factory.harness.claude_code import DRIFT_MARKER` —— `cli.py` 本来就
+import 了这个模块，没有新增依赖方向。抄一遍的版本坏起来是静默的：改了
+adapter 那边的串，漂移退回成静默 $0，全绿。
+
+### 变异验证 4/4
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 整个 `_missing_fields` 检查删掉 | 4 failed |
+| M2 | 只加 marker，不 fail-closed | 3 failed |
+| M3 | 判值而不是判键在不在 | 7 failed |
+| M4 | `_LEAK_MARKERS` 去掉漂移 | 3 failed |
+
+离线 665 通过（+9）。真 claude E2E 跑过一次 merged
+（`faefdc1`, 183.93s）—— 这一步不能省：漂移闸是 fail-closed 的，
+真实输出里要是本来就缺某个承重字段，它会把每个任务判红。
+三个承重字段都在。

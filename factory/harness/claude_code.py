@@ -3,6 +3,17 @@
 两个反直觉的地方，改动前先看 Global Constraints：
   1. `claude -p` 的退出码永远是 0 —— 只读 JSON 里的 is_error
   2. `--max-turns` 能用但 `--help` 里没有 —— 未文档化依赖，所以做成可选
+
+第三件（spec §10 风险 6）：**这份 JSON 没有文档、没有版本号**，字段随时可能
+改名。而这里全是 `payload.get(k, 默认)` —— 改名不会报错，会静默降级：
+
+  total_cost_usd 改名 → 每次派发都记 $0 → 预算上限形同虚设
+  is_error       改名 → 失败的任务被当成成功 → 监工去核一个空 diff
+  usage          改名 → token 数全 0 → 单位成本指标失效
+
+所以解析完要**显式检查承重字段在不在**（`_missing_fields`）。不在就落进
+error_text 并把这次派发标成漏账 —— 和超时被 kill 是同一类事（花了钱但记不上），
+所以走同一个熔断器。见 factory/cli.py 的 is_untracked_spend。
 """
 
 from __future__ import annotations
@@ -22,6 +33,35 @@ from factory.harness.proc import run_bounded
 from factory.harness.transcript import find_transcript, parse_tool_calls
 from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
+
+
+#: 格式漂移的标记串。**承重**：漏账熔断器靠它认「这次花费记不上账」
+#: （factory/cli.py 的 is_untracked_spend）。改这个字面量要同时改那边，
+#: 否则漂移会退回成静默的 $0 —— 也就是这个检查存在之前的状态。
+DRIFT_MARKER = "harness-format-drift"
+
+#: 缺了就会**静默降级**的字段。不是「JSON 里所有字段」——
+#: 只列那些缺失后果是「数字变 0 / 判断反转」而不是报错的。
+#:
+#: transcript / tool_calls 不在这里：它们缺失的后果是监工少一份证据，
+#: 会在裁决里看得见，不会伪装成一个正常的便宜任务。
+_LOAD_BEARING: tuple[tuple[str, str], ...] = (
+    ("is_error", "成败判断会反转成永远成功"),
+    ("total_cost_usd", "花费会记 0，预算上限形同虚设"),
+    ("usage", "token 数全 0，单位成本指标失效"),
+)
+
+
+def _missing_fields(payload: dict) -> tuple[str, ...]:
+    """列出承重字段里缺掉的那些。
+
+    只判**键在不在**，不判值合不合理：`total_cost_usd: 0` 是完全正常的
+    （缓存命中、极短任务），把 0 当漂移会让熔断器天天误报，
+    而一个天天误报的熔断器等于被关掉的熔断器。
+    """
+    if not isinstance(payload, dict):
+        return tuple(name for name, _ in _LOAD_BEARING)
+    return tuple(name for name, _ in _LOAD_BEARING if name not in payload)
 
 
 class ClaudeCodeAdapter:
@@ -146,6 +186,22 @@ class ClaudeCodeAdapter:
                 str(payload.get(k, ""))
                 for k in ("subtype", "stop_reason", "terminal_reason", "result")
             ).strip()
+
+        # 格式漂移检查（spec §10 风险 6）。放在读字段**之前**：
+        # 下面每个 .get 都带默认值，漂移之后它们全都安静地返回 0 / None。
+        #
+        # 判成 ERROR 而不是只加个标记 —— **一份我们读不懂的输出不能当成功**。
+        # 最恶劣的漂移正是 is_error 自己改名：那时 status 会是 OK，
+        # 任务一路走到监工、拿着一个可能是空的 diff 判绿、然后 merge。
+        # fail-closed 之后它变成这一轮红，走 dispatcher 已有的 harness 报错路
+        # （claim 的 got 里带 error_text），漏账熔断器也就能看见它。
+        missing = _missing_fields(payload)
+        if missing:
+            status = ExitStatus.ERROR
+            drift = (f"{DRIFT_MARKER}: 输出 JSON 缺少承重字段 "
+                     f"{', '.join(missing)} —— harness 输出格式可能变了，"
+                     f"本次花费记不上账")
+            error_text = f"{drift}\n{error_text}".strip()
 
         usage = payload.get("usage") or {}
         session_id = payload.get("session_id")

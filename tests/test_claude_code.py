@@ -224,3 +224,77 @@ def test_version_probe_dir_is_removed_after_the_call(tmp_path, monkeypatch):
 
     probe_dir = Path(open(log, encoding="utf-8").read().splitlines()[0])
     assert not probe_dir.exists()
+
+
+# ---------- 格式漂移（spec §10 风险 6）----------
+#
+# 这份 JSON 没有文档、没有版本号。而 adapter 里全是 `payload.get(k, 默认)`：
+# 字段改名不会报错，会静默降级 —— 而且降级的方向全都是「看起来更好」：
+# 花费变 0、失败变成功。所以漂移必须判红，不能只记个警告。
+
+def test_a_renamed_cost_field_is_caught_not_silently_zero(tmp_path, repo):
+    """total_cost_usd 改名 → 每次派发都记 $0 → 预算上限形同虚设。"""
+    payload = dict(OK_PAYLOAD)
+    payload["cost_usd_total"] = payload.pop("total_cost_usd")   # 改名
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+
+    assert r.exit_status is ExitStatus.ERROR, "读不懂的输出不能当成功"
+    assert "total_cost_usd" in r.error_text
+    assert "harness-format-drift" in r.error_text
+
+
+def test_a_renamed_is_error_field_does_not_become_a_silent_success(
+        tmp_path, repo):
+    """最恶劣的一种：is_error 改名 → 失败的任务被当成功。
+
+    没有这个检查的话，status 是 OK，任务一路走到监工、拿着一个可能是空的
+    diff 判绿、然后 merge。而 `claude -p` 的退出码永远是 0，没有第二个
+    信号能兜住。
+    """
+    payload = {k: v for k, v in OK_PAYLOAD.items() if k != "is_error"}
+    payload["error"] = False
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+
+    assert r.exit_status is ExitStatus.ERROR
+    assert "is_error" in r.error_text
+
+
+def test_a_renamed_usage_field_is_caught(tmp_path, repo):
+    payload = {k: v for k, v in OK_PAYLOAD.items() if k != "usage"}
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+    assert r.exit_status is ExitStatus.ERROR
+    assert "usage" in r.error_text
+
+
+def test_all_missing_fields_are_reported_at_once(tmp_path, repo):
+    """一次报全。一个字段一个字段地发现等于每次升级 harness 都要撞好几轮。"""
+    payload = {"session_id": "s", "result": "done"}
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+    for name in ("is_error", "total_cost_usd", "usage"):
+        assert name in r.error_text
+
+
+def test_a_zero_cost_is_not_drift(tmp_path, repo):
+    """`total_cost_usd: 0` 完全正常（缓存命中、极短任务）。
+
+    把 0 当漂移会让熔断器天天误报，而天天误报的熔断器等于被关掉的熔断器。
+    判的是**键在不在**，不是值合不合理。
+    """
+    payload = dict(OK_PAYLOAD, total_cost_usd=0.0)
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+    assert r.exit_status is ExitStatus.OK
+    assert "drift" not in r.error_text.lower()
+    assert r.cost_usd == 0.0
+
+
+def test_a_new_unknown_field_is_not_drift(tmp_path, repo):
+    """harness 加字段是常事，不该判红 —— 只有承重字段**消失**才是问题。"""
+    payload = dict(OK_PAYLOAD, some_new_thing={"a": 1})
+    r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
+        Task(task_id="T", prompt="x"), repo, Limits())
+    assert r.exit_status is ExitStatus.OK

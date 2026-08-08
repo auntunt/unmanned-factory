@@ -42,7 +42,7 @@ from factory.backlog.store import (
 from factory.dispatcher import Dispatcher, Outcome
 from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
-from factory.harness.claude_code import ClaudeCodeAdapter
+from factory.harness.claude_code import DRIFT_MARKER, ClaudeCodeAdapter
 from factory.harness.preflight import PreflightError, resolve_binary
 from factory.harness.shell import ShellAdapter
 from factory.harness.worktree import WorktreePool
@@ -597,25 +597,46 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
     return total, leaked
 
 
-def is_untracked_spend(row) -> bool:
-    """这个 attempt 超时了、记 $0，但真的花了钱。
+#: 漏账的两条来源。都是「花了钱但 cost_usd 记 0」，所以走同一个熔断器。
+#:
+#:   timeout      —— 进程被 kill，CLI 没来得及打出账单
+#:   格式漂移     —— JSON 字段改名，账单在那儿但我们没读到（spec §10 风险 6）
+#:
+#: 第二条是后加的。加之前那个洞长这样：字段改名 → 每次都记 $0 →
+#: **熔断器完全看不见**（没有 timeout 字样）→ 预算上限形同虚设，
+#: 而报表上每个任务都显示成功且免费。实测确认过。
+#:
+#: 第二条用 import 来的常量而不是重抄一遍字面量：写 adapter 那边的人改了串
+#: 却没改这里，漂移会静默退回成 $0 —— 也就是这个检查不存在时的样子，且全绿。
+_LEAK_MARKERS: tuple[str, ...] = ("timeout", DRIFT_MARKER)
 
-    判据是 regression 监工的 claim 文本里有 'timeout'：超时在审计库里就是
-    这么落的（`期望 'exit_status ok' / 实得 'timeout: timeout after 900s'`），
-    没有单独的状态列。文本判据不好看，但比在审计模型上加一列小得多。
+
+def is_untracked_spend(row) -> bool:
+    """这个 attempt 记 $0，但真的花了钱。
+
+    判据是 claim / error_text 里有 _LEAK_MARKERS 之一：这两种情况在审计库里
+    都只落成文本（`实得 'timeout: timeout after 900s'`），没有单独的状态列。
+    文本判据不好看，但比在审计模型上加一列小得多。
 
     返回布尔而不是只打警告：循环要靠这个数做熔断（连续 N 个任务都在烧
     不计价的钱就停机）。只打警告的话，那道闸没有数据可依。
     """
     if row.cost_usd:
         return False
+    if _has_leak_marker(getattr(row, "error_text", "") or ""):
+        return True
     for v in row.supervisors:
         for c in (v.claims or ()):
             # claims 是 JSON 列，取出来就是 dict。
             got = str((c or {}).get("got", "")) if isinstance(c, dict) else ""
-            if "timeout" in got.lower():
+            if _has_leak_marker(got):
                 return True
     return False
+
+
+def _has_leak_marker(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _LEAK_MARKERS)
 
 
 def _warn_if_untracked_spend(row) -> bool:
