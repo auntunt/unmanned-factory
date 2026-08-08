@@ -126,11 +126,17 @@ def test_a_hook_in_a_subdirectory_is_reported(tmp_path):
 
 
 def test_added_paths_needs_no_prior_capture_diff(tmp_path):
-    """added_paths 自己跑 `add -A -N`，不指望调用方做过。
+    """没人先跑过 capture_diff 时，added_paths 自己也能看见未追踪文件。
 
-    第一版漏了这行 → 未追踪文件不在 `git diff HEAD` 里 → 永远返回空。
-    而在 dispatcher 里恰好 capture_diff 先跑过，所以那里看不出来 ——
-    「函数依赖调用者先做过某件事」是最难查的那种巧合。
+    最早那版靠 `diff HEAD --diff-filter=A` 而没有先 `add -A -N`，未追踪文件
+    根本不在 `git diff HEAD` 里 → 永远返回空。而在 dispatcher 里恰好
+    capture_diff 先跑过，所以那里看不出来 —— 「函数依赖调用者先做过某件事」
+    是最难查的那种巧合。
+
+    现在的实现不再写索引（见 workspace.added_paths），这条测的是并集里
+    `ls-files --others` 那一半：它是**没人跑过 capture_diff** 时唯一的视野。
+    配对的那条测反面（capture_diff 先跑过）在文件末尾，两条必须都在 ——
+    只留任何一条，都有一个半瞎的实现能全绿。
     """
     root = _repo(tmp_path)
     (root / "conftest.py").write_text(_FAKE_GREEN, encoding="utf-8")
@@ -208,3 +214,62 @@ def test_a_clean_tree_still_merges(tmp_path):
     rep = _dispatch(tmp_path, root, ran)
     assert ran, "干净树上 check 该照常跑"
     assert rep.outcome.value == "merged", f"干净树被误拦：{rep}"
+
+
+# --- added_paths 的只读性与调用顺序 -------------------------------------
+#
+# 这两条是一次真实的自我纠错留下的。把 added_paths 从「add -A -N 再 diff」
+# 改成只读实现时，第一版用了 `diff --cached HEAD --diff-filter=A` 加
+# `ls-files --others`。九种形状实测和旧实现同解，离线全套也全绿 —— 但它在
+# **真实调用顺序**下静默失效：dispatcher 里 capture_diff 跑在前面，它一
+# `add -A -N`，新文件就成了 intent-to-add，从此既不在 `--others` 里（已进
+# 索引），也不在 `--cached` 的新增里（git 不把 intent-to-add 算作已 stage
+# 的新增）。两条查询之间恰好有一道缝，闸门返回 () —— 和「这一轮很干净」
+# 长得一模一样。
+#
+# 当时套件里只有反向那条测试（`..._needs_no_prior_capture_diff`），没有
+# 正向的，所以这个洞在测试面前是隐形的。
+
+
+def test_added_paths_still_sees_new_files_after_capture_diff(tmp_path):
+    """dispatcher 的真实顺序：capture_diff 先跑，added_paths 后跑。
+
+    capture_diff 会把未追踪文件挂成 intent-to-add。这条固定住「挂成
+    intent-to-add 之后照样看得见」—— 少了它，任何只查 `--others` 或只查
+    `--cached` 的实现都能骗过整套测试，而闸门在生产里已经瞎了。
+    """
+    from factory.harness.workspace import capture_diff
+
+    root = _repo(tmp_path)
+    (root / "conftest.py").write_text(_FAKE_GREEN, encoding="utf-8")
+
+    capture_diff(root)  # 就是这一步把它变成 intent-to-add
+    staged = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                            capture_output=True, text=True).stdout
+    assert " A conftest.py" in staged, f"前提：它已是 intent-to-add: {staged!r}"
+
+    assert added_paths(root) == ("conftest.py",), "intent-to-add 之后瞎了"
+    assert runner_hooks(root) == ("conftest.py",), "闸门跟着瞎了"
+
+
+def test_added_paths_does_not_write_to_the_index(tmp_path):
+    """一个名字像检查员的函数不许写它检查的那个仓库。
+
+    旧实现跑 `add -A -N`，症状出在自己身上：套件里那条合法的
+    `runner_hooks(Path("."))` 让每次跑离线全套都把开发者真仓库的未追踪文件
+    挂上 intent-to-add，`git status` 从 `??` 变成 ` A`。本会话真的差点因此
+    把一个临时变异脚本提交进去。
+    """
+    root = _repo(tmp_path)
+    (root / "conftest.py").write_text(_FAKE_GREEN, encoding="utf-8")
+
+    def status() -> str:
+        return subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                              capture_output=True, text=True).stdout
+
+    before = status()
+    assert "?? conftest.py" in before, f"前提：还是未追踪: {before!r}"
+
+    assert added_paths(root) == ("conftest.py",)
+
+    assert status() == before, f"它写了索引：{before!r} → {status()!r}"

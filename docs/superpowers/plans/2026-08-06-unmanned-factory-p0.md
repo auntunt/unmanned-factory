@@ -6806,3 +6806,127 @@ M108 是这一轮最值钱的东西。判据从「变了」退化成「多出来
 `is False` 断言，红了。这类失败每次都指向同一件事：**签名去读，不要猜**。
 
 20 条测试，离线全套 929 passed。
+
+## 补：拿 M108 的教训回头审所有 before/after 闸门
+
+M108 教的不是「replace 闸门写错了」——那道闸门的判据本来就是 `!=`，是对的。它教的
+是**测试的形状**：基线是空集时，`!=` 和「条数变多」这两种判据在接线测试面前长得
+一模一样。于是问题立刻推广开：前面八道 before/after 闸门，有几道有同一个病？
+
+不推测，去量。方法是给每道闸门的判据做一次 M108 形状的降级（换成「只报新增」
+或「只判从无到有」），然后跑**完整**离线套件。我刻意不自己挑测试文件跑 ——
+挑文件本身就预设了答案。活下来 = 那道闸门缺一条「基线非空、这一轮被改而不是被加」
+的测试。
+
+| 变异 | 降级成什么 | 结果 |
+| --- | --- | --- |
+| M109 | `changed_hooks` 只报新增/改动（`after - before`），漏删除 | KILLED `test_git_hooks.py::test_deletion_is_detected` |
+| M110 | `changed_config` 只报新增/改值，漏删键 | KILLED `test_git_config.py::test_a_deleted_key_is_reported` |
+| M111 | attrs 闸门只判「从无到有」（`not attrs_before and info_attributes(...)`） | **存活** |
+| M112 | 验收标准只判「条数变少」，漏条数不变的改写 | KILLED `test_spec_mutation.py::test_rewriting_the_criteria_blocks_the_merge` |
+| M113 | head 闸门只比哈希，丢掉 ref | KILLED `test_head_moved.py::test_switching_branch_mid_round_blocks_the_merge` |
+| M114 | `diff_suppressed` 丢掉 `--source=HEAD` 基线，判「现在是关的」 | KILLED `test_diff_attr.py::test_pre_existing_lockfile_rule_is_not_flagged` |
+
+`newly_skipped` 刻意不测：它的 docstring 明写只报新增，理由站得住 —— 取消一个
+本来挂着的标记是让 git **重新看见**改动，那是往闸门视野里送东西，报它只会在
+合法情形上响。
+
+### M111：一道闸门的判据被降级，930 条测试没人吭声
+
+`.git/info/attributes` 那道闸门的接线测试有五条，全部从**没有这个文件**的仓库起跑。
+于是「这一轮变了」被换成「本来没有、现在有了」，五条照旧全绿。
+
+漏掉的形态是**往一份已有文件里追加**。这不是臆想的路：那道闸门自己的 docstring
+就写着「外部仓库可以合法带一份 `.git/info/attributes`（本机不该提交的属性配置就
+该放这儿）」，而测试文件里也已经有一条
+`test_a_pre_existing_file_is_not_flagged_by_the_gate` 承认这个前提。既然承认了基线
+可以非空，就必须有一条测试让 worker 在那个非空基线上动手。
+
+补的测试 `test_appending_to_a_pre_existing_file_blocks_the_merge`：仓库先带
+`*.lock -diff`，worker 这一轮追加一行 `*.py -diff`。断言里把前提写死，否则它会
+悄悄退化成又一条空基线用例：
+
+    assert attrs_before, "前提：派发前就有内容"
+    assert attrs_now != attrs_before
+
+补完 M111 KILLED。
+
+**这一条里没有代码缺陷** —— 出货的 `!=` 一直是对的。缺的是证明它是对的那份证据。
+两者的区别在于：判据写对了是这一次的运气，有测试盯着才是下一次的保障。
+
+## 补：一个名字像检查员的函数在写它检查的那个仓库
+
+这一条不是 worker 能利用的洞，是**我们自己的**缺陷，而且症状已经出在这台机器上。
+
+发现的经过很偶然：跑完套件 `git status` 显示 ` D .tmp_mut_baseline.py` —— 一个我
+从没 `git add` 过的临时脚本，却带着索引条目。追下去发现新建的未追踪文件在跑完
+套件后从 `??` 变成 ` A`（git 的 intent-to-add 标记）。
+
+链路：`tests/test_runner_hooks.py` 有一条完全合法的误报测试
+`runner_hooks(Path("."))`（判「本仓库自己不该触发这道闸门」），而
+`runner_hooks` → `added_paths` → **`git add -A -N`**。于是每跑一次离线套件，
+开发者真仓库里所有未追踪文件都被挂上 intent-to-add。
+
+### 危害定级：先量出货面，再决定叫它什么
+
+第一反应是「闸门写索引、`land` 提交索引，会不会把未审文件带出货」。实测了：
+
+    changed_paths   : ('a.py', 'evil.py')
+    index 状态      : ' M a.py\n A evil.py\n'
+    land            : True
+    HEAD 的 tree    : ['README.md', 'a.py']
+    evil.py 出货了吗 : False
+
+不出货 —— `land` 只 `git add --` 审过的那一组，intent-to-add 条目不跟着进 commit。
+所以这是**卫生问题，不是出货洞**，定级到此为止，不往上抬。
+
+顺手量了另一个方向：这个副作用会不会动到别的闸门的输入？`add -A -N` 之后
+`index_skipped` 两边都测了 —— 既不会给新文件凭空造出 skip 标记（`newly_skipped`
+为 `()`，`ls-files -v` 全是 `H`），也不会把已挂上的标记洗掉（挂着 `a.py` 的
+仓库，`add -A -N` 前后都还是 `frozenset({'a.py'})`）。两个方向都干净，记成负结果。
+
+但真实代价已经发生过一次：本会话差点把一个临时变异脚本提交进仓库，因为它在
+`git status` 里长得像「已跟踪的删除」而不是「无关的垃圾」。
+
+### 改成两个只读查询的并集，以及我在这上面写错的那一版
+
+    diff HEAD --name-only --diff-filter=A   HEAD → 工作区的新增（含 intent-to-add）
+    ls-files --others --exclude-standard    还没进索引的未追踪文件（照 gitignore）
+
+第一版我写的是 `diff --cached HEAD`。九种形状比对全过，我差一步就交了。救回来是
+因为把「**capture_diff 先跑过**」也列成一种待测形状 —— 那一格立刻 DIFF：
+
+    capture_diff先跑    old=('conftest.py',)   new=()
+
+`--cached` 比的是索引和 HEAD，而 intent-to-add 条目在索引里是**空 blob 占位**，
+`--diff-filter=A` 不把它算成新增。去掉 `--cached`、让 HEAD 直接对工作区比，
+它就正常出现。
+
+这一版错的形状值得记：**在 dispatcher 的真实调用顺序里，`capture_diff` 永远跑在
+`runner_hooks` 前面**。所以那个 `()` 不是边缘情况，是生产路径上的默认情况 ——
+「worker 给自己出卷子」那道闸门会静默失效，而单元测试全绿，因为它们都直接调
+`added_paths`，没人先跑 `capture_diff`。又一次「静默降级永远更好看」：空元组和
+「这一轮很干净」在任何断言面前都是同一个东西。
+
+抓到它靠的不是读代码，是**把调用顺序本身列成一种待测形状**。十一种形状（未追踪
+单文件/深目录、已 stage 的新文件、被 ignore 的、只改不加、删、改名、stage 后又改、
+混合、capture_diff 先跑、先跑再加第二个）新旧同解，且新实现不写索引。
+
+### 变异
+
+| 变异 | 改成什么 | 结果 |
+| --- | --- | --- |
+| M115 | 去掉 `diff HEAD` 那一半（capture_diff 先跑过就瞎） | KILLED `test_added_paths_still_sees_new_files_after_capture_diff` |
+| M116 | 去掉 `ls-files --others` 那一半（没人先跑就瞎） | KILLED `test_a_new_conftest_is_reported` |
+| M117 | 把 `add -A -N` 的副作用装回去 | KILLED `test_added_paths_does_not_write_to_the_index` |
+
+M115 那条测试是这一轮**新补的**，而它对应的正是我自己差点交出去的那一版 ——
+先有变异，才有那条断言。
+
+### 端到端确认症状消失
+
+造一个未追踪哨兵文件 → 跑完整离线套件 → 它必须还是 `??`。跑之前 `??`，
+932 passed，跑之后仍是 `??`。修之前同一个实验的结果是 ` A`。
+
+排除 `test_runner_hooks.py` 单跑一遍（917 passed，哨兵保持 `??`）确认过它是
+唯一的写手，所以一处修完就够 —— 这一步也是量的，不是数出来的。

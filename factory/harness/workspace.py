@@ -310,16 +310,48 @@ def changed_hooks(
 def added_paths(root: Path) -> tuple[str, ...]:
     """这一轮**新增**的文件。`capture_diff` 只给「改动过的」，不分新增和修改。
 
-    `add -A -N` 这一步不能省，也不能指望调用方做过：未追踪的文件根本不在
-    `git diff HEAD` 里，少了这行就永远返回空 —— 而返回空长得和「这一轮很干净」
-    一模一样。第一版漏了它，测试当场抓到（在 dispatcher 里恰好因为
-    capture_diff 先跑过而看不出来，那是最难查的那种巧合）。
+    第一版是 `add -A -N` 加 `diff HEAD --diff-filter=A`。那一行 add 不能省也
+    不能指望调用方做过：未追踪的文件根本不在 `git diff HEAD` 里，少了它就永远
+    返回空 —— 而返回空长得和「这一轮很干净」一模一样。
+
+    但它有个不该有的副作用：**一个名字像检查员的函数在写它检查的那个仓库**。
+    实测症状出在自己身上 —— `tests/test_runner_hooks.py` 有一条
+    `runner_hooks(Path("."))`（合法的误报测试），于是每跑一次离线套件，开发者
+    真仓库里所有未追踪文件都被挂上 intent-to-add，`git status` 从 `??` 变成
+    ` A`。本会话真的差点因此把一个临时变异脚本提交进去。
+
+    所以改成两个只读查询的并集：
+
+      diff HEAD --diff-filter=A            HEAD 到**工作区**新增的。intent-to-add
+                                           条目在这里算新增（实测）
+      ls-files --others --exclude-standard 还没进索引的未追踪文件（照 gitignore）
+
+    第一条**不能带 `--cached`**，这一点是量出来的，而且第一版就写错了：
+    `diff --cached HEAD` 比的是索引和 HEAD，而 intent-to-add 条目在那个比较里
+    **不算新增**。于是在真实调用顺序下（dispatcher 里 capture_diff 先跑，
+    它的 `add -A -N` 把新文件变成 intent-to-add）这个函数返回 `()` ——
+    conftest.py 明明在，闸门却一声不响。
+
+    那个错法的可怕之处在于它只在**真实顺序**下发作：单元测试都是直接调
+    `added_paths`，没人先跑 capture_diff，全绿。和「静默降级永远更好看」
+    同一族——空元组长得和「这一轮很干净」一模一样。抓到它靠的是把
+    「capture_diff 先跑」也列成一种待测形状去比对新旧实现，不是靠读代码。
+
+    两条都必须有：没人跑过 capture_diff 时，新文件不在索引里，只有第二条看得见。
+
+    十一种形状实测和旧实现同解（未追踪单文件/深目录、已 stage 的新文件、被
+    ignore 的、只改不加、删、改名、stage 后又改、混合、capture_diff 先跑、
+    先跑再加第二个）。返回值改成排序过的 —— 旧实现跟 git 的输出顺序，没有任何
+    调用方依赖它（实测所有断言都是单元素或空），排序严格更确定。
     """
-    _git(root, "add", "-A", "-N")
-    proc = _git(root, "diff", "HEAD", "--name-only", "--diff-filter=A")
-    if proc.returncode != 0:
-        return ()
-    return tuple(l for line in proc.stdout.splitlines() if (l := line.strip()))
+    out: set[str] = set()
+    tracked = _git(root, "diff", "HEAD", "--name-only", "--diff-filter=A")
+    if tracked.returncode == 0:
+        out.update(l for line in tracked.stdout.splitlines() if (l := line.strip()))
+    others = _git(root, "ls-files", "--others", "--exclude-standard")
+    if others.returncode == 0:
+        out.update(l for line in others.stdout.splitlines() if (l := line.strip()))
+    return tuple(sorted(out))
 
 
 def runner_hooks(root: Path) -> tuple[str, ...]:

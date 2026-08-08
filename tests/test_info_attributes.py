@@ -286,6 +286,42 @@ def test_a_pre_existing_file_is_not_flagged_by_the_gate(tmp_path: Path) -> None:
     assert rep.outcome.value == "merged", f"合法的既有文件被判红了：{rep}"
 
 
+def test_appending_to_a_pre_existing_file_blocks_the_merge(tmp_path: Path) -> None:
+    """仓库本来就有 info/attributes，worker 往里**追加**一行 → 必须判红。
+
+    这条测试是变异 M111 逼出来的。M111 把闸门的判据从
+
+        if info_attributes(workspace) != attrs_before:
+
+    换成
+
+        if info_attributes(workspace) and not attrs_before:
+
+    也就是「从无到有才算」。离线全套 929 条**一条没红**：这道闸门的每一条
+    接线测试都从「仓库里没有这个文件」起跑，于是「变了」和「从无到有」给出
+    同一个答案。而上面那条误报测试恰好证明了空基线不是唯一合法形态 ——
+    仓库带一份 info/attributes 是正常的（本机不该提交的属性配置就该放那儿），
+    在那种仓库上被降级的判据完全哑掉，worker 追加一行 `*.py -diff` 就通关。
+
+    和 M108（refs/replace 只判条数变多）是同一个病：**基线为空的接线测试对
+    判据的形状几乎没有约束力**。修的是测试，不是代码 —— 出厂的 `!=` 一直是对的。
+    """
+    root = _repo(tmp_path)
+    _info_attrs(root).write_text("*.lock -diff\n", encoding="utf-8")
+    _git(root, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "feat")
+    ws = tmp_path / "wt"
+    _dirty(ws)
+    before = info_attributes(ws)
+    assert before, "前提：派发前基线非空，否则这条测试退化成又一条空基线用例"
+
+    # 保留原有那行，只追加 —— 「从无到有」不成立，但内容变了。
+    rep = _dispatch(tmp_path, ws, [], attrs="*.lock -diff\n*.py -diff\n")
+
+    assert info_attributes(ws) != before, "前提：内容真的变了"
+    assert rep.outcome.value != "merged", "往既有文件里追加过了 —— 判据只看了有无"
+    assert "info-attributes-touched" in rep.escalation_reason
+
+
 def test_the_other_gates_stay_quiet(tmp_path: Path) -> None:
     """只有这一条 claim 响。糊到别的闸门上会让打回的指令指错方向。"""
     ws = _worktree(tmp_path)
