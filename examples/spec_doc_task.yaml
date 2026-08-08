@@ -1,0 +1,37 @@
+# 引外部规格文档的任务。和 greet_task.yaml 的区别只在验收标准从哪来：
+#
+#   greet_task.yaml  —— acceptance：标准直接写在任务里（口述需求的形状）
+#   这个文件         —— spec_ref + spec_doc：标准在 PRD 里，任务只引编号
+#
+# **两者必须成对。** 只写 spec_ref 不写 spec_doc 的话，规格监工收到的字面
+# 就是 `AC-1` 这四个字符 —— 核不了任何 diff。这种任务会被拦在派发之前
+# （入口闸门的 [dangling-spec-ref]，或 dispatcher 的 pre-dispatch-spec-ref），
+# 不会浪费三轮再上人。
+#
+# 跑法：把 PRD.md 和这个 YAML 一起放进目标仓库（PRD 要已提交，否则
+# land() 的 git add 会把它一起提交进 worker 的 diff）：
+#
+#   factory run examples/spec_doc_task.yaml --workspace <仓库> --db audit.db
+#
+task_id: T-slugify-1
+prompt: |
+  在仓库根目录创建 textutil.py，实现 slugify(s) -> str。
+  同时创建 tests/test_textutil.py 覆盖 PRD 里 AC-1 到 AC-3 的情形。
+  不要改动其他文件。
+
+# 编号在 spec_doc 里查得到正文，监工核的是那些正文。
+spec_ref: [AC-1, AC-2, AC-3]
+spec_doc: PRD.md
+
+declared_paths: ["textutil.py", "tests/test_textutil.py"]
+declared_ops: []
+max_rounds: 3
+checks:
+  - name: module-exists
+    command: test -f textutil.py
+  - name: basic-slug
+    command: python -c "import textutil; print(textutil.slugify('Hello   World'))"
+    expect: stdout_contains
+    value: "hello-world"
+  - name: pytest-green
+    command: python -m pytest -q

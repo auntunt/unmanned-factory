@@ -105,3 +105,44 @@ def leak_probe(tmp_path):
     yield make
     for path in made:
         _cleanup(path)
+
+
+#: 哪些测试模块用 `tests.test_dispatcher._task`（它写死了 spec_ref=AC-1 +
+#: spec_doc=prd.md）。这些模块的 workspace 里必须有那条的正文，否则
+#: dispatcher 在派发前就把任务拦成 escalated（悬空 spec_ref）。
+#: 放在 conftest 而不是各模块里：`_task` 是跨模块共用的，配它的 PRD 也该跟着走，
+#: 否则下一个 import `_task` 的模块又会撞同一堵墙，而报错（outcome 变
+#: escalated）跟 spec_ref 一个字都不沾。
+_NEEDS_PRD = ("test_dispatcher", "test_scope", "test_dispatcher_four")
+
+
+@pytest.fixture(autouse=True)
+def _prd_for_shared_task(request, tmp_path):
+    """给用共用 `_task` 的模块在 workspace 根写一份能查到 AC-1 的 PRD。
+
+    PRD 是 **workspace 的状态**，不是 Task 构造的一部分 —— 任务说「我要满足
+    AC-1」，文档说「AC-1 是什么」。所以是 autouse 夹具，不是 `_task` 的默认值。
+    """
+    if request.module.__name__.rpartition(".")[2] in _NEEDS_PRD:
+        (tmp_path / "prd.md").write_text(
+            "# PRD\n\n## 验收标准\n\n- AC-1: 必须返回 str\n", encoding="utf-8")
+
+
+@pytest.fixture
+def spec_doc():
+    """往 workspace 里写一份 PRD，返回它的相对路径（给 Task.spec_doc 用）。
+
+    `spec_ref` 非空的任务必须配 `spec_doc`，否则 dispatcher 在派发前就拦下了
+    —— 编号不是标准（见 factory/spec_doc.py）。凡是要「带规格引用的真实任务」
+    的测试都该用这个，而不是各自手搓一份 Markdown：格式一旦改，只改一处。
+    """
+
+    def write(workspace: Path, refs: dict[str, str] | None = None,
+              *, name: str = "prd.md") -> str:
+        body = refs or {"AC-1": "必须返回 str"}
+        lines = ["# PRD", "", "## 验收标准", ""]
+        lines += [f"- {ref}: {text}" for ref, text in body.items()]
+        (workspace / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return name
+
+    return write

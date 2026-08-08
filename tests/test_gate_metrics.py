@@ -23,6 +23,7 @@ def _draft(**kw):
         task_id: str = "T-x"
         prompt: str = "改点东西"
         spec_ref: tuple = ()
+        spec_doc: str = ""
         acceptance: tuple = ("能跑",)
         declared_paths: tuple = ("src/a.py",)
         declared_ops: tuple = ()
@@ -57,6 +58,7 @@ def test_every_declared_code_is_reachable():
     for kw in ({"unclear": ("?",), "acceptance": (), "spec_ref": ()},
                {"checks": ()},
                {"acceptance": (), "spec_ref": ()},
+               {"spec_ref": ("AC-1",)},      # 有编号没文档 → dangling-spec-ref
                {"declared_ops": ("prod_deploy",)}):
         hit |= set(admit(_draft(**kw)).codes)
 

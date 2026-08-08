@@ -40,6 +40,7 @@ RULE_CODES: tuple[str, ...] = (
     "unclear-no-acceptance",
     "no-checks",
     "no-acceptance",
+    "dangling-spec-ref",
     "declared-ops",
     "guard-ops",
 )
@@ -80,6 +81,18 @@ class Admission:
         return tuple(rule_code(r) for r in self.reasons)
 
 
+def _has_spec(draft) -> bool:
+    """spec_ref 算不算「有验收标准」—— 只有配了 spec_doc 才算。
+
+    原来这里只看 spec_ref 非空。实测的后果：一份只有编号的草稿被判成
+    「有标准」直接进队，然后规格监工拿着 `AC-1` 这四个字符去核 diff，
+    判 fail，而那条 claim 不带 supervisor- 前缀 → 当成真问题打回 worker
+    → worker 改不了「AC-1 没有正文」→ 三轮烧完升级给人。
+    闸门本来就是为了免费说出这句话而存在的。
+    """
+    return bool(getattr(draft, "spec_ref", ()) and getattr(draft, "spec_doc", ""))
+
+
 def admit(draft) -> Admission:
     """判一份 DraftTask 能否自动进 inbox。
 
@@ -103,7 +116,7 @@ def admit(draft) -> Admission:
     #    有 acceptance 时它们降级成提示：验收标准就是那个边界。
     if getattr(draft, "unclear", ()):
         n = len(draft.unclear)
-        if getattr(draft, "acceptance", ()) or getattr(draft, "spec_ref", ()):
+        if getattr(draft, "acceptance", ()) or _has_spec(draft):
             warnings.append(f"模型有 {n} 条疑问，但 acceptance 已划定边界，"
                             f"未穷尽的行为由 worker 自定")
         else:
@@ -118,8 +131,23 @@ def admit(draft) -> Admission:
 
     # 3. 验收标准为空 → 只有 check 没有标准时，「全绿」的含义取决于 check 写得
     #    多严。人写 YAML 时能自己权衡，自动进队没人权衡。
-    if not getattr(draft, "acceptance", ()) and not getattr(draft, "spec_ref", ()):
+    if not getattr(draft, "acceptance", ()) and not _has_spec(draft):
         reasons.append("[no-acceptance] acceptance 和 spec_ref 都为空，没有可核对的验收标准")
+
+    # 3b. 有编号但没文档路径 → 编号查不到正文，等于没有标准。
+    #
+    #     和第 3 条分成两条编码：形状不同，该做的动作也不同。no-acceptance 是
+    #     「一条标准都没写」，人得去补标准；这条是「标准在某份文档里，但没说是哪份」，
+    #     人只要加一行 spec_doc。合成一条会让误拒率统计答不出「补一行路径就能进队的
+    #     草稿有多少」—— 而那是最该自动化掉的一类。
+    #
+    #     闸门只判到「路径给没给」这一层。给了但正文查不到（写错编号、文档改过）
+    #     由 dispatcher 派发前拦 —— 闸门是纯函数，不碰文件系统，而它拿到的
+    #     草稿此刻还不知道会派到哪个 workspace 去。
+    if getattr(draft, "spec_ref", ()) and not getattr(draft, "spec_doc", ""):
+        n = len(draft.spec_ref)
+        reasons.append(f"[dangling-spec-ref] 有 {n} 条 spec_ref 但没有 spec_doc，"
+                       f"编号查不到正文；补一行 spec_doc 指向规格文档即可")
 
     # 4/5. 声明了不可逆操作。两条规则，但要先把功劳分清楚。
     #

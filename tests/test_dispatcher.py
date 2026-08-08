@@ -72,7 +72,7 @@ def store():
 
 def _task(**kw):
     base = dict(task_id="T-1", prompt="add greet", spec_ref=("AC-1",),
-                declared_paths=("greet.py",),
+                spec_doc="prd.md", declared_paths=("greet.py",),
                 checks=(CheckSpec("pytest", "true"),))
     return Task(**{**base, **kw})
 
@@ -298,8 +298,13 @@ def test_a_merge_that_took_two_rounds_leaves_a_complete_audit_trail(store, tmp_p
 
 # ---------- 落地：spec §5 的 commit 字段 ----------
 
-def _wt(tmp_path):
-    """一棵真的 linked worktree。land() 拒绝在主工作树提交，所以假不了。"""
+def _wt(tmp_path, spec_doc=None):
+    """一棵真的 linked worktree。land() 拒绝在主工作树提交，所以假不了。
+
+    PRD 提交进 base：这批测试的 workspace 是 worktree 而不是 tmp_path，
+    模块级那个 autouse 夹具写的 prd.md 在这里查不到。而且它必须**在 base 里**
+    —— 留成未跟踪文件的话，land() 的 `git add` 会把 PRD 一起提交进去。
+    """
     import subprocess
 
     def g(root, *a):
@@ -312,6 +317,8 @@ def _wt(tmp_path):
     g(repo, "config", "user.email", "t@example.com")
     g(repo, "config", "user.name", "t")
     (repo / "base.txt").write_text("b\n")
+    if spec_doc is not None:
+        spec_doc(repo, {"AC-1": "greet 必须返回 str"})
     g(repo, "add", "-A")
     g(repo, "commit", "-q", "-m", "base")
     wt = tmp_path / "wt"
@@ -319,13 +326,13 @@ def _wt(tmp_path):
     return repo, wt, g
 
 
-def test_a_merged_attempt_records_the_commit_sha(store, tmp_path):
+def test_a_merged_attempt_records_the_commit_sha(store, tmp_path, spec_doc):
     """判绿 → 提交 → sha 落审计库。
 
     spec §5 把 commit 列为承重字段，而它一直写死 None，于是 spec 写明的
     漏报回查路径（git blame → commit → task_id）没有数据可走。
     """
-    repo, wt, g = _wt(tmp_path)
+    repo, wt, g = _wt(tmp_path, spec_doc)
     (wt / "greet.py").write_text("def greet(n): return n\n")
 
     report = _dispatcher(store, FakeAdapter([_result()])).run(_task(), wt)
@@ -338,14 +345,14 @@ def test_a_merged_attempt_records_the_commit_sha(store, tmp_path):
     assert g(repo, "status", "--porcelain").stdout.strip() == ""
 
 
-def test_reworked_rounds_are_not_committed(store, tmp_path):
+def test_reworked_rounds_are_not_committed(store, tmp_path, spec_doc):
     """只有合并的那一轮提交，中途打回的不提交。
 
     硬理由不是「打回的产出没人查」，而是 capture_diff 用 `git diff HEAD`：
     中途提交会让下一轮的 diff 变成「相对上一轮的增量」而不是「这个任务改了
     什么」—— 审计里 diff_hash 的含义会在多轮任务上悄悄换掉。
     """
-    repo, wt, g = _wt(tmp_path)
+    repo, wt, g = _wt(tmp_path, spec_doc)
     (wt / "greet.py").write_text("def greet(n): return n\n")
     base = g(wt, "rev-parse", "HEAD").stdout.strip()
 
@@ -367,7 +374,7 @@ def test_reworked_rounds_are_not_committed(store, tmp_path):
     assert log == [report.commit]
 
 
-def test_a_failed_landing_does_not_change_the_verdict(store, tmp_path):
+def test_a_failed_landing_does_not_change_the_verdict(store, tmp_path, spec_doc):
     """落地失败不把绿的判成红。
 
     退化后果只是 commit 仍为 None —— 也就是这个功能存在之前的状态。
@@ -381,6 +388,7 @@ def test_a_failed_landing_does_not_change_the_verdict(store, tmp_path):
               ["config", "user.name", "t"]):
         subprocess.run(["git", *a], cwd=repo, capture_output=True)
     (repo / "base.txt").write_text("b\n")
+    spec_doc(repo, {"AC-1": "greet 必须返回 str"})
     subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
     subprocess.run(["git", "commit", "-q", "-m", "b"], cwd=repo,
                    capture_output=True)
@@ -394,13 +402,13 @@ def test_a_failed_landing_does_not_change_the_verdict(store, tmp_path):
     assert store.attempts_for("T-1")[-1].resolution == Resolution.MERGED
 
 
-def test_an_attempt_can_be_found_back_from_a_short_sha(store, tmp_path):
+def test_an_attempt_can_be_found_back_from_a_short_sha(store, tmp_path, spec_doc):
     """git blame 给的是短 sha，回查必须接受它。
 
     逼人手动补全 40 位等于给漏报统计加一道摩擦，而需要额外动作的度量
     等于没有度量。
     """
-    _, wt, _ = _wt(tmp_path)
+    _, wt, _ = _wt(tmp_path, spec_doc)
     (wt / "greet.py").write_text("def greet(n): return n\n")
     report = _dispatcher(store, FakeAdapter([_result()])).run(_task(), wt)
 
@@ -411,7 +419,7 @@ def test_an_attempt_can_be_found_back_from_a_short_sha(store, tmp_path):
     assert store.attempt_by_commit("") is None
 
 
-def test_the_commit_covers_exactly_what_diff_hash_covered(store, tmp_path):
+def test_the_commit_covers_exactly_what_diff_hash_covered(store, tmp_path, spec_doc):
     """commit 和 diff_hash 必须描述同一组文件。
 
     真跑抓到的：check 命令跑 `python3 -c "from src.text import f"` 留下
@@ -421,7 +429,7 @@ def test_the_commit_covers_exactly_what_diff_hash_covered(store, tmp_path):
     钉的是 dispatcher 的接线（changed_paths 有没有真的传下去），
     不只是 land() 自己的行为。
     """
-    _, wt, g = _wt(tmp_path)
+    _, wt, g = _wt(tmp_path, spec_doc)
     (wt / "greet.py").write_text("def greet(n): return n\n")
     cache = wt / "__pycache__"
     cache.mkdir()

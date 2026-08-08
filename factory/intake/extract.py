@@ -101,6 +101,11 @@ class DraftTask:
     task_id: str
     prompt: str
     spec_ref: tuple[str, ...] = ()
+    #: 规格文档路径（相对 workspace 根）。抽取器**永远填不出这个** —— 一段
+    #: 口述需求里没有文档。留这个字段是为了让人在草稿里补：把编号变成能查的
+    #: 标准，靠的是加文档路径，不是加编号。spec_ref 非空而它为空的草稿会被
+    #: 闸门拦下（[dangling-spec-ref]）。
+    spec_doc: str = ""
     acceptance: tuple[str, ...] = ()
     declared_paths: tuple[str, ...] = ()
     declared_ops: tuple[str, ...] = ()
@@ -116,6 +121,7 @@ class DraftTask:
             "task_id": self.task_id,
             "prompt": self.prompt.rstrip() + "\n",
             "spec_ref": list(self.spec_ref),
+            "spec_doc": self.spec_doc,
             "acceptance": list(self.acceptance),
             "declared_paths": list(self.declared_paths),
             "declared_ops": list(self.declared_ops),

@@ -21,18 +21,26 @@ def repo(tmp_path):
     _git(ws, "config", "user.email", "t@example.com")
     _git(ws, "config", "user.name", "t")
     (ws / "README.md").write_text("seed\n", encoding="utf-8")
+    # PRD 进 baseline（不是留成未跟踪文件）：land() 的 `git add` 会把工作树里
+    # 的东西一起提交，PRD 不该出现在 worker 的 diff 里。
+    (ws / "PRD.md").write_text(
+        "## 验收标准\n\n- AC-1: greet(name) 返回 str\n", encoding="utf-8")
     _git(ws, "add", "-A")
     _git(ws, "commit", "-qm", "baseline")
     return ws
 
 
 @pytest.fixture
-def task_file(tmp_path):
+def task_file(tmp_path, repo):
+    """依赖 repo：spec_ref 的编号得在 workspace 的 spec_doc 里查得到正文，
+    否则 dispatcher 派发前就拦。任务和它引用的文档必须一起给。
+    """
     p = tmp_path / "task.yaml"
     p.write_text(
         "task_id: T-cli-1\n"
         "prompt: create greet.py\n"
         "spec_ref: [AC-1]\n"
+        "spec_doc: PRD.md\n"
         "declared_paths: ['greet.py']\n"
         "checks:\n"
         "  - name: greet-exists\n"

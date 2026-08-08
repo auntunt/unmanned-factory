@@ -104,7 +104,22 @@ class Dispatcher:
 
     # ---------- 预分级：不通过就一次都不派发 ----------
 
-    def _record_blocked(self, task: Task, grade: Grade, model: str) -> int:
+    def _record_blocked(
+        self,
+        task: Task,
+        grade: Grade,
+        model: str,
+        *,
+        check: str = "pre-dispatch-grading",
+        expected: str = "class A/B (unmanned allowed)",
+        got: str | None = None,
+    ) -> int:
+        """记一条没派发的 attempt 然后升级。**adapter 一次都不调，不花钱。**
+
+        check / expected / got 可换：预派发拦截不止分级一种（还有悬空
+        spec_ref），但它们的记账形状必须一样 —— 都要留下 attempt、都要
+        NOT_DISPATCHED、都要 escalated，否则报表上会漏掉一整类拦截。
+        """
         aid = self._store.open_attempt(
             task_id=task.task_id,
             spec_ref=list(task.spec_ref),
@@ -120,10 +135,10 @@ class Dispatcher:
             verdict=Verdict.FAIL,
             claims=[
                 {
-                    "check": "pre-dispatch-grading",
+                    "check": check,
                     "command": "",
-                    "expected": "class A/B (unmanned allowed)",
-                    "got": grade.reason,
+                    "expected": expected,
+                    "got": grade.reason if got is None else got,
                 }
             ],
         )
@@ -143,6 +158,28 @@ class Dispatcher:
                 " —— 硬闸门，agent 只能生成待执行脚本" if pre.hard_gate else ""
             )
             return DispatchReport(outcome, (aid,), 0, pre, reason)
+
+        # 悬空 spec_ref：编号有、正文查不到。这条必须在派发**之前**拦。
+        # 放它进去的话，规格监工会拿着一行 `- AC-1` 去核 diff，判 fail，
+        # 而那条 claim 不带 supervisor- 前缀 → 被当成真问题打回 worker →
+        # worker 改不了「AC-1 没有正文」→ 三轮烧完升级给人。实测过。
+        spec = task.resolve_spec(workspace)
+        if not spec.ok:
+            detail = spec.doc_error or (
+                f"spec_doc `{task.spec_doc}` 里查不到：{', '.join(spec.missing)}"
+            )
+            model = self._router.model_for(pre.oracle_class, 1)
+            aid = self._record_blocked(
+                task, pre, model,
+                check="pre-dispatch-spec-ref",
+                expected="spec_ref 的每个编号都能在 spec_doc 里查到正文",
+                got=detail,
+            )
+            return DispatchReport(
+                Outcome.ESCALATED, (aid,), 0, pre,
+                f"pre-dispatch spec_ref: {detail} —— 编号不是标准，"
+                f"派发只会烧三轮再上人",
+            )
 
         return self._loop(task, Path(workspace), pre)
 
@@ -373,9 +410,10 @@ class Dispatcher:
             reports.append(
                 self._spec.review(
                     diff=result.diff,
-                    # task.criteria = spec_ref + acceptance。口述来源的任务
-                    # 没有外部文档可引，验收标准写在 acceptance 里。
-                    criteria=task.criteria,
+                    # criteria = spec_doc 里解析出的**正文** + acceptance。
+                    # 递编号（`AC-1`）等于没递标准 —— 见 factory/spec_doc.py。
+                    # 走到这里 resolve 一定成功过：run() 里拦过一道。
+                    criteria=task.criteria(workspace),
                     context=context,
                     withheld=(result.error_text, self._render(reports[0].claims)),
                 )

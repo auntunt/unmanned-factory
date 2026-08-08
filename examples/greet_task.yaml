@@ -2,7 +2,13 @@ task_id: T-greet-1
 prompt: |
   在仓库根目录创建 greet.py，实现 greet(name) -> str，返回 "Hello, {name}!"。
   同时创建 tests/test_greet.py 覆盖正常入参。不要改动其他文件。
-spec_ref: [AC-1]
+# 这里原来是 `spec_ref: [AC-1]` —— 而 workspace 里没有任何文档定义 AC-1。
+# 规格监工收到的字面就是那四个字符，等于没给标准。带编号必须同时给
+# spec_doc（见 examples/spec_doc_task.yaml），否则 dispatcher 在派发前就拦。
+# 这个例子没有外部 PRD，所以标准直接写在这里 —— 也是口述任务的形状。
+acceptance:
+  - greet(name) 返回 str，内容是 "Hello, {name}!"
+  - 只新增 greet.py 和 tests/test_greet.py，不改动其他文件
 declared_paths: ["greet.py", "tests/test_greet.py"]
 declared_ops: []
 max_rounds: 3

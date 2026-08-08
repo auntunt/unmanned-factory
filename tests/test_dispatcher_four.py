@@ -41,9 +41,13 @@ def _claim(check="AC-1"):
 
 
 def _task(**kw):
+    # 原来是 `spec_ref=("AC-1: 必须返回 str",)` —— 把正文塞进编号字段绕过了
+    # 「编号没正文」的问题，而那恰好是 spec_doc 要修的形状。现在编号归编号、
+    # 正文归文档（conftest 的 _prd_for_shared_task 写的），解析出来的字面
+    # 仍是 `AC-1: 必须返回 str`。
     base = dict(
         task_id="T-4", prompt="加个函数",
-        spec_ref=("AC-1: 必须返回 str",),
+        spec_ref=("AC-1",), spec_doc="prd.md",
         declared_paths=("greet.py",),
         checks=(CheckSpec(name="ok", command="true"),),
     )
@@ -178,6 +182,24 @@ def test_spec_supervisor_receives_criteria_and_diff_but_not_the_log(tmp_path):
     assert spec.kwargs["criteria"] == ("AC-1: 必须返回 str",)
     assert "def greet" in spec.kwargs["diff"]
     assert "withheld" in spec.kwargs
+
+
+def test_the_supervisor_gets_the_body_not_the_bare_ref(tmp_path, spec_doc):
+    """监工手上必须是正文。断言 dispatcher 的**接线**，不是 criteria() 的返回值。
+
+    单测 `task.criteria()` 挡不住这条：把 dispatcher 的
+    `criteria=task.criteria(workspace)` 换回 `criteria=task.spec_ref`，
+    那个单测照样全绿，而监工又拿回了四个字符的编号。所以断言从监工
+    **实际收到的 kwargs** 上取。
+    """
+    spec_doc(tmp_path, {"AC-7": "错误路径必须带 request_id"})
+    spec = StubSupervisor(SupervisorRole.SPEC, Verdict.PASS)
+    d, _, _ = _build(tmp_path, spec=spec)
+    d.run(_task(spec_ref=("AC-7",), acceptance=("另外一条",)), tmp_path)
+
+    got = spec.kwargs["criteria"]
+    assert got == ("AC-7: 错误路径必须带 request_id", "另外一条")
+    assert "AC-7" not in got, "裸编号不能作为一条标准递过去"
 
 
 # ---------- 第三类：监工自己坏了 ----------

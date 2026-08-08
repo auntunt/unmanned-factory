@@ -88,6 +88,35 @@ C 和 D 都在**派发之前**停下，adapter 一次都不会被调用 —— �
 
 混成一句「C/D 被硬闸门拦住」会让人以为 C 也不可协商，而 C 只是这一层不该自动判收。
 
+## 验收标准怎么给
+
+规格监工核的是**正文**，所以任务必须给出正文。两种合法形状：
+
+```yaml
+# 形状一：标准写在任务里（口述需求的形状，examples/greet_task.yaml）
+acceptance:
+  - greet(name) 返回 str，内容是 "Hello, {name}!"
+
+# 形状二：标准在 PRD 里，任务只引编号（examples/spec_doc_task.yaml）
+spec_ref: [AC-1, AC-2]
+spec_doc: PRD.md          # 相对 workspace 根
+```
+
+**`spec_ref` 和 `spec_doc` 必须成对。** 只写编号的话，规格监工收到的字面就是
+`AC-1` 这四个字符 —— 它核不了任何 diff。这种任务在派发之前就被拦：入口闸门
+记 `[dangling-spec-ref]`，`factory run` 记 `pre-dispatch-spec-ref`，
+两条路都是 adapter 一次不调、一分钱不花。
+
+拦它而不是放它进去，是因为放进去的那条路每一步都「正常工作」：监工判 fail
+（合理），claim 不带 `supervisor-` 前缀（它是真实发现，不是监工故障），于是
+被当成真问题打回 worker（按设计），而 worker 改不了「AC-1 没有正文」——
+三轮烧完升级给人。全链路没有一个组件出错。
+
+编号在文档里认三种行首形状（`- AC-1: …`、`### AC-1 …`、`AC-1. …`），
+缩进续行会被合并，认不出就报「查不到」。**确定性解析，不让模型抽** ——
+抽错的标准比没有标准更危险：监工会拿着一条不存在的要求判 diff，判得理直气壮，
+而没有任何下游能发现那条标准是编出来的。
+
 ## 三条边界（改代码前先读）
 
 1. **只在 linked worktree 里提交。** 单任务 `run` 不开 worktree（`loop` 默认开），

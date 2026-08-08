@@ -27,6 +27,13 @@ def test_class_a_task_end_to_end(tmp_path):
     _git(ws, "config", "user.email", "t@example.com")
     _git(ws, "config", "user.name", "t")
     (ws / "README.md").write_text("# scratch\n", encoding="utf-8")
+    # PRD 进 baseline：spec_ref 的编号要在 spec_doc 里查得到正文，否则
+    # dispatcher 派发前就拦（悬空 spec_ref）。这条真跑因此也覆盖了
+    # 「编号 → 正文 → 监工」这条链，而不只是「编号原样进审计库」。
+    (ws / "PRD.md").write_text(
+        "# 需求\n\n## 验收标准\n\n"
+        "- AC-1: greet(name) 返回 str，内容是 \"Hello, {name}!\"\n",
+        encoding="utf-8")
     _git(ws, "add", "-A")
     _git(ws, "commit", "-qm", "baseline")
 
@@ -37,6 +44,7 @@ def test_class_a_task_end_to_end(tmp_path):
         "  在仓库根目录创建 greet.py，实现 greet(name) -> str，\n"
         "  返回 \"Hello, {name}!\"。不要改动其他文件。\n"
         "spec_ref: [AC-1]\n"
+        "spec_doc: PRD.md\n"
         "declared_paths: ['greet.py']\n"
         "max_rounds: 2\n"
         "checks:\n"

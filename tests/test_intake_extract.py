@@ -310,8 +310,12 @@ def test_acceptance_reaches_the_spec_supervisor(tmp_path):
     assert task.spec_ref == ()
     assert len(task.acceptance) == 2
     # 这一条才是重点：规格监工拿到的不是空的
-    assert len(task.criteria) == 2
-    assert "'...'" in task.criteria[0]
+    criteria = task.criteria(tmp_path)
+    assert len(criteria) == 2
+    assert "'...'" in criteria[0]
+    # 口述任务没有外部文档可引，spec_ref 必然为空 —— 于是它也永远不会
+    # 被悬空 spec_ref 那道闸门拦下。这条顺带钉住这一点。
+    assert task.resolve_spec(tmp_path).ok
 
 
 def test_empty_acceptance_is_flagged_in_the_yaml_header(tmp_path):

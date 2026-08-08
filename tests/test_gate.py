@@ -50,10 +50,53 @@ def test_unclear_blocks_when_there_is_no_acceptance():
     assert any("没有验收标准兜底" in r for r in v.reasons)
 
 
-def test_spec_ref_also_counts_as_a_boundary():
-    """引了外部文档条目的任务，标准在文档里，不必写 acceptance。"""
-    v = admit(draft(unclear=("边界?",), acceptance=(), spec_ref=("AC-1",)))
+def test_spec_ref_counts_as_a_boundary_only_with_a_doc():
+    """引了外部文档条目的任务，标准在文档里，不必写 acceptance。
+
+    但**得有那份文档**。原来这条只给 spec_ref，照样判进队 —— 那时闸门认为
+    「标准在文档里」，而根本没有文档。见 gate._has_spec。
+    """
+    v = admit(draft(unclear=("边界?",), acceptance=(),
+                    spec_ref=("AC-1",), spec_doc="docs/prd.md"))
     assert v.admitted
+
+
+def test_a_spec_ref_without_a_doc_is_not_a_boundary():
+    """光有编号不算标准，于是三条一起命中，而且**该**一起命中。
+
+    没有 acceptance（第 3 条）、编号查不到正文（3b）、unclear 没东西兜底
+    （第 1 条）—— 三句话讲的是同一份草稿的三个缺口，人补的东西也不一样。
+    合成一条会让他补完一个以为完事了。
+    """
+    v = admit(draft(unclear=("边界?",), acceptance=(), spec_ref=("AC-1",)))
+    assert not v.admitted
+    assert set(v.codes) == {
+        "unclear-no-acceptance", "no-acceptance", "dangling-spec-ref"}
+
+
+def test_a_dangling_spec_ref_is_blocked_on_its_own():
+    """acceptance 齐、check 齐、疑问也没有，只是编号没配文档 —— 照样拦。
+
+    因为它会**真的**走到规格监工手上：`AC-1` 这四个字符核不了任何 diff，
+    判 fail，claim 不带 supervisor- 前缀，于是被当成真问题打回 worker，
+    而 worker 改不了「AC-1 没有正文」。三轮烧完上人。
+    """
+    v = admit(draft(spec_ref=("AC-1", "AC-2")))
+    assert not v.admitted
+    assert v.codes == ("dangling-spec-ref",)
+    assert any("补一行 spec_doc" in r for r in v.reasons), "得说清怎么修"
+    assert any("2 条" in r for r in v.reasons)
+
+
+def test_a_spec_ref_with_a_doc_passes_cleanly():
+    v = admit(draft(spec_ref=("AC-1",), spec_doc="docs/prd.md"))
+    assert v.admitted and v.reasons == ()
+
+
+def test_a_spec_doc_without_any_ref_is_not_flagged():
+    """只给文档不给编号：没什么可查的，也就没什么可拦的（acceptance 兜着）。"""
+    v = admit(draft(spec_doc="docs/prd.md"))
+    assert v.admitted and v.reasons == ()
 
 
 # ── 硬性拦截 ──────────────────────────────────────────────────────────────

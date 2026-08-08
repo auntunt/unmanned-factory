@@ -177,7 +177,10 @@ def _task_file(tmp_path, task_id: str):
             {
                 "task_id": task_id,
                 "prompt": "create out.py",
-                "spec_ref": ["AC-1"],
+                # 用 acceptance 而不是 spec_ref：这批测试关心并发，不关心规格。
+                # spec_ref 要配 spec_doc（编号得查得到正文），而 acceptance
+                # 本身就是正文 —— 这也是口述任务的形状。
+                "acceptance": ["out.py 存在"],
                 "declared_paths": ["out.py"],
                 "checks": [{"name": "out-exists", "command": "test -f out.py"}],
             },
