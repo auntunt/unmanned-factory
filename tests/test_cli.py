@@ -1,3 +1,4 @@
+import argparse
 import stat
 import subprocess
 
@@ -342,3 +343,88 @@ def test_loop_does_not_warn_when_a_wall_clock_bound_is_given(
                  "--max-runtime", "14400"])
     assert code == 0
     assert "--max-runtime 0" not in capsys.readouterr().err
+
+
+# ── 熔断器的 CLI 接线 ────────────────────────────────────────────────────────
+# 循环那一侧的闸门有自己的测试；这两条测的是「flag 真的接上了」和「漏账
+# 真的传下去了」。写它们的直接原因：把这两处接线各删一次，整个测试套件
+# 62 + 21 条全过 —— 一道谁都没接上的闸门在报表上和接上了长得一样。
+
+def _captured_limits(argv, tmp_path, monkeypatch):
+    """跑一次 loop，把 CLI 造出来的 LoopLimits 截下来。"""
+    import factory.cli as cli
+    seen = {}
+
+    class Spy(cli.BacklogLoop):
+        def __init__(self, *a, **kw):
+            seen["limits"] = kw.get("limits")
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(cli, "BacklogLoop", Spy)
+    assert main(argv) == 0
+    return seen["limits"]
+
+
+def test_the_unpriced_streak_flag_reaches_the_loop(tmp_path, repo, monkeypatch):
+    limits = _captured_limits(
+        ["loop", "--queue", str(tmp_path / "q"), "--workspace", str(repo),
+         "--db", str(tmp_path / "a.db"), "--idle", "drain", "--no-sandbox",
+         "--max-unpriced-streak", "7"], tmp_path, monkeypatch)
+    assert limits.max_unpriced_streak == 7
+
+
+def test_the_breaker_is_on_by_default_from_the_command_line(
+        tmp_path, repo, monkeypatch):
+    """默认值写在 dataclass 上不算数 —— argparse 的 default 漏了同样是关着的。"""
+    limits = _captured_limits(
+        ["loop", "--queue", str(tmp_path / "q"), "--workspace", str(repo),
+         "--db", str(tmp_path / "a.db"), "--idle", "drain", "--no-sandbox"],
+        tmp_path, monkeypatch)
+    assert limits.max_unpriced_streak >= 1
+
+
+def test_loop_warns_when_the_breaker_is_switched_off(tmp_path, repo, capsys):
+    code = main(["loop", "--queue", str(tmp_path / "q"),
+                 "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
+                 "--idle", "drain", "--no-sandbox", "--max-runtime", "60",
+                 "--max-unpriced-streak", "0"])
+    assert code == 0
+    assert "--max-unpriced-streak 0" in capsys.readouterr().err
+
+
+def _dispatch_with_cost(tmp_path, repo, task_file, monkeypatch, cost_result):
+    """跑一次 _dispatch_queued，把 _attempts_cost 的返回值换成给定的。"""
+    import factory.cli as cli
+
+    class FakeReport:
+        outcome = "merged"
+        attempt_ids = (1,)
+        escalation_reason = ""
+        commit = ""
+        landing_note = ""
+
+    class FakeDispatcher:
+        def run(self, _task, _ws):
+            return FakeReport()
+
+    monkeypatch.setattr(cli, "_dispatcher_for", lambda _ns: FakeDispatcher())
+    monkeypatch.setattr(cli, "_attempts_cost", lambda _ns, _ids: cost_result)
+    # dispatcher 已被替掉，_dispatch_queued 只还需要 workspace（pool=None 时
+    # _queued_workspace 直接返回它）。手搭 Namespace 比走 argparse 少一层耦合。
+    ns = argparse.Namespace(workspace=str(repo), db=str(tmp_path / "a.db"))
+    return cli._dispatch_queued(ns, task_file, None)
+
+
+def test_an_unpriced_dispatch_is_reported_as_such_to_the_loop(
+        tmp_path, repo, task_file, monkeypatch):
+    """漏账在 _attempts_cost 里查出来没用 —— 熔断器在循环里，得传过去。"""
+    run = _dispatch_with_cost(tmp_path, repo, task_file, monkeypatch,
+                              (0.0, True))
+    assert run.unpriced is True
+
+
+def test_a_normally_priced_dispatch_is_not_flagged(
+        tmp_path, repo, task_file, monkeypatch):
+    run = _dispatch_with_cost(tmp_path, repo, task_file, monkeypatch,
+                              (0.42, False))
+    assert run.unpriced is False and run.cost_usd == 0.42

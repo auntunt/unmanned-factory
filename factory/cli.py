@@ -479,6 +479,7 @@ def _cmd_loop(ns: argparse.Namespace) -> int:
         max_runtime_s=ns.max_runtime,
         poll_s=ns.poll,
         idle=Idle(ns.idle),
+        max_unpriced_streak=ns.max_unpriced_streak,
     )
     if not limits.budget_usd:
         print("⚠ --budget-usd 0：没有花费上限。这个循环会一直派发到队列空 "
@@ -489,6 +490,9 @@ def _cmd_loop(ns: argparse.Namespace) -> int:
         # 的那道闸。单个任务最坏 max_rounds x --timeout，默认 3 x 900s。
         print("⚠ --max-runtime 0：没有墙钟上限。超时的 attempt 记 $0，"
               "光靠 --budget-usd 拦不住反复超时的任务。", file=sys.stderr)
+    if not limits.max_unpriced_streak:
+        print("⚠ --max-unpriced-streak 0：熔断关了。CLI 一直挂着的时候，"
+              "每个任务都记 $0，预算闸门读到的永远是 0。", file=sys.stderr)
 
     pool = WorktreePool(Path(ns.workspace), root=ns.worktree_root) \
         if ns.worktree else None
@@ -496,7 +500,8 @@ def _cmd_loop(ns: argparse.Namespace) -> int:
     print(f"上限：任务 {limits.max_tasks or '∞'} / "
           f"预算 ${limits.budget_usd or 0:.2f}" +
           ("（无限）" if not limits.budget_usd else "") +
-          f" / 时长 {limits.max_runtime_s or '∞'}s")
+          f" / 时长 {limits.max_runtime_s or '∞'}s"
+          f" / 连续漏账 {limits.max_unpriced_streak or '∞'}")
 
     loop = BacklogLoop(bl, lambda p: _dispatch_queued(ns, p, pool),
                        limits=limits)
@@ -519,7 +524,7 @@ def _dispatch_queued(ns: argparse.Namespace, task_path: Path,
     task = Task.from_yaml(task_path)
     workspace = _queued_workspace(ns, task, pool)
     report = _dispatcher_for(ns).run(task, workspace)
-    cost = _attempts_cost(ns, report.attempt_ids)
+    cost, unpriced = _attempts_cost(ns, report.attempt_ids)
     note = report.escalation_reason.replace("\n", " ")[:400]
     # 只有真的开了 worktree 才写进 note。C/D 类任务拿到的是 --workspace 本身，
     # 标成 worktree= 会让人以为那里有产出可看，而实际上一行都没跑。
@@ -531,7 +536,8 @@ def _dispatch_queued(ns: argparse.Namespace, task_path: Path,
         note = f"commit={report.commit[:12]}  {note}".strip()
     elif report.outcome is Outcome.MERGED and report.landing_note:
         note = f"未提交（{report.landing_note}）  {note}".strip()
-    return TaskRun(outcome=str(report.outcome), cost_usd=cost, note=note)
+    return TaskRun(outcome=str(report.outcome), cost_usd=cost, note=note,
+                   unpriced=unpriced)
 
 
 def _queued_workspace(ns: argparse.Namespace, task: Task,
@@ -557,8 +563,8 @@ def _queued_workspace(ns: argparse.Namespace, task: Task,
 
 
 def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
-                   ) -> float:
-    """一次派发的真实花费 = 它所有 attempt 的 cost 之和。
+                   ) -> tuple[float, bool]:
+    """一次派发的真实花费，以及「这个数低估了没有」。
 
     从审计库读而不是让 dispatcher 返回：预算闸门必须和账单看同一个数。
     dispatcher 另算一份的话，两个数会在某次重构后悄悄分叉，而分叉的方向
@@ -577,6 +583,7 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
     """
     store = AuditStore(ns.db)
     total = 0.0
+    leaked = False
     for aid in attempt_ids:
         try:
             row = store.get(aid)
@@ -586,29 +593,39 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
             continue        # get() 查不到时返回 None 而不是抛，上面兜不住
         total += row.cost_usd or 0.0
         total += sum(v.cost_usd or 0.0 for v in row.supervisors)
-        _warn_if_untracked_spend(row)
-    return total
+        leaked |= _warn_if_untracked_spend(row)
+    return total, leaked
 
 
-def _warn_if_untracked_spend(row) -> None:
-    """超时的 attempt 花了钱但记 $0 —— 说出来，别让预算闸门静默漏账。
+def is_untracked_spend(row) -> bool:
+    """这个 attempt 超时了、记 $0，但真的花了钱。
 
     判据是 regression 监工的 claim 文本里有 'timeout'：超时在审计库里就是
     这么落的（`期望 'exit_status ok' / 实得 'timeout: timeout after 900s'`），
-    没有单独的状态列。文本判据不好看，但比在审计模型上加一列更小的改动，
-    而这一行只是警告、不参与任何判决。
+    没有单独的状态列。文本判据不好看，但比在审计模型上加一列小得多。
+
+    返回布尔而不是只打警告：循环要靠这个数做熔断（连续 N 个任务都在烧
+    不计价的钱就停机）。只打警告的话，那道闸没有数据可依。
     """
     if row.cost_usd:
-        return
+        return False
     for v in row.supervisors:
         for c in (v.claims or ()):
             # claims 是 JSON 列，取出来就是 dict。
             got = str((c or {}).get("got", "")) if isinstance(c, dict) else ""
             if "timeout" in got.lower():
-                print(f"⚠ attempt #{row.attempt_no} 超时且记 $0 —— "
-                      f"真实花费未计入预算（transcript: "
-                      f"{row.transcript_path or '未留'}）", file=sys.stderr)
-                return
+                return True
+    return False
+
+
+def _warn_if_untracked_spend(row) -> bool:
+    """漏账就说出来，别让预算闸门静默读成 0。返回是否漏账。"""
+    if not is_untracked_spend(row):
+        return False
+    print(f"⚠ attempt #{row.attempt_no} 超时且记 $0 —— "
+          f"真实花费未计入预算（transcript: "
+          f"{row.transcript_path or '未留'}）", file=sys.stderr)
+    return True
 
 
 def _cmd_queue(ns: argparse.Namespace) -> int:
@@ -920,6 +937,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="最多派发几个任务（0 = 不限）")
     lp.add_argument("--max-runtime", type=float, default=0.0,
                     help="最长运行秒数（0 = 不限）")
+    lp.add_argument("--max-unpriced-streak", type=int,
+                    default=LoopLimits.max_unpriced_streak,
+                    help=f"连续几个任务的花费记不上账（超时被 kill，CLI 没打"
+                         f"出 cost）就停机。默认 "
+                         f"{LoopLimits.max_unpriced_streak}；0 = 不限，会打印"
+                         f"警告 —— 关掉它等于让预算闸门在超时这条路上失效")
     lp.add_argument("--poll", type=float, default=5.0,
                     help="--idle watch 下队列空时的轮询间隔秒数")
     _add_dispatch_args(lp)

@@ -17,6 +17,14 @@ state='blocked' 的结果。
 3. **收到 SIGINT/SIGTERM 先把手上这个跑完再退。** 中途硬杀会留下
    running/ 里的孤儿条目和一棵没人验收的 worktree。等一轮的代价是几分钟，
    不等的代价是人来收拾现场。
+
+4. **连续 2 个任务的花费记不上账就停机。** 预算闸门读的是 CLI 打出的
+   total_cost_usd，而被我们 kill 掉的超时进程永远不打那行 —— 它的花费在账上
+   是 $0。于是「反复超时」这一种失败模式能绕开 --budget-usd 无限烧下去
+   （实测：一次 900s 超时记 $0.0000，transcript 里 ~232k input tokens）。
+   熔断器不猜价格，只数「有多少次派发的价格是假的」，连续到 2 次就停。
+   为什么不是 1 次：单个任务超时是设计里的正常出口，一次就停机等于让一条
+   坏任务停掉整夜。连续两次说明坏的是环境，那才该叫人。
 """
 
 from __future__ import annotations
@@ -47,26 +55,37 @@ class Idle(StrEnum):
 
 @dataclass(frozen=True)
 class TaskRun:
-    """一次派发的结果，循环只认这三个字段。
+    """一次派发的结果，循环只认这几个字段。
 
     Dispatcher 的 DispatchReport 由调用方翻译过来 —— 循环不 import
     dispatcher，这样 shell 探针和单测可以塞一个假 dispatch 进来。
+
+    unpriced 是「cost_usd 这个数低估了」的标记，不是「花了 0 块」。超时被
+    kill 的 attempt 拿不到 CLI 的 total_cost_usd payload，于是记 $0 —— 而它
+    真的烧了 token。预算闸门只看 cost_usd 的话，一个反复超时的任务在账上
+    永远免费，闸门永远不响。这个布尔是熔断器唯一的输入。
     """
 
     outcome: Outcome
     cost_usd: float = 0.0
     note: str = ""
+    unpriced: bool = False
 
 
 @dataclass(frozen=True)
 class LoopLimits:
-    """三个上限都是 0 = 不限，但**预算默认不是 0**。见模块 docstring。"""
+    """上限都是 0 = 不限，但**预算和熔断默认不是 0**。见模块 docstring。"""
 
     max_tasks: int = 0
     budget_usd: float = DEFAULT_BUDGET_USD
     max_runtime_s: float = 0.0
     poll_s: float = 5.0
     idle: Idle = Idle.WATCH
+    # 连续几个任务的花费都是「不计价的」就停机。默认 2 而不是 1：单个任务
+    # 超时是正常的（3 轮 × 900s 上限本来就是设计里的），一次超时就停机会让
+    # 一条坏任务把整夜的队列停掉。连续两个都在烧不计价的钱，说明烧的不是
+    # 这个任务而是环境（CLI 挂了、网断了、模型不回话），那才该停。
+    max_unpriced_streak: int = 2
 
 
 @dataclass
@@ -81,6 +100,10 @@ class LoopReport:
     idle_polls: int = 0
     stopped_by: str = ""
     trail: list[tuple[str, str]] = field(default_factory=list)
+    # 当前连续不计价的次数（一有计价的派发就归零），和整轮的累计次数。
+    # 两个都留：熔断看前者，早上看报表想知道的是后者。
+    unpriced_streak: int = 0
+    unpriced_total: int = 0
 
     def bump(self, outcome: str) -> None:
         """按 outcome 计数。未知 outcome 记成 errors 而不是静默丢掉 ——
@@ -91,9 +114,13 @@ class LoopReport:
         setattr(self, name, getattr(self, name) + 1)
 
     def summary(self) -> str:
+        # 有漏账就在总额后面标出来。不标的话「花费 $0.8」读起来像真的花了
+        # $0.8，而实际账单可能是它的几倍 —— 一个已知偏低的数必须自带这个提示。
+        leak = (f"（另有 {self.unpriced_total} 次派发未计价，真实花费更高）"
+                if self.unpriced_total else "")
         return (f"派发 {self.dispatched}：合并 {self.merged} / "
                 f"升级 {self.escalated} / 硬闸门 {self.blocked} / "
-                f"异常 {self.errors}，花费 ${self.cost_usd:.4f}")
+                f"异常 {self.errors}，花费 ${self.cost_usd:.4f}{leak}")
 
 
 class BacklogLoop:
@@ -156,6 +183,13 @@ class BacklogLoop:
                     f"（已花 ${report.cost_usd:.4f}）")
         if lim.max_runtime_s and (self._now() - started) >= lim.max_runtime_s:
             return f"达到 --max-runtime {lim.max_runtime_s:g}s"
+        # 熔断放在最后一条：前面几条是「计划内的收工」，这条是「有东西坏了」。
+        # 顺序有意义 —— 同时命中时报表上该显示的是计划内那条原因。
+        if (lim.max_unpriced_streak
+                and report.unpriced_streak >= lim.max_unpriced_streak):
+            return (f"连续 {report.unpriced_streak} 个任务的花费未计价"
+                    f"（--max-unpriced-streak {lim.max_unpriced_streak}）"
+                    f"—— 预算闸门已失效，停机等人看")
         return ""
 
     # ---------- 主循环 ----------
@@ -176,6 +210,7 @@ class BacklogLoop:
             self._journal.event("run_end", stopped_by=report.stopped_by,
                                 dispatched=report.dispatched,
                                 cost_usd=round(report.cost_usd, 6),
+                                unpriced_total=report.unpriced_total,
                                 merged=report.merged,
                                 escalated=report.escalated,
                                 blocked=report.blocked,
@@ -214,6 +249,13 @@ class BacklogLoop:
             t0 = self._now()
             run = self._one(claim)
             report.cost_usd += run.cost_usd
+            # 归零而不是自减：熔断要的是「连续」。中间夹一个正常计价的任务
+            # 就说明环境还活着，前面那次超时是任务自己的问题。
+            if run.unpriced:
+                report.unpriced_streak += 1
+                report.unpriced_total += 1
+            else:
+                report.unpriced_streak = 0
             report.bump(run.outcome)
             self._backlog.finish(claim, run.outcome, note=run.note)
             self._log(f"    {run.outcome} "
@@ -221,6 +263,7 @@ class BacklogLoop:
             self._journal.event("dispatch", task_id=claim.task_id,
                                 outcome=run.outcome,
                                 cost_usd=round(run.cost_usd, 6),
+                                unpriced=run.unpriced,
                                 wall_clock_s=round(self._now() - t0, 3),
                                 note=run.note)
 

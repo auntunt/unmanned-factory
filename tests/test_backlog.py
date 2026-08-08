@@ -31,6 +31,7 @@ from factory.backlog.store import (
     BLOCKED,
     DONE,
     INBOX,
+    LOG,
     NEEDS_HUMAN,
     OUTCOME_DIR,
     RESULT_SUFFIX,
@@ -467,6 +468,114 @@ def test_max_runtime_also_bounds_an_idle_watch_loop(tmp_path):
     assert "--max-runtime" in report.stopped_by
 
 
+# ── 熔断：预算闸门在「超时」这条路上是瞎的 ─────────────────────────────────
+
+def unpriced(outcome: str = "escalated"):
+    """一次记 $0 但真烧了钱的派发（超时被 kill，CLI 没打 cost payload）。"""
+    return lambda _p: TaskRun(outcome=outcome, cost_usd=0.0, unpriced=True)
+
+
+def test_the_breaker_defaults_on_because_budget_cannot_see_timeouts(tmp_path):
+    """默认值本身是这道闸的全部价值：忘了写 flag 的人正是需要它的人。"""
+    assert LoopLimits().max_unpriced_streak == 2
+
+
+def test_consecutive_unpriced_dispatches_stop_the_loop(tmp_path):
+    """反复超时的任务在预算眼里免费 —— 没有这道闸就能烧一整夜。"""
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, *[f"t{i}.yaml" for i in range(6)])
+    report = loop_over(q, unpriced(),
+                       limits=LoopLimits(idle=Idle.DRAIN,
+                                         max_unpriced_streak=2)).run()
+    assert report.dispatched == 2, "第 2 个之后就该停，不该把队列吃完"
+    assert "未计价" in report.stopped_by
+    assert len(q.pending()) == 4, "余下的留在队列里，等人看过再跑"
+
+
+def test_one_priced_dispatch_resets_the_streak(tmp_path):
+    """单个任务超时是设计里的正常出口（3 轮 x 900s）。一次就停机等于让
+    一条坏任务停掉整夜 —— 熔断要的是「连续」，不是「累计」。"""
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, *[f"t{i}.yaml" for i in range(5)])
+    seq = iter([True, False, True, False, True])
+
+    def alternating(_p):
+        leak = next(seq)
+        return TaskRun(outcome="merged", cost_usd=0.0 if leak else 0.01,
+                       unpriced=leak)
+
+    report = loop_over(q, alternating,
+                       limits=LoopLimits(idle=Idle.DRAIN, budget_usd=0.0,
+                                         max_unpriced_streak=2)).run()
+    assert report.dispatched == 5, f"没连续两次，不该熔断：{report.stopped_by}"
+    assert report.stopped_by == "队列已抽干"
+    assert report.unpriced_total == 3, "累计次数照样要记下来给早上看"
+    assert report.unpriced_streak == 1
+
+
+def test_a_zero_cost_dispatch_is_not_by_itself_unpriced(tmp_path):
+    """$0 和「记不上账」是两件事：D 类硬闸门真的花了 $0，adapter 一次都没
+    调。把它算成漏账会让一队 D 类任务把循环熔断掉。"""
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, *[f"t{i}.yaml" for i in range(4)])
+    report = loop_over(q, always("blocked_hard_gate", cost=0.0),
+                       limits=LoopLimits(idle=Idle.DRAIN,
+                                         max_unpriced_streak=2)).run()
+    assert report.dispatched == 4 and report.unpriced_total == 0
+    assert report.stopped_by == "队列已抽干"
+
+
+def test_the_breaker_can_be_switched_off(tmp_path):
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, *[f"t{i}.yaml" for i in range(3)])
+    report = loop_over(q, unpriced(),
+                       limits=LoopLimits(idle=Idle.DRAIN, budget_usd=0.0,
+                                         max_unpriced_streak=0)).run()
+    assert report.dispatched == 3 and report.unpriced_total == 3
+
+
+def test_a_planned_stop_wins_over_the_breaker_in_the_report(tmp_path):
+    """同时命中时报表该说的是计划内那条 —— 「达到 --max-tasks」不该被
+    「有东西坏了」盖掉，否则早上会去查一个不存在的故障。"""
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, *[f"t{i}.yaml" for i in range(5)])
+    report = loop_over(q, unpriced(),
+                       limits=LoopLimits(idle=Idle.DRAIN, max_tasks=2,
+                                         max_unpriced_streak=2)).run()
+    assert "--max-tasks" in report.stopped_by
+
+
+def test_the_summary_flags_that_the_total_is_an_underestimate(tmp_path):
+    """「花费 $0.0100」读起来像真花了这么多。已知偏低的数必须自带提示。"""
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, "a.yaml")
+    report = loop_over(q, unpriced(), limits=LoopLimits(idle=Idle.DRAIN)).run()
+    assert "未计价" in report.summary() and "真实花费更高" in report.summary()
+
+
+def test_a_clean_run_summary_says_nothing_about_pricing(tmp_path):
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, "a.yaml")
+    report = loop_over(q, always("merged", cost=0.02),
+                       limits=LoopLimits(idle=Idle.DRAIN)).run()
+    assert "未计价" not in report.summary()
+
+
+def test_the_journal_records_which_dispatches_were_unpriced(tmp_path):
+    """早上要能只看 journal 就分清「便宜」和「没记上」。"""
+    import json
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, "a.yaml")
+    loop_over(q, unpriced(), limits=LoopLimits(idle=Idle.DRAIN)).run()
+    lines = [json.loads(x) for x in
+             (q.dir(LOG) / sorted(p.name for p in q.dir(LOG).glob("*.jsonl"))[0]
+              ).read_text().splitlines()]
+    disp = [e for e in lines if e["kind"] == "dispatch"]
+    assert disp and disp[0]["unpriced"] is True
+    end = [e for e in lines if e["kind"] == "run_end"]
+    assert end and end[0]["unpriced_total"] == 1
+
+
 def test_request_stop_finishes_the_current_task_first(tmp_path):
     q = bl(tmp_path)
     queue_tasks(q, tmp_path, "a.yaml", "b.yaml")
@@ -689,15 +798,17 @@ def test_supervisor_cost_counts_toward_the_budget(tmp_path):
     from factory.cli import _attempts_cost
 
     db, aid = seeded_audit(tmp_path, cost=0.10, supervisor_cost=0.03)
-    assert _attempts_cost(ns_for(tmp_path, db=db), (aid,)) == pytest.approx(0.13)
+    cost, _ = _attempts_cost(ns_for(tmp_path, db=db), (aid,))
+    assert cost == pytest.approx(0.13)
 
 
 def test_cost_reads_the_audit_db_not_a_second_tally(tmp_path):
     from factory.cli import _attempts_cost
 
     db, aid = seeded_audit(tmp_path, cost=0.25, supervisor_cost=0.0)
-    assert _attempts_cost(ns_for(tmp_path, db=db), (aid,)) == pytest.approx(0.25)
-    assert _attempts_cost(ns_for(tmp_path, db=db), ()) == 0.0
+    ns = ns_for(tmp_path, db=db)
+    assert _attempts_cost(ns, (aid,)) == (pytest.approx(0.25), False)
+    assert _attempts_cost(ns, ()) == (0.0, False)
 
 
 def test_an_unreadable_cost_row_does_not_stop_the_loop(tmp_path):
@@ -705,5 +816,7 @@ def test_an_unreadable_cost_row_does_not_stop_the_loop(tmp_path):
     from factory.cli import _attempts_cost
 
     db, aid = seeded_audit(tmp_path, cost=0.5, supervisor_cost=0.0)
-    got = _attempts_cost(ns_for(tmp_path, db=db), (aid, 999_999))
+    got, leaked = _attempts_cost(ns_for(tmp_path, db=db), (aid, 999_999))
     assert got == pytest.approx(0.5)
+    # 读不到的那一行不许被当成漏账：漏账会触发熔断停机，而这里只是查不到 id。
+    assert leaked is False
