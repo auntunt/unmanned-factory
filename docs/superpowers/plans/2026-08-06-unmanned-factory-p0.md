@@ -6236,3 +6236,99 @@ PRD、第二轮什么都不做，断言 `rounds == 2` 且不合并。有这条�
 `hooks_before` 一样刻意没有默认值：填 `()` 会让漏传的调用方在每个引
 spec_doc 的任务上判红（空基线 vs 有标准 = 差异），让它当场 TypeError
 好过每次都响。这条也有测试钉（`inspect.signature`）。
+
+## 补：第十二个洞 —— 一个索引标记让改动从 git 眼里消失
+
+```
+git update-index --assume-unchanged tests/test_calc.py
+```
+
+之后 git 对这个文件的工作区改动一概不看。`capture_diff` 的
+`git diff HEAD --name-only` 里没有它，`git diff HEAD` 正文里也没有它。
+`--skip-worktree` 效果一样。
+
+比第七个洞（`.gitattributes -diff`）更彻底。那个只让 diff **正文**退化成
+「Binary files … differ」，路径还在 `changed_paths` 里 —— 范围监工和 runbook
+照常工作，三道闸门里两道正常。这个把路径本身抹掉。
+
+### 实测的完整攻击
+
+worker 可见地改坏源码，隐蔽地把测试改成永绿：
+
+```
+监工看到的 changed_paths = ('calc.py',)      ← 测试文件不在里面
+diff 里有 test_calc = False
+shadow_code=()  runner_hooks=()  diff_suppressed=()
+pytest -q → 退出码 0，"1 passed"
+```
+
+`calc.py` 那边留着一个 `return a - b`（需求是和）—— 一个监工看得见的错。
+但它旁边那份"绿"是伪造的，而伪造的动作没有任何闸门看见。
+
+### 危害的边界：出不了货，但那份绿是假的
+
+这条必须量清楚，它决定闸门的位置和 claim 的措辞：
+
+```
+git add -A  →  status 干净
+git commit  →  退出码 1，"无文件要提交，工作区干净"
+HEAD 里有 pdb: False        磁盘上有 pdb: True
+```
+
+`land` 提交不了这类文件。所以危害**不是**「未审代码出货」，是伪造那份绿 ——
+check 跑在真实文件树上，藏起来的那行会真的执行。闸门因此放在跑 check 之前，
+claim 里说的是「git 从此不看它们的改动，而 check 跑在真实文件树上」。
+
+### 金丝雀那条为什么覆盖不到
+
+金丝雀判「这一轮动了**能改变裁决**的文件」（conftest.py / pyproject.toml
+之类）。而这里那个文件在 git 眼里根本没动 —— `git add -A -N` 不碰它，
+`--name-only` 里没有它。金丝雀拿不到「这一轮动了什么」这个输入。
+
+### 判据：`git ls-files -v` 的首字母
+
+```
+h a.py                    ← 小写 = assume-unchanged
+S b.py                    ← S = skip-worktree
+h c.py                    ← 两个都挂，还是一个
+H d.py                    ← 正常
+```
+
+误报面：本仓库 106 个文件首字母**全是 H**。零。
+
+基线还是要有 —— 合法用法真实存在（有人拿 `--skip-worktree` 忽略本地 config
+的改动），在那种仓库上每个任务都判红等于这道闸门被关掉。索引不在 HEAD 里，
+所以没有第七个洞那种 `--source=HEAD` 的免费基线，照 hooks 的形状在
+`_loop` 循环外快照一次。
+
+**取消标记不报。** 刻意不像 `changed_hooks` 那样取对称差：hook 被删掉等于
+关掉一道闸门，而标记被取消等于**打开**一道视野。方向相反，判据不该照抄。
+
+### M83：测函数不等于测接线（本会话第三回）
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M79 | 闸门短路成 `if False and …` | KILLED（3 条） |
+| M80 | 只查小写，不查 `S` | KILLED（2 条） |
+| M81 | 只查 `S`，不查小写 | KILLED（6 条） |
+| M82 | `newly_skipped` 改成对称差 | KILLED |
+| M83 | 闸门不看基线，有标记就报 | **存活** → 补测试后 KILLED |
+| M84 | 路径从 `line[1:]` 切（多一个空格） | KILLED（5 条） |
+
+M83 存活时 17 条全过。原因：`test_pre_existing_flags_are_not_flagged` 测的是
+`newly_skipped` **这个函数**，而不是闸门在预挂标记的仓库上的行为。补
+`test_a_pre_existing_flag_does_not_block_the_merge` 之后 killed。
+
+写这条测试时踩到一个真实细节：worktree 有自己的索引，标记挂在父仓库上传不
+过来，得在 worktree 那边挂。测试里有一句 `assert index_skipped(ws) == ...`
+先钉住"标记真挂上了"—— 否则这条测试会变成又一次静默扑空。
+
+`tests/test_index_skip.py` 18 条。离线套件 846 passed，smoke 2 条真跑通过。
+
+### 顺带修正一个跑法错误
+
+前三次跑全套都停在 26% 不动，我一度以为挂住了。查进程才发现那里是
+`@pytest.mark.smoke` 的在线测试在等真实模型返回，两个 pytest 还并跑着。
+离线跑法是 `-m "not smoke"`（pyproject 第 29 行定义了这个 marker），
+82 秒跑完。清掉残留进程时顺手确认了一遍：孤儿 claude 进程要显式 pkill，
+这和「超时只杀了直接子进程」是同一个坑的另一面。

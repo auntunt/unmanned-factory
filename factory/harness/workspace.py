@@ -111,6 +111,46 @@ def hook_fingerprint(root: Path) -> frozenset[tuple[str, str]]:
     return frozenset(out)
 
 
+def index_skipped(root: Path) -> frozenset[str]:
+    """索引里被打上 assume-unchanged / skip-worktree 的路径。
+
+    `git ls-files -v` 的首字母：`H` 是正常，**小写**是 assume-unchanged，
+    `S` 是 skip-worktree。两个标记的效果一样致命 —— git 对这个文件的工作区
+    改动一概不看，`git diff HEAD` 里没有它，`--name-only` 里也没有它。
+
+    比 `.gitattributes`（第七个洞）更彻底：那个只让 diff 正文退化成
+    「Binary files … differ」，路径还在 changed_paths 里，范围监工和 runbook
+    照常工作。这个把路径本身抹掉，四道闸门全盲，而 check 跑在**真实文件树**
+    上 —— 那行代码会真的执行。
+
+    危害不是「未审代码出货」：实测 `git add -A` 不 stage 这类文件，land 那步
+    会以「无文件要提交」失败。危害是伪造那份绿 —— 把测试改成 `assert True`
+    再挂上标记，监工只看到源码文件的改动，pytest 退出码 0。
+    """
+    proc = _git(root, "ls-files", "-v")
+    if proc.returncode != 0:
+        return frozenset()
+    out = set()
+    for line in proc.stdout.splitlines():
+        if len(line) < 3 or line[1] != " ":
+            continue
+        tag = line[0]
+        # 小写 = assume-unchanged，S = skip-worktree。其余（H/M/R/C/K）正常。
+        if tag.islower() or tag == "S":
+            out.add(line[2:])
+    return frozenset(out)
+
+
+def newly_skipped(before: frozenset[str], after: frozenset[str]) -> tuple[str, ...]:
+    """这一轮**新挂上**标记的路径。
+
+    只报新增，不像 changed_hooks 那样取对称差：worker 把一个本来挂着标记的
+    文件**取消**标记，效果是让 git 重新看见它的改动 —— 那是往闸门视野里
+    送东西，不是藏东西。报它只会在合法情形上响。
+    """
+    return tuple(sorted(after - before))
+
+
 def changed_hooks(
     before: frozenset[tuple[str, str]], after: frozenset[tuple[str, str]]
 ) -> tuple[str, ...]:
