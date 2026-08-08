@@ -319,3 +319,26 @@ def test_an_attempt_with_no_claims_at_all_does_not_crash(capsys):
 
     _warn_if_untracked_spend(_row(0.0, []))
     assert capsys.readouterr().err == ""
+
+
+def test_loop_warns_when_there_is_no_wall_clock_bound(tmp_path, repo, capsys):
+    """预算不是充分的上限 —— 超时记 $0，反复超时的任务在预算眼里免费。
+
+    墙钟是超时唯一躲不过的那道闸，所以没给的时候要说出来。
+    """
+    code = main(["loop", "--queue", str(tmp_path / "q"),
+                 "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
+                 "--idle", "drain", "--no-sandbox", "--budget-usd", "5"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "--max-runtime 0" in err and "$0" in err
+
+
+def test_loop_does_not_warn_when_a_wall_clock_bound_is_given(
+        tmp_path, repo, capsys):
+    code = main(["loop", "--queue", str(tmp_path / "q"),
+                 "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
+                 "--idle", "drain", "--no-sandbox", "--budget-usd", "5",
+                 "--max-runtime", "14400"])
+    assert code == 0
+    assert "--max-runtime 0" not in capsys.readouterr().err

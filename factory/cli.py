@@ -483,6 +483,12 @@ def _cmd_loop(ns: argparse.Namespace) -> int:
     if not limits.budget_usd:
         print("⚠ --budget-usd 0：没有花费上限。这个循环会一直派发到队列空 "
               "(--idle watch 下永不空)，没人看着的时候也一样。", file=sys.stderr)
+    if not limits.max_runtime_s:
+        # 光有预算上限不够：超时的 attempt 记 $0（被 kill 的进程不打 usage
+        # payload），所以反复超时的任务在预算眼里是免费的。墙钟是超时躲不过
+        # 的那道闸。单个任务最坏 max_rounds x --timeout，默认 3 x 900s。
+        print("⚠ --max-runtime 0：没有墙钟上限。超时的 attempt 记 $0，"
+              "光靠 --budget-usd 拦不住反复超时的任务。", file=sys.stderr)
 
     pool = WorktreePool(Path(ns.workspace), root=ns.worktree_root) \
         if ns.worktree else None

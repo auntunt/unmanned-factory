@@ -42,6 +42,12 @@
     <!-- 预算上限必须给。0 = 无限，夜里没人看着。 -->
     <string>--budget-usd</string>
     <string>5</string>
+    <!-- 墙钟上限也必须给，光靠预算不够：超时的 attempt 记 $0（被 kill 的
+         进程不打 usage payload），所以一个反复超时的任务在预算眼里是免费的。
+         单个任务最坏是 3 轮 x 900s = 45 分钟，这里给 4 小时。
+         墙钟是超时唯一躲不过的那道闸。 -->
+    <string>--max-runtime</string>
+    <string>14400</string>
     <string>--worktree</string>
     <string>--global-runbook</string>
   </array>
