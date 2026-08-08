@@ -4931,3 +4931,69 @@ attempt #2 换 sonnet 重跑、通过、merge，commit 落地。**整条链路�
 
 这条比它看起来重要：一个会因为上游 400 而变红的 P0 判据，跑几次之后就会被
 当成 flaky 而被人加上 `-k not smoke`，然后它覆盖的那些字段就再也没人验了。
+
+---
+
+## 补：另外 7 处同样的超时洞（同日）
+
+harness 那两处改完之后我做了件本该更早做的事：grep 一遍 `subprocess.run`。
+
+结果是 7 处，全都传了 `timeout=`，全都只杀直接子进程：
+
+| 位置 | 跑的是什么 | 漏掉的是什么 |
+|---|---|---|
+| `supervisors/regression.py` | task YAML 里的 check 命令（`shell=True`） | 用户 shell 派生的任何东西 |
+| `supervisors/model_base.py` | 三个模型监工共用的那次调用 | 还在花钱的 CLI 进程树 |
+| `intake/checkgen.py` ×2 | 探针（用户 shell）+ 提议（模型） | 两样都有 |
+| `intake/extract.py` | 入口提取（模型） | 还在花钱的树 |
+| `intake/transcribe.py` | whisper | 按核数拉起来的 worker |
+| `runbook/library.py` | `requires` 前置探针（`shell=True`） | 用户 shell 派生的东西 |
+
+修法和 harness 那两处一样，`run_bounded` 加了个 `shell=True`。
+
+有两处值得单独说。
+
+**入口提取那条最隐蔽。** 它在队列**之前** —— 任务还没入队，没有 attempt，
+没有 TaskRun，没有账。它漏掉的花费连熔断器都看不见：熔断器数的是「有多少次
+**派发**的价格是假的」，而在提取阶段一次派发都还没发生。这个洞不会让任何数字
+变得可疑，只会让账单变大。
+
+**runbook 的 `requires` 探针在报表上完全无痕。** 探针超时按设计算「不满足」→
+规则跳过 → 任务照常往下走。也就是说：一条挂住的探针，在裁决、在日志、在报表
+上都看不出任何异常，只在 `ps` 里看得出来。这类「失败被吸收掉」的路径是漏进程
+最好的藏身处 —— 没有任何信号会把人引到那里。
+
+### 测试：第三次撞上同一件事
+
+每条都断言**孙子进程真的死了**，不是断言超时文本。这已经是同一个教训的第三次：
+
+1. `hard_killed is True` —— 标志是我们自己写的账，删掉整段 SIGKILL 照样绿；
+2. CLI 的两处接线 —— 删掉任一处，83 条测试全绿；
+3. 这一轮 —— 现成的 `test_timeout_becomes_claim` 只看 `"timeout" in claim["got"]`，
+   把 `run_bounded` 换回 `subprocess.run`，它照样绿。
+
+`"timeout"` 那个词是**我们自己写进去的字符串**。进程活着才是外部事实。
+
+7 处各自换回 `subprocess.run` 验过一遍，7 条测试各死各的 —— 特别是 checkgen
+那两个出口要分别验：它们在同一个文件里，很容易只改一处就以为改完了（第一遍
+我就只改了探针那处）。
+
+顺带三件事：
+
+- 之前手写了三份同样的 25 行「等 marker、轮询 `os.kill(pid, 0)`」，第四份的时候
+  抽成了 `tests/conftest.py::leak_probe`。它还负责在断言失败时把孙子杀掉 ——
+  一条漏进程的测试会把进程漏给**下一条**测试，那种红是查不出来的。
+- `transcribe.py` 之前一条测试都没有。它是唯一一条人在环里的入口（口述需求），
+  出问题的时候人就在旁边，所以一直没被当回事 —— 但它照样有超时。补了 6 条，
+  其中一条是「退出 0 但没产出 txt 也算错」：静默返回空串会让需求凭空变成空的。
+- runbook 的探针时限提成模块常量。原来硬编码 30，那条新测试就得真等 30 秒。
+
+`614 passed`（含真跑 claude 的 E2E）。跑完 `claude` 进程数 12 → 12，
+`sleep` 残留 0。
+
+### 现在整个工厂里没有不杀进程组的超时了
+
+剩下的 `subprocess.run` 只有 4 处，全是 `git`：`landing.py`、`worktree.py`、
+`workspace.py`、`sandbox.py` 的 `rev-parse`。git 不派生长命子进程，也不花钱，
+留着。判断依据是「这条命令会不会拉起我们不认识的东西」，不是「它有没有传
+timeout」。
