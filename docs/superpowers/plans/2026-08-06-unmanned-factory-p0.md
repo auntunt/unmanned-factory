@@ -6483,3 +6483,79 @@ git 的 config 键有几百个，逐个堵是猜机制。改成整份 local conf
 
 检查一道新闸门时要多问一句：**它的「之前是什么」是从哪读的，那个读法自己能不能被这一轮
 的改动影响。** 前面十几个洞里，这个形状出现了三次。
+
+## 补：第十五个洞 —— 给 diff 关掉正文的第三条路，前两道闸门都在它下游
+
+第七个洞（`.gitattributes`）和第十三个洞（`core.attributesFile`）补完之后，
+给 diff 属性设值的路还剩一条：**`.git/info/attributes`**。
+
+写一行 `*.py -diff` 进去，实测：
+
+```
+pdb 在 diff 里: False | diff 长度: 93 | paths: ('a.py',)
+闸门 #7  diff_suppressed: ()
+闸门 #13 changed_config : ()
+闸门 #12 index_skipped  : frozenset()
+影子代码: () | runner hooks: ()
+这个文件在 diff 里吗: False | git status: ' M a.py\n'
+```
+
+五道闸门全静默，而两个模型监工看到的是「Binary files a/a.py and b/a.py differ」。
+
+### 为什么第七道闸门恰好在这条路上瞎掉
+
+它的基线是 `git check-attr --source=HEAD`。`--source` 换的只是**树里那份
+`.gitattributes`**；`info/attributes` 是仓库级配置，git 读它读的永远是磁盘上
+的当前内容 —— 基线侧和现状侧都是「已被关掉」，差异恒为空。
+
+这是本会话同一形状的第四次：**一道闸门的基线，落在另一个 worker 可写的东西
+的下游。** 前三次是 #5（hook 基线在循环内）、#11（判据每轮重解析）、
+#14（config 第四层）。
+
+### 危害面比第七个洞大
+
+`.git/info/` 在 **common dir** 里，和 hooks 一样。实测：
+
+```
+worker 写的位置 : /private/tmp/attr15/.git/info/attributes
+  worktree pdb 可见=False
+  主仓库      pdb 可见=False
+```
+
+从一个 worktree 写进去，**主仓库和所有并行 worktree 的 diff 一起瞎**。一个
+worker 能同时关掉所有并行任务的监工视野。
+
+### 判据
+
+`sha256($(git rev-parse --git-common-dir)/info/attributes)`，派发前取一次，
+`_review` 里比。三个决定：
+
+- **判「这一轮变了」不判「有没有这个文件」**：外部仓库合法带一份是正常配法
+  （本机不该提交的属性配置就该放这儿）。本仓库根本没有它，基线是空串。
+- **不存在和读不了都当空串**：「从没有到有」照样是差异，拦得住；反过来把
+  读不了当成一个固定字符串，会让权限异常伪装成「没变」。
+- **问 git 要 common dir，不拼 `root/.git`**：worktree 里 `.git` 是文件不是
+  目录。M98 就是这条 —— 拼路径的版本在 worktree 上恒返回空串，闸门全瞎。
+
+### 设 attributes 的三条路，现在各有归属
+
+| 路径 | 归谁管 |
+| --- | --- |
+| 树里的 `.gitattributes` | 第七道闸门 `diff-suppressed` |
+| `core.attributesFile` | 第十三道闸门 `git-config-touched` |
+| `.git/info/attributes` | 这一道 `info-attributes-touched` |
+
+### 变异
+
+| 编号 | 变异 | 结果 |
+| --- | --- | --- |
+| M94 | 闸门整块短路 | KILLED (4 failed) |
+| M95 | 基线挪进循环开头 | KILLED (4 failed) |
+| M96 | 不看基线，有文件就报 | KILLED (1 failed) |
+| M97 | 指纹恒定返回空串（读了不算） | KILLED (8 failed) |
+| M98 | worktree 里拼 `root/.git`，不问 git | KILLED (5 failed) |
+
+M97 第一次扑空 —— 我猜了实现文本。本会话第五回，教训还是那条：穷举词表别猜，
+先把真实文本读出来。
+
+19 条测试，离线全套 891 passed。

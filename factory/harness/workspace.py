@@ -418,6 +418,42 @@ def neighbour_context(
 #: `git check-attr diff` 的正常回答。除此之外都意味着这个路径的 diff 被
 #: 改过 driver —— `unset` 是 `-diff`（输出退化成 "Binary files differ"），
 #: 任何别的值是自定义 driver（配 textconv 能让整段 diff **消失**）。
+def info_attributes(root: Path) -> str:
+    """`.git/info/attributes` 的内容指纹。不存在时返回空串。
+
+    这是给 diff 属性设值的**第三条路**，前两条各有闸门：
+
+      仓库树里的 .gitattributes  → diff_suppressed（第七个洞）。它的基线是
+                                   `check-attr --source=HEAD`，只换掉「树里那份」
+      core.attributesFile        → changed_config（第十三个洞）
+      .git/info/attributes       → 这里
+
+    第三条为什么必须单独判：`--source=HEAD` **不影响**这个文件，git 读它读的
+    永远是磁盘上的当前内容。于是 diff_suppressed 的基线侧和现状侧都是「已被
+    关掉」，差异为空 —— 那道闸门在这条路上恒不响（实测 `diff_suppressed`
+    返回 `()`，而 `"pdb.set_trace" in diff` 是 False）。
+
+    危害面比第七个洞更大：`.git/info/` 在**公共** git dir 里（和 hooks 一样），
+    父仓库和所有并行 worktree 共用一份。实测从一个 worktree 写进去，主仓库的
+    `git diff HEAD` 也跟着瞎 —— 一个 worker 能同时瞎掉所有并行任务的监工。
+
+    取内容 sha256 而不是「文件存不存在」：外部仓库可以合法带一份
+    `.git/info/attributes`（本机不该提交的属性配置就该放这儿）。要判的还是
+    「这一轮变了」，不是「有没有」。
+    """
+    common = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0 or not (base := common.stdout.strip()):
+        return ""
+    f = Path(base) / "info" / "attributes"
+    try:
+        return hashlib.sha256(f.read_bytes()).hexdigest()
+    except OSError:
+        # 不存在是绝大多数仓库的常态，和「读不了」一样当空 —— 两边都当空的话
+        # 「从没有到有」照样是差异，拦得住；反过来把读不了当成一个固定字符串
+        # 会让权限异常伪装成「没变」。
+        return ""
+
+
 _DIFF_ATTR_OK = "unspecified"
 
 

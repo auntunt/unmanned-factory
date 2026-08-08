@@ -34,6 +34,7 @@ from factory.harness.workspace import (
     diff_suppressed,
     git_config,
     hook_fingerprint,
+    info_attributes,
     index_skipped,
     newly_skipped,
     neighbour_context,
@@ -276,6 +277,20 @@ class Dispatcher:
         # **自己**回答问题的方式，而它们不出现在任何 diff 里。
         config_before = git_config(workspace)
 
+        # `.git/info/attributes` 的基线。设 attributes 一共三条路，这是第三条：
+        #   tree 里的 .gitattributes  → diff_suppressed（第七个洞，--source=HEAD 做基线）
+        #   core.attributesFile      → changed_config（第十三个洞）
+        #   .git/info/attributes     → 这里
+        # 前两条堵上之后这条还通：实测写一行 `*.py -diff` 进去，diff 正文退化成
+        # 「Binary files differ」，而 diff_suppressed 差异为空 —— `check-attr
+        # --source=HEAD` 也读这个文件，基线和现状都是「已关掉」。它又不是 config
+        # 键，第十三道闸门也看不见；文件本身不在 diff、不在 git status 里。
+        #
+        # 和 hooks 同一个性质：`.git/info` 属于 **common dir**，父仓库和所有并行
+        # worktree 共用一份（实测从 worktree 写进去，主仓库的 diff 也瞎了），
+        # 所以一个 worker 能污染所有并行任务的监工。
+        attrs_before = info_attributes(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -353,7 +368,7 @@ class Dispatcher:
 
             reports = self._review(
                 task, workspace, result, hooks_before, criteria_before,
-                skipped_before, config_before,
+                skipped_before, config_before, attrs_before,
             )
             for report in reports:
                 self._store.record_verdict(
@@ -461,6 +476,7 @@ class Dispatcher:
         criteria_before: tuple[str, ...],
         skipped_before: frozenset[str],
         config_before: frozenset[tuple[str, str]],
+        attrs_before: str,
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -641,6 +657,35 @@ class Dispatcher:
                     "这一轮没有改动仓库本地 git config",
                     f"{len(cfg)} 个 config 键变了：{_listed(cfg)}。config 不出现在"
                     f"任何 diff 里，而其中若干键能直接改变监工看到的 diff",
+                ),
+            )
+
+        # `.git/info/attributes` 这一轮变了。设 attributes 一共三条路，这是第三条：
+        #   tree 里的 .gitattributes  —— 第七道闸门（diff_suppressed）管
+        #   core.attributesFile       —— 上面那道 git-config-touched 管
+        #   .git/info/attributes      —— 这一条，两道都管不到
+        #
+        # 为什么第七道管不到：它的基线是 `check-attr --source=HEAD`，而
+        # `--source` 只换「tree 里那份 .gitattributes」，info/attributes 属于
+        # 仓库级，**基线侧和现状侧都会读它** → 差异恒为空。实测写一行
+        # `*.py -diff` 之后 diff_suppressed 返回 ()，而 diff 正文已经退化成
+        # 「Binary files a/a.py and b/a.py differ」。
+        #
+        # 危害面比第七个洞大：`.git/info` 在 **common dir**，父仓库和所有并行
+        # worktree 共用一份（实测从 worktree 写进去，主仓库的 diff 也瞎了）——
+        # 和 hooks 同一个性质，一个 worker 能污染所有并行任务的监工。
+        #
+        # 判「这一轮变了」而不是「有没有这个文件」：外部仓库合法拥有它是正常的
+        # （常见配法是给生成物加 `-diff`）。本仓库根本没有这个文件，基线是空串。
+        if info_attributes(workspace) != attrs_before:
+            return (
+                self._blocked(
+                    "info-attributes-touched",
+                    "sha256 of $(git rev-parse --git-common-dir)/info/attributes",
+                    "这一轮没有改动 .git/info/attributes",
+                    ".git/info/attributes 变了。一行 `*.py -diff` 就让监工看到的 "
+                    "diff 正文退化成「Binary files … differ」，而这个文件不在任何 "
+                    "diff、任何 config、git status 里，且被所有并行 worktree 共用",
                 ),
             )
 
