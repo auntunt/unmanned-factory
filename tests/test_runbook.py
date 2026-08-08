@@ -331,3 +331,33 @@ def test_runbook_claim_names_the_rule_source(tmp_path):
         tmp_path, "def g():\n    breakpoint()\n", runbook=RunbookLibrary.load()
     )
     assert "global:" in report.escalation_reason
+
+
+def test_a_hanging_requires_probe_leaves_no_children_behind(
+    tmp_path, leak_probe, monkeypatch
+):
+    """requires 也是 YAML 里的 shell。挂住的探针同样会漏一棵树。
+
+    这条路容易被漏掉，因为探针超时**不影响结果**（超时算「不满足」，
+    规则跳过，任务照走）—— 从报表上看一切正常，进程留在机器上。
+    """
+    import factory.runbook.library as lib
+
+    # 别让这条测试等满 30s 的真实时限
+    monkeypatch.setattr(lib, "_PROBE_TIMEOUT_S", 1)
+
+    probe = leak_probe("requires")
+    ws = tmp_path / "ws"
+    write(ws, "a.py", "x = 1\n")
+    rules = write(
+        tmp_path, "r.yaml",
+        "rules:\n  - name: slow-probe\n"
+        "    command: 'true'\n"
+        f"    requires: {probe.command!r}\n"
+        "    when: ['*.py']\n",
+    )
+    sel = RunbookLibrary.load(project=rules, include_global=False).select(
+        ("a.py",), ws
+    )
+    assert sel.checks == ()          # 超时 → 不满足 → 跳过，任务不受影响
+    probe.assert_reaped()

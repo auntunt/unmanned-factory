@@ -31,10 +31,12 @@ declared_paths 仍由看不见仓库的模型产出，checks 由看得见的产�
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 
 _MAX_FIELD = 4000
 _PROBE_TIMEOUT_S = 60
@@ -202,11 +204,10 @@ def probe_check(check: dict, workspace: Path, *, timeout_s: int = _PROBE_TIMEOUT
         return Probe(check, "broken", None, "command 为空")
 
     try:
-        proc = subprocess.run(
-            command, shell=True, cwd=workspace,
-            capture_output=True, text=True, timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired:
+        # 探针跑的是模型刚提议的、没人审过的 shell。超时杀整组，
+        # 别让一条乱写的 check 在机器上留东西。见 proc 模块。
+        proc = run_bounded(command, cwd=workspace, timeout_s=timeout_s, shell=True)
+    except ProcTimeout:
         # 超时的 check 在回归监工那里也会超时。不留。
         return Probe(check, "broken", None, f"探针超时（{timeout_s}s）")
     except OSError as exc:
@@ -335,11 +336,10 @@ class CheckProposer:
         """
         with tempfile.TemporaryDirectory(prefix="factory-checkgen-") as cwd:
             try:
-                proc = subprocess.run(
-                    self._argv(prompt), cwd=cwd,
-                    capture_output=True, text=True, timeout=self._timeout_s,
+                proc = run_bounded(
+                    self._argv(prompt), cwd=cwd, timeout_s=self._timeout_s,
                 )
-            except subprocess.TimeoutExpired:
+            except ProcTimeout:
                 raise CheckGenError(f"提议 check 超时（{self._timeout_s}s）")
             except OSError as exc:
                 raise CheckGenError(f"无法启动 {self._binary}：{exc}")

@@ -17,13 +17,14 @@ checks 也一样只抄用户说的验收标准。它不知道这个仓库怎么�
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.intake.guard import GuardFinding, harden_ops
 
 _MAX_FIELD = 4000
@@ -198,12 +199,10 @@ class TaskExtractor:
 
         with tempfile.TemporaryDirectory(prefix="factory-intake-") as cwd:
             try:
-                proc = subprocess.run(
-                    self._argv(prompt),
-                    cwd=cwd, capture_output=True, text=True,
-                    timeout=self._timeout_s,
+                proc = run_bounded(
+                    self._argv(prompt), cwd=cwd, timeout_s=self._timeout_s,
                 )
-            except subprocess.TimeoutExpired:
+            except ProcTimeout:
                 raise IntakeError(f"模型提取超时（{self._timeout_s}s）")
             except OSError as exc:
                 raise IntakeError(f"无法启动 {self._binary}: {exc}")

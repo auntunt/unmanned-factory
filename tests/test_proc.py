@@ -163,3 +163,35 @@ def test_a_hard_killed_child_is_reaped_not_left_a_zombie(tmp_path):
     with pytest.raises(Timeout):
         run_bounded([str(script)], cwd=tmp_path, timeout_s=0.5)
     assert _own_zombies() == [], "硬杀之后留下了没回收的僵尸"
+
+
+# ── shell=True ──
+# 回归监工和 check 探针走这条：命令是 task YAML / 模型提议的 shell 串。
+# 这条路**更**需要杀整组 —— sh 派生的东西 sh 自己不管，而那串命令是用户
+# 写的，我们对它派生什么没有任何假设。
+
+def test_shell_mode_runs_a_command_string(tmp_path):
+    got = run_bounded("echo hi && exit 3", cwd=tmp_path,
+                      timeout_s=10, shell=True)
+    assert got.returncode == 3
+    assert got.stdout.strip() == "hi"
+
+
+def test_shell_mode_also_kills_the_whole_group(tmp_path):
+    """`cmd & other` 里那个后台进程超时后必须一起死。
+
+    shell=True 的时候 Popen 自己会多一层 sh，孙子实际上是曾孙 —— 靠
+    killpg 才管得到，一层层 wait 是管不到的。
+    """
+    marker = tmp_path / "shell_grandchild.pid"
+    command = f"sh -c 'echo $$ > {marker}; exec sleep 300' & sleep 300"
+
+    with pytest.raises(Timeout):
+        run_bounded(command, cwd=tmp_path, timeout_s=1, shell=True)
+
+    pid = _grandchild_pid(marker)
+    for _ in range(40):
+        if not _alive(pid):
+            break
+        time.sleep(0.05)
+    assert not _alive(pid), f"shell 模式漏了 {pid}"

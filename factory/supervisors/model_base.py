@@ -18,11 +18,12 @@ dispatcher 也不会把它当修复指令发给 worker（worker 修不了监工�
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 from dataclasses import dataclass
 
 from factory.audit.models import SupervisorRole, Verdict
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.supervisors.base import SupervisorReport
 
 SUPERVISOR_ERROR_PREFIX = "supervisor-"
@@ -146,14 +147,14 @@ class ClaudeJudge:
 
     def _ask_in(self, prompt: str, cwd: str) -> ModelCall:
         try:
-            proc = subprocess.run(
+            # 不是 subprocess.run：三个模型监工都走这条路，每次超时都会留下
+            # 一棵还在花钱的 node 进程树。见 proc 模块。
+            proc = run_bounded(
                 self._argv(prompt),
                 cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_s,
+                timeout_s=self._timeout_s,
             )
-        except subprocess.TimeoutExpired:
+        except ProcTimeout:
             return ModelCall(ok=False, error_text=f"timeout after {self._timeout_s}s")
         except OSError as exc:
             return ModelCall(ok=False, error_text=f"cannot launch {self._binary}: {exc}")

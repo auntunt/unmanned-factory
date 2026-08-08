@@ -66,15 +66,20 @@ def _killpg(pgid: int, sig: int) -> bool:
         return False
 
 
-def run_bounded(argv: list[str], *, cwd: Path | str | None = None,
+def run_bounded(argv: list[str] | str, *, cwd: Path | str | None = None,
                 env: dict[str, str] | None = None,
-                timeout_s: float | None = None) -> Completed:
+                timeout_s: float | None = None,
+                shell: bool = False) -> Completed:
     """跑一个程序，超时杀整棵进程树，抛 Timeout。
 
     timeout_s=None 表示不限时（探针路径不需要这一层）。
+
+    shell=True 是给回归监工用的：task YAML 里的 check 命令本来就是 shell
+    串（`pytest -q && npm test`）。这条路**更**需要杀整组 —— sh 自己派生的
+    东西 sh 都不管，而 check 命令是用户写的，我们对它派生什么没有任何假设。
     """
     proc = subprocess.Popen(
-        argv, cwd=cwd, env=env, text=True,
+        argv, cwd=cwd, env=env, text=True, shell=shell,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         # 这一行是整个模块存在的理由。没有它，下面的 killpg 会打到
         # **我们自己**的进程组 —— 那等于工厂自杀。

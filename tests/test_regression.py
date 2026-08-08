@@ -61,7 +61,21 @@ def test_runs_in_workspace_cwd(ws):
 def test_timeout_becomes_claim(ws):
     claim = run_check(CheckSpec("slow", "sleep 5", timeout_s=1), ws)
     assert claim is not None
+    # "timeout" 这个词是承重的：漏账探测器按它认超时。
     assert "timeout" in claim["got"]
+
+
+def test_a_timed_out_check_leaves_no_children_behind(ws, leak_probe):
+    """check 命令是 task YAML 里用户写的 shell，它派生的东西 sh 自己不管。
+
+    上面那条只看 claim 文本 —— 把 run_bounded 换回 subprocess.run，它照样
+    过。真正要断言的是那个孙子进程死了：一条挂住的 check 留下的 pytest /
+    node 会接着占机器。
+    """
+    probe = leak_probe("check")
+    claim = run_check(CheckSpec("leaky", probe.command, timeout_s=1), ws)
+    assert claim is not None and "timeout" in claim["got"]
+    probe.assert_reaped()
 
 
 def test_unknown_expect_becomes_claim(ws):

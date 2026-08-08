@@ -378,3 +378,15 @@ def test_cli_prd_missing_audio_binary_returns_2(tmp_path):
     rc = main(["prd", "--audio", str(audio),
                "--whisper-binary", str(tmp_path / "no-such-whisper")])
     assert rc == 2
+
+
+def test_a_timed_out_extraction_leaves_no_children_behind(leak_probe):
+    """入口提取也是一次模型调用，超时同样会漏一棵还在花钱的树。
+
+    这条路在最前面：任务还没进队列，没有 attempt，没有账。漏掉的花费
+    连熔断器都看不见 —— 它数的是「派发」，而这里一次派发都还没发生。
+    """
+    probe = leak_probe("extract")
+    with pytest.raises(IntakeError, match="超时"):
+        TaskExtractor(binary=str(probe.script), timeout_s=1).run("做个东西")
+    probe.assert_reaped()

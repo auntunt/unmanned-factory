@@ -87,6 +87,18 @@ def test_a_hanging_check_is_discarded_rather_than_kept(repo):
     assert "超时" in p.detail
 
 
+def test_a_hanging_probe_leaves_no_children_behind(repo, leak_probe):
+    """探针跑的是模型刚提议、没人审过的 shell。
+
+    上面那条只看 detail 文本，换回 subprocess.run 也过。这条看进程：入口
+    一次要探十几条 check，每条漏一棵树的话机器很快就没了。
+    """
+    probe = leak_probe("probe")
+    p = probe_check({"command": probe.command}, repo, timeout_s=1)
+    assert p.verdict == "broken"
+    probe.assert_reaped()
+
+
 def test_stdout_contains_is_judged_on_output_not_exit_code(repo):
     # 命令退出 0，但要的字符串不在 stdout 里 → 还是红的，留下。
     p = probe_check({"command": 'echo hello', "expect": "stdout_contains",
@@ -336,3 +348,19 @@ def test_a_proposal_that_survives_nothing_leaves_checks_empty(repo, monkeypatch)
     monkeypatch.setattr(_cg, "CheckProposer", Empty)
     out = _propose_checks(_draft(), _ns(repo))
     assert out.checks == ()
+
+
+def test_a_timed_out_proposal_leaves_no_children_behind(repo, leak_probe):
+    """提议 checks 的那次模型调用超时，也要把整棵树收干净。
+
+    这条和上面那条探针是**两个**不同的 subprocess 出口（一个跑用户 shell，
+    一个跑模型），两处都得改。第一次改的时候只改了探针那处。
+    """
+    probe = leak_probe("proposer")
+    with pytest.raises(CheckGenError, match="超时"):
+        CheckProposer(binary=str(probe.script), timeout_s=1).propose(
+            acceptance=["AC-1: 必须返回 str"],
+            prompt="做个 slugify",
+            workspace=repo,
+        )
+    probe.assert_reaped()

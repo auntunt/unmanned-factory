@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
+
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 
 #: 常见格式。不做转码 —— 交给 whisper（它内部走 ffmpeg）。
 AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".mp4", ".mpga", ".webm", ".flac", ".ogg")
@@ -63,10 +65,10 @@ def transcribe(
         if language:
             argv += ["--language", language]
         try:
-            proc = subprocess.run(
-                argv, cwd=out_dir, capture_output=True, text=True, timeout=timeout_s
-            )
-        except subprocess.TimeoutExpired:
+            # 不是 subprocess.run：whisper 会拉起自己的 worker，超时只 kill
+            # 顶上那个的话它们会接着占满 CPU。见 proc 模块。
+            proc = run_bounded(argv, cwd=out_dir, timeout_s=timeout_s)
+        except ProcTimeout:
             raise TranscribeError(f"转录超时（{timeout_s}s）：{src.name}")
         except OSError as exc:
             raise TranscribeError(f"无法启动 {binary}: {exc}")

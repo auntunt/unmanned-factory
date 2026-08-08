@@ -18,13 +18,14 @@ worker 对 workspace 有写权限（沙箱只挡 workspace *外面*），已实�
 from __future__ import annotations
 
 import shlex
-import subprocess
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
 import yaml
 
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.task import CheckSpec
 
 GLOBAL_RULES = Path(__file__).with_name("global_rules.yaml")
@@ -186,14 +187,22 @@ class RunbookLibrary:
         return Selection(checks=tuple(checks), skipped=tuple(skipped))
 
 
+#: 前置探针的时限。探针该是「装了没装」这种一瞬间的问题。
+_PROBE_TIMEOUT_S = 30
+
+
 def _probe(command: str, workspace: Path) -> bool:
-    """前置探针。超时/异常都算不满足 —— 探针本身不该让任务失败。"""
+    """前置探针。超时/异常都算不满足 —— 探针本身不该让任务失败。
+
+    走 run_bounded 而不是 subprocess.run：requires 是 runbook YAML 里写的
+    shell，内置那条是 `command -v python3`，但用户可以写 `docker info`
+    这种会拉起东西的。超时杀整组，见 proc 模块。
+    """
     try:
-        return subprocess.run(
-            command, shell=True, cwd=workspace,
-            capture_output=True, timeout=30,
+        return run_bounded(
+            command, cwd=workspace, timeout_s=_PROBE_TIMEOUT_S, shell=True,
         ).returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
+    except (ProcTimeout, OSError):
         return False
 
 

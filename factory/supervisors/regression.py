@@ -6,11 +6,12 @@ claims 是打回 worker 时的唯一载荷，所以每条都必须写清
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
 from factory.audit.models import SupervisorRole, Verdict
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.supervisors.base import SupervisorReport
 from factory.task import CheckSpec
 
@@ -18,13 +19,14 @@ _MAX_CAPTURE = 2000
 
 
 def _sh(command: str, workspace: Path, timeout_s: int):
-    return subprocess.run(
+    # 不是 subprocess.run：这里 shell=True，command 是 task YAML 里的一串
+    # 用户写的 shell。超时只 kill 那个 sh，它拉起的 pytest / node / docker
+    # 全都活下来 —— 一条挂住的 check 能在机器上留一地进程。见 proc 模块。
+    return run_bounded(
         command,
-        shell=True,
         cwd=workspace,
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
+        timeout_s=timeout_s,
+        shell=True,
     )
 
 
@@ -32,7 +34,9 @@ def run_check(spec: CheckSpec, workspace: Path) -> dict | None:
     """跑一条 check。通过返回 None，不通过返回一条 claim。"""
     try:
         proc = _sh(spec.command, workspace, spec.timeout_s)
-    except subprocess.TimeoutExpired:
+    except ProcTimeout:
+        # 这条 got 文本是承重的：漏账探测器靠 "timeout" in got.lower() 认
+        # 超时（factory/backlog 的 is_untracked_spend）。别改措辞。
         return {
             "check": spec.name,
             "command": spec.command,
@@ -66,7 +70,7 @@ def run_check(spec: CheckSpec, workspace: Path) -> dict | None:
     if spec.expect == "commands_agree":
         try:
             other = _sh(spec.value, workspace, spec.timeout_s)
-        except subprocess.TimeoutExpired:
+        except ProcTimeout:
             return {
                 "check": spec.name,
                 "command": spec.value,

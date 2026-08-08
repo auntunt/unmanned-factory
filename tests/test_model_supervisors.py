@@ -162,18 +162,18 @@ def test_judge_runs_in_a_clean_empty_cwd():
 
     seen = {}
 
-    def fake_run(argv, *, cwd, capture_output, text, timeout):
+    def fake_run(argv, *, cwd, timeout_s=None, **kw):
         seen["cwd"] = cwd
         seen["entries"] = os.listdir(cwd)
         raise OSError("stop here")
 
     j = ClaudeJudge(binary="claude")
     import factory.supervisors.model_base as mb
-    orig, mb.subprocess.run = mb.subprocess.run, fake_run
+    orig, mb.run_bounded = mb.run_bounded, fake_run
     try:
         j.ask("x")
     finally:
-        mb.subprocess.run = orig
+        mb.run_bounded = orig
 
     assert seen["entries"] == []                      # 空目录，看不到任何仓库
     assert "自动化无人工厂" not in seen["cwd"]
@@ -214,3 +214,19 @@ def test_spec_supervisor_still_refuses_the_build_log_alongside_context():
             context=log,
             withheld=(log,),
         )
+
+
+def test_a_timed_out_judge_leaves_no_children_behind(leak_probe):
+    """三个模型监工共用这条路，每次超时都留下一棵还在花钱的进程树。
+
+    这里不 mock：binary 换成一个自己派生后台进程的脚本，然后看那个孙子
+    是不是真的死了。只断言 error_text 里有 "timeout" 的话，把 run_bounded
+    换回 subprocess.run 也照样过 —— 那行字是我们自己写的账。
+    """
+    from factory.supervisors.model_base import ClaudeJudge
+
+    probe = leak_probe("judge")
+    call = ClaudeJudge(binary=str(probe.script), timeout_s=1).ask("x")
+    assert call.ok is False
+    assert "timeout" in call.error_text
+    probe.assert_reaped()
