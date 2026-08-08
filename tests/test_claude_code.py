@@ -298,3 +298,77 @@ def test_a_new_unknown_field_is_not_drift(tmp_path, repo):
     r = ClaudeCodeAdapter(binary=_fake_claude(tmp_path, payload)).run(
         Task(task_id="T", prompt="x"), repo, Limits())
     assert r.exit_status is ExitStatus.OK
+
+
+# ---------- token 记账：usage 是个低估的数 ----------
+#
+# 加这几条之前，改 tokens 的来源不会让任何测试变红 —— 没有一条测试在测
+# token 记账。而 token 是单位成本指标的分母。
+
+def test_model_usage_wins_over_usage():
+    """`usage` 只算最后一轮，`modelUsage` 是累计。真跑实测两边不一致：
+    同一次调用 usage.in=27415，modelUsage 累计 77856。
+
+    判 modelUsage 是权威的依据：它各模型 costUSD 之和与顶层 total_cost_usd
+    **完全相等**（0.40520999999999996 两边一致），而 usage 和它对不上。
+    """
+    from factory.harness.drift import token_split, total_tokens
+
+    p = {"usage": {"input_tokens": 27415, "output_tokens": 10},
+         "modelUsage": {"m": {"inputTokens": 77856, "outputTokens": 249}}}
+    assert token_split(p) == (77856, 249)
+    assert total_tokens(p) == 78105
+
+
+def test_the_supervisor_flag_combo_zeroes_usage_but_not_model_usage():
+    """真跑抓到的那一种：监工带上四个独立性 flag 时 usage 全是 0。
+
+    键在、值为 0 —— `missing_fields` 按设计看不见（判值会天天误报），
+    所以这个洞只能在取数这一侧堵。原来监工那行读 usage，于是**所有**
+    模型监工的 token 都记 0。
+    """
+    from factory.harness.drift import total_tokens
+
+    p = {"usage": {"input_tokens": 0, "output_tokens": 0},
+         "modelUsage": {"gpt-5.6-luna": {"inputTokens": 2719,
+                                         "outputTokens": 249}}}
+    assert total_tokens(p) == 2968
+
+
+def test_usage_is_the_fallback_not_the_dead_end():
+    """没有 modelUsage 时仍读 usage —— 不能因为换了来源就把老格式判成 0。"""
+    from factory.harness.drift import token_split
+
+    assert token_split({"usage": {"input_tokens": 5, "output_tokens": 3}}) == (5, 3)
+    assert token_split({}) == (0, 0)
+    assert token_split(None) == (0, 0)
+
+
+def test_an_empty_model_usage_falls_back_instead_of_reporting_zero():
+    """`modelUsage: {}` 要回落到 usage。
+
+    只判「键在不在」的话空 dict 会让 token 记 0，而 usage 里明明有数。
+    """
+    from factory.harness.drift import token_split
+
+    p = {"usage": {"input_tokens": 7, "output_tokens": 2}, "modelUsage": {}}
+    assert token_split(p) == (7, 2)
+
+
+def test_the_adapter_records_model_usage_tokens_end_to_end(tmp_path, repo):
+    """接线测试：drift.token_split 真的接到了 AttemptResult 上。
+
+    上面那几条只测了取数函数本身。函数对了但 adapter 还在读 usage 的话，
+    它们全绿而记账照旧低估 —— 「一道谁都没接上的闸门在报表上和接上了
+    长得一样」的又一次。
+    """
+    payload = dict(OK_PAYLOAD)
+    payload["usage"] = {"input_tokens": 0, "output_tokens": 0}
+    payload["modelUsage"] = {"m": {"inputTokens": 2719, "outputTokens": 249}}
+
+    binary = _fake_claude(tmp_path, payload)
+    adapter = ClaudeCodeAdapter(binary=binary, projects_root=tmp_path / "proj")
+    res = adapter.run(Task(task_id="T-1", prompt="x"), repo,
+                      Limits(max_turns=5, timeout_s=30), model="haiku")
+
+    assert (res.tokens_in, res.tokens_out) == (2719, 249)

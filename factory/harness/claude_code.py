@@ -26,6 +26,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from factory.harness import drift
 from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits, ToolCall
 from factory.harness.proc import Timeout as ProcTimeout
@@ -35,33 +36,12 @@ from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
 
 
-#: 格式漂移的标记串。**承重**：漏账熔断器靠它认「这次花费记不上账」
-#: （factory/cli.py 的 is_untracked_spend）。改这个字面量要同时改那边，
-#: 否则漂移会退回成静默的 $0 —— 也就是这个检查存在之前的状态。
-DRIFT_MARKER = "harness-format-drift"
-
-#: 缺了就会**静默降级**的字段。不是「JSON 里所有字段」——
-#: 只列那些缺失后果是「数字变 0 / 判断反转」而不是报错的。
-#:
-#: transcript / tool_calls 不在这里：它们缺失的后果是监工少一份证据，
-#: 会在裁决里看得见，不会伪装成一个正常的便宜任务。
-_LOAD_BEARING: tuple[tuple[str, str], ...] = (
-    ("is_error", "成败判断会反转成永远成功"),
-    ("total_cost_usd", "花费会记 0，预算上限形同虚设"),
-    ("usage", "token 数全 0，单位成本指标失效"),
-)
-
-
-def _missing_fields(payload: dict) -> tuple[str, ...]:
-    """列出承重字段里缺掉的那些。
-
-    只判**键在不在**，不判值合不合理：`total_cost_usd: 0` 是完全正常的
-    （缓存命中、极短任务），把 0 当漂移会让熔断器天天误报，
-    而一个天天误报的熔断器等于被关掉的熔断器。
-    """
-    if not isinstance(payload, dict):
-        return tuple(name for name, _ in _LOAD_BEARING)
-    return tuple(name for name, _ in _LOAD_BEARING if name not in payload)
+#: 漂移检测搬去了 `factory/harness/drift.py` —— 读这份 JSON 的不止这里，
+#: 模型监工读的是同一个 CLI 的同一种输出，而它比这一路贵得多。
+#: 这两个别名留着是因为外面（含测试）已经在按这个名字引用。
+DRIFT_MARKER = drift.DRIFT_MARKER
+_LOAD_BEARING = drift.LOAD_BEARING
+_missing_fields = drift.missing_fields
 
 
 class ClaudeCodeAdapter:
@@ -198,12 +178,11 @@ class ClaudeCodeAdapter:
         missing = _missing_fields(payload)
         if missing:
             status = ExitStatus.ERROR
-            drift = (f"{DRIFT_MARKER}: 输出 JSON 缺少承重字段 "
-                     f"{', '.join(missing)} —— harness 输出格式可能变了，"
-                     f"本次花费记不上账")
-            error_text = f"{drift}\n{error_text}".strip()
+            error_text = f"{drift.drift_text(missing)}\n{error_text}".strip()
 
-        usage = payload.get("usage") or {}
+        # `usage` 只算最后一轮，多轮调用会系统性低估；真数在 modelUsage。
+        # 实测同一次调用 usage.in=27415 而 modelUsage 累计 77856。见 drift 模块。
+        tok_in, tok_out = drift.token_split(payload)
         session_id = payload.get("session_id")
         transcript = (
             find_transcript(session_id, root=self._projects_root)
@@ -220,8 +199,8 @@ class ClaudeCodeAdapter:
             version,
             elapsed_ms=payload.get("duration_ms") or elapsed_ms,
             error_text=error_text,
-            tokens_in=int(usage.get("input_tokens", 0)),
-            tokens_out=int(usage.get("output_tokens", 0)),
+            tokens_in=tok_in,
+            tokens_out=tok_out,
             cost_usd=float(payload.get("total_cost_usd", 0.0) or 0.0),
             session_id=session_id,
             transcript_path=str(transcript) if transcript else None,

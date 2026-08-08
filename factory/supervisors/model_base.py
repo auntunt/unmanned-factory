@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass
 
 from factory.audit.models import SupervisorRole, Verdict
+from factory.harness import drift
 from factory.harness.proc import Timeout as ProcTimeout
 from factory.harness.proc import run_bounded
 from factory.supervisors.base import SupervisorReport
@@ -166,9 +167,23 @@ class ClaudeJudge:
                 ok=False, error_text=(proc.stdout or proc.stderr or "")[:_MAX_FIELD]
             )
 
-        usage = payload.get("usage") or {}
-        tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+        # 走 drift.total_tokens 而不是自己读 usage：监工带上四个独立性 flag 时
+        # `usage.input_tokens` 实测是 **0**（真数在 modelUsage 里）。原来这行
+        # 读 usage，于是所有模型监工的 token 都记 0 —— 真跑复现过。
+        tokens = drift.total_tokens(payload)
         cost = float(payload.get("total_cost_usd", 0.0) or 0.0)
+
+        # 格式漂移。走 ok=False 而不是加个标记继续：那条路已经会判 FAIL 且
+        # 带 SUPERVISOR_ERROR_PREFIX（升级给人，不打回 worker），正是漂移
+        # 该去的地方 —— 读不懂输出是我们的故障，不是 worker 的错。
+        #
+        # 监工这一路比 worker 那一路更值得加固：P1 真跑单任务 $0.65 **全部**
+        # 落在两个模型监工上，而监工的花费记在 verdict 行、attempt 行照常收费，
+        # 所以 `is_untracked_spend` 第一行 `if row.cost_usd: return False`
+        # 会直接放过它。实测：attempt $0.12 + 监工漏账，账上 $0.12，熔断器 False。
+        if (missing := drift.missing_fields(payload)):
+            return ModelCall(ok=False, tokens=tokens, cost_usd=cost,
+                             error_text=drift.drift_text(missing)[:_MAX_FIELD])
 
         if payload.get("is_error"):
             return ModelCall(

@@ -597,7 +597,8 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
     return total, leaked
 
 
-#: 漏账的两条来源。都是「花了钱但 cost_usd 记 0」，所以走同一个熔断器。
+#: 漏账的两条来源。都是「花了钱但账上记不全」，所以走同一个熔断器 ——
+#: 但**判据不同**，见下面两个常量分开的理由。
 #:
 #:   timeout      —— 进程被 kill，CLI 没来得及打出账单
 #:   格式漂移     —— JSON 字段改名，账单在那儿但我们没读到（spec §10 风险 6）
@@ -608,42 +609,70 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
 #:
 #: 第二条用 import 来的常量而不是重抄一遍字面量：写 adapter 那边的人改了串
 #: 却没改这里，漂移会静默退回成 $0 —— 也就是这个检查不存在时的样子，且全绿。
-_LEAK_MARKERS: tuple[str, ...] = ("timeout", DRIFT_MARKER)
+
+#: 「attempt 有钱 ⇒ 这条不算漏账」成立的 marker。超时是这种：进程被 kill
+#: 就必然拿不到账单，所以 attempt 记着 $2.45 说明它没走那条路（是重试里
+#: 别的轮次超时），报警只会是噪音。
+_LEAK_MARKERS_ZERO_ONLY: tuple[str, ...] = ("timeout",)
+
+#: 「attempt 有钱也仍然算漏账」的 marker。漂移是这种：漏的可能是**监工**
+#: 那笔账，而监工花费记在 verdict 行上、attempt 行照常收费。
+#: 实测：attempt $0.12 + 两个监工漂移记 $0，真实约 $0.65。
+#: 拿 attempt 有没有钱来判漂移，等于用一个无关的数做判据。
+_LEAK_MARKERS_ANY_COST: tuple[str, ...] = (DRIFT_MARKER,)
 
 
 def is_untracked_spend(row) -> bool:
     """这个 attempt 记 $0，但真的花了钱。
 
-    判据是 claim / error_text 里有 _LEAK_MARKERS 之一：这两种情况在审计库里
-    都只落成文本（`实得 'timeout: timeout after 900s'`），没有单独的状态列。
-    文本判据不好看，但比在审计模型上加一列小得多。
+    判据是 claim / error_text 里的 marker：这两种情况在审计库里都只落成文本
+    （`实得 'timeout: timeout after 900s'`），没有单独的状态列。文本判据不
+    好看，但比在审计模型上加一列小得多。
 
     返回布尔而不是只打警告：循环要靠这个数做熔断（连续 N 个任务都在烧
     不计价的钱就停机）。只打警告的话，那道闸没有数据可依。
     """
-    if row.cost_usd:
-        return False
-    if _has_leak_marker(getattr(row, "error_text", "") or ""):
-        return True
+    texts = [getattr(row, "error_text", "") or ""]
     for v in row.supervisors:
         for c in (v.claims or ()):
             # claims 是 JSON 列，取出来就是 dict。
-            got = str((c or {}).get("got", "")) if isinstance(c, dict) else ""
-            if _has_leak_marker(got):
-                return True
-    return False
+            texts.append(str((c or {}).get("got", "")) if isinstance(c, dict)
+                         else "")
+
+    if any(_has_marker(t, _LEAK_MARKERS_ANY_COST) for t in texts):
+        return True
+    # 这一类要 attempt 记 $0 才算 —— 理由见 _LEAK_MARKERS_ZERO_ONLY。
+    if row.cost_usd:
+        return False
+    # 没有任何 marker 的 $0 是正常的（确定性监工那一路本来就免费），
+    # 所以这里不能反过来「$0 就算漏账」—— 那会让熔断器天天误报。
+    return any(_has_marker(t, _LEAK_MARKERS_ZERO_ONLY) for t in texts)
 
 
-def _has_leak_marker(text: str) -> bool:
+def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
     low = text.lower()
-    return any(m in low for m in _LEAK_MARKERS)
+    return any(m in low for m in markers)
 
 
 def _warn_if_untracked_spend(row) -> bool:
-    """漏账就说出来，别让预算闸门静默读成 0。返回是否漏账。"""
+    """漏账就说出来，别让预算闸门静默读成 0。返回是否漏账。
+
+    两种漏账印不同的话。原本这里写死了「超时且记 $0」—— 漂移走同一条路时
+    那句话是**错的**（漂移的 attempt 可能记着钱，漏的是监工那笔），
+    而一句指错方向的警告比没有警告更费时间：人会去翻超时日志，翻不到。
+    """
     if not is_untracked_spend(row):
         return False
-    print(f"⚠ attempt #{row.attempt_no} 超时且记 $0 —— "
+    texts = [getattr(row, "error_text", "") or ""]
+    for v in row.supervisors:
+        for c in (v.claims or ()):
+            texts.append(str((c or {}).get("got", "")) if isinstance(c, dict)
+                         else "")
+    if any(_has_marker(t, _LEAK_MARKERS_ANY_COST) for t in texts):
+        why = "输出格式漂移，账单没读到 —— 先核对 claude -p 的 JSON 字段名"
+    else:
+        why = "超时且记 $0"
+    print(f"⚠ attempt #{row.attempt_no} {why} —— "
           f"真实花费未计入预算（transcript: "
           f"{row.transcript_path or '未留'}）", file=sys.stderr)
     return True

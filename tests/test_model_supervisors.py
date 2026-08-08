@@ -230,3 +230,107 @@ def test_a_timed_out_judge_leaves_no_children_behind(leak_probe):
     assert call.ok is False
     assert "timeout" in call.error_text
     probe.assert_reaped()
+
+
+# ---------- 格式漂移：监工是最贵的一路 ----------
+#
+# P1 真跑单任务 $0.65 **全部**落在两个模型监工上。worker 那一路加了漂移
+# 检测而这一路没加，等于只加固了便宜的那条。
+
+def _payload(**over):
+    p = {"is_error": False, "total_cost_usd": 0.04,
+         "usage": {"input_tokens": 100, "output_tokens": 20},
+         "structured_output": {"verdict": "pass", "claims": []}}
+    p.update(over)
+    return p
+
+
+def _ask(monkeypatch, payload):
+    """真跑一次 ClaudeJudge.ask，只把 CLI 的 stdout 换成给定 payload。
+
+    不打桩 ask 本身：要测的正是**解析**那一段。
+    """
+    import json
+
+    from factory.supervisors import model_base as mb
+
+    class P:
+        stdout = json.dumps(payload)
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(mb, "run_bounded", lambda *a, **k: P())
+    return mb.ClaudeJudge(model="haiku").ask("x")
+
+
+def test_a_supervisor_payload_missing_the_cost_field_is_a_drift(monkeypatch):
+    """监工的花费记在 verdict 行上，attempt 行照常收费 —— 所以监工漏账
+    在旧的 `if row.cost_usd: return False` 下**完全不可见**。"""
+    from factory.harness.drift import DRIFT_MARKER, missing_fields
+
+    p = _payload()
+    del p["total_cost_usd"]
+    assert missing_fields(p) == ("total_cost_usd",)
+
+    from factory.harness.drift import drift_text
+    assert DRIFT_MARKER in drift_text(missing_fields(p))
+
+
+def test_drift_makes_the_supervisor_unavailable_not_a_pass(monkeypatch):
+    """漂移必须走 ok=False（→ FAIL + supervisor- 前缀 → 升级给人）。
+
+    判 pass 的话最贵的那道闸就变成了一个免费的橡皮章。
+    """
+    from factory.harness.drift import DRIFT_MARKER
+
+    p = _payload()
+    del p["is_error"]        # 最恶劣的那种：成败判断自己没了
+    call = _ask(monkeypatch, p)
+
+    assert not call.ok, "漂移判 pass 会让最贵的那道闸变成免费的橡皮章"
+    assert DRIFT_MARKER in call.error_text
+
+
+def test_drift_is_reported_before_the_verdict_is_read(monkeypatch):
+    """漂移的判定必须在读 structured_output **之前**。
+
+    顺序反了的话：一份 `is_error` 改了名、但 verdict 还在的 payload 会被
+    当成正常的 pass 返回 —— 而那正是我们要拦的那一种。
+    """
+    from factory.harness.drift import DRIFT_MARKER
+
+    p = _payload(structured_output={"verdict": "pass", "claims": []})
+    del p["usage"]
+    call = _ask(monkeypatch, p)
+
+    assert not call.ok
+    assert DRIFT_MARKER in call.error_text
+    assert call.verdict != "pass"
+
+
+def test_a_supervisor_payload_with_all_fields_still_passes(monkeypatch):
+    """加了闸之后正常路径不能变红 —— 否则每个任务都升级给人。"""
+    call = _ask(monkeypatch, _payload())
+    assert call.ok and call.verdict == "pass"
+    assert call.cost_usd == 0.04
+
+
+def test_zero_cost_is_not_a_drift_for_supervisors_either(monkeypatch):
+    """`total_cost_usd: 0` 完全正常。判值而不是判键在不在会让这条挂掉。"""
+    call = _ask(monkeypatch, _payload(total_cost_usd=0))
+    assert call.ok and call.verdict == "pass"
+
+
+def test_the_supervisor_records_model_usage_tokens(monkeypatch):
+    """真跑抓到的洞：监工带四个独立性 flag 时 usage 全 0，真数在 modelUsage。
+
+    修之前 `SpecSupervisor(...).review(...)` 返回 tokens=0 而 cost=0.018375
+    —— 花费对、token 全丢。单位成本指标的分母一直是 0。
+    """
+    p = _payload(usage={"input_tokens": 0, "output_tokens": 0},
+                 modelUsage={"gpt-5.6-luna": {"inputTokens": 2719,
+                                              "outputTokens": 249}})
+    call = _ask(monkeypatch, p)
+
+    assert call.ok
+    assert call.tokens == 2968, "读 usage 的话这里是 0"

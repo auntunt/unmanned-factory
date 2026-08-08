@@ -474,10 +474,10 @@ def test_the_drift_marker_string_matches_what_the_adapter_writes():
     它钉住的是**接线方式**：谁把它改回手抄字面量，这条就会在下次改串时挂掉。
     抄一遍的版本挂不掉 —— 漂移会静默退回成 $0，而且全绿。
     """
-    from factory.cli import _LEAK_MARKERS
-    from factory.harness.claude_code import DRIFT_MARKER
+    from factory.cli import _LEAK_MARKERS_ANY_COST
+    from factory.harness.drift import DRIFT_MARKER
 
-    assert DRIFT_MARKER in _LEAK_MARKERS
+    assert DRIFT_MARKER in _LEAK_MARKERS_ANY_COST
 
 
 def test_a_normal_zero_cost_attempt_is_still_not_flagged():
@@ -486,3 +486,51 @@ def test_a_normal_zero_cost_attempt_is_still_not_flagged():
 
     assert not is_untracked_spend(_row(0.0, ["expected exit 0, got 1"]))
     assert not is_untracked_spend(_row(0.0, [], error_text="某个普通错误"))
+
+
+# ---------- 「attempt 有钱」不代表账是全的 ----------
+
+def test_drift_counts_even_when_the_attempt_itself_cost_money():
+    """这是这一轮真正修的洞。
+
+    监工的花费记在 verdict 行上，attempt 行照常收费。旧写法第一行是
+    `if row.cost_usd: return False` —— 于是「worker 收了 $0.12、两个模型
+    监工的账全漏了」这种情况直接被放过。实测：真实约 $0.65，账上 $0.12，
+    熔断器返回 False。
+
+    判据必须是 marker 而不是「attempt 有没有钱」：后者是个无关的数。
+    """
+    from factory.cli import is_untracked_spend
+
+    row = _row(0.12, ["harness-format-drift: 输出 JSON 缺少承重字段 usage"])
+    assert is_untracked_spend(row)
+
+
+def test_timeout_still_needs_the_attempt_to_be_zero():
+    """超时那一类保持原判据，不要跟着一起放宽。
+
+    进程被 kill 就必然拿不到账单，所以 attempt 记着 $2.45 说明这次没走
+    那条路（是重试里别的轮次超时）。对它报警只会是噪音，而噪音等于没有警告。
+    """
+    from factory.cli import is_untracked_spend
+
+    assert not is_untracked_spend(_row(2.4579, ["timeout: after 900s"]))
+    assert is_untracked_spend(_row(0.0, ["timeout: after 900s"]))
+
+
+def test_the_warning_says_which_kind_of_leak_it_was(capsys):
+    """两种漏账印不同的话。
+
+    原本这行写死了「超时且记 $0」。漂移走同一条路时那句话是**错的** ——
+    人会去翻超时日志，翻不到，然后以为是误报。一句指错方向的警告比没有
+    警告更费时间。
+    """
+    from factory.cli import _warn_if_untracked_spend
+
+    _warn_if_untracked_spend(_row(0.12, ["harness-format-drift: 缺 usage"]))
+    err = capsys.readouterr().err
+    assert "漂移" in err and "超时" not in err
+    assert "JSON" in err, "要指出去查什么，否则人不知道下一步做什么"
+
+    _warn_if_untracked_spend(_row(0.0, ["timeout: after 900s"]))
+    assert "超时" in capsys.readouterr().err

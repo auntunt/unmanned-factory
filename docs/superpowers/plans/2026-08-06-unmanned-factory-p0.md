@@ -5165,3 +5165,92 @@ adapter 那边的串，漂移退回成静默 $0，全绿。
 （`faefdc1`, 183.93s）—— 这一步不能省：漂移闸是 fail-closed 的，
 真实输出里要是本来就缺某个承重字段，它会把每个任务判红。
 三个承重字段都在。
+
+## 补：漂移检测只加固了便宜的那一路（2026-08-06，接上一节）
+
+上一节把漂移检测加在了 `claude_code.py`（worker）。然后想到一件事：
+**读这份 JSON 的有两处**，另一处是模型监工 —— 而 P1 真跑单任务 $0.65
+**全部**落在两个模型监工上。加固了便宜的那条，贵的那条没动。
+
+顺着量出来一个更基础的洞。`is_untracked_spend` 第一行是：
+
+```python
+if row.cost_usd:
+    return False
+```
+
+监工的花费记在 **verdict 行**上，attempt 行照常收费。所以「worker 收了
+$0.12、两个监工的账全漏了」这种情况被这行直接放过。实测：真实约 $0.65，
+账上 $0.12，熔断器返回 `False`。
+
+### 两类漏账的判据不一样，不能合成一个列表
+
+我第一版把 `if row.cost_usd: return False` 整行删了，结果超时那条测试红了
+—— 而它是对的：进程被 kill 就必然拿不到账单，所以 attempt 记着 $2.45
+说明**这次**没走超时那条路（是重试里别的轮次超时）。对它报警只是噪音。
+
+拆成两个列表：
+
+| 常量 | 判据 | 为什么 |
+|---|---|---|
+| `_LEAK_MARKERS_ZERO_ONLY` | 要 attempt 记 $0 | 超时必然拿不到账单，有钱=没走这条路 |
+| `_LEAK_MARKERS_ANY_COST` | attempt 有钱也算 | 漂移漏的可能是监工那笔，attempt 照常收费 |
+
+拿「attempt 有没有钱」判漂移，等于用一个无关的数做判据。
+
+### 警告文本写死成「超时」是个真 bug
+
+`_warn_if_untracked_spend` 原本印「attempt #N 超时且记 $0」。漂移走同一条
+路时那句话是**错的** —— 人会去翻超时日志，翻不到，然后以为是误报。
+一句指错方向的警告比没有警告更费时间。现在两类印不同的话，漂移那句直接
+指出「先核对 claude -p 的 JSON 字段名」。
+
+### 真跑抓到一个已经在发生的漂移：token 一直记 0
+
+监工那道闸是 fail-closed 的，所以必须真跑一次确认不误判。跑出来：
+
+```
+verdict : pass
+cost    : 0.018375
+tokens  : 0          ← 花费对、token 全丢
+```
+
+`usage` 键在（所以 `missing_fields` 按设计看不见它），但监工带上四个独立性
+flag（`--tools "" --safe-mode --exclude-dynamic-system-prompt-sections
+--json-schema`）时 `usage.input_tokens` 实测是 **0**，真数在
+`modelUsage.<model>.inputTokens`（2719）。单个 flag 都不清零，四个一起才清零。
+
+顺手发现一件更普遍的：**`usage` 和 `modelUsage` 从来就不一致。**
+同一次普通调用 `usage.in=27415`，`modelUsage` 累计 `77856` —— `usage` 只反映
+最后一轮。判 modelUsage 是权威的依据是账：各模型 `costUSD` 之和与顶层
+`total_cost_usd` **完全相等**（`0.40520999999999996` 两边一致），
+而 `usage` 和它对不上。所以两处都改成 `drift.token_split` / `total_tokens`。
+
+这条洞 `missing_fields` 抓不到，而且抓不到是**对的**：判值会让熔断器天天
+误报（`total_cost_usd: 0` 完全正常）。键在值为 0 这一类只能在取数那一侧堵。
+两个决定不冲突，是分工。
+
+改完真跑：`tokens: 3177`，裁决仍 pass。
+
+### 又一次「没有测试在测它」
+
+改 token 来源之前，把 `tokens` 随便改成什么都不会让任何测试变红 —— 一条
+测 token 记账的测试都没有。而 token 是单位成本指标的分母。补了 6 条，
+其中 2 条是**接线**测试（`AttemptResult.tokens_in` / `ModelCall.tokens`
+真的拿到 modelUsage 的数）：取数函数对了但调用点还在读 `usage` 的话，
+纯函数测试会全绿而记账照旧低估。
+
+### 变异验证 8/8
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M5 | 监工漂移检测删掉 | 2 failed |
+| M6 | 监工漂移移到读裁决之后 | 2 failed |
+| M7 | 漂移退回成「要 $0 才算」 | 4 failed |
+| M8 | 警告文本又写死成超时 | 1 failed |
+| M9 | 监工退回读 `usage` | 1 failed |
+| M10 | worker 退回读 `usage` | 1 failed |
+| M11 | `modelUsage` 优先级反转 | 4 failed |
+| M12 | 空 `modelUsage` 不回落 | 1 failed |
+
+离线 679 通过（+14）。
