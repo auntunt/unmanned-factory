@@ -27,7 +27,7 @@ from factory.grading.rules import Grade, GradingEngine
 from factory.harness.base import HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
-from factory.harness.workspace import neighbour_context
+from factory.harness.workspace import neighbour_context, shadow_code
 from factory.intake.guard import harden_ops
 from factory.runbook import RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
@@ -414,6 +414,27 @@ class Dispatcher:
                     "git diff HEAD",
                     "至少一个文件改动",
                     "no changes produced",
+                ),
+            )
+
+        # 影子代码：被 .gitignore 挡住、四道闸门都看不见的代码文件。
+        # **必须在跑 check 之前拦**，因为它污染的正是那份绿 —— check 跑在真实
+        # 文件树上，会 import 并执行这些没人审过的文件（实测执行到了）。
+        # 拦下来之后跑 check 只是在一个已知被污染的树上多花一次钱。
+        #
+        # 不挂进范围监工：那个监工 declared_paths 为空时 PASS，而口述来源的
+        # 任务绝大多数为空。影子代码不依赖任何声明才有意义。
+        if shadow := shadow_code(Path(workspace)):
+            listed = ", ".join(shadow[:20])
+            if len(shadow) > 20:
+                listed += f"（另有 {len(shadow) - 20} 个）"
+            return (
+                self._blocked(
+                    "shadow-code",
+                    "git ls-files --others --ignored --exclude-standard",
+                    "没有被 .gitignore 挡住的新代码文件",
+                    f"{len(shadow)} 个文件不在任何闸门视野里，但 check 会执行"
+                    f"它们：{listed}",
                 ),
             )
 

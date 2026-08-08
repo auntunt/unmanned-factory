@@ -5388,3 +5388,54 @@ KNOWN_OPS 全表 (declared_paths=db/migrate.py)
 比修复更值得记的是这个顺序：**先变异，再决定测试怎么写**。如果我先写测试
 看它绿了就收工，仓库里就多了一条永远不会失败的断言 —— 而那比没有测试更糟，
 因为它会让下一个人以为这里有覆盖。
+
+## 补：四道闸门共用一个视野，而那视野是 git 的
+
+上一节的问法（「这个判定的输入是谁给的，能不能是假的」）继续往下扫，问到
+`changed_paths` 时发现它是**四道闸门的共同输入**：后分级、范围监工、runbook
+选择、架构监工的邻居代码，全都吃它。而它来自 `git diff HEAD --name-only`。
+
+worker 伪造不了 git 的输出。但 git 有一个天生的盲区：`.gitignore`。
+
+先排除了两条不通的路（实测）：
+
+  - 改 `.gitignore` 掩盖已追踪文件 → **不通**。已追踪文件不受 ignore 影响，
+    改动照样进 diff；而且 `.gitignore` 自己的改动也在 changed_paths 里。
+  - 靠 ignore 让改动不进 commit → **不通**。`land` 用 `add -- *paths`
+    只提交审过的那组，影子文件本来就进不了 commit。
+
+通的那条是**新建**文件落在 ignored 路径下：
+
+```
+worker: 改 src/app.py 加一行 `import build.hook`，新建 build/hook.py
+        (.gitignore 里有 build/)
+
+changed_paths               → ('src/app.py',)   ← 只有这个
+diff 里能看到那行 import    → 能               ← 监工看得见调用
+diff 里能看到 hook.py 内容  → 不能             ← 看不见被调用的东西
+git status --porcelain      → 只报 src/app.py
+check 命令实际执行 hook.py  → **会**（实测打印出来了）
+```
+
+危险不在出货，在**检查**：check 全绿是四道闸门放行的唯一依据，而那份绿是在一个
+含有未审代码的文件树上得出的。所以 `shadow_code` 拦在跑 check **之前** ——
+拦在之后等于先让未审代码执行一遍、再宣布这次不算，而它已经执行了。
+
+顺带发现 `has_changes` 用 `git status --porcelain`（不报 ignored），所以只含
+ignored 改动的 worktree 会被判「干净」而删掉。这条没单独修：影子代码已经在
+派发路上被拦下，走不到 release。
+
+### 为什么两张目录词表不许合并
+
+`_SKIP_DIRS`（已有，给架构监工找邻居用）里有 `build/`、`dist/`。
+新的 `_VENDOR_DIRS` 里**没有**。看着像重复，其实语义相反：
+
+  _SKIP_DIRS   说的是「这里没有值得读的代码」
+  _VENDOR_DIRS 要答的是「这里有不该出现的代码」
+
+`build/` 恰好既是最常见的生成物目录，又是最好藏代码的地方。合表就等于给攻击
+开一个白名单。M26 变异（把 build/dist 塞进 _VENDOR_DIRS）杀掉 5 条测试。
+
+噪音水平实测：本仓库 `.venv` 里有 724 个 `.py` 命中原始命令，加上代码后缀 +
+`_VENDOR_DIRS` 过滤后剩 **0 条**。这个 0 是这道检测能用的前提 ——
+每次都响的闸门等于没有闸门，和漂移熔断器同一条教训。
