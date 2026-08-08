@@ -6660,3 +6660,149 @@ commit 以「无文件要提交」失败。改成 `once` 标志只动一次（�
 行为——它不会每轮都重新提交同一份东西）。
 
 18 条测试，离线全套 909 passed。
+
+## 第十七个洞：`refs/replace/*` —— 让 git 在「那个对象是什么」上撒谎
+
+前十六道闸门盯的东西可以分两类：`git diff HEAD` 的**输入**（hooks、
+`.gitattributes`、`core.attributesFile`、`.git/info/attributes`、索引跳过标记、
+验收标准）和它的**基线端**（HEAD 自己）。这一条两样都不动。
+
+它改的是 git **回答「那个对象是什么」时说的话**。而每一道闸门看世界的方式都是
+问 git。
+
+### 洞（两种形态，都是实测）
+
+替换 blob —— 把后门写进磁盘，再让 git 认为 HEAD 里那个 blob 本来就长这样：
+
+```
+clean=$(git rev-parse HEAD:a.py)          # HEAD 里那份
+# 磁盘上写入后门
+dirty=$(git hash-object -w a.py)
+git update-ref refs/replace/$clean $dirty  # 方向：干净的 → 脏的
+```
+
+结果 `git diff HEAD` 是**空字符串**，`changed_paths` 是 `()`。
+
+方向极易搞反，我第一版就反了（写成 `refs/replace/$dirty $clean`）：diff 的基线
+侧读的是 **HEAD 里那个对象**，所以 ref 必须以干净 blob 命名。反过来什么也挡不
+住——没有人会去读那个脏 blob。
+
+替换 commit 更强：伪造一个 tree 里**已经带着** `evil.py` 的提交顶掉 HEAD。
+
+| | 不替换 | 替换 commit |
+|---|---|---|
+| `changed_paths` | `('README.md', 'evil.py')` | `('README.md',)` |
+| diff 里有后门 | 是 | **否** |
+| 磁盘上 `evil.py` | 在 | 在 |
+| `git status --porcelain` | 正常 | `' M README.md\nDA evil.py\n'` |
+
+一个**全新文件**就这么从监工视野里消失了，而 check 跑在真实文件树上，会执行它。
+
+顺手掐掉一个偷懒的修法：「diff 为空就判红」。worker 只要另留一处真改动
+（`README.md`），`paths` 就非空，那道假想的闸门永远不响。测试里钉了这条。
+
+### 危害定级：伪造那份绿，不出货
+
+`land` 只 `git add --` 监工审过的那一组路径，而 `evil.py` 恰恰不在那一组里
+（被替换的 tree 把它藏了）。linked worktree 里真跑一遍 `land`：落地成功，用
+`git --no-replace-objects ls-tree` 读历史，里面**没有** `evil.py`。
+
+所以它和第十二个洞（索引跳过标记）同性质，比第十六个洞轻一档：第十六个洞的代码
+已经在历史里，land 往上一叠就真出货了。这一条只是让那份绿变成假的——而那份绿是
+四道闸门放行的唯一依据。
+
+读历史必须加 `--no-replace-objects`：否则问的还是那个会撒谎的 git。
+
+### 一次自我纠错：`shadow_code` 不是被瞎掉，是从来不在射程内
+
+我先记下的结论是「同一形状第五次：闸门 A 的判据落在闸门 B 的下游」，理由是那个
+全新的 `.py` 连 `shadow_code()` 都看不见。写测试时先证明它平时抓得到，当场红了。
+
+量出来的真相：`shadow_code` 在**替换与不替换两种情况下都返回 `()`**。它问的是
+`ls-files --others --ignored`——「被 gitignore 挡住的文件有哪些」，而 `evil.py`
+没被 ignore。它不是被瞎掉，是压根不管这类文件。
+
+「它没报」和「它被瞎掉」是两件事。混起来会往仓库里记一条**假的因果**，而假因果
+比没有记录更贵：下次有人依赖「shadow_code 是第二道防线」去做判断。
+
+真相反而更朴素也更该记：**全新非 ignore 文件的唯一视野来自 `capture_diff` 里那
+句 `git add -A -N`**。替换掉的正是它，此处没有第二道防线。
+
+这条纠错在三个地方各留了一份（`workspace.py` 的 docstring、`dispatcher.py` 的
+闸门注释、给 worker 看的判词），因为错的那版也是三份。另外
+`tests/test_replace_refs.py` 里专门留了一条
+`test_shadow_code_is_not_a_backstop_here`，把「它的射程是 ignore、不是 newness」
+钉住：不替换时 `evil.py` 在 paths 里而 `shadow_code` 已经是 `()`，换成
+`ignored/h.py` 它才报。
+
+### 读法是量出来的，三个候选只有一个站得住
+
+| 读法 | 结果 |
+|---|---|
+| `git replace -l` | 只印**被替换的**那一侧。把一条已有 ref 重新指向另一个替换物，它的输出**一字不变**，而攻击内容已经换了 |
+| 读 `.git/refs/replace/` 目录 | `git pack-refs --all` 把它们挪进 `packed-refs`，松散目录空掉，这个读法当场瞎；两个 git 读法都不受影响 |
+| `for-each-ref --format='%(refname) %(objectname)'` | 两种形态、诱饵自替换、打包前后、`core.useReplaceRefs=false` 下都如实报告 |
+
+取「ref 名 + 替换物」这个**对**，不是只取名字：重新指向那一支名字不变。M107 就是
+把它退化成只读名字，被函数级测试打死。
+
+`core.useReplaceRefs=false` 那条值得单记：这个开关能让替换**失效**（后门重新出现
+在 diff 里），但 ref 还在。闸门照样得报——判的是「worker 动了这个东西」，不是
+「这次攻击成功了没有」。
+
+中途有一次测量看起来显示「攻击生效时 `for-each-ref` 恰好返回空」。这种反直觉的
+结果我没有拿去建闸门，重测发现是我的脚本自己造了一条**自替换**
+（`--format=long` 印出 `X -> X`）。如果当时信了，会照着一个假的观测去挑读法。
+
+### `.git/info/grafts`：同族兄弟，刻意不管
+
+它在场时后门**照样出现在 diff 里**（`paths: ('a.py',)`）——它只改父子关系，不改
+tree 内容。给它加闸门是给一条不存在的路修桥。git 自己也已经把它标成废弃。
+
+### 危害面：common dir，一个 worker 瞎掉所有并行任务
+
+`refs/replace` 和 hooks、`.git/info/attributes` 一样住在**公共** git dir 里。从一个
+linked worktree 设一条，父仓库和所有并行 worktree 一起中招（实测
+`replace_refs(root) == replace_refs(ws) != frozenset()`）。
+
+这是第三个具有这个性质的洞了。「它住在 common dir 吗」应该进检查清单。
+
+### 基线取在循环外，误报面零
+
+一轮之内没有任何合法动作会设 replace ref：`capture_diff` 和 `land` 都不碰它。本仓库
+`replace_refs()` 返回 `frozenset()`，误报面是零。
+
+判据是「这一轮变了」而不是「有没有 replace ref」：外部仓库合法拥有它是正常的
+（`git replace --convert-graft-file` 的产物就是它）。拿存在当判据，这道闸门在那类
+仓库上恒响，而恒响等于被关掉。
+
+### 变异：M108 活了下来，逼出一条测试
+
+| | 变异 | 结果 |
+|---|---|---|
+| M105 | 闸门整条关掉 | KILLED |
+| M106 | 基线改成每轮重取 | KILLED |
+| M107 | 只读 ref 名，丢掉替换物 | KILLED（函数级重新指向测试） |
+| M108 | `!=` 换成 `len(now) > len(before)` | **存活** |
+
+M108 是这一轮最值钱的东西。判据从「变了」退化成「多出来才算」，前面**所有**接线
+测试照旧全绿——它们的基线都是空集，加一条必然让条数变多。而重新指向和删除这两种
+形态它一概不管，重新指向恰恰是威力最大的一支（`git replace -l` 对它一字不变）。
+
+函数级测试早就盖住了重新指向。差的是**接线**：闸门是不是拿函数的全部信息在判，
+只有真跑一轮才看得见。这是「测接线，不只测行为」的又一例，也是「先变异再写测试」
+的价值——顺序反了，我会以为已经测过了。
+
+补的测试：派发前那条 ref 名上先坐一个无害的自替换（诱饵），worker 中途只把它
+**重新指向**后门 blob。条数前后都是 1，`!=` 判红，`len >` 放过。补完 M108 KILLED。
+
+### 本轮的两个测试自身的坑
+
+`assert (root / "a.py").read_text().count("pdb") == 1` —— `BACKDOOR` 里 "pdb" 出现
+两次（`import pdb` 和 `pdb.set_trace`）。这行想说的是「磁盘上真有后门」，该用子串
+判，不该数次数。
+
+`changed_config` / `changed_hooks` 返回的是 `tuple[str, ...]` 不是 `bool`，我按
+`is False` 断言，红了。这类失败每次都指向同一件事：**签名去读，不要猜**。
+
+20 条测试，离线全套 929 passed。

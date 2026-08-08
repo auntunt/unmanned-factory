@@ -39,6 +39,7 @@ from factory.harness.workspace import (
     index_skipped,
     newly_skipped,
     neighbour_context,
+    replace_refs,
     runner_hooks,
     shadow_code,
 )
@@ -313,6 +314,19 @@ class Dispatcher:
         # 刻意不提交。所以基线取一次就永远对得上，不存在「合法漂移」。
         head_before = head_position(workspace)
 
+        # replace ref 的基线。这一条比前面所有的都靠下：前面盯的是 `git diff
+        # HEAD` 的输入和基线端，这一条盯的是 git **回答对象内容时说的话**。
+        #
+        # 实测替换 HEAD 那个 commit 对象，一个**全新文件** evil.py 同时从 diff
+        # 和 changed_paths 里消失（不替换时两处都有它）。全新非 ignore 文件的
+        # 视野只有一处 —— `capture_diff` 里那句 `add -A -N`，替换掉的正是它，
+        # 此处没有第二道防线（`shadow_code` 管的是被 gitignore 挡住的文件，
+        # 替换与否它都返回 ()，别把它当兜底）。
+        #
+        # 也在循环外：一轮之内没有任何合法动作会设 replace ref（capture_diff
+        # 和 land 都不碰它，本仓库一条都没有）。
+        replaces_before = replace_refs(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -391,6 +405,7 @@ class Dispatcher:
             reports = self._review(
                 task, workspace, result, hooks_before, criteria_before,
                 skipped_before, config_before, attrs_before, head_before,
+                replaces_before,
             )
             for report in reports:
                 self._store.record_verdict(
@@ -500,6 +515,7 @@ class Dispatcher:
         config_before: frozenset[tuple[str, str]],
         attrs_before: str,
         head_before: tuple[str, str],
+        replaces_before: frozenset[str],
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -513,9 +529,10 @@ class Dispatcher:
         `criteria_before` 同理没有默认值：填 `()` 会让漏传的调用方在每个
         引 spec_doc 的任务上都判红（空基线 vs 有标准 = 差异）。
 
-        `skipped_before` / `config_before` / `attrs_before` / `head_before`
-        也一样，一个默认值都没有。这六个基线是同一个教训的六份：判据必须是
-        「这一轮变了什么」，而拿不到「之前是什么」的时候要炸，不要猜。
+        `skipped_before` / `config_before` / `attrs_before` / `head_before` /
+        `replaces_before` 也一样，一个默认值都没有。这七个基线是同一个教训的
+        七份：判据必须是「这一轮变了什么」，而拿不到「之前是什么」的时候要炸，
+        不要猜。
 
         `head_before` 这一份尤其不能给默认值：随手填 `("", "")` 不会像别的
         基线那样「每次都响」，它会让这道闸门在**每个**任务上都判红（空哈希 vs
@@ -746,6 +763,37 @@ class Dispatcher:
                     "的基线是 HEAD，移动它就把监工的视野截短成「相对 worker 那次"
                     "提交的增量」，已提交的部分谁都看不见，而 land 会直接叠在上面"
                     "出货",
+                ),
+            )
+
+        # `refs/replace/*` 这一轮变了。这道比前面所有闸门都更靠下：前面盯的是
+        # `git diff HEAD` 的输入和基线端，这道盯的是 git **回答对象内容时说的
+        # 话**。所有闸门都通过问 git 来看世界，让 git 撒谎就一次性绕过全部。
+        #
+        # 实测两种形态，八道闸门全静默、HEAD 哈希不变、status 只报干净那处：
+        #   替换 blob   —— `git diff HEAD` 退化成空字符串，paths 为 ()。
+        #   替换 commit —— 伪造 tree 里带 evil.py 的提交顶掉 HEAD，那个**全新
+        #                  文件**不在 diff、也不在 changed_paths（不替换时两处
+        #                  都有它，实测）。这类文件的唯一视野是 `capture_diff`
+        #                  里那句 `add -A -N`，没有第二道防线。
+        #
+        # 危害是伪造那份绿，不是出货：land 只提交监工审过的那一组，实测 linked
+        # worktree 里真跑一遍 evil.py 没进历史。但 check 跑在真实文件树上（实测
+        # 能读到它），那份绿是假的。和第十二个洞同性质。
+        #
+        # 判「这一轮变了」而不是「有没有 replace ref」：外部仓库合法拥有它是
+        # 正常的（`--convert-graft-file` 的产物就是它）。本仓库一条都没有。
+        if replace_refs(workspace) != replaces_before:
+            return (
+                self._blocked(
+                    "replace-refs-changed",
+                    f"派发前 refs/replace/ 下有 {len(replaces_before)} 条",
+                    "worker 没有增删改 refs/replace/ 下的引用",
+                    "refs/replace/ 这一轮变了。一条 replace ref 就让 git 在「那个"
+                    "对象是什么」上撒谎：替换 blob 会让 diff 变成空字符串，替换 "
+                    "commit 连全新文件都能藏掉，而 check 照样在真实文件树上执行"
+                    "它。这些引用不在任何 diff、任何 config、git status 里，且被"
+                    "所有并行 worktree 共用",
                 ),
             )
 

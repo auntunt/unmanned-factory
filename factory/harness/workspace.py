@@ -60,6 +60,56 @@ def head_position(root: Path) -> tuple[str, str]:
     return head_commit(root) or "", ref
 
 
+def replace_refs(root: Path) -> frozenset[str]:
+    """`refs/replace/*` 的 (ref 名, 替换物) 集合。
+
+    这一条比前面所有闸门都更靠下：它不改 `git diff HEAD` 的输入，也不动 HEAD，
+    它改的是 git **回答对象内容时说的话**。设一条 replace ref，git 从此在
+    「那个对象是什么」这个问题上撒谎，而所有闸门都是通过问 git 来看世界的。
+
+    实测两种形态，八道闸门全静默、HEAD 哈希不变、`git status` 只报那处干净改动：
+
+      替换 blob   —— `git diff HEAD` 退化成**空字符串**，paths 为 ()。
+      替换 commit —— 伪造一个 tree 里带 `evil.py` 的提交顶掉 HEAD，于是那个
+                     **全新文件**在 diff 里不存在、不在 changed_paths 里。
+                     实测同一个仓库，不替换：paths `('README.md', 'evil.py')`、
+                     diff 里有后门；替换后：paths `('README.md',)`、diff 里没有。
+
+    全新文件平时之所以看得见，靠的是 `capture_diff` 开头那句 `git add -A -N`
+    （intent-to-add）—— 这条攻击攻的正是它：路径进了索引，但 git 认为 HEAD 的
+    tree 里本来就有一份一样的。`shadow_code()` 在这里帮不上忙，它只列被
+    gitignore 挡住的文件，`evil.py` 没被 ignore，替换前后它都是 ()（实测）——
+    是**不覆盖**，不是被瞎掉。
+
+    危害是**伪造那份绿**，不是出货：`land` 只提交监工审过的那一组路径，实测
+    linked worktree 里真跑一遍，`evil.py` 没进历史。但 check 跑在真实文件树上
+    （实测能读到它），所以那份绿是假的。和第十二个洞（索引跳过标记）同性质。
+
+    和 hooks、`.git/info/attributes` 一样在 **common dir** 里（实测从 worktree
+    设一条，父仓库的 diff 也瞎了），一个 worker 能瞎掉所有并行任务的监工。
+
+    读法是量出来的，三个候选里只有这一个站得住：
+
+      `git replace -l`          只印**被替换的**那一侧。把一条已有的 ref 重新
+                                指向另一个替换物，它的输出一字不变（实测），
+                                而攻击内容已经换了 —— 这道闸门会瞎掉。
+      读 `.git/refs/replace/`   `git pack-refs --all` 把它们挪进 packed-refs，
+                                松散目录空掉（实测），两个 git 读法都不受影响。
+      for-each-ref 名+对象      两种形态、诱饵自替换、打包前后、
+                                `core.useReplaceRefs=false` 下都如实报告（实测）。
+
+    `.git/info/grafts` 是同一族的兄弟机制，**刻意不管**：实测它在场时后门照样
+    出现在 diff 里（它只改父子关系，不改 tree 内容），加一道闸门是给一条不存在
+    的路修桥。git 自己也已经把它标成废弃。
+    """
+    proc = _git(
+        root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/replace/"
+    )
+    if proc.returncode != 0:
+        return frozenset()
+    return frozenset(ln for ln in proc.stdout.splitlines() if ln.strip())
+
+
 def capture_diff(root: Path) -> tuple[str, tuple[str, ...]]:
     if not has_baseline(root):
         raise RuntimeError(f"{root} 没有任何 commit，无法 diff。先 git commit 一个基线。")
