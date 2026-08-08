@@ -269,3 +269,53 @@ def test_main_returns_an_int_so_the_console_script_can_exit_with_it(
     # 于是 cron 认为「失败的那次也成功了」。
     rc = main(["show", "T-does-not-exist", "--db", str(tmp_path / "a.db")])
     assert isinstance(rc, int) and rc != 0
+
+
+def _row(cost, claims_got=None, attempt_no=1, transcript=None):
+    class V:
+        claims = [{"got": g} for g in (claims_got or [])]
+    class R:
+        cost_usd = cost
+        supervisors = [V()]
+        transcript_path = transcript
+    R.attempt_no = attempt_no
+    return R()
+
+
+def test_a_timed_out_attempt_recording_zero_is_warned_about(capsys):
+    """真跑实测的漏账：900s 超时的 attempt 记 $0，transcript 里有 ~232k tokens。
+
+    花费只来自 claude CLI 的 JSON payload，而被 kill 的进程永远不打那个
+    payload。预算闸门累加的就是这些数，所以一个反复超时的任务在预算眼里是
+    免费的 —— 「低估的预算闸门等于没有闸门」在这条路径上再次成立。
+    """
+    from factory.cli import _warn_if_untracked_spend
+
+    _warn_if_untracked_spend(
+        _row(0.0, ["timeout: timeout after 900s"], transcript="/tmp/t.jsonl"))
+    err = capsys.readouterr().err
+    assert "超时" in err and "预算" in err
+    assert "/tmp/t.jsonl" in err, "要给出 transcript 路径，否则人无法核实花了多少"
+
+
+def test_an_attempt_that_actually_cost_money_is_not_warned_about(capsys):
+    from factory.cli import _warn_if_untracked_spend
+
+    _warn_if_untracked_spend(_row(2.4579, ["timeout: timeout after 900s"]))
+    assert capsys.readouterr().err == ""
+
+
+def test_a_zero_cost_attempt_that_did_not_time_out_is_not_warned_about(capsys):
+    # 确定性监工的 attempt 本来就是 $0（regression/scope 不调模型）。
+    # 对它们报警会让这行警告变成噪音，而噪音等于没有警告。
+    from factory.cli import _warn_if_untracked_spend
+
+    _warn_if_untracked_spend(_row(0.0, ["expected exit 0, got 1"]))
+    assert capsys.readouterr().err == ""
+
+
+def test_an_attempt_with_no_claims_at_all_does_not_crash(capsys):
+    from factory.cli import _warn_if_untracked_spend
+
+    _warn_if_untracked_spend(_row(0.0, []))
+    assert capsys.readouterr().err == ""

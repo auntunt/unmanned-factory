@@ -4730,3 +4730,53 @@ plist 随之改成直接用 `.venv/bin/factory`：绝对路径的 console script
 落地失败不改判决）。文档去重在这三条上是错的优化：它们是改代码时最容易
 "顺手放宽"的地方，而放宽的后果分别是往人的仓库里写 commit、审计两个字段
 描述不同内容、以及把全绿的任务判成升级。
+
+### 第二次真跑抓到：超时的 attempt 记 $0，而它真的花了钱
+
+跑 README 的 quickstart 验证命令能不能用（`examples/greet_task.yaml` →
+一个 scratch 仓库），顺带撞到一个预算漏账。审计库里是这样的：
+
+```
+-- attempt #1  (id=1)   model=haiku
+   commit     : -
+   tokens     : in=0 out=0  cost=$0.0000  900058ms
+   resolution : reworked
+   [regression] fail  - harness: 期望 'exit_status ok' / 实得 'timeout: timeout after 900s'
+
+-- attempt #2  (id=2)   model=sonnet
+   commit     : e5bdc932f3ec...
+   tokens     : in=595112 out=44838  cost=$2.4579  60745ms
+   resolution : merged
+```
+
+第一轮 900 秒超时、记 **$0.0000**。但它的 transcript 还在磁盘上，数一遍：
+
+```
+usage 行数=8  in≈232616  out≈802
+带 cost 的字段: (无)
+```
+
+也就是说它烧了约 23 万 input tokens，而预算闸门看到的是 0。原因很直接：花费
+只来自 claude CLI 的 JSON payload（`total_cost_usd`），而**被我们 kill 掉的
+进程永远不会打出那个 payload**，超时分支走的是 `_result(...)` 的默认
+`cost_usd=0.0`。
+
+这正是本文档上面已经写过的那条原则又踩了一次：「低估的预算闸门等于没有闸门」。
+当时说的是监工花费记在 verdict 行上要一起加，没想到超时是同一类漏账 ——
+而它更隐蔽，因为 `--budget-usd` 是无人循环**唯一的默认上限**
+（`--max-tasks` 和 `--max-runtime` 默认都是 0=无限）。一个反复超时的任务
+在预算眼里是免费的。
+
+**没有去估算价格。** transcript 里没有 cost 字段，按 token 估需要一张价目表，
+而价目表会过期 —— 估错的账单比没有账单更难查（人会拿它去对月账）。改成在
+`_attempts_cost()` 里对「$0 且 claim 里有 timeout」的 attempt 打一行警告，
+带上 transcript 路径，让人能自己核。警告不参与任何判决。
+
+判据用 claim 文本里的 `timeout` 而不是加一列状态：超时在审计库里本来就只以
+这个形式存在（`实得 'timeout: timeout after 900s'`）。文本判据不好看，但比
+在审计模型上加一列小得多，而这一行只是警告。
+
+四条测试，两次变异各挂一条：去掉 `if row.cost_usd: return`（付了钱的也报警）
+挂 `test_an_attempt_that_actually_cost_money_...`；把 timeout 匹配改成 `if True`
+（确定性监工的 $0 attempt 也报警，噪音等于没有警告）挂
+`test_a_zero_cost_attempt_that_did_not_time_out_...`。

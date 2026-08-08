@@ -1,5 +1,9 @@
 """无人工厂入口。
 
+装好后是 `factory <子命令>`（`[project.scripts]`）；没装时
+`python -m factory.cli <子命令>` 等价 —— 定时任务里用前者的绝对路径，
+它自带正确的 sys.path，不依赖 cwd。
+
     prd       录音 / 自由文本 → 任务 YAML 草稿（要人看过再 run）
     run       派发一个任务
     queue     任务入队 / 看队列状态
@@ -557,6 +561,13 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
     监工的花费也要算：它们记在 verdict 行上，不在 attempt 行上。只算
     attempt 的话，开了 --spec-review 的循环会系统性低估自己的开销 ——
     低估的预算闸门等于没有闸门。
+
+    **超时的 attempt 记 $0，而它真的花了钱。** 花费只来自 CLI 的 JSON
+    payload，而被我们 kill 掉的进程永远不会打出那个 payload。真跑实测：
+    一次 900s 超时的 attempt 记 `cost=$0.0000`，但它的 transcript 里有
+    ~232k input tokens。所以这里对超时 attempt 打一行警告 —— 不猜价格
+    （transcript 里没有 cost 字段，估算需要一张价目表，而估错的账单比
+    没有账单更难查），但也不让它静默读成 0。
     """
     store = AuditStore(ns.db)
     total = 0.0
@@ -569,7 +580,29 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
             continue        # get() 查不到时返回 None 而不是抛，上面兜不住
         total += row.cost_usd or 0.0
         total += sum(v.cost_usd or 0.0 for v in row.supervisors)
+        _warn_if_untracked_spend(row)
     return total
+
+
+def _warn_if_untracked_spend(row) -> None:
+    """超时的 attempt 花了钱但记 $0 —— 说出来，别让预算闸门静默漏账。
+
+    判据是 regression 监工的 claim 文本里有 'timeout'：超时在审计库里就是
+    这么落的（`期望 'exit_status ok' / 实得 'timeout: timeout after 900s'`），
+    没有单独的状态列。文本判据不好看，但比在审计模型上加一列更小的改动，
+    而这一行只是警告、不参与任何判决。
+    """
+    if row.cost_usd:
+        return
+    for v in row.supervisors:
+        for c in (v.claims or ()):
+            # claims 是 JSON 列，取出来就是 dict。
+            got = str((c or {}).get("got", "")) if isinstance(c, dict) else ""
+            if "timeout" in got.lower():
+                print(f"⚠ attempt #{row.attempt_no} 超时且记 $0 —— "
+                      f"真实花费未计入预算（transcript: "
+                      f"{row.transcript_path or '未留'}）", file=sys.stderr)
+                return
 
 
 def _cmd_queue(ns: argparse.Namespace) -> int:

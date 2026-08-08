@@ -13,8 +13,14 @@ uv sync
 uv run factory run examples/greet_task.yaml --workspace ~/some-repo --db audit.db
 ```
 
-产出落在任务分支上，主分支不动。`--workspace` 指到别人的仓库时**默认不开
-worktree**，此时不会提交（见「三条边界」第 1 条）。
+**单个任务时 `run` 不开 worktree**（多任务会自动开），此时 workspace 就是那个
+仓库本身，改动留在工作区但不会被提交（见「三条边界」第 1 条）。要产出落在
+任务分支上就显式加 `--worktree`：
+
+```bash
+uv run factory run examples/greet_task.yaml --workspace ~/some-repo \
+  --db audit.db --worktree
+```
 
 ## 无人跑批
 
@@ -22,9 +28,9 @@ worktree**，此时不会提交（见「三条边界」第 1 条）。
 # 入队（一个失败则一个都不入队）
 uv run factory queue --queue ~/.factory/q tasks/*.yaml
 
-# 抽干就退，5 美元上限
+# 抽干就退，5 美元上限（loop 默认开 worktree，要关得显式 --no-worktree）
 uv run factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
-  --idle drain --budget-usd 5 --worktree
+  --idle drain --budget-usd 5
 
 # 昨晚跑得怎么样
 uv run factory queue --queue ~/.factory/q --history 50
@@ -56,7 +62,13 @@ launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败�
 - **spec** — 逐条核 diff 是否满足验收标准，不给 build log（拿不到过程叙述）
 - **architecture** — 出**意见**，不能一票否决合并
 
-三轮不过升级给人。分级引擎把任务分 A/B/C/D，C/D 类在派发前就被硬闸门拦住。
+三轮不过升级给人（`max_rounds`，默认 3）。分级引擎把任务分 A/B/C/D：A/B 走无人，
+C 和 D 都在**派发之前**停下，adapter 一次都不会被调用 —— 但两者不是一回事：
+
+- **D**（不可逆，如 `prod_deploy`）→ `blocked_hard_gate`，agent 只能生成待执行脚本
+- **C**（无廉价裁判，如 `*auth/*`）→ `escalated`，交给人
+
+混成一句「C/D 被硬闸门拦住」会让人以为 C 也不可协商，而 C 只是这一层不该自动判收。
 
 ## 三条边界（改代码前先读）
 
@@ -72,7 +84,7 @@ launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败�
 ## 开发
 
 ```bash
-uv run pytest -m "not smoke"   # 569 个，离线，不需要 API key
+uv run pytest -m "not smoke"   # 离线，不需要 API key（当前 571 个）
 uv run pytest -m smoke -s      # 真调 claude，约 6 分钟，花约 $0.5
 ```
 
