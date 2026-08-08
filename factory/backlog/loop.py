@@ -281,7 +281,21 @@ class BacklogLoop:
         try:
             return self._dispatch(claim.path)
         except Exception as exc:  # noqa: BLE001 - 见 docstring
+            # **unpriced=True**：异常可能发生在派发之后（落地那一步炸了、
+            # 审计库写不进去），此时 attempt 已经跑完、钱已经烧了，而我们
+            # 拿不到 attempt_ids，一分钱都入不了账。默认 cost=0/unpriced=False
+            # 的话，这个任务在预算账上免费且熔断器看不见 —— 反复发生就能
+            # 绕开 --budget-usd 无限烧。实测：landing 抛异常 → (0.0, False)。
+            #
+            # 不猜价格：这里没有 attempt_ids，也没有价目表。标记「这个数
+            # 低估了」就够 —— 那正是 unpriced 的语义，见 TaskRun 的 docstring。
+            #
+            # 代价是 YAML 写坏这种「派发前就炸」的情况也会被标 unpriced，
+            # 它真的没花钱。宁可这样：熔断器多停一次机（人来看一眼就知道是
+            # YAML 坏了）比漏掉一条烧钱的路便宜。而且派发前炸的任务是坏任务，
+            # 连续两条坏任务本身也值得停下来。
             return TaskRun(
                 outcome="error",
                 note=f"{type(exc).__name__}: {exc}",
+                unpriced=True,
             )

@@ -5263,3 +5263,64 @@ flag（`--tools "" --safe-mode --exclude-dynamic-system-prompt-sections
 | M12 | 空 `modelUsage` 不回落 | 1 failed |
 
 离线 679 通过（+14）。
+
+## 补：漏账原来有四条来源，不是两条（2026-08-06）
+
+按「哪里在吞异常」翻了一遍 `factory/`，只有 4 处 `except Exception`。
+其中两处正是漏账。
+
+### 第三条：花费读不出来
+
+`_attempts_cost` 里两个 `continue`（`store.get` 抛异常、返回 None）。
+两个决定本身都对 —— 一次读失败不该让夜跑停摆 —— 错的是它们**不留痕**。
+实测：三个 attempt 里两个读不出来，返回 `(0.42, False)`。
+
+`attempt_ids` 是**刚派发时**拿到的 id。读不出来只有两种可能：库坏了，
+或者记账那步没落盘。两种都意味着账不全，而不是「这次免费」。按原来的
+写法，一个 id 全都读不出来的坏库能让夜跑无限烧钱。
+
+这里推翻了一条已有测试。它断言 `leaked is False`，理由写的是「漏账会触发
+熔断停机，而这里只是查不到 id」。那个理由不成立：**熔断要连续 2 次才响**，
+单次读不到只让计数从 0 变 1，下一个任务正常就归零。「不停摆」该由 streak
+保证，不该靠把漏账谎报成 0。改成两条测试，一条测留痕、一条测单次不停机
+—— 原始诉求是对的，只是实现方式错了，所以它也得继续有测试守着。
+
+### 第四条：派发抛异常
+
+`BacklogLoop._one` 的 `except Exception` 返回 `TaskRun(outcome="error")`，
+默认 `cost_usd=0.0, unpriced=False`。但**异常可能发生在派发之后**：落地
+那一步炸了、审计库写不进去 —— 此时 attempt 已经跑完、钱已经烧了，而 `_one`
+拿不到 attempt_ids，一分钱都入不了账。实测：landing 抛异常 → `(0.0, False)`。
+
+标 `unpriced=True`。不猜价格（没有 attempt_ids 也没有价目表），只标「这个数
+低估了」—— 那正是 `unpriced` 的语义。
+
+代价：YAML 写坏这种「派发前就炸」的情况也会被标 unpriced，它真的没花钱。
+宁可这样 —— 熔断器多停一次机（人看一眼就知道是 YAML 坏了）比漏掉一条烧钱
+的路便宜，而且连续两条坏任务本身也值得停下来。
+
+### 又一次假接线测试
+
+`test_two_dispatch_exceptions_in_a_row_...` 我第一版写成了「断言
+`LoopLimits.max_unpriced_streak == 2` 且 `LoopReport(unpriced_streak=2) >= 2`」
+—— 那只证明了两个常量的大小关系，`_one` 里的 unpriced 完全没接上也会绿。
+改成真跑一轮循环，断言第三个任务没被派发。
+
+### 顺带：监工花费加总那一行从没被测过
+
+`_row` 桩没有 `cost_usd` 属性，所以 `total += sum(v.cost_usd ...)` 删掉
+不会让任何测试变红。而它的注释写着「低估的预算闸门等于没有闸门」，
+且真跑单任务 $0.65 全部落在监工上。
+
+### 变异验证 6/6
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M13 | 读异常不留痕 | 1 failed |
+| M14 | 查不到不留痕 | 1 failed |
+| M15 | 监工花费不加总 | 1 failed |
+| M16 | 正常路径也报漏账 | 2 failed |
+| M17 | 派发异常不标 unpriced | 2 failed |
+| M18 | streak 不累加 | 3 failed |
+
+离线 686 通过（+7）。

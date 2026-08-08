@@ -580,17 +580,34 @@ def _attempts_cost(ns: argparse.Namespace, attempt_ids: tuple[int, ...]
     ~232k input tokens。所以这里对超时 attempt 打一行警告 —— 不猜价格
     （transcript 里没有 cost 字段，估算需要一张价目表，而估错的账单比
     没有账单更难查），但也不让它静默读成 0。
+
+    返回的 bool 是「这个数低估了」而**不是**「有 attempt 超时」。三条来源都
+    走它：超时、格式漂移、以及这里的「读不出来」。判据统一成「账全不全」
+    之后，将来第四条来源接进来不需要改熔断器那一侧。
     """
     store = AuditStore(ns.db)
     total = 0.0
     leaked = False
     for aid in attempt_ids:
+        # 这两个 continue 是对的（一次读失败不该让夜跑停摆），但**必须留痕**。
+        # 漏账的第三条来源，和前两条同构：`attempt_ids` 是刚派发时拿到的 id，
+        # 读不出来只有两种可能 —— 库坏了，或者记账那步没落盘。两种都意味着
+        # 这次派发的账不全，而不留痕的话 leaked=False，熔断器看不见。
+        # 实测：三个 attempt 里两个读不出来，返回 (0.42, False)。
         try:
             row = store.get(aid)
-        except Exception:   # noqa: BLE001 - 花费读不到不该让整个循环停
+        except Exception as exc:   # noqa: BLE001 - 见上
+            print(f"⚠ attempt #{aid} 的花费读不出来（{type(exc).__name__}: "
+                  f"{exc}）—— 这次派发的账不全", file=sys.stderr)
+            leaked = True
             continue
         if row is None:
-            continue        # get() 查不到时返回 None 而不是抛，上面兜不住
+            # get() 查不到时返回 None 而不是抛，上面兜不住。
+            print(f"⚠ attempt #{aid} 在审计库里查不到 —— 刚派发的 id 查不到，"
+                  f"要么库坏了要么记账没落盘；这次派发的账不全",
+                  file=sys.stderr)
+            leaked = True
+            continue
         total += row.cost_usd or 0.0
         total += sum(v.cost_usd or 0.0 for v in row.supervisors)
         leaked |= _warn_if_untracked_spend(row)

@@ -280,8 +280,16 @@ def test_main_returns_an_int_so_the_console_script_can_exit_with_it(
     assert isinstance(rc, int) and rc != 0
 
 
-def _row(cost, claims_got=None, attempt_no=1, transcript=None, error_text=""):
+def _row(cost, claims_got=None, attempt_no=1, transcript=None, error_text="",
+         sup_cost=0.0):
+    """一行 attempt 的桩。
+
+    `sup_cost` 是监工那笔账。原来这个桩根本没有这个属性 —— 也就是说
+    `_attempts_cost` 里「监工的花费也要算」那一行从没被测过，而那行的注释
+    写着「低估的预算闸门等于没有闸门」。
+    """
     class V:
+        cost_usd = sup_cost
         claims = [{"got": g} for g in (claims_got or [])]
     class R:
         cost_usd = cost
@@ -534,3 +542,70 @@ def test_the_warning_says_which_kind_of_leak_it_was(capsys):
 
     _warn_if_untracked_spend(_row(0.0, ["timeout: after 900s"]))
     assert "超时" in capsys.readouterr().err
+
+
+# ---------- 漏账的第三条来源：花费读不出来 ----------
+
+def _cost(monkeypatch, rows):
+    """跑 _attempts_cost，把 AuditStore.get 换成给定的 {id: 行或异常}。"""
+    import types
+
+    import factory.cli as cli
+
+    class Fake:
+        def __init__(self, *a, **k): pass
+        def get(self, aid):
+            v = rows[aid]
+            if isinstance(v, Exception):
+                raise v
+            return v
+
+    monkeypatch.setattr(cli, "AuditStore", Fake)
+    return cli._attempts_cost(types.SimpleNamespace(db="x"),
+                              tuple(sorted(rows)))
+
+
+def test_a_cost_row_that_cannot_be_read_counts_as_untracked(monkeypatch, capsys):
+    """读不出来 = 账不全。和超时、漂移同构。
+
+    这两个 continue 本身是对的（一次读失败不该让夜跑停摆），错的是它们
+    原来**不留痕**：实测三个 attempt 里两个读不出来，返回 (0.42, False)
+    —— 熔断器完全看不见，而报表上那次派发只显示 $0.42。
+    """
+    cost, leaked = _cost(monkeypatch, {
+        1: _row(0.12), 2: RuntimeError("db locked"),
+    })
+    assert leaked, "读不出来必须算漏账"
+    assert cost == pytest.approx(0.12), "读到的那部分仍要算进去"
+    assert "读不出来" in capsys.readouterr().err
+
+
+def test_a_missing_attempt_row_counts_as_untracked(monkeypatch, capsys):
+    """get() 查不到时返回 None 而不抛 —— 那条路要单独兜。
+
+    `attempt_ids` 是刚派发时拿到的 id。查不到只有两种可能：库坏了，或者
+    记账那步没落盘。两种都意味着账不全。
+    """
+    cost, leaked = _cost(monkeypatch, {1: _row(0.12), 2: None})
+    assert leaked
+    assert "查不到" in capsys.readouterr().err
+
+
+def test_all_rows_readable_is_not_a_leak(monkeypatch, capsys):
+    """正常路径不能变成漏账 —— 否则熔断器天天误报，等于被关掉。"""
+    cost, leaked = _cost(monkeypatch, {1: _row(0.12), 2: _row(0.30)})
+    assert not leaked
+    assert cost == pytest.approx(0.42)
+    assert capsys.readouterr().err == ""
+
+
+def test_supervisor_cost_is_added_to_the_dispatch_total(monkeypatch, capsys):
+    """「监工的花费也要算」那一行从没被测过。
+
+    它的注释写着「低估的预算闸门等于没有闸门」，而删掉它不会让任何测试
+    变红。P1 真跑单任务 $0.65 **全部**落在监工上，所以漏掉这一行等于
+    预算闸门只看得见零头。
+    """
+    cost, leaked = _cost(monkeypatch, {1: _row(0.12, sup_cost=0.53)})
+    assert cost == pytest.approx(0.65), "0.12 是 worker，0.53 是两个监工"
+    assert not leaked

@@ -812,11 +812,83 @@ def test_cost_reads_the_audit_db_not_a_second_tally(tmp_path):
 
 
 def test_an_unreadable_cost_row_does_not_stop_the_loop(tmp_path):
-    """花费读不到是个观测问题，不该让一个跑得好好的队列停摆。"""
+    """花费读不到不该让队列停摆 —— 但**必须留痕**。
+
+    这条测试原来断言 `leaked is False`，理由写的是「漏账会触发熔断停机，
+    而这里只是查不到 id」。那个理由不成立，2026-08-06 改掉：
+
+    - 熔断要**连续** `max_unpriced_streak`（默认 2）次才响。单次读不到只让
+      计数从 0 变 1，下一个任务正常就归零 —— 不会停摆。
+    - `attempt_ids` 是刚派发时拿到的 id。查不到只有两种可能：库坏了，或者
+      记账那步没落盘。两种都意味着账不全，而**不是**「这次免费」。
+    - 按原来的写法，一个 id 全都读不出来的坏库能让夜跑无限烧钱：每次派发
+      都记 $0、`leaked=False`，`--budget-usd` 永远不响。
+
+    所以「不停摆」由熔断器的 streak 保证，不该靠把漏账谎报成 0。
+    """
     from factory.cli import _attempts_cost
 
     db, aid = seeded_audit(tmp_path, cost=0.5, supervisor_cost=0.0)
     got, leaked = _attempts_cost(ns_for(tmp_path, db=db), (aid, 999_999))
-    assert got == pytest.approx(0.5)
-    # 读不到的那一行不许被当成漏账：漏账会触发熔断停机，而这里只是查不到 id。
-    assert leaked is False
+    assert got == pytest.approx(0.5), "读到的那部分仍要算进去"
+    assert leaked is True, "查不到 = 账不全，不是免费"
+
+
+def test_one_unreadable_row_alone_does_not_trip_the_breaker(tmp_path):
+    """上面那条的另一半：留痕了，但**单次不停机**。
+
+    这两条合起来才是完整的判据。只有上面那条的话，「不该让队列停摆」这个
+    原始诉求就没有测试守着了 —— 而它是对的诉求，只是实现方式错了。
+    """
+    from factory.backlog.loop import LoopLimits, LoopReport
+
+    lim = LoopLimits()
+    assert lim.max_unpriced_streak == 2
+    rep = LoopReport(unpriced_streak=1)
+    assert rep.unpriced_streak < lim.max_unpriced_streak, "单次不该触发熔断"
+
+
+# ---------- 漏账的第四条来源：派发抛异常 ----------
+
+def test_a_dispatch_that_raises_is_marked_unpriced():
+    """异常可能发生在**派发之后** —— 钱烧完了，account 一分没入。
+
+    落地那一步炸了、审计库写不进去：此时 attempt 已经跑完，而 `_one` 拿不到
+    attempt_ids，一分钱都入不了账。默认 `cost=0, unpriced=False` 的话，这个
+    任务在预算账上免费且熔断器看不见 —— 反复发生就绕开了 --budget-usd。
+    实测修之前：landing 抛异常 → (cost=0.0, unpriced=False)。
+
+    不猜价格（这里没有 attempt_ids，也没有价目表），只标「这个数低估了」。
+    """
+    from factory.backlog.loop import BacklogLoop
+
+    def boom(path):
+        raise RuntimeError("landing 炸了，此前已派发 3 轮")
+
+    loop = BacklogLoop.__new__(BacklogLoop)
+    loop._dispatch = boom
+    run = loop._one(type("C", (), {"path": "t.yaml"})())
+
+    assert run.outcome == "error"
+    assert run.unpriced is True, "钱烧了但没入账 = 漏账"
+
+
+def test_two_dispatch_exceptions_in_a_row_stop_the_loop(tmp_path):
+    """接线测试：unpriced 真的喂到熔断器 —— **真跑一轮循环**。
+
+    第一版我写成了「断言 LoopLimits.max_unpriced_streak == 2 且
+    LoopReport(unpriced_streak=2) >= 2」，那是个假接线测试：它只证明了两个
+    常量的大小关系，`_one` 里的 unpriced 完全没接上也会绿。
+    """
+    q = bl(tmp_path)
+    queue_tasks(q, tmp_path, "a.yaml", "b.yaml", "c.yaml")
+
+    def boom(path):
+        raise RuntimeError("landing 炸了")
+
+    lp = loop_over(q, boom)
+    rep = lp.run()
+
+    assert rep.unpriced_streak >= 2
+    assert "未计价" in rep.stopped_by
+    assert rep.dispatched < 3, "熔断该在第三个任务之前停下来"
