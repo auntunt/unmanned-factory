@@ -28,6 +28,7 @@ from factory.harness.base import HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
 from factory.harness.workspace import neighbour_context
+from factory.intake.guard import harden_ops
 from factory.runbook import RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.base import SupervisorReport
@@ -145,8 +146,33 @@ class Dispatcher:
         self._store.finalize(aid, Resolution.ESCALATED)
         return aid
 
+    def _ops(self, task: Task) -> tuple[str, ...]:
+        """分级用的 declared_ops —— **在这里重扫一遍 prompt**，不信 YAML。
+
+        为什么不能只读 task.declared_ops：guard 的关键词扫描只在
+        `TaskExtractor.run` 里跑过一次（intake/extract.py），也就是只有
+        `factory prd` 那条路走过。`factory queue <task.yaml>` 直接 bl.add，
+        人手写的 YAML 一个字节都不过 guard。实测同一份任务：
+
+            prompt: 「把生产库的 users 表 drop 掉再重建，然后 force push 到 main」
+            declared_ops: []
+            走 prd   → harden 补出 force_push → D 类，硬闸门，不派发
+            走 queue → declared_ops 空 → 「no rule matched -> default A」→ 无人放行
+
+        两条入口对同一份任务给出相反判决，差别只在 guard 有没有跑过。
+        Global Constraint 10 要的是「dispatcher 里不存在绕过 D 类判定的路径」——
+        绕过它的不是代码，是数据，所以补在 dispatcher 这个派发咽喉上。
+
+        安全性：harden_ops 只增不减且幂等（实测），所以重扫只可能把分级**调严**，
+        对已经走过 prd 的任务是空操作。代价是人手写 YAML 时 prompt 里提一句
+        force push 就会被拦 —— 这个方向的误拒是可接受的那一侧。
+        """
+        ops, _ = harden_ops(task.prompt, task.declared_ops)
+        return ops
+
     def run(self, task: Task, workspace: Path) -> DispatchReport:
-        pre = self._engine.grade(task.declared_paths, task.declared_ops)
+        ops = self._ops(task)
+        pre = self._engine.grade(task.declared_paths, ops)
 
         if not pre.unmanned_allowed:
             model = self._router.model_for(pre.oracle_class, 1)
@@ -222,7 +248,9 @@ class Dispatcher:
             )
 
             # 后分级（= 风险监工）：用真实改动的文件再判一次
-            post = self._engine.grade(result.changed_paths, task.declared_ops)
+            # 用 _ops 而不是 task.declared_ops：后分级和预分级必须同一份输入，
+            # 否则「prompt 里写了 force push」这条在后分级又消失了。
+            post = self._engine.grade(result.changed_paths, self._ops(task))
             if post.more_severe_than(grade):
                 grade = post
                 escalated_reason = f"post-diff escalation: {post.reason}"

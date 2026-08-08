@@ -172,3 +172,111 @@ def test_c_class_from_guard_is_never_unmanned():
     grade = GradingEngine.default().grade(paths=(), ops=result)
     assert grade.unmanned_allowed is False
     assert grade.hard_gate is False, "C 类要上人但不是硬闸门"
+
+
+# --- guard 在 dispatcher 里也要跑一遍（不只在 prd 抽取时） -------------------
+#
+# 上面那些测的是 guard 这个函数对不对。下面测的是**它有没有接在派发路上**。
+# 这两件事在报表上长得一样：guard 单测全绿、D 类闸门单测全绿，而
+# `factory queue 一份人手写的 YAML` 从头到尾没碰过 guard。
+
+def _handwritten(tmp_path, prompt, ops=()):
+    """人手写的 task.yaml —— 这条路不过 TaskExtractor，所以不过 harden_ops。"""
+    from factory.task import CheckSpec, Task
+    return Task(
+        task_id="T-hand", prompt=prompt,
+        declared_paths=("db/migrate.py",),
+        declared_ops=tuple(ops),
+        checks=(CheckSpec(name="ok", command="true"),),
+    )
+
+
+def test_a_handwritten_yaml_that_says_force_push_is_still_hard_gated(tmp_path):
+    """declared_ops 空着、prompt 里写着 force push —— 必须不派发。
+
+    修之前：dispatcher 直接拿 YAML 的 declared_ops 去分级，空的 →
+    「no rule matched -> default A」→ 无人放行，adapter 真被调起来。
+    走 `factory prd` 的同一份任务是 D 类硬闸门。两条入口相反判决。
+    """
+    from factory.audit.store import AuditStore
+    from factory.dispatcher import Dispatcher, Outcome
+    from tests.test_dispatcher import AlwaysPass, FakeAdapter, _result
+
+    adapter = FakeAdapter([_result()])
+    d = Dispatcher(adapter=adapter,
+                   store=AuditStore(tmp_path / "a.db"),
+                   supervisor=AlwaysPass())
+    rep = d.run(_handwritten(
+        tmp_path, "把生产库的 users 表 drop 掉再重建，然后 force push 到 main"),
+        tmp_path)
+
+    assert rep.outcome == Outcome.BLOCKED_HARD_GATE
+    assert rep.final_grade.oracle_class.value == "D"
+    assert "force_push" in rep.escalation_reason
+    assert not adapter.calls, "D 类任何情况下不许调 harness"
+
+
+def test_the_two_entry_points_grade_the_same_task_the_same_way(tmp_path):
+    """prd 路径和 queue 路径对同一份任务的分级必须一致。
+
+    这条是上面那个 bug 的形状本身：不变量不是「D 类会被拦」，
+    而是「同一份任务走哪条门进来，分级都一样」。
+    """
+    from factory.grading.rules import GradingEngine
+    from factory.dispatcher import Dispatcher
+    from factory.audit.store import AuditStore
+    from tests.test_dispatcher import AlwaysPass, FakeAdapter, _result
+
+    p = "上线前记得 force push 一下"
+    via_prd, _ = harden_ops(p, ())          # 抽取时补过 ops
+    grade_prd = GradingEngine.default().grade(("db/migrate.py",), via_prd)
+
+    d = Dispatcher(adapter=FakeAdapter([_result()]),
+                   store=AuditStore(tmp_path / "b.db"),
+                   supervisor=AlwaysPass())
+    grade_queue = d.run(_handwritten(tmp_path, p), tmp_path).final_grade
+
+    assert grade_queue.oracle_class == grade_prd.oracle_class
+    assert grade_queue.unmanned_allowed == grade_prd.unmanned_allowed
+
+
+def test_the_post_grade_reads_the_same_ops_as_the_pre_grade(tmp_path):
+    """后分级必须走 _ops，不是 task.declared_ops。
+
+    这条**只能用替身测**，因为当前词表下它没有可观测行为：KNOWN_OPS 里
+    每一个 op 都是 C 或 D（实测），全都 unmanned_allowed=False，所以
+    guard 扫出非空 ops 的任务在预分级就被拦了，后分级根本走不到。
+    第一版测试因此是假的 —— 它用 `rm -rf`（**不在词表里**）当输入，两次
+    分级都拿到空元组，把「后分级退回读 YAML」的变异放了过去。
+
+    那为什么还要改后分级：这行的价值是**在词表长出一个 A/B 类 op 的那天
+    不会静默失守**。往 KNOWN_OPS 加一个允许无人的 op 是完全合理的演进
+    （比如「改了 CHANGELOG」这种只想记账的标记），那天后分级会第一次真的
+    收到非空 ops，而如果它还在读 YAML，就又漏了。替身盯的是接线本身。
+    """
+    from factory.audit.store import AuditStore
+    from factory.dispatcher import Dispatcher
+    from tests.test_dispatcher import AlwaysPass, FakeAdapter, _result
+
+    seen: list[tuple[str, ...]] = []
+    d = Dispatcher(adapter=FakeAdapter([_result()]),
+                   store=AuditStore(tmp_path / "c.db"),
+                   supervisor=AlwaysPass())
+    real = d._engine.grade
+    d._engine.grade = lambda paths, ops: (seen.append(tuple(ops))
+                                          or real(paths, ops))
+
+    # 假设词表明天多了一个 A 类 op：guard 扫得出、预分级放行。
+    # 用替身模拟这一天，因为今天的 KNOWN_OPS 里没有这样的 op。
+    import factory.dispatcher as dm
+    monkey = lambda text, declared=(): (("future_marker_op",), ())
+    orig = dm.harden_ops
+    dm.harden_ops = monkey
+    try:
+        d.run(_handwritten(tmp_path, "随便改点东西"), tmp_path)
+    finally:
+        dm.harden_ops = orig
+
+    assert len(seen) >= 2, f"该有预分级和后分级两次，实际 {len(seen)} 次"
+    assert all(o == ("future_marker_op",) for o in seen), (
+        f"有一次分级没走 _ops，拿到的是 YAML 里的原值: {seen}")

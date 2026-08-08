@@ -5324,3 +5324,67 @@ flag（`--tools "" --safe-mode --exclude-dynamic-system-prompt-sections
 | M18 | streak 不累加 | 3 failed |
 
 离线 686 通过（+7）。
+
+## 补：绕过 D 类闸门的不是代码，是数据
+
+全局约束 10 写的是「dispatcher 里不允许存在任何绕过 D 类判定的代码路径」。
+这句话我一直按字面理解去查代码路径，每条都对。漏掉的是：**判定的输入本身
+可以是假的，而 dispatcher 无法知道它是不是假的**。
+
+同一份任务，两条入口，相反判决（实测）：
+
+```
+prompt:       把生产库的 users 表 drop 掉再重建，然后 force push 到 main
+declared_ops: []
+
+走 factory prd   → TaskExtractor.run 里 harden_ops 补出 force_push
+                 → D 类，硬闸门，不派发
+走 factory queue → bl.add(p) 直接入队，一个字节都不过 guard
+                 → dispatcher 读 YAML 的空 declared_ops
+                 → 「no rule matched -> default A」→ 无人放行，adapter 真被调起
+```
+
+`harden_ops` 在整个仓库里只被调用一次，在 `intake/extract.py:238`。
+`factory queue <task.yaml>` 是设计上就不过 admit 的（人手写的 YAML 是人在
+负责），但这个设计的副作用是 guard 也没跑过 —— 而 guard 才是那个不依赖
+模型判断的确定性防线。
+
+这是和悬空 spec_ref 一模一样的形状：**每个环节都正确的坏路径**。
+guard 的单测全绿（16 条，核心不变量「只增不减」有测），D 类硬闸门的单测
+全绿，分级引擎的单测全绿。没有任何一个组件坏了。坏的是它们之间少了一根线。
+
+修在 `Dispatcher._ops()` —— 派发的咽喉，不是入口。理由：入口会长出新的
+（今天是 prd 和 queue 两个，明天可能有 HTTP、有定时任务），每加一个都要
+记得挂 guard 的话，迟早漏一个；派发只有一处。
+
+安全性靠两条实测性质：`harden_ops` 只增不减，且幂等。所以重扫只可能把分级
+**调严**，对已走过 prd 的任务是空操作。代价是人手写 YAML 时 prompt 里提一句
+force push 就会被拦 —— 误拒方向可接受，A 类真跑（26s）确认没被误伤。
+
+### 附带发现：我为一行没有可观测行为的改动写了一个假测试
+
+顺手把后分级也从 `task.declared_ops` 改成 `self._ops(task)`（两次分级的输入
+必须一致）。变异测试立刻发现这行**没人盯着**，于是我补了一个测试，用
+`rm -rf 掉临时目录` 当输入 —— 然后变异重放，测试还是绿的。
+
+原因：`rm -rf` 不在 `KNOWN_OPS` 里。两次分级都拿到空元组，测试断言的
+「两次一样」平凡成立。而穷举词表后发现更根本的一件事：
+
+```
+KNOWN_OPS 全表 (declared_paths=db/migrate.py)
+  data_delete / drop_table / force_push / prod_deploy /
+  registry_push / schema_migration / truncate  → D, 无人放行 False
+  new_ux / visual_change                        → C, 无人放行 False
+```
+
+**每一个** guard 能扫出的 op 都不许无人放行。所以 guard 扫出非空 ops 的任务
+在预分级就被拦住了，后分级永远收不到非空 ops —— 那行改动在今天的词表下
+没有任何可观测行为。
+
+没有回退它，也没有假装它有行为。它的价值是「词表长出第一个 A/B 类 op 的
+那天不会静默失守」，这是真的，但只能用替身测，测试的 docstring 里写清了
+为什么是替身、以及第一版测试为什么是假的。
+
+比修复更值得记的是这个顺序：**先变异，再决定测试怎么写**。如果我先写测试
+看它绿了就收工，仓库里就多了一条永远不会失败的断言 —— 而那比没有测试更糟，
+因为它会让下一个人以为这里有覆盖。
