@@ -6559,3 +6559,104 @@ M97 第一次扑空 —— 我猜了实现文本。本会话第五回，教训�
 先把真实文本读出来。
 
 19 条测试，离线全套 891 passed。
+
+## 第十六个洞：worker 自己移动 HEAD（`head-moved`）
+
+前面十五个洞里有五个是同一族：都在动 `git diff HEAD` 的**输入**——属性、
+config、索引标记、验收标准。这一个动的是它对比的那个**点**。
+
+### 洞
+
+worker 自己 `git commit` 一次，把后门提交掉，只留一处干净改动不提交。于是
+`git diff HEAD` 的含义从「这个任务改了什么」变成「相对 worker 那次提交的增量」。
+
+实测（fixture：`a.py` 里塞 `import pdb; pdb.set_trace()` 并提交，`README.md`
+改一行不提交）：
+
+```
+HEAD 变了: True
+监工看到的 paths: ('README.md',)
+后门在 diff 里: False
+后门在 HEAD 里: True
+git status: ' A README.md'
+shadow=() hooks=() muted=() skip=frozenset()  cfg 变=False  attrs 变=False
+```
+
+前面五道闸门一道不响，`git status` 也只报那处干净改动——被提交掉的东西
+在 git 眼里不再是「改动」。
+
+### 这一个和第十二个洞的区别：它真的出货
+
+索引跳过标记那条路上，`git add -A` 不 stage 被挂标记的文件，`land` 会以
+「无文件要提交」失败——未审代码进不了历史，那道闸门保的是那份绿的可信度。
+
+这条路上代码**已经在历史里了**。`land` 只是往上叠一层提交，人 review 时看到的
+是两个 commit，其中一个从来没有任何监工看过。这是本会话十六个洞里第一个
+「未审代码真的出货」的。
+
+### 判据取 (哈希, ref) 对，不是只取哈希
+
+先量了第二种移动才定的判据：worker 只 `git checkout -b worker-side`，不提交。
+
+```
+HEAD 哈希变了: False
+ref: refs/heads/feat -> refs/heads/worker-side
+pdb 在 diff 里: True | paths: ('a.py',)
+```
+
+diff 照样诚实——单看「视野被截短」这个危害，只切分支是无害的。但接着量了
+`land` 的后果：
+
+```
+land 成功: True
+提交落在: refs/heads/worker-side (基线是 refs/heads/feat)
+feat 分支还能看到这次提交吗: + worker-side
+```
+
+人审的是原分支，货落在别处。所以判据必须是 (哈希, ref) 对；只判哈希会让这一支
+整个漏过去。变异 M99 就是这个形状，killed。
+
+`ref` 用空串表示 detached 而不是 `None`：`symbolic-ref` 在 detached 时以 128
+退出，那不是错误而是一种合法状态，而「从分支变成 detached」和反过来都是这一轮
+动了 HEAD，两个方向都得算差异。
+
+### 基线取在循环外，但理由和前面几个不同
+
+前五个基线提到循环外，是因为「每轮重取」会让第二轮起看不见（第五个洞的形状）。
+这一个提到循环外还多一条更强的理由：**一轮之内没有任何合法动作会移动 HEAD**。
+
+- `land` 是全流程唯一的提交点（`landing.py:131`）
+- 它跑在这道闸门**之后**（`_review` 在 380 行，`land` 在 420 行）
+- `land` 之后直接 `return`，循环不会再转
+- 被打回的轮次刻意不提交（这是第八个洞留下的设计）
+
+所以基线取一次就永远对得上，不存在「合法漂移」需要容忍。这也是为什么这道闸门
+可以做成严格相等比较，不需要任何白名单。
+
+### 误报面：零
+
+不需要新函数——`head_commit` 已经存在，`head_position` 只是加读一次
+`symbolic-ref`。本仓库上连测两次 `head_position` 稳定不变。
+
+### 变异
+
+| 编号 | 变异 | 结果 |
+| --- | --- | --- |
+| M99 | 只看哈希不看 ref（分支切换那一支瞎掉） | KILLED (1 failed) |
+| M100 | detached 当读不出来 → 返回空对 | KILLED (1 failed) |
+| M101 | 闸门整条删掉 | KILLED (1 failed) |
+| M102 | 基线每轮重取（第五个洞的形状） | KILLED (1 failed) |
+| M103 | claim 里不印 ref | KILLED (1 failed) |
+| M104 | 报「有没有提交」而不是「这一轮动没动」 | KILLED (1 failed) |
+
+M104 是这道闸门最像的一种写错法：判「HEAD 是不是有提交」而不是「这一轮动没动」。
+在任何正常仓库上它恒响——一道在自己仓库上必然误报的闸门等于一道被关掉的闸门。
+
+### 本轮踩的坑：多轮里 adapter 被调用两次
+
+接线测试第一版四条全红，`git commit` rc=1。手动复现却 rc=0。区别在轮次：
+闸门判红 → 打回 → adapter 第二轮再跑 → `git add a.py` 无改动可 stage →
+commit 以「无文件要提交」失败。改成 `once` 标志只动一次（这也是真实 worker 的
+行为——它不会每轮都重新提交同一份东西）。
+
+18 条测试，离线全套 909 passed。

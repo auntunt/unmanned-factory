@@ -33,6 +33,33 @@ def head_commit(root: Path) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def head_position(root: Path) -> tuple[str, str]:
+    """HEAD 的位置：(commit 哈希, 符号 ref)。detached 时 ref 为空串。
+
+    `git diff HEAD` 的**基线端**。前面所有闸门盯的都是这条命令的输入（属性、
+    config、索引标记），这个盯的是它对比的那个点本身：worker 自己
+    `git commit` 一次，HEAD 一移，diff 就变成「相对 worker 那次提交的增量」，
+    后门落在 HEAD 里，监工只看到剩下那点没提交的改动。
+
+    比索引跳过标记（第十二个洞）严重一档：那条路上 `git add -A` 不 stage，
+    land 会以「无文件要提交」失败，未审代码出不了货；这条路上代码**已经在
+    历史里**，land 只是往上叠一层，直接出货。
+
+    判据取 (哈希, ref) 而不是只取哈希，因为两种移动各自成灾：
+      - 提交：哈希变 → 后门进历史，diff 视野被截短
+      - 只切分支：哈希**不变**，diff 照样诚实（实测 pdb 可见），但 land 的
+        提交落到 worker 那条分支上（实测 `refs/heads/worker-side`，原分支
+        `refs/heads/feat` 看不到它）—— 人审的是原分支，货在别处
+
+    ref 用空串表示 detached 而不是 None：detached 是合法状态（`symbolic-ref`
+    在那里以 128 退出，不是错误），而「从 detached 变成挂在分支上」和反过来
+    都是这一轮动了 HEAD，两个方向都得算差异。
+    """
+    proc = _git(root, "symbolic-ref", "HEAD")
+    ref = proc.stdout.strip() if proc.returncode == 0 else ""
+    return head_commit(root) or "", ref
+
+
 def capture_diff(root: Path) -> tuple[str, tuple[str, ...]]:
     if not has_baseline(root):
         raise RuntimeError(f"{root} 没有任何 commit，无法 diff。先 git commit 一个基线。")

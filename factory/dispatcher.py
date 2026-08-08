@@ -33,6 +33,7 @@ from factory.harness.workspace import (
     changed_hooks,
     diff_suppressed,
     git_config,
+    head_position,
     hook_fingerprint,
     info_attributes,
     index_skipped,
@@ -105,6 +106,18 @@ def _listed(paths: tuple[str, ...]) -> str:
     if len(paths) > _MAX_LISTED_PATHS:
         text += f"（另有 {len(paths) - _MAX_LISTED_PATHS} 个）"
     return text
+
+
+def _head_desc(pos: tuple[str, str]) -> str:
+    """(哈希, ref) 转成给 worker 看的一行。
+
+    哈希截到 12 位：递进 prompt 里要的是「动过没动过」和「往哪动了」，40 位
+    全写进去只是占字数。ref 为空串是 detached，明写出来 —— 「从分支变成
+    detached」本身就是这道闸门要报的一种移动，只印哈希会让它读起来像没变。
+    """
+    commit, ref = pos
+    short = commit[:12] or "（无提交）"
+    return f"{short} @ {ref or 'detached HEAD'}"
 
 
 class Dispatcher:
@@ -291,6 +304,15 @@ class Dispatcher:
         # 所以一个 worker 能污染所有并行任务的监工。
         attrs_before = info_attributes(workspace)
 
+        # HEAD 的位置。前五个基线盯的都是 `git diff HEAD` 的**输入**（hooks、
+        # 属性、config、索引标记、标准），这一个盯的是它对比的那个**点**。
+        #
+        # 也在循环外，但这里的理由和前面几个不同：一轮之内**没有任何合法动作
+        # 会移动 HEAD**。land 是全流程唯一的提交点（landing.py:131），它跑在
+        # 这道闸门之后（_review 在 368 行，land 在 398 行），而被打回的轮次
+        # 刻意不提交。所以基线取一次就永远对得上，不存在「合法漂移」。
+        head_before = head_position(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -368,7 +390,7 @@ class Dispatcher:
 
             reports = self._review(
                 task, workspace, result, hooks_before, criteria_before,
-                skipped_before, config_before, attrs_before,
+                skipped_before, config_before, attrs_before, head_before,
             )
             for report in reports:
                 self._store.record_verdict(
@@ -477,6 +499,7 @@ class Dispatcher:
         skipped_before: frozenset[str],
         config_before: frozenset[tuple[str, str]],
         attrs_before: str,
+        head_before: tuple[str, str],
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -490,8 +513,14 @@ class Dispatcher:
         `criteria_before` 同理没有默认值：填 `()` 会让漏传的调用方在每个
         引 spec_doc 的任务上都判红（空基线 vs 有标准 = 差异）。
 
-        `skipped_before` 也一样。这三个基线是同一个教训的三份：判据必须是
+        `skipped_before` / `config_before` / `attrs_before` / `head_before`
+        也一样，一个默认值都没有。这六个基线是同一个教训的六份：判据必须是
         「这一轮变了什么」，而拿不到「之前是什么」的时候要炸，不要猜。
+
+        `head_before` 这一份尤其不能给默认值：随手填 `("", "")` 不会像别的
+        基线那样「每次都响」，它会让这道闸门在**每个**任务上都判红（空哈希 vs
+        真哈希恒不等），于是最省事的修法就是把闸门关掉。恒红和恒绿一样是坏的，
+        但恒红会被人当成闸门有毛病，比恒绿更快被拆。
         """
         if not result.ok:
             return (
@@ -686,6 +715,37 @@ class Dispatcher:
                     ".git/info/attributes 变了。一行 `*.py -diff` 就让监工看到的 "
                     "diff 正文退化成「Binary files … differ」，而这个文件不在任何 "
                     "diff、任何 config、git status 里，且被所有并行 worktree 共用",
+                ),
+            )
+
+        # HEAD 这一轮被移动了。这是 `git diff HEAD` 的**基线端**被动了手 ——
+        # 前面几道闸门盯的都是这条命令的输入，这道盯它对比的那个点。
+        #
+        # 实测：worker 自己 `git commit` 把后门提交掉，只留一处干净改动没提交。
+        # 于是 `git diff HEAD` 变成「相对 worker 那次提交的增量」，监工看到的
+        # paths 只有 ('README.md',)，`"pdb.set_trace" in diff` 是 False，而
+        # 后门在 HEAD 里。前面五道闸门全静默（shadow=() hooks=() muted=()
+        # skip=frozenset() cfg 变=False attrs 变=False），git status 只报
+        # ' A README.md'。
+        #
+        # **这条路和第十二个洞的区别是它真的出货**：索引跳过标记那条路上
+        # `git add -A` 不 stage 被标记的文件，land 会以「无文件要提交」失败，
+        # 未审代码进不了历史；这条路上代码已经在历史里了，land 只是往上叠一层。
+        #
+        # 判 (哈希, ref) 而不是只判哈希，因为只切分支那一支哈希不变：实测
+        # `git checkout -b worker-side` 之后 diff 照样诚实（pdb 可见），但 land
+        # 的提交落到 `refs/heads/worker-side`，原分支 `refs/heads/feat` 看不到
+        # 它 —— 人审的是原分支，货在别处。
+        if (head_now := head_position(workspace)) != head_before:
+            return (
+                self._blocked(
+                    "head-moved",
+                    f"派发前 HEAD 在 {_head_desc(head_before)}",
+                    "worker 没有移动 HEAD（一轮之内没有合法动作会移动它）",
+                    f"HEAD 这一轮被移到了 {_head_desc(head_now)}。`git diff HEAD` "
+                    "的基线是 HEAD，移动它就把监工的视野截短成「相对 worker 那次"
+                    "提交的增量」，已提交的部分谁都看不见，而 land 会直接叠在上面"
+                    "出货",
                 ),
             )
 
