@@ -47,7 +47,7 @@ from factory.harness.preflight import PreflightError, resolve_binary
 from factory.harness.shell import ShellAdapter
 from factory.harness.worktree import WorktreePool
 from factory.intake.extract import DraftTask, IntakeError, TaskExtractor
-from factory.intake.guard import KNOWN_OPS
+from factory.intake.guard import KNOWN_OPS, harden_ops
 from factory.intake.transcribe import TranscribeError, read_source
 from factory.metrics import gate3_rework, supervisor_metrics
 from factory.runbook import RunbookError, RunbookLibrary
@@ -555,8 +555,12 @@ def _queued_workspace(ns: argparse.Namespace, task: Task,
     """
     if pool is None:
         return Path(ns.workspace)
-    grade = GradingEngine.default().grade(task.declared_paths,
-                                          task.declared_ops)
+    # 和 Dispatcher._ops 一样重扫一遍 prompt，否则两处判定会分叉：一份 prompt
+    # 里写着 force push、declared_ops 空着的 YAML 在这里判 A（开 worktree），
+    # 到 Dispatcher.run 判 D（不派发）—— 结果就是这个 docstring 说要避免的
+    # 空目录。实测过这个分叉。harden_ops 只增不减且幂等，重扫只会更严。
+    ops, _ = harden_ops(task.prompt, task.declared_ops)
+    grade = GradingEngine.default().grade(task.declared_paths, ops)
     if not grade.unmanned_allowed:
         return Path(ns.workspace)
     return pool.acquire(task.task_id).path

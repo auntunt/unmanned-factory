@@ -5439,3 +5439,24 @@ ignored 改动的 worktree 会被判「干净」而删掉。这条没单独修�
 噪音水平实测：本仓库 `.venv` 里有 724 个 `.py` 命中原始命令，加上代码后缀 +
 `_VENDOR_DIRS` 过滤后剩 **0 条**。这个 0 是这道检测能用的前提 ——
 每次都响的闸门等于没有闸门，和漂移熔断器同一条教训。
+
+### 附带：「不是闸门」不等于「可以和闸门不一致」
+
+`_queued_workspace` 里有一段预分级，docstring 明说「这里重跑一次只是为了决定
+要不要开目录，**不是**闸门，判错的最坏后果是多开或少开一个空目录」。
+
+加了 `Dispatcher._ops` 之后这句话就不成立了 —— 实测的分叉：
+
+```
+prompt 写着 force push、declared_ops 空
+  _queued_workspace  读 YAML → 判 A → **开 worktree**
+  Dispatcher.run     _ops 重扫 → 判 D → **不派发**
+```
+
+后果正是这个函数自己的 docstring 说要避免的东西：worktree 开了，任务一行没跑，
+`.factory-worktrees/` 里堆着空目录，而「有 worktree」在别处的含义是「这里有产出
+没人验收」。
+
+顺带发现三个相关测试用的 `SimpleNamespace` 替身根本没有 `prompt` 字段 ——
+也就是说它们从未验证过 prompt 参与判定。补字段时 AttributeError 当场暴露了
+这件事；补完之后加了一条真的会失败的测试（M28 杀）。

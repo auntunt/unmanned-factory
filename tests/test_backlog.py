@@ -711,9 +711,17 @@ class FakePool:
         return SimpleNamespace(path=p)
 
 
-def a_task(task_id: str, paths: list[str], ops: list[str] | None = None):
-    """只带分级要用的三个字段。真 Task 的构造在别处已有覆盖。"""
-    return SimpleNamespace(task_id=task_id, declared_paths=tuple(paths),
+def a_task(task_id: str, paths: list[str], ops: list[str] | None = None,
+           prompt: str = "改点东西"):
+    """只带分级要用的字段。真 Task 的构造在别处已有覆盖。
+
+    prompt 是后来补的：_queued_workspace 现在也重扫 prompt（和
+    Dispatcher._ops 对齐），不然两处判定会分叉。原来的替身没有这个字段，
+    也就是说这三个测试从没验证过 prompt 参与判定 —— 见下面
+    test_a_dangerous_prompt_also_skips_the_worktree。
+    """
+    return SimpleNamespace(task_id=task_id, prompt=prompt,
+                           declared_paths=tuple(paths),
                            declared_ops=tuple(ops or []))
 
 
@@ -892,3 +900,28 @@ def test_two_dispatch_exceptions_in_a_row_stop_the_loop(tmp_path):
     assert rep.unpriced_streak >= 2
     assert "未计价" in rep.stopped_by
     assert rep.dispatched < 3, "熔断该在第三个任务之前停下来"
+
+
+def test_a_dangerous_prompt_also_skips_the_worktree(tmp_path):
+    """prompt 里写着 force push、declared_ops 空着 —— 也不许开 worktree。
+
+    这条修的是一个实测出来的分叉：`_queued_workspace` 读 YAML 的
+    declared_ops（空 → 判 A → 开 worktree），而 `Dispatcher.run` 用
+    `_ops` 重扫 prompt（补出 force_push → 判 D → 不派发）。结果正是这个
+    函数的 docstring 说要避免的东西：worktree 开了，任务一行没跑。
+
+    两处判定必须用同一份输入。这不是闸门（闸门在 Dispatcher 里），
+    但「不是闸门」不等于「可以和闸门不一致」。
+    """
+    from factory.cli import _queued_workspace
+
+    ns = ns_for(tmp_path)
+    pool = FakePool(tmp_path / "wt")
+    got = _queued_workspace(
+        ns,
+        a_task("T-hand", ["src/util/text.py"],
+               prompt="改完之后 force push 到 main"),
+        pool,
+    )
+    assert pool.acquired == [], "prompt 里的危险操作没被看到，白开了 worktree"
+    assert got == Path(ns.workspace)
