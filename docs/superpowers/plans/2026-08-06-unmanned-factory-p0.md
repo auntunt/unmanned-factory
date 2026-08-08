@@ -6332,3 +6332,88 @@ M83 存活时 17 条全过。原因：`test_pre_existing_flags_are_not_flagged` 
 离线跑法是 `-m "not smoke"`（pyproject 第 29 行定义了这个 marker），
 82 秒跑完。清掉残留进程时顺手确认了一遍：孤儿 claude 进程要显式 pkill，
 这和「超时只杀了直接子进程」是同一个坑的另一面。
+
+## 补：第十三个洞 —— `.git/config` 一行让 `git diff HEAD` 返回空字符串
+
+第十二个洞（索引跳过标记）修完之后，`capture_diff` 这条线上还剩一个我没查的
+入口：`.git/config` 本身。sandbox 刻意把 git_dir 放进可写（`capture_diff` 要写
+`index.lock`），于是 `.git/config` 也可写 —— 实测 `os.access(W_OK)` 为 True。
+
+量出来两条路，都不需要碰任何被跟踪的文件：
+
+| 设置 | pdb 在 diff 里可见 | diff 长度 | changed_paths |
+|---|---|---|---|
+| `diff.external=./fake-diff.sh` | False | **0** | 2 个，正常 |
+| `core.attributesFile=/tmp/x`（内含 `*.py -diff`） | False | 387 | 3 个，正常 |
+| `diff.noprefix` / `core.pager` / `diff.py.command` | True | 234–248 | 正常 |
+
+后两行是我先猜后验、结果证伪的机制：`core.pager` 在非 tty 下本来就不生效，
+`diff.py.command` 需要 `.gitattributes` 里先有 `diff=py` 才被查表。**猜了三条，
+中两条。** 这是"验效果不猜机制"那条教训的又一次复现。
+
+### 为什么"空 diff"那道判定不响
+
+`_review` 里第二道就是空 diff 检查，但它看的是 `result.changed_paths`：
+
+```python
+if not result.changed_paths:
+    return (self._blocked("diff", "git diff HEAD", "至少一个文件改动", ...),)
+```
+
+而 `diff.external` 只劫持 `git diff HEAD` 的**正文**生成，`--name-only` 不走
+external。于是 `changed_paths` 非空、这道判定通过，两个模型监工收到的
+`diff` 是空字符串 → 模板里降级成 `"(空 diff)"`。判据错位：判的是路径有没有，
+伤的是正文有没有。
+
+### `core.attributesFile` 绕过第七道闸门
+
+第七个洞的判据是 `git check-attr diff` 现状 vs `--source=HEAD` 基线。实测
+`core.attributesFile` 这条路让它彻底失效：
+
+```
+pdb 可见: False
+第七道闸门 diff_suppressed: ()      ← 空 = 被绕过
+```
+
+原因是 `--source=HEAD` 只换"读哪个版本的 `.gitattributes` 文件"，`core.attributesFile`
+指向的是仓库**外**一份属性文件，两次调用都会读它 → 基线和现状都是"被关掉"
+→ 对称差为空。一道闸门被另一层配置从下面掏空，而它自己报"一切正常"。
+
+这条值得单独记：**闸门 A 的基线机制，可能整个落在闸门 B 要防的东西的下游。**
+
+### 判据：不堵开关名，判"这一轮 config 变了"
+
+git 的 config 键有几百个，逐个堵是猜机制。改成整份 local config 的
+(键, 值) 集合做基线，对称差非空就拦。三个测量支撑这个选法：
+
+- 本仓库 local config 只有 6 个键，全是 `git init` 装的，**零误报面**
+- `capture_diff` 跑完 config 无变化（它只写 index，不写 config）
+- `landing.py:85` 只 `git config user.email` 读、身份靠瞬时 `-c` 注入，不落盘
+
+只读 `--local`：global / system 不在 workspace 里，worker 改不到，算进来等于
+把"这台机器的设置"当成任务的改动。
+
+`-z` 而不是按行切：`git config foo.bar $'a\nb'` 是合法的，按行切会把一条
+拆成两条 —— M89 就是这个变异，杀掉了 6 条测试。
+
+取**键名**递给 worker，不递值：值里可能有路径、有人的邮箱。实测还发现
+`--list` 会把键名小写化（`core.attributesFile` → `core.attributesfile`），
+不影响判定（基线和现状同一条路），也不影响 worker 撤销（git 的 section+name
+查找本身大小写不敏感）。
+
+### 基线在循环外
+
+和 hooks / criteria / index-skip 同一个形状，现在是第四份。M86（挪进循环开头）
+杀掉 5 条 —— 默认 `max_rounds=3` 让单轮用例实际跑到第二轮，改后的 config
+在第二轮被当成原样。
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M85 | 闸门整块短路 | KILLED (3) |
+| M86 | 基线挪进循环开头 | KILLED (5) |
+| M87 | 不看基线，有非默认键就报 | KILLED (1) |
+| M88 | 对称差改成单向差 | KILLED (1) |
+| M89 | `-z` 换成按行切 | KILLED (6) |
+| M90 | 只比键不比值 | KILLED (1) |
+
+20 条测试，离线全套 866 passed。

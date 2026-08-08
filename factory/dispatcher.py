@@ -29,8 +29,10 @@ from factory.harness.landing import land
 from factory.routing import Router
 from factory.harness.verdict_probe import judge_files_touched, probe
 from factory.harness.workspace import (
+    changed_config,
     changed_hooks,
     diff_suppressed,
+    git_config,
     hook_fingerprint,
     index_skipped,
     newly_skipped,
@@ -269,6 +271,11 @@ class Dispatcher:
         # 之后每一轮它都还在，每轮重取基线的版本从第二轮起就看不见了。
         skipped_before = index_skipped(workspace)
 
+        # 本地 git config 的基线。也在循环外，理由同上。
+        # 这份是四个基线里覆盖面最宽的一个：config 里的开关能直接改变 git
+        # **自己**回答问题的方式，而它们不出现在任何 diff 里。
+        config_before = git_config(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -346,7 +353,7 @@ class Dispatcher:
 
             reports = self._review(
                 task, workspace, result, hooks_before, criteria_before,
-                skipped_before,
+                skipped_before, config_before,
             )
             for report in reports:
                 self._store.record_verdict(
@@ -453,6 +460,7 @@ class Dispatcher:
         hooks_before: frozenset[tuple[str, str]],
         criteria_before: tuple[str, ...],
         skipped_before: frozenset[str],
+        config_before: frozenset[tuple[str, str]],
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -603,6 +611,36 @@ class Dispatcher:
                     "这一轮没有给任何路径挂上 assume-unchanged / skip-worktree",
                     f"{len(skipped)} 个路径被挂上了索引跳过标记，git 从此不看它们"
                     f"的改动，而 check 跑在真实文件树上：{_listed(skipped)}",
+                ),
+            )
+
+        # 本地 git config 被动过。**这一条必须在两道 diff 相关闸门之前**，因为
+        # 它能让那两道自己失效：
+        #
+        #   diff.external=<脚本>     → `git diff HEAD` 返回空字符串（实测 len=0）。
+        #                             而 `--name-only` 不走 external，changed_paths
+        #                             照常非空 → 上面那道「空 diff」判定也不响。
+        #                             两个模型监工收到的是 "(空 diff)"。
+        #   core.attributesFile=<外部> → 效果同第七个洞（`*.py -diff`），但
+        #                             `check-attr --source=HEAD` **也读这个设置**，
+        #                             基线和现状都是「被关掉」→ 差异为空 →
+        #                             diff_suppressed 那道闸门被绕过（实测）。
+        #
+        # 判「这一轮变了」而不是查开关名单：git 的 config 键有几百个，逐个堵
+        # 是猜机制。而且 config 里的东西**不出现在任何 diff 里** —— 四道闸门
+        # 加上范围监工全都看不见它，只有拿基线比才看得见。
+        #
+        # 合法改动不会响：实测 capture_diff / land 都不写 --local（landing.py
+        # 只 `git config user.email` 读一次，身份是瞬时 `-c` 传的），本仓库
+        # 6 个键在一整轮里恒定。
+        if cfg := changed_config(config_before, git_config(workspace)):
+            return (
+                self._blocked(
+                    "git-config-touched",
+                    "git config --local --list（派发前后对比）",
+                    "这一轮没有改动仓库本地 git config",
+                    f"{len(cfg)} 个 config 键变了：{_listed(cfg)}。config 不出现在"
+                    f"任何 diff 里，而其中若干键能直接改变监工看到的 diff",
                 ),
             )
 

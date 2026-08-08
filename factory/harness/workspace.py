@@ -111,6 +111,55 @@ def hook_fingerprint(root: Path) -> frozenset[tuple[str, str]]:
     return frozenset(out)
 
 
+def git_config(root: Path) -> frozenset[tuple[str, str]]:
+    """仓库**本地** git config 的 (键, 值) 集合。
+
+    只读 `--local`，不读 global / system：那两层不在 workspace 里，worker 改
+    不到，算进来只会把「机器上的设置」当成「这一轮的改动」。
+
+    为什么要这个基线：`.git/config` 在 sandbox 可写（实测 `os.access(W_OK)`
+    为 True —— git_dir 必须可写，capture_diff 要写 index.lock）。config 里有
+    好几个开关能直接瞎掉监工的输入，而且它们**不在任何 diff 里**：
+
+      diff.external=./sh        → `git diff HEAD` 返回**空字符串**（实测 len=0），
+                                  而 --name-only 不走 external，changed_paths 照常
+                                  非空，于是「空 diff」那道判定也不响
+      core.attributesFile=...   → 指向仓库外一份 `*.py -diff`，效果和第七个洞
+                                  一样，但 `check-attr --source=HEAD` 也会读这个
+                                  设置，基线和现状都是「被关掉」→ 第七道闸门
+                                  差异为空，被绕过（实测）
+
+    所以判据是「这一轮 config 变了」，不是逐个堵开关名 —— 那是猜机制，而
+    git 的 config 键有几百个。
+    """
+    proc = _git(root, "config", "--local", "--list", "-z")
+    if proc.returncode != 0:
+        return frozenset()
+    out = set()
+    # `-z` 的格式：每条记录 `key\nvalue`，记录间 NUL 分隔。用 -z 是因为值里
+    # 可以有换行（`git config foo.bar $'a\nb'` 是合法的），按行切会把一条拆成两条。
+    for record in proc.stdout.split("\0"):
+        if not record:
+            continue
+        key, _, value = record.partition("\n")
+        out.add((key, value))
+    return frozenset(out)
+
+
+def changed_config(
+    before: frozenset[tuple[str, str]], after: frozenset[tuple[str, str]]
+) -> tuple[str, ...]:
+    """两份 config 之间变动过的**键名**。新增、改值、删除都算。
+
+    删除也算，和 changed_hooks 同一个理由：仓库里可能有人设的
+    `core.autocrlf`、`diff.algorithm`，worker 删掉它等于改变 diff 的形状。
+
+    取键名不取键值对：给 worker 的指令是「别动 .git/config」，而值里可能
+    有路径、有人的邮箱 —— 递进 prompt 是白送信息。
+    """
+    return tuple(sorted({k for k, _ in before ^ after}))
+
+
 def index_skipped(root: Path) -> frozenset[str]:
     """索引里被打上 assume-unchanged / skip-worktree 的路径。
 
