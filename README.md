@@ -50,6 +50,10 @@ uv run factory queue --queue ~/.factory/q --history 50
 循环停机之后继续跑（实测一次 3 任务的 drain 留下 12 个孤儿）。先 TERM 等 3s
 再 KILL —— 那 3 秒是留给 CLI 把 transcript 落盘的，漏账时那是唯一的线索。
 
+工厂里每一条会超时的外部调用都走这条路，不只是派发：回归监工跑的 check、
+三个模型监工、入口的提取和 check 探针、口述转录、runbook 的 `requires` 探针。
+凡是「会拉起我们不认识的东西」的命令都算，纯 `git` 调用不算。
+
 定时启动用 `examples/launchd/com.factory.loop.plist`，**别照抄上面那条命令** ——
 launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
 「←」的行按本机改，改完跑 `plutil -lint`。
