@@ -17,6 +17,8 @@ from pathlib import Path
 
 from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits, ToolCall
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.harness.transcript import find_transcript, parse_tool_calls
 from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
@@ -47,17 +49,15 @@ class ClaudeCodeAdapter:
         实际发生过：out.py 被 git add -A 提交进了 10a0d9f。
         这是 ShellAdapter.version() 同一个坑，两处都修。
         """
+        # 探针也走 run_bounded：一个挂住的 `--version` 同样会留下整棵树。
+        # 实测里那 12 个孤儿有一半是探针留的（每次 attempt 前探一次，
+        # 每次都等满 30s 再放着不管）。
         try:
             with tempfile.TemporaryDirectory(prefix="factory-cc-ver-") as clean:
-                proc = subprocess.run(
-                    [self._binary, "--version"],
-                    cwd=clean,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+                proc = run_bounded([self._binary, "--version"],
+                                   cwd=clean, timeout_s=30.0)
             raw = proc.stdout.strip() or "unknown"
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, ProcTimeout):
             raw = "unknown"
         return sb.tag_version(raw, self._sandbox)
 
@@ -99,21 +99,22 @@ class ClaudeCodeAdapter:
                 argv, overrides = sb.prepare(argv, Path(workspace), stack)
                 env = {**os.environ, **overrides}
             try:
-                proc = subprocess.run(
+                # 不是 subprocess.run：超时要杀掉整棵进程树。claude 是个
+                # node 进程，会拉起 MCP server 和 Bash 工具的每条命令，
+                # 只 kill 直接子进程的话花钱的那一半会活下来。见 proc 模块。
+                proc = run_bounded(
                     argv,
                     cwd=workspace,
                     env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=limits.timeout_s,
+                    timeout_s=limits.timeout_s,
                 )
-            except subprocess.TimeoutExpired:
+            except ProcTimeout as exc:
                 return self._result(
                     workspace,
                     ExitStatus.TIMEOUT,
                     version,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
-                    error_text=f"timeout after {limits.timeout_s}s",
+                    error_text=str(exc),
                 )
             except OSError as exc:
                 return self._result(

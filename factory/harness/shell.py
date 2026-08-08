@@ -30,6 +30,8 @@ from pathlib import Path
 
 from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits
+from factory.harness.proc import Timeout as ProcTimeout
+from factory.harness.proc import run_bounded
 from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
 
@@ -96,14 +98,11 @@ class ShellAdapter:
             return self._static_version()
         with tempfile.TemporaryDirectory(prefix="factory-shell-ver-") as clean:
             try:
-                proc = subprocess.run(
-                    [self._argv_template[0], "--version"],
-                    cwd=clean,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-            except (OSError, subprocess.SubprocessError):
+                # 探针也走 run_bounded 的理由见 ClaudeCodeAdapter.version()。
+                # 这里更需要：probe_version=True 的对象是任意可执行文件。
+                proc = run_bounded([self._argv_template[0], "--version"],
+                                   cwd=clean, timeout_s=30.0)
+            except (OSError, ProcTimeout):
                 return self._static_version()
         lines = (proc.stdout or proc.stderr or "").strip().splitlines()
         return lines[0][:64] if lines else self._static_version()
@@ -159,21 +158,21 @@ class ShellAdapter:
             if self._sandbox:
                 argv, env_overrides = sb.prepare(argv, Path(workspace), stack)
                 env.update(env_overrides)
-            proc = subprocess.run(
+            # 见 proc 模块：超时杀整棵树。shell harness 更需要这个 ——
+            # argv 通常是个 sh 脚本，它派生的东西 sh 自己都不管。
+            proc = run_bounded(
                 argv,
                 cwd=workspace,
                 env=env,
-                capture_output=True,
-                text=True,
-                timeout=limits.timeout_s,
+                timeout_s=limits.timeout_s,
             )
-        except subprocess.TimeoutExpired:
+        except ProcTimeout as exc:
             return self._result(
                 workspace,
                 ExitStatus.TIMEOUT,
                 version,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
-                error_text=f"timeout after {limits.timeout_s}s",
+                error_text=str(exc),
             )
         except OSError as exc:
             return self._result(
