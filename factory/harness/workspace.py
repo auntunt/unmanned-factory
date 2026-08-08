@@ -131,18 +131,33 @@ def git_config(root: Path) -> frozenset[tuple[str, str]]:
 
     所以判据是「这一轮 config 变了」，不是逐个堵开关名 —— 那是猜机制，而
     git 的 config 键有几百个。
+
+    刻意读 **--local 和 --worktree 两层的并集**，不是只读 --local。
+    `config.worktree` 是 git 的第四层，只在 `extensions.worktreeConfig=true`
+    时生效，而这个工厂的并行任务**跑在 worktree 里**（见 harness/worktree.py）。
+    实测：仓库已开 extensions 时，往 `.git/worktrees/<名>/config.worktree` 写
+    一行 `diff.external`，`--local` 完全不变（这道闸门差异为空），而
+    `git diff HEAD` 照样返回空字符串 —— 也就是这道闸门自己的视野差。
+
+    「这一轮才开 extensions」那条路本来就被拦住（`extensions.worktreeconfig`
+    出现在 --local 里，实测报出来了），所以补的是「仓库本来就开着」——
+    sparse-checkout 的常见配法。
     """
-    proc = _git(root, "config", "--local", "--list", "-z")
-    if proc.returncode != 0:
-        return frozenset()
-    out = set()
-    # `-z` 的格式：每条记录 `key\nvalue`，记录间 NUL 分隔。用 -z 是因为值里
-    # 可以有换行（`git config foo.bar $'a\nb'` 是合法的），按行切会把一条拆成两条。
-    for record in proc.stdout.split("\0"):
-        if not record:
+    out: set[tuple[str, str]] = set()
+    for scope in ("--local", "--worktree"):
+        proc = _git(root, "config", scope, "--list", "-z")
+        # rc != 0 当**这一层不存在**，不是错误：未开 extensions 的 worktree 上
+        # `--worktree` 以 128 退出（实测「无法读取配置文件 .git/config.worktree」）。
+        # 非 worktree 仓库上它返回的和 --local 一样，并集去重，无副作用。
+        if proc.returncode != 0:
             continue
-        key, _, value = record.partition("\n")
-        out.add((key, value))
+        # `-z` 的格式：每条记录 `key\nvalue`，记录间 NUL 分隔。用 -z 是因为值里
+        # 可以有换行（`git config foo.bar $'a\nb'` 是合法的），按行切会把一条拆成两条。
+        for record in proc.stdout.split("\0"):
+            if not record:
+                continue
+            key, _, value = record.partition("\n")
+            out.add((key, value))
     return frozenset(out)
 
 

@@ -332,3 +332,87 @@ def test_the_other_gates_stay_quiet(tmp_path: Path) -> None:
     for other in ("shadow-code", "runner-hook-added", "git-hook-touched",
                   "diff-suppressed", "index-skip-flag"):
         assert other not in rep.escalation_reason, f"{other} 也响了"
+
+
+# --- 四、第四层 config：worktree 层 -----------------------------------------
+#
+# 第十三道闸门自己的盲区：它只读 `--local`，而 git 有第四层 `config.worktree`
+# （`.git/worktrees/<名>/config.worktree`）。工厂正是用 worktree 跑并行任务的。
+
+
+def _wt_repo(tmp_path: Path, *, extensions: bool) -> Path:
+    """建一个 worktree，`extensions` 决定 worktreeConfig 开没开。"""
+    root = _repo(tmp_path)
+    if extensions:
+        _git(root, "config", "extensions.worktreeConfig", "true")
+    _git(root, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "feat")
+    return tmp_path / "wt"
+
+
+def test_the_hole_worktree_layer_was_invisible_to_local(tmp_path: Path) -> None:
+    """洞本身：`--local` 读不到 worktree 层，所以只读 local 的闸门看不见它。
+
+    刻意断言的是 **git 的行为**（`--local --list` 里没有这个键），不是我的
+    函数 —— 这条测试要证的是「视野差存在」，删掉我的修法它照样该通过。
+    """
+    ws = _wt_repo(tmp_path, extensions=True)
+    _git(ws, "config", "--worktree", "diff.external", "/bin/true")
+
+    local_only = _git(ws, "config", "--local", "--list")
+    assert "diff.external" not in local_only, "git 行为变了？那这个洞不存在了"
+    assert "diff.external" in _git(ws, "config", "--list")
+
+
+def test_the_hole_empties_the_diff_through_the_worktree_layer(tmp_path: Path) -> None:
+    """走 worktree 层设 diff.external，效果和走 local 一样：diff 全空。"""
+    ws = _wt_repo(tmp_path, extensions=True)
+    fake = tmp_path / "fake.sh"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    _git(ws, "config", "--worktree", "diff.external", str(fake))
+    (ws / "a.py").write_text("x = 1\nimport pdb; pdb.set_trace()\n", encoding="utf-8")
+
+    diff, paths = capture_diff(ws)
+    assert diff == "", f"diff 没被清空：{diff[:200]!r}"
+    assert paths == ("a.py",), "路径还在 —— 所以「空 diff」那道判定不响"
+
+
+def test_the_worktree_layer_is_caught(tmp_path: Path) -> None:
+    ws = _wt_repo(tmp_path, extensions=True)
+    before = git_config(ws)
+    _git(ws, "config", "--worktree", "diff.external", "/bin/true")
+    assert changed_config(before, git_config(ws)) == ("diff.external",)
+
+
+def test_undoing_the_worktree_layer_is_quiet(tmp_path: Path) -> None:
+    """撤回去就不该再响 —— 判据是「这一轮变了」，不是「有没有设过」。"""
+    ws = _wt_repo(tmp_path, extensions=True)
+    before = git_config(ws)
+    _git(ws, "config", "--worktree", "diff.external", "/bin/true")
+    _git(ws, "config", "--worktree", "--unset", "diff.external")
+    assert changed_config(before, git_config(ws)) == ()
+
+
+def test_enabling_the_extension_this_round_is_itself_caught(tmp_path: Path) -> None:
+    """前提条件本身也被拦：开 extensions 要写 `.git/config`。
+
+    所以这个洞的危害面只是「仓库**本来**就开着 worktreeConfig」（sparse-checkout
+    的常见用法），不是任何仓库都能走。
+    """
+    root = _repo(tmp_path)
+    _git(root, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "feat")
+    ws = tmp_path / "wt"
+    before = git_config(ws)
+    _git(ws, "config", "extensions.worktreeConfig", "true")
+    assert "extensions.worktreeconfig" in changed_config(before, git_config(ws))
+
+
+def test_a_worktree_without_the_extension_is_not_an_error(tmp_path: Path) -> None:
+    """未开 extensions 的 worktree 上 `--worktree` 会 rc=128，必须当空层。
+
+    实测的报错：`无法读取配置文件 '.git/config.worktree'`。让它冒出去的话，
+    每个普通 worktree 任务都会炸在取基线这一步。
+    """
+    ws = _wt_repo(tmp_path, extensions=False)
+    assert git_config(ws), "普通 worktree 上读成空了 —— local 层也丢了"
+    assert changed_config(git_config(ws), git_config(ws)) == ()

@@ -6417,3 +6417,69 @@ git 的 config 键有几百个，逐个堵是猜机制。改成整份 local conf
 | M90 | 只比键不比值 | KILLED (1) |
 
 20 条测试，离线全套 866 passed。
+
+## 补：第十四个洞 —— 上一道闸门自己的视野差（`config.worktree`）
+
+第十三道闸门刚提交，它自己就是第十四个洞的入口。`git_config` 读的是
+`git config --local --list`，而 git 的 config 有**四层**，`--local` 是第三层。
+第四层是 `config.worktree`，只在 `extensions.worktreeConfig=true` 时生效 ——
+而这个工厂的并行任务**恰好跑在 worktree 里**（`harness/worktree.py`）。
+
+### 实测
+
+仓库已开 extensions 的前提下，往 `.git/worktrees/<名>/config.worktree` 写一行
+`diff.external`：
+
+| 观察点 | 值 |
+|---|---|
+| 闸门 #13 `changed_config` | `()` —— `--local` 一个字节没变 |
+| `git diff HEAD` 长度 | `0` |
+| `changed_paths` | `('a.py',)` —— 非空，所以「空 diff」那道判定也不响 |
+| 闸门 #12 `index_skipped` | `frozenset()` |
+| 闸门 #7 `diff_suppressed` | `()` |
+
+也就是第十三个洞的**同一个后果**，走的是第十三道闸门看不见的那一层。
+
+### 为什么这不是「再加一道闸门」
+
+修法是把 `git_config` 的视野从一层加宽到两层的并集，不新增 claim：worker 要做的事
+没变（「别动仓库的 git config」），判据也没变（「这一轮变了什么」）。加一条新 claim
+只会让打回的指令多一个 worker 分不清的分类。
+
+三种情形都量过，并集是安全的：
+
+| 情形 | `--worktree` 的行为 | 并集的后果 |
+|---|---|---|
+| 非 worktree、未开 extensions | 返回和 `--local` 一样 | 去重后无变化（本仓库仍是 6 条） |
+| 工厂 worktree、未开 extensions | rc=128「无法读取配置文件 .git/config.worktree」 | `continue`，当这一层不存在 |
+| worktree、已开 extensions | 只返回那一层 | 并进来，于是抓得住 |
+
+第三行的 rc=128 必须当「这一层不存在」而不是当错误：当错误返回空 frozenset 的话，
+基线和现状都空，闸门在**未开 extensions 的每个工厂 worktree 上直接瞎掉** —— 也就是
+绝大多数真实任务。M93 钉的就是这条（7 条测试失败）。
+
+### 「这一轮才开 extensions」那条路
+
+不需要单独处理：`extensions.worktreeconfig` 这个键本身出现在 `--local` 里，实测闸门
+#13 直接报出来（`('extensions.worktreeconfig',)`）。所以补的只是「仓库本来就开着」
+—— sparse-checkout 的常见配法，不罕见。
+
+### 变异
+
+| 编号 | 变异 | 结果 |
+|---|---|---|
+| M91 | 只读 `--local`（退回洞里） | KILLED（1 失败） |
+| M92 | 只读 `--worktree` | KILLED（5 失败） |
+| M93 | 一层读不到就整份返回空 | KILLED（7 失败） |
+
+离线套件 866 → 872。
+
+### 这个洞的形状值得单独记一句
+
+**一道闸门的基线，可能落在另一道闸门的下游。** 第七个洞（`.gitattributes`）的基线取自
+`check-attr --source=HEAD`，而 `core.attributesFile` 这个 config 键让基线和现状同时
+变成「被关掉」，差异为空 —— 闸门 #7 被 config 绕过。现在同一件事又发生一次：闸门 #13
+的基线取自 `--local`，而 `config.worktree` 在它下游。
+
+检查一道新闸门时要多问一句：**它的「之前是什么」是从哪读的，那个读法自己能不能被这一轮
+的改动影响。** 前面十几个洞里，这个形状出现了三次。
