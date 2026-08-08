@@ -40,6 +40,16 @@ uv run factory queue --queue ~/.factory/q --history 50
 进程不打 usage payload），所以反复超时的任务在预算眼里是免费的 —— 墙钟是超时
 躲不过的那道闸。两个都没给时 `loop` 会各打一条警告。
 
+第三道闸默认就开着：`--max-unpriced-streak 2`，连续 2 个任务的花费记不上账就
+停机。它数的不是钱，是「有多少次派发的价格是假的」—— 连续两次说明坏的是环境
+（CLI 挂了、网断了），不是任务。单次超时不触发，因为那是设计里的正常出口。
+停机后 `queue --history` 里那几条会写明原因，队列里剩下的任务原地不动。
+
+`--timeout` 到点时杀掉的是**整个进程组**，不只是 claude 自己。它是个 node
+进程，会拉起 MCP server 和 Bash 工具的每条命令；只杀父进程的话，那些会在
+循环停机之后继续跑（实测一次 3 任务的 drain 留下 12 个孤儿）。先 TERM 等 3s
+再 KILL —— 那 3 秒是留给 CLI 把 transcript 落盘的，漏账时那是唯一的线索。
+
 定时启动用 `examples/launchd/com.factory.loop.plist`，**别照抄上面那条命令** ——
 launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
 「←」的行按本机改，改完跑 `plutil -lint`。
