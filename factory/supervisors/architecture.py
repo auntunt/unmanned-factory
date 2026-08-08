@@ -15,7 +15,15 @@ from collections.abc import Sequence
 
 from factory.audit.models import SupervisorRole
 from factory.supervisors.base import SupervisorReport
-from factory.supervisors.model_base import ClaudeJudge, assert_no_leak, report_from_call
+from factory.supervisors.model_base import (
+    ISOLATION_RULE,
+    ClaudeJudge,
+    assert_intact,
+    assert_no_leak,
+    fence,
+    new_sentinel,
+    report_from_call,
+)
 
 _MAX_DIFF = 60_000
 _MAX_CONTEXT = 40_000
@@ -34,16 +42,13 @@ _PROMPT = """你是架构监工。看 diff 和它周边的代码，找出测试�
 - check 写问题类型加位置（例：「重复实现 factory/x.py:foo」），
   expected 写本仓库的既有做法，got 写这次 diff 的做法。
 - 找不到上面四类问题就判 pass，claims 留空。干净的 diff 判 pass 是正常结果。
+{isolation}
 
 ## 本次 diff
-```diff
 {diff}
-```
 
 ## 周边既有代码（判断约定和是否重复实现的依据）
-```
 {context}
-```
 """
 
 
@@ -60,9 +65,18 @@ class ArchitectureSupervisor:
         context: str = "",
         withheld: Sequence[str] = (),
     ) -> SupervisorReport:
+        # 和规格监工同一个理由：diff / context 是 worker 完全控制的文本。
+        # 这个监工尤其吃亏 —— 它的 context 是**同目录未改动文件**，worker
+        # 可以在上一轮把注入内容正常提交进版本控制，这一轮它就成了「既有
+        # 代码」，影子代码那道闸门也看不见（它判的是 .gitignore 挡住的文件）。
+        sentinel = new_sentinel()
         prompt = _PROMPT.format(
-            diff=(diff or "(空 diff)")[:_MAX_DIFF],
-            context=(context or "(未提供周边代码)")[:_MAX_CONTEXT],
+            isolation=ISOLATION_RULE.format(sentinel=sentinel),
+            diff=fence(sentinel, "DIFF", (diff or "(空 diff)")[:_MAX_DIFF]),
+            context=fence(
+                sentinel, "CONTEXT", (context or "(未提供周边代码)")[:_MAX_CONTEXT]
+            ),
         )
+        assert_intact(prompt, sentinel, 5)
         assert_no_leak(prompt, tuple(withheld))
         return report_from_call(self.role, self._judge.ask(prompt), what="架构监工")

@@ -82,6 +82,17 @@ class DispatchReport:
 _MAX_LISTED_PATHS = 20
 
 
+def _criteria_delta(before: tuple[str, ...], after: tuple[str, ...]) -> tuple[str, ...]:
+    """派发时有、现在没了的标准。给 worker 看的是**丢了哪几条**。
+
+    刻意不列「现在多出来的」：改一条正文会同时产生一进一出，两条都摊出来
+    worker 看到的是自己写的那句话被引用一遍，容易读成「系统认可了」。
+    只说丢了什么，指令才唯一：把它改回去。
+    """
+    gone = tuple(c for c in before if c not in after)
+    return gone or ("（条数没变，正文被改写）",)
+
+
 def _listed(paths: tuple[str, ...]) -> str:
     """路径列表转成给 worker 看的一行。上限见 supervisors/scope.py 的同名理由：
     worker 要的是「处理哪几个」，糊 200 行路径进 prompt 只会挤掉真正的失败项。"""
@@ -243,6 +254,15 @@ class Dispatcher:
         # 提到循环外之后，worker 想过这道闸门只有一条路：把 hook 改回去。
         hooks_before = hook_fingerprint(workspace)
 
+        # 验收标准的基线。同样**在循环外取一次** —— 理由和 hooks 一模一样，
+        # 而且这份更隐蔽：递给规格监工的 criteria 是每轮重新从仓库里那份
+        # spec_doc 解析出来的（_review 里 `task.criteria(workspace)`），而
+        # 那个文件 worker 写得进去。被判的东西能改判它的标准。
+        #
+        # 只存这个任务 spec_ref 的正文，不存整份文档：实测改文档里**别的
+        # 编号**、往尾部加新条目都不该响，只有这几条自己变了才该响。
+        criteria_before = task.criteria(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -318,7 +338,9 @@ class Dispatcher:
                     aid, role=SupervisorRole.RISK, verdict=Verdict.PASS, claims=[]
                 )
 
-            reports = self._review(task, workspace, result, hooks_before)
+            reports = self._review(
+                task, workspace, result, hooks_before, criteria_before
+            )
             for report in reports:
                 self._store.record_verdict(
                     aid,
@@ -422,6 +444,7 @@ class Dispatcher:
     def _review(
         self, task, workspace, result,
         hooks_before: frozenset[tuple[str, str]],
+        criteria_before: tuple[str, ...],
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -431,6 +454,9 @@ class Dispatcher:
         `hooks_before` 刻意**没有默认值**：给它填 `frozenset()` 会让漏传的
         调用方在一个本来就装了合法 pre-commit 的仓库上每个任务都判红
         （空基线 vs 有 hook = 差异）。让它当场 TypeError 好过每次都响。
+
+        `criteria_before` 同理没有默认值：填 `()` 会让漏传的调用方在每个
+        引 spec_doc 的任务上都判红（空基线 vs 有标准 = 差异）。
         """
         if not result.ok:
             return (
@@ -535,6 +561,37 @@ class Dispatcher:
                     "改动的源码文件在 diff 里能看到正文",
                     f"{len(muted)} 个路径这一轮被 .gitattributes 关掉了 diff，"
                     f"监工看不到改了什么：{_listed(muted)}",
+                ),
+            )
+
+        # 验收标准这一轮被改了。判的是「被审对象改了审它的标准」。
+        #
+        # 路径：`_review` 里 `task.criteria(workspace)` 每轮重新解析仓库里的
+        # spec_doc，而 sandbox 允许 worker 写这个文件。实测两个方向：
+        #   改正文  —— `- AC-1: 返回和` 改成 `- AC-1: 返回差，已由上游确认满足`，
+        #             监工拿着改后的标准核 diff，判 pass。
+        #   删条目  —— 两条删成一条，`resolve_spec().ok` 变 False，但这里
+        #             **不看 ok**，criteria 静默从 2 条降到 1 条。少的那条
+        #             没有任何人提起过。静默降级这一侧永远更好看。
+        #
+        # 派发前那道 pre-dispatch-spec-ref 拦不住：它跑在 worker 之前，
+        # 那时文档还是原样。注释里「走到这里 resolve 一定成功过」当时是真的，
+        # 但它说的是**上一份文本**。
+        #
+        # 判据只覆盖本任务 spec_ref 解析出的正文，不覆盖整份文档：实测改文档
+        # 里别的编号、往尾部追加新条目都不响（合法情形 —— 一个仓库的 PRD 里
+        # 有别的任务的章节），只有这几条自己被改/被删才响。口述来源的任务
+        # （没有 spec_doc）criteria 恒定，这道闸门对它们永远静默。
+        if criteria_before != (criteria_now := task.criteria(workspace)):
+            return (
+                self._blocked(
+                    "spec-criteria-mutated",
+                    f"派发前解析 spec_ref 得到 {len(criteria_before)} 条验收标准",
+                    "worker 没有改动它自己被核对的那几条标准",
+                    f"这一轮之后重新解析得到 {len(criteria_now)} 条，"
+                    f"派发时这几条已经不在了："
+                    f"{_listed(_criteria_delta(criteria_before, criteria_now))}。"
+                    f"改标准不是完成任务，规格监工核的必须是派发时那份",
                 ),
             )
 

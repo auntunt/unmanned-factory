@@ -223,6 +223,11 @@ def diff_hash(diff: str) -> str | None:
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "dist", "build"}
 
 
+#: 每个邻居至少给这么多字节。低于这个数只剩几行 import，读不出约定，
+#: 不如干脆归到「没放进来」里说清楚。
+_MIN_PER_FILE = 2_000
+
+
 def neighbour_context(
     root: Path,
     changed_paths: tuple[str, ...],
@@ -254,17 +259,55 @@ def neighbour_context(
                 continue
             picked.append(rel)
 
+    # 每个文件先分到一份**配额**，而不是先到先得把预算吃光。
+    # 洞的形状：上一轮正常提交进版本控制的一个 12000 行文件，名字排在
+    # `sorted()` 前面（`aaa_big.py`），就能把真正写着仓库约定的
+    # `zz_conventions.py` 完全挤出监工视野。实测 len(ctx)=40023，
+    # 「已有实现」一个字都不在里面，而**架构监工判重复实现的唯一依据就是
+    # 这段 context**。它会如实判 pass —— 推理没错，输入不完整。
+    #
+    # 这一轮没有任何改动，所以前面四道闸门全瞎：不在 changed_paths 里、
+    # 不是新增文件、不被 .gitignore 挡、diff 属性正常。
+    keep = picked[:max_files]
+    dropped_files = picked[max_files:]
+    per_file = max(_MIN_PER_FILE, max_bytes // max(1, len(keep))) if keep else 0
+
     chunks: list[str] = []
+    truncated: list[str] = []
     budget = max_bytes
-    for rel in picked[:max_files]:
+    for rel in keep:
+        if budget <= 0:
+            dropped_files.append(rel)
+            continue
         try:
             body = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if budget <= 0:
-            break
-        chunks.append(f"--- {rel} ---\n{body[:budget]}")
+        allow = min(per_file, budget)
+        if len(body) > allow:
+            truncated.append(rel)
+            body = body[:allow]
+        chunks.append(f"--- {rel} ---\n{body}")
         budget -= len(body)
+
+    # 少给东西必须**说出来**。原来的版本静默截断：ctx 里没有任何标记说
+    # 「这里还有别的文件」，于是「邻居只有这些」和「邻居被挤掉了」在监工
+    # 眼里长得一模一样 —— 和 JSONL 改名那件事同一个形状，静默降级永远更
+    # 好看（这里是「看起来没有重复实现」）。
+    notes = []
+    if truncated:
+        notes.append(f"以上文件被截断（只给了开头）：{', '.join(sorted(truncated))}")
+    if dropped_files:
+        notes.append(
+            f"同目录还有 {len(dropped_files)} 个文件没放进来："
+            f"{', '.join(sorted(dropped_files))}"
+        )
+    if notes:
+        chunks.append(
+            "--- 上下文不完整 ---\n"
+            + "\n".join(notes)
+            + "\n判断「是否已有等价实现」时把这一条算进去：没看到不等于不存在。"
+        )
     return "\n\n".join(chunks)
 
 
