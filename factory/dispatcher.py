@@ -28,6 +28,8 @@ from factory.harness.base import HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
 from factory.harness.workspace import (
+    changed_hooks,
+    hook_fingerprint,
     neighbour_context,
     runner_hooks,
     shadow_code,
@@ -232,6 +234,13 @@ class Dispatcher:
         feedback: tuple[dict, ...] = ()
         grade = pre
 
+        # git hooks 的基线：**整个任务派发之前取一次，不是每轮取一次**。
+        # 每轮取的版本实测会漏：第一轮 worker 写了 pre-commit → 判红打回 →
+        # 第二轮开头重取基线，那个 hook 已经在里面了 → 差异为空 → 合并，
+        # 而 commit 照样被 hook 污染（rounds=2 的真跑抓到）。
+        # 提到循环外之后，worker 想过这道闸门只有一条路：把 hook 改回去。
+        hooks_before = hook_fingerprint(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -307,7 +316,7 @@ class Dispatcher:
                     aid, role=SupervisorRole.RISK, verdict=Verdict.PASS, claims=[]
                 )
 
-            reports = self._review(task, workspace, result)
+            reports = self._review(task, workspace, result, hooks_before)
             for report in reports:
                 self._store.record_verdict(
                     aid,
@@ -408,11 +417,18 @@ class Dispatcher:
             faults=tuple(faults),
         )
 
-    def _review(self, task, workspace, result) -> tuple[SupervisorReport, ...]:
+    def _review(
+        self, task, workspace, result,
+        hooks_before: frozenset[tuple[str, str]],
+    ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
         原因：check 全绿但 agent 什么都没改，说明 check 太弱或任务已完成，
         两种都需要人看一眼，不能静默 merge。没有 diff 时调模型监工纯烧钱。
+
+        `hooks_before` 刻意**没有默认值**：给它填 `frozenset()` 会让漏传的
+        调用方在一个本来就装了合法 pre-commit 的仓库上每个任务都判红
+        （空基线 vs 有 hook = 差异）。让它当场 TypeError 好过每次都响。
         """
         if not result.ok:
             return (
@@ -430,6 +446,31 @@ class Dispatcher:
                     "git diff HEAD",
                     "至少一个文件改动",
                     "no changes produced",
+                ),
+            )
+
+        # git hooks 被动过。**这一条放在三道检测的最前面**，因为只有它的
+        # 影响范围在这个 workspace 之外：`.git/hooks` 属于**公共** git dir，
+        # 父仓库和所有并行 worktree 共用一份（实测 hooks_dir 在两边返回同一
+        # 个路径）。sandbox 又刻意把 git_dir 放进可写（capture_diff 要写
+        # index.lock，见 sandbox.git_dir），于是 worker 写得进去。
+        #
+        # 实测的后果：pre-commit 里 `echo EVIL >> a.py; git add a.py`，
+        # 监工审过的是 'x\ny\n'，`git show HEAD:a.py` 是 'x\ny\nEVIL=1\n'。
+        # 也就是 landing 模块 docstring 里那句「监工审的是前者，出货的是
+        # 后者，中间那段差额没有任何人看过」，只是这次差额是 hook 加的。
+        #
+        # 修法不是给 land 加 `--no-verify`：那会把人自己装的 lint hook 也
+        # 一起关掉（landing.py 第 27 行是刻意的）。要区分的是「仓库本来
+        # 有 hook」和「这一轮 worker 动了 hook」，所以判据是指纹差异。
+        if touched := changed_hooks(hooks_before, hook_fingerprint(workspace)):
+            return (
+                self._blocked(
+                    "git-hook-touched",
+                    "sha256 of executable files in $(git rev-parse --git-common-dir)/hooks",
+                    "这一轮没有改动 git hooks",
+                    f"{len(touched)} 个 hook 变了：{_listed(touched)}。hooks 目录"
+                    f"被父仓库和所有并行 worktree 共用，且 commit 时会执行",
                 ),
             )
 

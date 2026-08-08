@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -65,6 +66,64 @@ _RUNNER_HOOKS = frozenset({
     "vitest.config.js", "vitest.config.ts",
     ".mocharc.json", ".mocharc.yml", ".mocharc.yaml", "karma.conf.js",
 })
+
+
+def hooks_dir(root: Path) -> Path | None:
+    """这个 workspace 的 git hooks 目录（跟着 core.hooksPath 走）。
+
+    worktree 里的 `.git` 是文件不是目录，且 hooks 属于**公共** git dir，
+    所以不能拼 `root/".git"/"hooks"` —— 问 git 自己。
+    """
+    common = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0 or not (base := common.stdout.strip()):
+        return None
+    cfg = _git(root, "config", "--get", "core.hooksPath")
+    if cfg.returncode == 0 and (custom := cfg.stdout.strip()):
+        p = Path(custom)
+        return p if p.is_absolute() else (Path(root) / p)
+    return Path(base) / "hooks"
+
+
+def hook_fingerprint(root: Path) -> frozenset[tuple[str, str]]:
+    """(hook 名, 内容 sha256) 的集合。只看**可执行且非 .sample** 的文件。
+
+    `.sample` 是 `git init` 装的样例，不可执行、不生效，每个仓库都有一堆 ——
+    算进来会让每次比对都有一大坨恒定噪音，也让「有没有变」这个信号变钝。
+
+    为什么要指纹而不是「有没有 hook」：仓库本来就有合法 pre-commit 是完全正常的
+    （lint、格式化），而 `land` 刻意**不加** `--no-verify`（人的 hook 该跑就跑，
+    见 landing 模块 docstring）。要区分的是「这一轮 worker 有没有动过它们」。
+    """
+    d = hooks_dir(root)
+    if d is None or not d.is_dir():
+        return frozenset()
+    out = []
+    for f in sorted(d.iterdir()):
+        if not f.is_file() or f.name.endswith(".sample"):
+            continue
+        if not os.access(f, os.X_OK):
+            continue
+        try:
+            digest = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            digest = "unreadable"
+        out.append((f.name, digest))
+    return frozenset(out)
+
+
+def changed_hooks(
+    before: frozenset[tuple[str, str]], after: frozenset[tuple[str, str]]
+) -> tuple[str, ...]:
+    """两份指纹之间变动过的 hook **名字**。新增、改内容、删除都算。
+
+    删除也报，而不只报新增：仓库里那条合法的 pre-commit（lint、格式化）
+    是人装的一道闸门，worker 删掉它等于关掉这道闸门，和自己加一个
+    篡改内容的 hook 是同一类越权。
+
+    对称差取名字而不是取 (名字, sha) 对：给 worker 的指令是「别动
+    .git/hooks/pre-commit」，递一串 sha 过去他什么也做不了。
+    """
+    return tuple(sorted({name for name, _ in before ^ after}))
 
 
 def added_paths(root: Path) -> tuple[str, ...]:

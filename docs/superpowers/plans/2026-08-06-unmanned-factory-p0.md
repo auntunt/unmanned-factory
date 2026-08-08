@@ -5524,3 +5524,125 @@ pytest -q 退出码 **0**
 
 单测抓到了它，因为单测刻意不调 `capture_diff`。这条现在是一条显式测试
 （`test_added_paths_needs_no_prior_capture_diff`），M30 变异杀 6 条。
+
+## 补：第五个洞 —— worker 写 `.git/hooks`，出货的东西没人审过
+
+沿着同一条问法找下来的第三个：**这个判定的输入是谁给的，它能不能是假的。**
+前两个（影子代码、runner hook）伪造的是 check 那一份绿。这一个不碰绿，
+它伪造的是**绿之后才发生的那一步** —— 落地。
+
+`land` 判绿之后才提交，而提交会执行 `pre-commit`。实测：
+
+```
+.git/hooks/pre-commit:
+  #!/bin/sh
+  echo "EVIL=1" >> a.py
+  git add a.py
+
+监工审过的 a.py : 'x\ny\n'
+git show HEAD:a.py : 'x\ny\nEVIL=1\n'
+一致: False
+```
+
+这正是 `landing.py` docstring 里已经写过的那句话：「监工审的是前者，
+出货的是后者，中间那段差额没有任何人看过」。那句话当时说的是
+`add -A` 把 `.pyc` 一起提交进去，我以为把 `paths` 收窄就封住了。
+没封住 —— `add -- *paths` 管的是「哪些文件进 index」，hook 是在
+那之后往 index 里再塞东西的。收窄路径挡不住一个会自己 `git add` 的进程。
+
+### 影响范围越过了 workspace
+
+这条和前四道闸门都不同的地方：**`.git/hooks` 属于公共 git dir。**
+
+```
+父仓库     hooks: /private/tmp/hk/.git/hooks
+worktree   hooks: /private/tmp/hk/.git/hooks
+同一个目录: True
+```
+
+于是 worker 在自己那个 worktree 里写的 hook，会在**别人**提交时执行。
+实测跑过：w1 里写 pre-commit，w2 落地时 commit 里出现 `EVIL=1`。
+并行跑任务的时候（`factory loop` 就是并行的），一个跑飞的 worker
+能污染同一批里其他任务的产出 —— 那些任务的监工从头到尾没看见任何异常。
+
+这也是它在 `_review` 里排在三条检测最前面的唯一理由：另外两条的影响
+关在 workspace 里，这条不是。
+
+### 为什么不是给 `land` 加 `--no-verify`
+
+`landing.py` 第 27 行是刻意的：「不碰 git config，不加 `--no-verify`：
+仓库的 pre-commit hook 该跑就跑」。人自己装的 lint / 格式化 hook
+是人的一道闸门，无人循环把它关掉是越权。
+
+所以判据不能是「有没有 hook」，只能是「**这一轮动了没有**」——
+指纹差异。`hook_fingerprint` 返回 `(名字, 内容 sha256)` 的集合，
+`changed_hooks` 取对称差。
+
+### 三个决定，都是量出来的不是想出来的
+
+**滤掉 `.sample`。** `git init` 装 14 个样例 hook，全部不可执行。
+算进去的后果不是「多报几个」，而是让基线里恒定带着 14 个条目 ——
+读报表的人会习惯性跳过这一段，「有没有变」这个信号就钝了。
+判据必须是「名字带 `.sample`」而不是「内容长这样」，否则复制一份改名
+就绕过了。为这条写了一个专门的测试：把样例复制成 `pre-commit` 并
+`chmod +x`，内容一个字没改，行为从不生效变生效，必须报。
+
+**跟着 `core.hooksPath` 走，不硬拼 `.git/hooks`。** 改这个配置本身
+就是换掉 hooks 的一种方式；只看 `.git/hooks` 的话，基线和实际就都在
+盯一个没人用的目录。另外 worktree 里 `.git` 是**文件**不是目录，
+`root/".git"/"hooks"` 拼出来的路径根本不存在（测试里断言了这点），
+所以只能问 git 自己要 `--git-common-dir`。
+
+**删除也报。** 不只报新增。worker 删掉仓库里那条合法 pre-commit，
+等于关掉人的一道闸门，和自己加一个篡改内容的 hook 是同一类越权。
+所以是对称差不是差集 —— M34 把它改成 `after - before`，被杀。
+
+**噪音 0**：本仓库指纹为空；有 hook 的仓库连续取两次一致。
+
+### 接线测试抓到一个真 bug：基线不能每轮取
+
+第一版把 `hooks_before = hook_fingerprint(workspace)` 放在 `for round_no`
+**里面**。单元测试全绿，接线测试当场判红：
+
+```
+AssertionError: 动了 hook 却合并了：outcome=MERGED, rounds=2, commit=0b0feade...
+```
+
+路径是：第一轮 worker 写 pre-commit → 检测到 → 判红打回 → 第二轮开头
+**重取基线**，那个 hook 已经在里面了 → 差异为空 → 全绿 → 落地，
+commit 照样被污染。
+
+也就是说这道闸门在多轮任务上只拦第一轮，而多轮才是常态。
+基线必须是「**整个任务派发之前**那一次」，提到循环外之后 worker
+想过闸只剩一条路：把 hook 改回去。为它写了 `test_the_baseline_is_
+taken_once_not_per_round`，跑满两轮且第二轮 worker 什么都不做，
+M33 把基线挪回循环内即被杀。
+
+这条值得记下来的地方不在 bug 本身，在于**单元测试对它完全免疫**。
+`hook_fingerprint` 和 `changed_hooks` 两个函数都没错，错的是「什么时候
+调用它」。上一次「测接线，不只测行为」学到的是「闸门可能没接上」，
+这次是「接上了，但接在了错误的时刻」。
+
+### `hooks_before` 刻意没有默认值
+
+`_review` 的签名里它是必填。填 `frozenset()` 当默认值的后果：漏传的
+调用方在一个本来装了合法 pre-commit 的仓库上，每个任务都判红
+（空基线 vs 有 hook = 差异）。当场 `TypeError` 好过每次都响。
+
+### 变异 M32–M39，全部被杀
+
+| 变异 | 改了什么 | 死于 |
+|---|---|---|
+| M32 | `if touched := ...` → `if False` | 5 条 |
+| M33 | 基线挪回 `for` 循环内 | 5 条（含多轮那条） |
+| M34 | 对称差 → `after - before`（只报新增） | 删除检测 |
+| M35 | 不滤 `.sample` | 4 条 |
+| M36 | 不读 `core.hooksPath` | hooksPath 那条 |
+| M37 | 不看可执行位 | 不可执行 hook 那条 |
+| M38 | 相对 hooksPath 不拼 root | hooksPath 那条 |
+| M39 | 指纹丢掉内容 sha，只留名字 | 内容改动那条 |
+
+变异脚本一律 `assert old in s`（静默扑空和「变异存活」长得一模一样，
+这个坑一个会话里踩过三回）。
+
+离线套件 715 → 737。
