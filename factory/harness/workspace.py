@@ -110,6 +110,53 @@ def replace_refs(root: Path) -> frozenset[str]:
     return frozenset(ln for ln in proc.stdout.splitlines() if ln.strip())
 
 
+def staged_gitlinks(root: Path) -> frozenset[str]:
+    """索引里 mode 为 `160000` 的条目（gitlink / 嵌入式仓库）的 (路径, 哈希) 集合。
+
+    前面的洞都在攻「git 怎么回答问题」。这一条不攻 git，它**顺着** git 的规矩走：
+    工作区里 `git init evil/`，在里面提交任意多个文件，再 `git add evil`。git
+    如实地把 evil 记成一条 gitlink，而 gitlink 的内容就是**一个提交哈希**，
+    里面那些文件对外层来说压根不存在。
+
+    实测（一个外层仓库，内层放 `conftest.py` + `payload.py`）：
+
+      changed_paths        ('evil',)          ← 只有目录名，一个文件名都没有
+      diff 含 pdb          False
+      diff 含 conftest     False
+      payload.py 在磁盘上   True
+
+    十二道现有闸门全部返回干净：`added_paths` 报的是 `('evil',)`（它看见的也只是
+    那个名字）、`runner_hooks` 空（它查的是 `added_paths` 里的**文件名**，
+    `evil` 不匹配 conftest.py 这类词）、`shadow_code` 空（没被 gitignore
+    挡住 —— 又一次「不覆盖」而不是「被瞎掉」）、`diff_suppressed` 空
+    （attributes 一行没动）、config / hooks / HEAD / info-attributes /
+    replace-refs 全部无变化。
+
+    危害同样是**伪造那份绿**：check 跑在真实文件树上，pytest 在
+    `--collect-only` 阶段就会执行 `evil/conftest.py`（实测哨兵文件被写入，
+    多次独立量测一致）。所以 worker 能把「给自己出卷子」那一手整个搬进 gitlink
+    里躲开第十一道闸门 —— 那道闸门查的是新增文件名，而这里没有新增文件名。
+
+    读法：`ls-files --stage` 的 mode 字段。取 (路径, 哈希) 对而不是只取路径，
+    理由和 replace_refs 同一个 —— 内层仓库再提交一版，路径不变、哈希变，
+    只取路径的话「换掉 gitlink 指向的内容」这一支会瞎掉。
+
+    判据必须是「这一轮多出来的」而不是「有没有」：真实仓库合法拥有子模块
+    （子模块在索引里也是 160000），把存在本身判红会让每个带子模块的项目天天响。
+    """
+    proc = _git(root, "ls-files", "--stage")
+    if proc.returncode != 0:
+        return frozenset()
+    out: set[str] = set()
+    for line in proc.stdout.splitlines():
+        # `<mode> <object> <stage>\t<path>`
+        meta, _, path = line.partition("\t")
+        fields = meta.split()
+        if len(fields) >= 2 and fields[0] == "160000" and path.strip():
+            out.add(f"{path.strip()} {fields[1]}")
+    return frozenset(out)
+
+
 def capture_diff(root: Path) -> tuple[str, tuple[str, ...]]:
     if not has_baseline(root):
         raise RuntimeError(f"{root} 没有任何 commit，无法 diff。先 git commit 一个基线。")

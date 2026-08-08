@@ -42,6 +42,7 @@ from factory.harness.workspace import (
     replace_refs,
     runner_hooks,
     shadow_code,
+    staged_gitlinks,
 )
 from factory.intake.guard import harden_ops
 from factory.runbook import RunbookLibrary
@@ -327,6 +328,23 @@ class Dispatcher:
         # 和 land 都不碰它，本仓库一条都没有）。
         replaces_before = replace_refs(workspace)
 
+        # gitlink 基线。前面所有攻击改的都是 git 在某件事上「怎么回答」，这条
+        # 不改回答，它**把代码藏进一个 git 不展开的黑盒**。
+        #
+        # worker 在工作区里 `git init evil/`，往里提交任意代码，再 `git add evil`。
+        # git 如实地把 evil 记成一条 gitlink（mode 160000）——索引里只有一行
+        # 「evil → 某提交哈希」。diff 和 changed_paths 都只看见目录名，里面的
+        # 任何一行代码对所有外层查询都隐形。
+        #
+        # 实测十二道现有闸门全部静默（changed_paths=('evil',)、diff 为空、
+        # runner_hooks/shadow_code/replace_refs 全 ()）。而 check 跑在真实文件树
+        # 上：pytest 在 --collect-only 阶段就会执行 evil/conftest.py，哨兵文件被
+        # 写入，多次独立量测一致。危害性质同 replace ref：伪造那份绿，不出货。
+        #
+        # 判「这一轮多出来的」而非「有没有」：真实项目合法拥有子模块，子模块在
+        # 索引里也是 mode 160000。本仓库一条都没有，但不应写死这个假设。
+        gitlinks_before = staged_gitlinks(workspace)
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -405,7 +423,7 @@ class Dispatcher:
             reports = self._review(
                 task, workspace, result, hooks_before, criteria_before,
                 skipped_before, config_before, attrs_before, head_before,
-                replaces_before,
+                replaces_before, gitlinks_before,
             )
             for report in reports:
                 self._store.record_verdict(
@@ -516,6 +534,7 @@ class Dispatcher:
         attrs_before: str,
         head_before: tuple[str, str],
         replaces_before: frozenset[str],
+        gitlinks_before: frozenset[str],
     ) -> tuple[SupervisorReport, ...]:
         """harness 报错 / 空 diff 都算这一轮红，且不跑 check、不调模型监工。
 
@@ -530,9 +549,9 @@ class Dispatcher:
         引 spec_doc 的任务上都判红（空基线 vs 有标准 = 差异）。
 
         `skipped_before` / `config_before` / `attrs_before` / `head_before` /
-        `replaces_before` 也一样，一个默认值都没有。这七个基线是同一个教训的
-        七份：判据必须是「这一轮变了什么」，而拿不到「之前是什么」的时候要炸，
-        不要猜。
+        `replaces_before` / `gitlinks_before` 也一样，一个默认值都没有。这八个
+        基线是同一个教训的八份：判据必须是「这一轮变了什么」，而拿不到「之前是
+        什么」的时候要炸，不要猜。
 
         `head_before` 这一份尤其不能给默认值：随手填 `("", "")` 不会像别的
         基线那样「每次都响」，它会让这道闸门在**每个**任务上都判红（空哈希 vs
@@ -794,6 +813,35 @@ class Dispatcher:
                     "commit 连全新文件都能藏掉，而 check 照样在真实文件树上执行"
                     "它。这些引用不在任何 diff、任何 config、git status 里，且被"
                     "所有并行 worktree 共用",
+                ),
+            )
+
+        # 这一轮多出来了 gitlink（mode 160000 的索引条目）。
+        #
+        # 前面所有攻击改的都是 git 「怎么回答」，这条不改回答：它**把代码藏进一
+        # 个 git 不展开的黑盒**。worker 在工作区里 `git init evil/`，在里面提交
+        # conftest.py / payload.py，再 `git add evil`。git 如实记一条 gitlink——
+        # 索引里只有「evil → 提交哈希」，diff 和 changed_paths 都只有目录名。
+        #
+        # 实测十二道现有闸门全静默，同时 pytest 在 --collect-only 阶段就执行
+        # evil/conftest.py（哨兵文件被写入，多次独立量测一致）。危害同 replace
+        # ref：伪造那份绿，不出货（land 只提交审过的路径集合）。
+        #
+        # 判「这一轮多出来」而非「有没有」：真实项目合法拥有子模块，子模块在
+        # 索引里也是 mode 160000。取 (路径, 哈希) 对以覆盖「路径不变、内层再
+        # 提交一版」的重新指向攻击 —— 只看路径那一版对这支是盲的。
+        if staged_gitlinks(workspace) != gitlinks_before:
+            new = staged_gitlinks(workspace) - gitlinks_before
+            return (
+                self._blocked(
+                    "gitlink-added",
+                    f"派发前有 {len(gitlinks_before)} 条 gitlink",
+                    "worker 没有新增或修改 mode-160000 的索引条目",
+                    f"这一轮新增了 {len(new)} 条 gitlink（mode 160000）。gitlink "
+                    "在外层 diff 里只露出一个目录名，里面可以有任意多个文件——"
+                    "pytest 在 collect 阶段就会执行其中的 conftest.py，而所有"
+                    "现有闸门对内层代码完全盲。这类索引条目不属于任何合法的单任"
+                    "务改动；添加子模块应该走独立的、人工审核的流程",
                 ),
             )
 

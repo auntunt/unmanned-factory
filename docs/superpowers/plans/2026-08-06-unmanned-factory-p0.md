@@ -6930,3 +6930,127 @@ M115 那条测试是这一轮**新补的**，而它对应的正是我自己差�
 
 排除 `test_runner_hooks.py` 单跑一遍（917 passed，哨兵保持 `??`）确认过它是
 唯一的写手，所以一处修完就够 —— 这一步也是量的，不是数出来的。
+
+## 第十八个洞：gitlink —— 把代码藏进一个 git 不展开的盒子
+
+前十七个洞攻的都是「git 怎么回答问题」：改 diff 的输入、移动它的基线端、让 git
+在对象内容上撒谎。这一条**不攻 git，它顺着 git 的规矩走**，而且没有任何一步是
+异常操作。
+
+    cd 工作区 && git init evil/          # 一个独立仓库
+    往 evil/ 里写任意多个文件并提交
+    git add evil                         # 外层索引里多了一行
+
+git 如实记账：索引里 `evil` 的 mode 是 `160000`，内容**就是那个提交哈希**。
+gitlink 不是一棵能展开的 tree，所以「让 diff 递归进去」这种修法根本不存在 ——
+必须判条目本身。
+
+### 实测：十二道闸门全部返回干净
+
+内层放 `conftest.py` + `payload.py`（`payload.py` 里是 `pdb.set_trace()`）：
+
+    changed_paths          ('evil',)      ← 只有目录名，一个文件名都没有
+    diff 含 pdb.set_trace  False
+    diff 含 conftest       False
+    payload.py 在磁盘上    True
+
+每道闸门为什么安静，得分清「不覆盖」和「被瞎掉」：
+
+| 闸门 | 结果 | 为什么 |
+| --- | --- | --- |
+| `added_paths` | `('evil',)` | 它看见的也只是那个目录名 |
+| `runner_hooks` | 空 | 它查 `added_paths` 里的**文件名**，`evil` 不匹配 conftest 这类词 |
+| `shadow_code` | 空 | 没被 gitignore 挡住 —— 是**不覆盖**，不是被瞎掉 |
+| `diff_suppressed` | 空 | attributes 一行没动 |
+| config / hooks / HEAD / info-attributes / replace-refs / index-skip / criteria | 无变化 | 都不覆盖这个形状 |
+
+只有 `staged_gitlinks` 看得见它。
+
+### 危害：伪造那份绿，不出货
+
+`land` 只 `git add --` 监工审过的那一组路径，内层文件进不了历史。所以定级和第十二
+个洞（索引跳过标记）、第十七个洞（replace ref）同性质，比出货类轻一档。
+
+但那份绿是**假的**，而且是可执行的假：check 跑在真实文件树上，pytest 在
+`--collect-only` 阶段就会执行 `evil/conftest.py`。哨兵实测（5 次独立量测一致）：
+
+    assert not sentinel.exists()                       # 前提：还没跑
+    pytest --collect-only -q                           # 只 collect，不跑测试
+    assert sentinel.read_text() == "ran"                # 内层 conftest 执行了
+
+也就是说**第十一个洞（worker 给自己出卷子）整手都能搬进 gitlink 里躲开**——
+那道闸门查的是新增文件名，而这里一个新增文件名都没有。
+
+### 判据的两个非显然选择
+
+**取 (路径, 哈希) 对，不是只取路径。** 理由和 `replace_refs` 同一个：内层仓库再
+提交一版，路径不变、哈希变。只取路径的实现对「换掉 gitlink 指向的内容」这一支
+完全盲，而这一支在 diff 里更不起眼 —— 一个本来就在仓库里的依赖目录被改了一下，
+是最普通的一种改动。
+
+**判「这一轮多出来的」，不是「有没有」。** 真实项目合法拥有子模块，而子模块在
+索引里也是 mode 160000。把存在本身判红会让每个带子模块的仓库每一轮都响 ——
+每次都响的闸门等于没有闸门。所以基线照旧取在轮次循环**外面**，第八份同一个教训
+（`hooks_before` / `criteria_before` / `skipped_before` / `config_before` /
+`attrs_before` / `head_before` / `replaces_before` / `gitlinks_before`，一个默认值
+都没有）。
+
+### 闸门必须在 check 之前
+
+内层代码本身就是伪造那份绿的手段。先跑 check 再拦，拿到的绿已经是被内层
+`conftest.py` 改判过的。所以接线测试里有一条专盯这个：`ran == []`。
+
+### 变异：两条存活，暴露的是测试的形状问题
+
+第一轮四条变异，两条 KILLED 两条 SURVIVED（离线全套，950 passed）：
+
+| 变异 | 改成什么 | 第一轮 |
+| --- | --- | --- |
+| M118a `path-only` | 判据只取路径，扔掉哈希 | KILLED |
+| M118b `count-only` | 闸门写成 `len(after) > len(before)` | **SURVIVED** |
+| M118c `exists-only` | 闸门写成 `if staged_gitlinks(ws):` | **SURVIVED** |
+| M118d `never-fires` | 闸门恒不成立 | KILLED |
+
+两条存活的共同点：**它们都在闸门那一侧，而我写的重指向测试全是判据级的** ——
+直接调 `staged_gitlinks` 比较前后，压根没过闸门。判据级测试对「闸门怎么用这个
+判据」免疫。
+
+而接线测试那一节的基线是**空集**：从无到有的新增，`len(after) > len(before)` 和
+`after != before` 同解，`if staged_gitlinks(ws)` 也同解。这正是 M108/M111 那条
+教训的第三次复现 —— **空基线让接线测试瞎掉**。
+
+杀它们要同时满足两个条件：真跑 dispatcher（过闸门）**且**基线非空（条目是被改
+不是被加）。补的两条：
+
+- `test_repointing_mid_round_blocks_the_merge` —— 仓库本来有一条合法 `vendor`
+  gitlink，worker 在轮次中把它重指到自己造的提交上。条目数一条都没多，闸门仍须响。
+- `test_a_repo_that_already_has_a_gitlink_still_merges` —— 同样的非空基线，worker
+  什么也没动，必须照常合并。这是这道闸门唯一的误拒面，而且是真实项目的常态。
+
+补完两条都 KILLED，四条全灭。
+
+### 变异脚本自己把仓库留在了变异态
+
+这一轮踩到一个新的坑，而且它差点让我改坏出货代码：变异脚本第一次跑因为
+`assert old in text` 扑空而抛异常退出，**但那次退出发生在 `finally` 恢复之前的
+某个位置**，仓库里留下了 `workspace.py.m118.bak`，而 `workspace.py` 本身停在
+`out.add(path.strip())` 这个降级版本上。
+
+症状极具误导性：我读实现，看到的是「只取路径」，而测试里的 `_entry()` 期待
+`(路径, 哈希)`。两者不可能同时为真，可测试文件却报 18 passed（那是变异之前跑的
+结果）。第一反应是「实现在上下文压缩里丢了哈希，得补回去」——**如果照这个反应
+去改，等于把变异当成了出货代码**。
+
+救回来靠的是 `git status`：`?? factory/harness/workspace.py.m118.bak` 这一行说明
+不是「实现写错了」，是「有个脚本没还原」。判据因此定成：**先看有没有 `.bak`
+残留，再谈实现对不对**。修完加了三步收尾检查（`diff` 与备份一致 → 删备份 →
+grep 确认变异串计数为 0）。
+
+教训：变异脚本的 `assert` 全部提前到**备份之前**。既然它的作用就是「扑空要炸」，
+那它炸的时候仓库必须还没被动过。
+
+### 覆盖
+
+`tests/test_staged_gitlinks.py`，20 条，四节：洞的证明（含 `--collect-only`
+哨兵）、判据本身、接线（空基线）、非空基线的重指向与误拒面。离线全套
+**952 passed, 2 deselected**。
