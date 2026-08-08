@@ -152,3 +152,33 @@ def test_class_a_task_end_to_end(tmp_path):
                        or "error" in str(c.get("got", "")).lower()
                        for v in fails for c in (v.claims or ())), \
                 "attempt 没跑起来，但审计里查不到失败原因"
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI 不可用")
+def test_a_model_supervisor_records_real_tokens():
+    """模型监工的 token 必须是真数。**这一列从没被任何真跑核对过。**
+
+    上面那个 E2E 不开模型监工，所以它测的是 worker 那一路的 token（不带
+    四个独立性 flag，`usage` 是对的）。监工带上那四个 flag 时
+    `usage.input_tokens` 实测是 0 —— 真数在 `modelUsage` 里。
+
+    这条判据存在的理由是核对表教的：`tokens` 在 spec §5 的字段清单里、
+    打了勾，而它在监工那一路一直是 0。「有值」放过了「有一个错的值」，
+    因为 0 是个合法的 int。所以判据必须是「经过一次真跑核对」，
+    而真跑核对必须覆盖**每一条**取数路径，不是其中便宜的那条。
+
+    不进上面那个 E2E 而单开一条：那个测试是 P0 的收口判据（A 类全自动
+    跑通），给它加两个模型监工会让它变慢变贵，也会让「P0 判据」和
+    「P1 监工」的失败混在一起 —— 一个分不清是哪层坏了的判据不好用。
+    """
+    from factory.supervisors.model_base import ClaudeJudge
+    from factory.supervisors.spec_review import SpecSupervisor
+
+    r = SpecSupervisor(judge=ClaudeJudge(model="haiku")).review(
+        diff="--- a/g.py\n+++ b/g.py\n@@\n+def greet(n):\n+    return f'hi {n}'\n",
+        criteria=["AC-1: greet 必须返回 str"],
+    )
+    print(f"\nverdict={r.verdict} cost=${r.cost_usd:.6f} tokens={r.tokens}")
+    assert r.cost_usd > 0, "调了模型就该收费；$0 说明账没读到"
+    assert r.tokens > 0, "读 usage 的话这里是 0（modelUsage 才有真数）"

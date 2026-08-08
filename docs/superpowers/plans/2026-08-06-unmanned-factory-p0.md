@@ -3250,6 +3250,11 @@ def test_attempts_for_returns_in_attempt_order(store):
     但这条判据把它跳过了，于是「全部有值」在一个永远是 None 的字段上打了勾。
     2026-08-08 补上（见下文「P1 落地」）—— 判据本身漏项，比实现漏项更难发现，
     因为核对表读起来是绿的。
+  - **同一张表第二次骗过我：`tokens` 在清单里、打了勾，而模型监工那一路它
+    一直是 0**（2026-08-06 真跑抓到，见下文「漂移检测只加固了便宜的那一路」）。
+    「全部有值」这个措辞放过了「有一个错的值」—— 而 0 是个合法的 int。
+    判据应当是「有值**且**那个值经过一次真跑核对」，因为静默降级的值
+    在核对表上和正确的值长得一样。
 - [x] `commit` 提交的文件集**正好**等于监工审过的那一组（`diff_hash` 的来源），
       且主工作树未被写入 —— 这条只有真跑能查：check 命令自己会造 `__pycache__`
 - [x] 短 sha 能反查回 attempt（`attempt_by_commit`），即 git blame → 缺陷现场那一跳
@@ -3260,6 +3265,10 @@ def test_attempts_for_returns_in_attempt_order(store):
 - [x] 三轮不过升级给人，且每轮 `resolution` 分别是 reworked/reworked/escalated
 - [x] 除 smoke 外全部测试离线可跑（`uv run pytest -m "not smoke"` 不需要网络与 API key）
 - [x] 审计库里没有任何明文密码或 API key
+- [x] **每一条取数路径都过了一次真跑核对**，不只是便宜的那条。
+      `tokens` 在上面的字段清单里打了勾，而模型监工那一路它一直是 0 ——
+      因为唯一的真跑判据（A 类 E2E）不开模型监工。
+      2026-08-06 补 `test_a_model_supervisor_records_real_tokens`。
 
 ## 不在 P0 范围内（勿顺手做）
 
