@@ -120,8 +120,27 @@ def test_class_a_task_end_to_end(tmp_path):
         assert prev.resolution == "reworked", (
             f"attempt #{prev.attempt_no} 不是最后一轮，"
             f"resolution 应当是 reworked，实际 {prev.resolution}")
-        assert prev.diff_hash and len(prev.diff_hash) == 64
-        assert prev.cost_usd > 0
         # 打回必须有理由：至少一个监工判了 fail，否则这一轮为什么重跑无从解释。
-        assert any(v.verdict == "fail" for v in prev.supervisors), \
-            f"attempt #{prev.attempt_no} 被打回却没有 fail 裁决"
+        fails = [v for v in prev.supervisors if v.verdict == "fail"]
+        assert fails, f"attempt #{prev.attempt_no} 被打回却没有 fail 裁决"
+
+        # **一次没拿到模型回复的 attempt 没有 diff 也没有账单，这是对的。**
+        # 真跑抓到的（2026-08-08）：attempt #1 撞上 `API Error: 400 Upstream
+        # request failed`，3.4s 就回来了，diff_hash=None、cost=$0、tokens=0，
+        # 然后 #2 正常 merge。原来这里无条件要求 diff_hash 和 cost>0，于是
+        # 一个**处理得完全正确**的上游故障把 P0 判据判成了失败。
+        #
+        # 判据要钉的是「工厂有没有丢现场」，不是「上游有没有抖」。所以分两支：
+        # 跑起来了的必须留全套现场；根本没跑起来的只要求那条失败原因在库里
+        # 说得清（否则第二天没人知道为什么重跑）。
+        launched = prev.tokens_in > 0
+        if launched:
+            assert prev.diff_hash and len(prev.diff_hash) == 64
+            assert prev.cost_usd > 0
+        else:
+            assert prev.diff_hash is None and prev.cost_usd == 0.0, (
+                "没跑起来的 attempt 不该有 diff 或账单")
+            assert any("api_error" in str(c.get("got", "")).lower()
+                       or "error" in str(c.get("got", "")).lower()
+                       for v in fails for c in (v.claims or ())), \
+                "attempt 没跑起来，但审计里查不到失败原因"
