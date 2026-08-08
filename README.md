@@ -28,13 +28,17 @@ uv run factory run examples/greet_task.yaml --workspace ~/some-repo \
 # 入队（一个失败则一个都不入队）
 uv run factory queue --queue ~/.factory/q tasks/*.yaml
 
-# 抽干就退，5 美元上限（loop 默认开 worktree，要关得显式 --no-worktree）
+# 抽干就退（loop 默认开 worktree，要关得显式 --no-worktree）
 uv run factory loop --queue ~/.factory/q --workspace ~/repo --db audit.db \
-  --idle drain --budget-usd 5
+  --idle drain --budget-usd 5 --max-runtime 14400
 
 # 昨晚跑得怎么样
 uv run factory queue --queue ~/.factory/q --history 50
 ```
+
+两个上限都要给。`--budget-usd` 单独不够：**超时的 attempt 记 $0**（被 kill 的
+进程不打 usage payload），所以反复超时的任务在预算眼里是免费的 —— 墙钟是超时
+躲不过的那道闸。两个都没给时 `loop` 会各打一条警告。
 
 定时启动用 `examples/launchd/com.factory.loop.plist`，**别照抄上面那条命令** ——
 launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
@@ -72,9 +76,9 @@ C 和 D 都在**派发之前**停下，adapter 一次都不会被调用 —— �
 
 ## 三条边界（改代码前先读）
 
-1. **只在 linked worktree 里提交。** 不加 `--worktree` 时 workspace 就是人的
-   仓库本身，那条路径**默认会走到** —— 人的检出目录里冒出一个没人要求过的
-   commit 是这一层能造成的最坏后果。
+1. **只在 linked worktree 里提交。** 单任务 `run` 不开 worktree（`loop` 默认开），
+   此时 workspace 就是人的仓库本身，所以这条拒绝路径**默认会走到** ——
+   人的检出目录里冒出一个没人要求过的 commit 是这一层能造成的最坏后果。
 2. **只提交监工审过的那一组文件**（`git add -- <paths>`，不是 `add -A`）。
    check 命令自己会造 `__pycache__`，`add -A` 会让 `commit` 和 `diff_hash`
    描述不同的内容。
@@ -84,9 +88,12 @@ C 和 D 都在**派发之前**停下，adapter 一次都不会被调用 —— �
 ## 开发
 
 ```bash
-uv run pytest -m "not smoke"   # 离线，不需要 API key（当前 571 个）
-uv run pytest -m smoke -s      # 真调 claude，约 6 分钟，花约 $0.5
+uv run pytest -m "not smoke"   # 离线，不需要 API key（当前 577 个）
+uv run pytest -m smoke -s      # 真调 claude，约 6 分钟
 ```
+
+smoke 的花费实测在 $0.5 到 $2.5 之间浮动：一轮过是前者，第一轮超时后
+换模型重跑是后者。别把它当固定成本。
 
 `tests/__init__.py` 必须存在：site-packages 里有第三方装的顶层 `tests` 包，
 没有它本地测试会 `ModuleNotFoundError`。
