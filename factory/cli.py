@@ -966,6 +966,11 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
     print("[闸门 3]")
     print(f"  上人平均打回次数: {mean}  (目标 ≤ {g.target:g}，"
           f"{g.total_reworks} 次打回 / {g.tasks} 个已派发任务)")
+    # 排掉的那些要说出来。悄悄排掉的话，一个网关整天抽风的日子和一个真正顺畅
+    # 的日子在这个指标上长得一样。
+    if g.upstream_reworks:
+        print(f"  （另有 {g.upstream_reworks} 次打回是上游/worker CLI 报错，"
+              "不计入 —— 那和验收条件够不够机器可判定无关）")
     if g.meets_p1_target is None:
         print("  → 尚无已派发任务，P1 判据待测")
     elif g.meets_p1_target:

@@ -190,6 +190,38 @@ def test_gate3_averages_across_tasks(store):
     assert g.meets_p1_target is True
 
 
+def test_gate3_does_not_count_reworks_caused_by_upstream_errors(store):
+    """网关 502 导致的打回不进闸门 3 的分子。
+
+    这个指标检验的是**验收条件够不够机器可判定** —— 一次上游抖动对那件事一个字
+    都没说。不排掉的话，上游越不稳这个数越差，人会拿着它去改验收条件，
+    而验收条件根本没问题。同一个形状在 P0 判据上踩过一次。
+
+    非空基线：同一个任务里再放一次**真**打回，证明分子本来就在数。缺了它，
+    把 total_reworks 改成恒 0 也能让下面全绿。
+    """
+    aid = store.open_attempt(
+        task_id="T-g502", spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="A", harness="h", harness_version="v", model="haiku",
+    )
+    store.record_verdict(
+        aid, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[{"check": "harness", "expected": "exit_status ok",
+                 "got": "API Error: 502"}])
+    store.finalize(aid, Resolution.REWORKED)
+    # 基线：一次真打回（判据是验收条件本身没被满足）
+    _attempt(store, "T-g502",
+             verdicts=[(SupervisorRole.REGRESSION, Verdict.FAIL, 0.1)],
+             resolution=Resolution.REWORKED)
+    _attempt(store, "T-g502", verdicts=[], resolution=Resolution.MERGED)
+
+    g = gate3_rework(store)
+    assert g.tasks == 1
+    assert g.total_reworks == 1          # 只数那次真打回，不是 2
+    assert g.mean_reworks == 1.0
+    assert g.upstream_reworks == 1        # 但排掉了多少要看得见
+
+
 def test_gate3_excludes_tasks_blocked_before_dispatch(store):
     """C/D 类预分级拦下的任务从没进过闸门 3，不能进分母。
 

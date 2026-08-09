@@ -176,6 +176,10 @@ class Gate3Rework:
     tasks: int = 0
     total_reworks: int = 0
     target: float = 1.0
+    #: 因上游/worker CLI 报错（502 之类）而打回的轮次，**已从 total_reworks
+    #: 里排掉**。单独留着是为了「排掉了多少」看得见 —— 悄悄排掉的话，一个
+    #: 网关整天抽风的日子和一个真正顺畅的日子在这个指标上长得一样。
+    upstream_reworks: int = 0
 
     @property
     def mean_reworks(self) -> float | None:
@@ -196,14 +200,27 @@ def gate3_rework(store, *, target: float = 1.0) -> Gate3Rework:
 
     分母排除预分级就拦下、从未派发的任务：它们没进过闸门 3。
     不排除的话，C/D 类拦得越多平均打回次数越好看，指标会奖励错误的行为。
+
+    **因上游报错（502）而打回的轮次也不算。** 这个指标检验的是验收系统够不够
+    机器可判定 —— 一次网关抖动对那件事一个字都没说。不排掉的话，上游越不稳这
+    个数越差，人会拿着它去改验收条件，而验收条件根本没问题。同一个形状在 P0
+    判据上踩过一次（一次 400 让处理完全正确的链路判红）。
+
+    排掉的数留在 `upstream_reworks` 里，不是丢掉：悄悄排掉的话，一个网关整天
+    抽风的日子和一个真正顺畅的日子在这个指标上长得一样。
     """
     reworks: dict[str, int] = {}
+    upstream = 0
     for row in store.all_attempts():
         if row.harness_version == NOT_DISPATCHED:
             continue
         reworks.setdefault(row.task_id, 0)
         if row.resolution == Resolution.REWORKED:
-            reworks[row.task_id] += 1
+            if any(_is_harness_fault(v) for v in row.supervisors):
+                upstream += 1
+            else:
+                reworks[row.task_id] += 1
     return Gate3Rework(
-        tasks=len(reworks), total_reworks=sum(reworks.values()), target=target
+        tasks=len(reworks), total_reworks=sum(reworks.values()), target=target,
+        upstream_reworks=upstream,
     )
