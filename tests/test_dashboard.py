@@ -25,6 +25,7 @@ from factory.audit.models import (
 )
 from factory.dashboard import (
     ACTIONS,
+    FAULT_CLAIMS,
     GATE_CLAIMS,
     MANUAL_HOURS,
     _e,
@@ -212,6 +213,54 @@ def test_gate_hits_counts_only_known_gates(tmp_path):
     assert dict(sm.gate_hits) == {"gitlink-added": 1, "head-moved": 1}
 
 
+def test_upstream_fault_is_not_counted_or_shown_as_a_gate_hit(tmp_path):
+    """网关 502 不许渲染成「闸门拦下」。
+
+    一次真跑批抓到的：上游回 502，attempt 落成 `reworked` + 红色「闸门 harness」。
+    于是一条处理得完全正确的链路（打回 → 重试 → 合并）在页面上长成「模型写错了、
+    被闸门拦下」—— 客户读到两件都不成立的事。同一个形状在 P0 判据上踩过一次。
+
+    第二个代价在数上：harness 混进 gate_hits，「闸门拦下 N 次」就掺进一堆 502。
+    虚高的方向恰好对我们有利，这种偏差没人会来纠，所以必须钉住。
+
+    非空基线：同一次 attempt 里放一条真闸门 claim，证明这条路径本来就在数
+    claim。缺了它，把 gate_hits 整个改成永远返回 {} 也能让下面全绿。
+    """
+    store, db = _store(tmp_path)
+    aid = _attempt(store)
+    _result(store, aid)
+    store.record_verdict(
+        aid, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[
+            {"check": "harness", "command": "claude_code",
+             "expected": "exit_status ok",
+             "got": "error: API Error: 502 Upstream request failed"},
+            {"check": "shadow-code", "command": "", "expected": "",
+             "got": "被 .gitignore 挡住的 a.py"},   # 基线：真闸门照样要数
+        ],
+    )
+    sm = collect(db)
+    assert dict(sm.gate_hits) == {"shadow-code": 1}      # 502 不在里面
+    assert dict(sm.fault_hits) == {"harness": 1}         # 但也没被丢掉
+    assert state_payload(sm, queue_state(None))["gate_hits_n"] == 1
+    assert state_payload(sm, queue_state(None))["fault_hits_n"] == 1
+
+    # 上面那一轮同时有真闸门，页面上「闸门」优先说 —— 那是对的（人该先去看
+    # 那个 shadow-code）。所以「故障怎么说」要另起一轮只有 502 的来验。
+    solo = _attempt(store, task_id="T-502")
+    _result(store, solo)
+    store.record_verdict(
+        solo, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[{"check": "harness", "command": "claude_code",
+                 "expected": "exit_status ok", "got": "API Error: 502"}],
+    )
+    page = render(collect(db), db=db)
+    assert "工具/上游故障" in page
+    assert "不是代码问题" in page
+    # 而那一轮不许出现「闸门 harness」字样 —— 它一个闸门都没触发
+    assert "闸门 harness" not in page
+
+
 def test_gate_claims_matches_dispatcher_source(tmp_path):
     """GATE_CLAIMS 的键必须和 dispatcher 里真实的 `_blocked(...)` 名字对上。
 
@@ -222,6 +271,10 @@ def test_gate_claims_matches_dispatcher_source(tmp_path):
 
     只查「dispatcher 有、表里没有」这个方向。反方向不查：表里可以留已经下线
     的闸门名，让历史库里的旧 claim 仍然显示得出来。
+
+    对账对的是**两张表的并集**（GATE_CLAIMS ∪ FAULT_CLAIMS）：一个名字必须被
+    认识，但它算闸门还是算工具故障是另一件事 —— 那件事由下面那条断言单独钉，
+    合在一起会让「分类搬错了」和「名字漏了」报同一个错。
     """
     import re
 
@@ -230,8 +283,18 @@ def test_gate_claims_matches_dispatcher_source(tmp_path):
     # `self._blocked("name", ...)` / `self._blocked(\n    "name",`
     names = set(re.findall(r'_blocked\(\s*\n?\s*"([a-z0-9-]+)"', src))
     assert names, "一个都没抽到 —— 正则和 dispatcher 的写法脱节了，别信这条绿"
-    missing = names - set(GATE_CLAIMS)
+    missing = names - set(GATE_CLAIMS) - set(FAULT_CLAIMS)
     assert not missing, f"dispatcher 有这些闸门但看板不认识：{sorted(missing)}"
+
+
+def test_gate_and_fault_tables_do_not_overlap():
+    """一个 check 名只能属于一张表。
+
+    两边都有的话，同一次故障会被 gate_hits 和 fault_hits 各数一遍 —— 而这两个
+    数在页面上是并排显示的，读起来像「拦下 1 次 + 故障 1 次 = 发生了两件事」。
+    """
+    both = set(GATE_CLAIMS) & set(FAULT_CLAIMS)
+    assert not both, f"这些名字同时在两张表里：{sorted(both)}"
 
 
 # ---------- 导出 ----------
@@ -705,6 +768,9 @@ def test_live_numbers_are_rendered_server_side(tmp_path):
     page = render(collect(db), db=db, qs=queue_state(q))
     assert '<b data-live="q_inbox">2</b>' in page
     assert '<b data-live="waiting_n">1</b>' in page
+    # 工具故障也在横条上：一次上游宕机不上横条，就和一切正常长得一样
+    # （闸门 0、合并数不动），而人是靠这条横条决定要不要去看一眼的。
+    assert '<b data-live="fault_hits_n">0</b>' in page
 
 
 # ---------- 表单：两道限制 ----------

@@ -72,7 +72,6 @@ GATE_CLAIMS: dict[str, str] = {
     "git-config-touched": "worker 动了 .git/config",
     "git-hook-touched": "worker 动了 git hooks",
     "gitlink-added": "新增/改动 mode-160000 的索引条目",
-    "harness": "harness 自己报错",
     "head-moved": "HEAD 被移动过",
     "index-skip-flag": "索引跳过标记让改动从 git 眼里消失",
     "info-attributes-touched": ".git/info/attributes 被动过",
@@ -80,6 +79,24 @@ GATE_CLAIMS: dict[str, str] = {
     "runner-hook-added": "新增 runner 自动加载文件（自己出卷子）",
     "shadow-code": "被 .gitignore 挡住的代码文件",
     "spec-criteria-mutated": "worker 改了自己的验收标准",
+}
+
+#: 不是闸门 —— 是我们这一侧或上游坏了。
+#:
+#: `harness` 曾经在 GATE_CLAIMS 里，一次真跑批把这件事暴露出来：网关回了个
+#: 502，attempt 记成 `reworked` + 红色「闸门 harness」。于是一条**处理得完全
+#: 正确**的链路（打回 → 重试 → 合并）在页面上长成「模型写错了、被闸门拦下」。
+#: 客户读到的是两件都不成立的事：模型没写错，闸门也没拦任何东西。
+#: 同一个形状在 P0 判据上踩过一次 —— 上游抖动不许把正确的链路判红。
+#:
+#: 分开的第二个理由是那张命中率表：harness 混在里面会让「闸门拦下 N 次」
+#: 里掺进一堆 502。拿它做汇报的数就系统性虚高，而虚高的方向是**对我们有利**
+#: 的那一侧 —— 这种偏差没人会来纠。
+#:
+#: 判据仍是 claim 的 check 名，和 GATE_CLAIMS 同一套读法；两张表**不许合并**，
+#: 因为合并之后「闸门拦下」和「工具坏了」就只剩一个计数器。
+FAULT_CLAIMS: dict[str, str] = {
+    "harness": "worker CLI 自己报错（上游 5xx、超时、装的东西不对）",
 }
 
 
@@ -108,6 +125,11 @@ class Row:
     @property
     def gate_claims(self) -> tuple[dict, ...]:
         return tuple(c for c in self.claims if c.get("check") in GATE_CLAIMS)
+
+    @property
+    def fault_claims(self) -> tuple[dict, ...]:
+        """工具/上游故障。和 gate_claims 是**互斥**的两组，见 FAULT_CLAIMS。"""
+        return tuple(c for c in self.claims if c.get("check") in FAULT_CLAIMS)
 
 
 @dataclass
@@ -161,6 +183,15 @@ class Summary:
         c: Counter = Counter()
         for r in self.rows:
             for cl in r.gate_claims:
+                c[cl["check"]] += 1
+        return c
+
+    @property
+    def fault_hits(self) -> Counter:
+        """工具/上游故障各出过几次。**不进** gate_hits，见 FAULT_CLAIMS。"""
+        c: Counter = Counter()
+        for r in self.rows:
+            for cl in r.fault_claims:
                 c[cl["check"]] += 1
         return c
 
@@ -459,11 +490,14 @@ def _attempts_table(sm: Summary) -> str:
     if not sm.rows:
         return ('<p class="empty">审计库是空的 —— 跑一次 '
                 '<code>factory run</code> 或 <code>factory loop</code> 才有数据。</p>')
-    head = ("任务", "轮", "类", "裁决", "监工", "闸门拦下", "模型",
+    head = ("任务", "轮", "类", "裁决", "监工", "闸门拦下", "工具故障", "模型",
             "花费", "耗时", "commit", "时间")
     rows = []
     for r in sorted(sm.rows, key=lambda x: x.id, reverse=True):
         gates = ", ".join(c["check"] for c in r.gate_claims) or "—"
+        # 故障单列一格。塞进「闸门拦下」那一格会让汇总的红色数量虚高，
+        # 而虚高的方向恰好对我们有利 —— 那种偏差没人会来纠。
+        faults = ", ".join(c["check"] for c in r.fault_claims) or "—"
         # 只列报警的监工，全过就写「4 过」。
         # 逐个列 `role:pass` 会让这一格宽到把 commit/时间挤出视野，而它承载的
         # 信息只有「谁 fail 了」。「4 过」比 `regression:pass, spec:pass, ...`
@@ -480,6 +514,7 @@ def _attempts_table(sm: Summary) -> str:
             f'<td class="pill {_cls(r.resolution)}">{_e(r.resolution)}</td>'
             f'<td class="dim">{_e(verd)}</td>'
             f'<td class="{"bad" if r.gate_claims else "dim"}">{_e(gates)}</td>'
+            f'<td class="{"warn" if r.fault_claims else "dim"}">{_e(faults)}</td>'
             f'<td class="dim">{_e(r.model)}</td>'
             f'<td class="num">${r.cost_usd:.3f}</td>'
             f'<td class="num">{_e(secs)}</td>'
@@ -531,9 +566,25 @@ def _gate_table(sm: Summary) -> str:
             f'<td class="wrapline">{_e(desc)}</td>'
             f'<td class="num {"bad" if n else "dim"}">{n}</td></tr>'
         )
+    # 故障那张表跟在后面，同样的「0 渲染成灰 0」规则。分成两张而不是加一列
+    # 「类型」：一列类型仍然会被求和成一个「拦下 N 次」，而这两个数不该相加。
+    fh = sm.fault_hits
+    frows = [
+        f'<tr><td><code>{_e(name)}</code></td>'
+        f'<td class="wrapline">{_e(desc)}</td>'
+        f'<td class="num {"warn" if fh.get(name, 0) else "dim"}">'
+        f'{fh.get(name, 0)}</td></tr>'
+        for name, desc in sorted(FAULT_CLAIMS.items())
+    ]
     return ('<div class="scroll"><table><thead><tr><th>闸门</th><th>它拦什么</th>'
             "<th>拦下次数</th></tr></thead><tbody>"
-            + "".join(rows) + "</tbody></table></div>")
+            + "".join(rows) + "</tbody></table></div>"
+            '<p class="sub">下面这些<b>不是闸门</b> —— 是我们这一侧或上游坏了。'
+            "分开数是因为混在一起会让「闸门拦下 N 次」掺进一堆 502，"
+            "而那个数是要拿出去讲的。</p>"
+            '<div class="scroll"><table><thead><tr><th>故障</th><th>是什么</th>'
+            "<th>出现次数</th></tr></thead><tbody>"
+            + "".join(frows) + "</tbody></table></div>")
 
 
 def _claims_detail(sm: Summary) -> str:
@@ -651,9 +702,18 @@ def _rounds(rows: tuple[Row, ...] | list[Row]) -> str:
     for r in rows:
         gates = ", ".join(c["check"] for c in r.gate_claims)
         fired = [role for role, v in r.verdicts if v == Verdict.FAIL]
-        why = (f'<span class="bad">闸门 {_e(gates)}</span>' if gates
-               else (f'<span class="warn">监工 {_e(", ".join(fired))}</span>'
-                     if fired else '<span class="dim">无人反对</span>'))
+        # 顺序是判断：**故障先说**。一轮里既有故障又有监工报警时，说「工具坏了」
+        # 比说「监工不同意」更接近人要做的下一件事（去看网关，而不是去看代码）。
+        if gates:
+            why = f'<span class="bad">闸门 {_e(gates)}</span>'
+        elif r.fault_claims:
+            why = ('<span class="warn">工具/上游故障 '
+                   f'{_e(", ".join(c["check"] for c in r.fault_claims))}'
+                   " —— 不是代码问题，重试即可</span>")
+        elif fired:
+            why = f'<span class="warn">监工 {_e(", ".join(fired))}</span>'
+        else:
+            why = '<span class="dim">无人反对</span>'
         out.append(
             f'<div class="round"><span class="rno">第 {r.attempt_no} 轮</span>'
             f'<span class="pill {_cls(r.resolution)}">{_e(r.resolution)}</span>'
@@ -725,6 +785,9 @@ def state_payload(sm: Summary, qs: QueueState) -> dict:
         "escalated": sm.escalated,
         "cost": round(sm.cost, 4),
         "gate_hits_n": sum(sm.gate_hits.values()),
+        # 单独一个键。掺进 gate_hits_n 会让「闸门拦下」在轮询里也虚高，
+        # 而这是唯一一个会被人截图去汇报的数。
+        "fault_hits_n": sum(sm.fault_hits.values()),
         "queue_error": qs.error,
     }
 
@@ -745,6 +808,9 @@ def _live_bar(sm: Summary, qs: QueueState) -> str:
         ("已合并", "merged", s["merged"]),
         ("升级给人", "escalated", s["escalated"]),
         ("闸门拦下", "gate_hits_n", s["gate_hits_n"]),
+        # 故障也上横条。不上的话，一次上游宕机在这条横条上和一切正常长得一样
+        # （闸门 0、合并数不动），而人正是靠这条横条判断「要不要去看一眼」。
+        ("工具故障", "fault_hits_n", s["fault_hits_n"]),
         ("累计花费 $", "cost", f'{s["cost"]:.2f}'),
     )
     dot = f'<span class="dot{" on" if s["running_n"] else ""}"></span>'
