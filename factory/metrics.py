@@ -17,7 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from factory.audit.models import NOT_DISPATCHED, Resolution, Verdict
-from factory.supervisors.model_base import SUPERVISOR_ERROR_PREFIX
+from factory.supervisors.model_base import (
+    HARNESS_FAULT_CHECKS,
+    SUPERVISOR_ERROR_PREFIX,
+)
 
 # FAIL 之后，这些 resolution 说明告警是真的 / 是假的 / 还没判
 _TRUE_POSITIVE = {Resolution.REWORKED}
@@ -28,9 +31,30 @@ _UNADJUDICATED = {Resolution.ESCALATED, Resolution.PENDING}
 def _is_fault(verdict) -> bool:
     """监工自身故障 vs 真报了个问题。靠 claim 的 check 前缀区分，
     和 dispatcher._merge_reports 用的是同一个前缀 —— 两处判据必须一致，
-    否则「拦了合并」和「算进命中率」会对不上。"""
+    否则「拦了合并」和「算进命中率」会对不上。
+
+    只判监工自己那一种。worker CLI 报错是另一个函数 —— 见 _is_harness_fault。
+    """
     return any(
         str(c.get("check", "")).startswith(SUPERVISOR_ERROR_PREFIX)
+        for c in (verdict.claims or ())
+    )
+
+
+def _is_harness_fault(verdict) -> bool:
+    """worker CLI / 上游坏了，不是这个监工报的警。
+
+    真跑批抓到的：网关回 502，`_blocked("harness", ...)` 挂在 REGRESSION 名下，
+    于是回归监工白得一次**真阳性** —— 它什么都没审出来，那次红是我们这一侧的
+    网络。而这个数正是用来决定「这个监工值不值它的钱」的，虚高的方向恰好是
+    「保留」，也就是不会有人来纠的那一侧。
+
+    判据从 model_base 来（dispatcher 和这里都已经 import 它），不在这边重抄
+    一份字面量：抄一份的话，将来加第二个 harness 级 check 名只改一边，
+    退化方向是「又变回真阳性」，而那是全绿的。
+    """
+    return any(
+        str(c.get("check", "")) in HARNESS_FAULT_CHECKS
         for c in (verdict.claims or ())
     )
 
@@ -45,6 +69,11 @@ class SupervisorMetrics:
     unadjudicated: int = 0      # 报了 FAIL 但人还没定案
     false_negatives: int = 0    # 报 PASS 却事后挂上 defect
     faults: int = 0             # 监工自己坏了（超时、拿不到裁决），不是告警
+    #: worker CLI / 上游坏了（502、装的东西不对）。**和 faults 分开数**：
+    #: 两者都「不是告警」，但指向的修法完全相反 —— faults 说这个监工该修，
+    #: 这一项说监工没毛病、是我们这一侧的网络。混在一起时 verdict_line 会
+    #: 建议「先修监工可用性」，而那是一条指错方向的建议，比没有建议更费时间。
+    harness_faults: int = 0
     cost_usd: float = 0.0
     tokens: int = 0
 
@@ -71,6 +100,10 @@ class SupervisorMetrics:
         # 故障率高先修故障：命中率是在「它真的审了」的前提下才有意义
         if self.faults and self.faults >= max(1, self.fired):
             return "多数轮次是监工自己故障 → 先修可用性，命中率还谈不上"
+        # 上游坏了要说清是**上游**。说成「先修监工可用性」会把人送去翻监工日志，
+        # 而那里什么都没有 —— 一条指错方向的建议比没有建议更费时间。
+        if self.harness_faults and self.harness_faults >= max(1, self.fired):
+            return "多数轮次是 worker CLI / 上游报错 → 先看网关，与本监工无关"
         if self.adjudicated == 0 and self.false_negatives == 0:
             return "数据不足，继续攒"
         # hit_rate is None 且有漏报 = 从没报对过、却漏了东西，是「没干活」最强的情形。
@@ -98,7 +131,7 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
             role,
             dict(fired=0, passed=0, true_positives=0, false_positives=0,
                  unadjudicated=0, false_negatives=0, faults=0,
-                 cost_usd=0.0, tokens=0),
+                 harness_faults=0, cost_usd=0.0, tokens=0),
         )
 
     for row in store.all_attempts(task_id=task_id):
@@ -108,7 +141,11 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
             b = bucket(str(v.role))
             b["cost_usd"] += v.cost_usd
             b["tokens"] += v.tokens
-            if _is_fault(v):
+            if _is_harness_fault(v):
+                # 上游/worker CLI 坏了。既不进 fired（不是告警），也不进 faults
+                # （不是这个监工的毛病）—— 分开数的理由见 harness_faults。
+                b["harness_faults"] += 1
+            elif _is_fault(v):
                 # 监工超时不是「它报了个警」。混进 fired 会污染命中率分母，
                 # 而裁剪决定就建在那个分母上。
                 b["faults"] += 1

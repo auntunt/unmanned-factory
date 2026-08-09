@@ -280,6 +280,63 @@ def test_faults_dominating_says_fix_availability_first(store):
     assert "先修可用性" in supervisor_metrics(store)["spec"].verdict_line()
 
 
+def test_upstream_502_is_not_a_true_positive_for_the_supervisor(store):
+    """网关 502 不许给回归监工记真阳性。
+
+    真跑批抓到的：上游回 502，dispatcher 的 `_blocked("harness", ...)` 挂在
+    REGRESSION 名下，attempt 落成 reworked，于是回归监工白得一次真阳性、命中率
+    100%。它什么都没审出来 —— 那次红是我们这一侧的网络。
+
+    而这个数正是用来决定「这个监工值不值它的钱」的，虚高的方向恰好是「保留」，
+    也就是不会有人来纠的那一侧。
+
+    非空基线：走的是和真告警**完全一样**的写入路径（同一个 role、同一个
+    Verdict.FAIL、同一个 REWORKED），差别只在 check 名。所以这条测试排除掉了
+    「它本来就不会被算进去」这种解释。
+    """
+    aid = store.open_attempt(
+        task_id="T-502", spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="A", harness="h", harness_version="v", model="haiku",
+    )
+    store.record_verdict(
+        aid, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[{"check": "harness", "command": "claude_code",
+                 "expected": "exit_status ok",
+                 "got": "error: API Error: 502 Upstream request failed"}],
+    )
+    store.finalize(aid, Resolution.REWORKED)
+
+    m = supervisor_metrics(store)["regression"]
+    assert m.true_positives == 0
+    assert m.fired == 0
+    assert m.hit_rate is None          # 不是 1.0
+    assert m.harness_faults == 1       # 但没被丢掉
+    assert m.faults == 0               # 也不算「监工自己坏了」
+
+
+def test_upstream_fault_verdict_points_at_the_gateway_not_the_supervisor(store):
+    """建议要说「看网关」，不能说「先修监工可用性」。
+
+    说错方向会把人送去翻监工日志，而那里什么都没有 —— 一条指错方向的建议比
+    没有建议更费时间。这两种故障对人是同一个动作（不打回 worker），
+    但指向的修法完全相反，所以计数器也必须是两个。
+    """
+    aid = store.open_attempt(
+        task_id="T-502b", spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="A", harness="h", harness_version="v", model="haiku",
+    )
+    store.record_verdict(
+        aid, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[{"check": "harness", "expected": "exit_status ok",
+                 "got": "API Error: 502"}],
+    )
+    store.finalize(aid, Resolution.ESCALATED)
+
+    line = supervisor_metrics(store)["regression"].verdict_line()
+    assert "网关" in line
+    assert "先修可用性" not in line
+
+
 def test_a_real_alarm_alongside_a_fault_still_counts(store):
     """故障归故障，真报的警照算 —— 两者分开计数而不是互相吞掉。"""
     for claims, res in ((_fault_claim(), Resolution.ESCALATED),

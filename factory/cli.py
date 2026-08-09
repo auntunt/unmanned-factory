@@ -952,8 +952,11 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
         print(f"  漏报        : {m.false_negatives}")
         print(f"  单位命中成本: {per_hit}"
               f"  (总 ${m.cost_usd:.4f} / {m.tokens} tokens)")
+        # 上游故障也打出来。不打的话它从这份报表里**整个消失**（既不在 fired
+        # 也不在 faults），于是一批全被 502 打回的轮次看起来像「什么都没发生」。
         print(f"  报警 {m.fired} 次，放行 {m.passed} 次，"
-              f"未定案 {m.unadjudicated} 次，自身故障 {m.faults} 次")
+              f"未定案 {m.unadjudicated} 次，自身故障 {m.faults} 次，"
+              f"上游故障 {m.harness_faults} 次")
         print(f"  → {m.verdict_line()}")
 
     # 闸门 3 是 spec §9 的 P1 判据。它不随 --task-id 收窄：单个任务的

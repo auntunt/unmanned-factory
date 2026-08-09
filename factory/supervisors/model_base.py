@@ -30,6 +30,22 @@ from factory.supervisors.base import SupervisorReport
 
 SUPERVISOR_ERROR_PREFIX = "supervisor-"
 
+#: 「不是监工报的警，是工具/上游坏了」的 check 名。
+#:
+#: 和 SUPERVISOR_ERROR_PREFIX 并列而不是共用一个前缀：那个前缀是**监工自己**
+#: 不可用（超时、拿不到裁决），这一条是 **worker CLI** 不可用（上游 5xx、
+#: 装的东西不对）。两者对人是同一个动作（不打回 worker），但对指标不是 ——
+#: 前者说明监工该修，后者跟监工一点关系都没有。
+#:
+#: 真跑批抓到的：网关回 502，`_blocked("harness", ...)` 挂在 REGRESSION 名下，
+#: 于是 metrics 给回归监工记了一次**真阳性**。它什么都没审出来，那次红是我们
+#: 这一侧的网络。而这个数正是拿来决定「这个监工值不值它的钱」的 —— 虚高的
+#: 方向恰好是「保留」，也就是不会有人来纠的那一侧。
+#:
+#: 放在这里而不是 dashboard.py：dispatcher 和 metrics 都已经 import 这个模块，
+#: 而它们谁都不 import dashboard。判据只有一份。
+HARNESS_FAULT_CHECKS: frozenset[str] = frozenset({"harness"})
+
 _CLAIM_KEYS = ("check", "command", "expected", "got")
 _MAX_FIELD = 2000
 
