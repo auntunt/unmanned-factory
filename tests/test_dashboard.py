@@ -287,6 +287,41 @@ def test_gate_claims_matches_dispatcher_source(tmp_path):
     assert not missing, f"dispatcher 有这些闸门但看板不认识：{sorted(missing)}"
 
 
+def test_evidence_table_shows_supervisor_reasons_not_only_gates(tmp_path):
+    """证据表要收**所有** claim，不只是机制闸门那几个。
+
+    只收 gate_claims 时，三个真实的打回理由在页面上根本不存在：
+    `no-checks-defined`（任务没有可执行判据）、`declared-paths-scope`
+    （改到声明之外的文件）、`post-diff-grading`（按真实 diff 重分级后升级）。
+    页面此前只在轮次那行写「监工 regression」—— 说了谁反对，没说为什么，
+    而演示时「为什么被打回」是第一个被问到的问题。
+
+    非空基线：同一次 attempt 里放一条真闸门 claim。它在旧实现里也显示，所以
+    只断言它在，等于什么都没测。
+    """
+    store, db = _store(tmp_path)
+    aid = _attempt(store)
+    _result(store, aid)
+    store.record_verdict(
+        aid, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[
+            {"check": "shadow-code", "command": "", "expected": "",
+             "got": "基线：闸门 claim 旧实现也显示"},
+            {"check": "no-checks-defined", "command": "",
+             "expected": "至少一条廉价客观裁判",
+             "got": "任务没有定义任何 check，不能判为通过"},
+            {"check": "declared-paths-scope", "command": "",
+             "expected": "只改 slug.py", "got": "还改了 deploy.sh"},
+        ],
+    )
+    page = render(collect(db), db=db)
+    assert "基线：闸门 claim 旧实现也显示" in page      # 基线
+    assert "任务没有定义任何 check" in page             # 这条以前看不见
+    assert "还改了 deploy.sh" in page                   # 这条也看不见
+    # 而它们要被标成「监工」，不是混进闸门 —— 处置完全不同
+    assert "no-checks-defined" in page and "监工" in page
+
+
 def test_gate_and_fault_tables_do_not_overlap():
     """一个 check 名只能属于一张表。
 

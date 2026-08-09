@@ -588,22 +588,42 @@ def _gate_table(sm: Summary) -> str:
 
 
 def _claims_detail(sm: Summary) -> str:
-    """被闸门拦下的具体现场。给别人看时这一段最有说服力 —— 它是证据。"""
+    """打回/拦下的具体现场。给别人看时这一段最有说服力 —— 它是证据。
+
+    收**所有** claim，不只是机制闸门那几个。原本只收 `gate_claims`，于是三种
+    reason 在这张表上根本不存在：`no-checks-defined`（任务没有可执行判据，
+    回归监工据此拒绝判过）、`declared-paths-scope`（改到了声明之外的文件）、
+    `post-diff-grading`（拿真实 diff 重分级后升级）。它们都是**真的打回理由**，
+    而页面此前只在轮次那行显示「监工 regression」—— 说了谁反对，没说为什么。
+    演示时「为什么被打回」是第一个被问到的问题。
+
+    每条标出属于哪一类（闸门 / 工具故障 / 监工），因为处置完全不同：闸门是
+    worker 越界、故障是重试、监工是去看那条 claim 的正文。
+    """
+    kinds = {}
+    for name in GATE_CLAIMS:
+        kinds[name] = ("闸门", "bad")
+    for name in FAULT_CLAIMS:
+        kinds[name] = ("工具故障", "warn")
     items = [(r, c) for r in sorted(sm.rows, key=lambda x: x.id, reverse=True)
-             for c in r.gate_claims]
+             for c in r.claims]
     if not items:
-        return '<p class="empty">这个库里还没有闸门拦下过任何东西。</p>'
+        return '<p class="empty">这个库里还没有任何 claim —— 没人反对过。</p>'
     rows = []
     for r, c in items[:40]:
+        # 表里没有的名字算「监工」而不是丢掉：一张手维护的表迟早漏名字，
+        # 而漏掉的后果必须是「归错类」，不能是「这条证据不存在」。
+        kind, cls = kinds.get(str(c.get("check")), ("监工", "dim"))
         rows.append(
             f"<tr><td>{_e(r.task_id)}#{r.attempt_no}</td>"
-            f'<td><code class="bad">{_e(c.get("check"))}</code></td>'
+            f'<td class="{cls}">{_e(kind)}</td>'
+            f'<td><code class="{cls}">{_e(c.get("check"))}</code></td>'
             f'<td class="wrapline">{_e(str(c.get("got", ""))[:300])}</td></tr>'
         )
     more = ("" if len(items) <= 40
             else f'<p class="dim">另有 {len(items) - 40} 条未显示。</p>')
-    return ('<div class="scroll"><table><thead><tr><th>attempt</th><th>闸门</th>'
-            "<th>拦下时看到了什么</th></tr></thead><tbody>"
+    return ('<div class="scroll"><table><thead><tr><th>attempt</th><th>类</th>'
+            "<th>什么</th><th>当时看到了什么</th></tr></thead><tbody>"
             + "".join(rows) + f"</tbody></table></div>{more}")
 
 
@@ -890,7 +910,7 @@ def render(sm: Summary, *, db: str, title: str = "自动化无人工厂",
 <p class="sub">这些闸门判的不是「代码好不好」，是「worker 有没有在伪造那份绿」。
 每一道都对应一条实测过的攻击路径 —— 拦下次数为 0 不代表它没装上。</p>
 {_gate_table(sm)}
-<h2>拦下的现场</h2>
+<h2>打回的现场：谁反对、以及看到了什么</h2>
 {_claims_detail(sm)}
 </div><script>{_LIVE_JS}</script></body></html>"""
 
