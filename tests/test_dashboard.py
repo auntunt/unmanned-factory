@@ -94,6 +94,24 @@ def test_merge_rate_is_none_on_empty_db(tmp_path):
     assert sm.merge_rate is None
 
 
+def test_header_gate_count_is_derived_not_hardcoded(tmp_path):
+    """副标题里的闸门道数必须是算出来的。
+
+    真踩过：`harness` 从 GATE_CLAIMS 挪进 FAULT_CLAIMS 之后，表变成 13 项，
+    而副标题上写死的「十四道」原样留着 —— 页面是给客户看的第一屏，那行字是
+    错的，而所有测试都绿。这类漂移的方向永远是「数字看起来更气派」。
+
+    判据不写死 13：写死等于把同一个漂移搬到测试里。加/删一道闸门时这条测试
+    应该照样绿，只有「副标题和表不一致」才响。
+    """
+    _, db = _store(tmp_path)
+    page = render(collect(db), db=db)
+    assert f"{len(GATE_CLAIMS)} 道机制闸门" in page
+    # 中文数字写法一律不许再出现 —— 它没法跟着表走
+    for stale in ("十四道机制闸门", "十三道机制闸门"):
+        assert stale not in page, f"副标题又写死了：{stale}"
+
+
 def test_upstream_fault_stays_in_the_merge_rate_denominator(tmp_path):
     """502 打回的 attempt **留在**合并率分母里 —— 和 gate3 排掉它恰好相反。
 
@@ -214,7 +232,7 @@ def test_escape_covers_quotes():
 
 
 def test_zero_hit_gates_render_as_zero_not_blank(tmp_path):
-    """十四道闸门一次没触发时，表里要有十四行、每行一个 `0`。
+    """闸门一次没触发时，表里要有 `GATE_CLAIMS` 那么多行、每行一个 `0`。
 
     留空会被读成「这道闸门不存在」。这个项目里「空表和干净的表长得一样」
     已经踩过多次，展示层是它最容易发生的地方。
@@ -1119,3 +1137,117 @@ def test_any_queue_read_error_is_surfaced(tmp_path, monkeypatch):
     store, db = _store(tmp_path)
     page = render(collect(db), db=db, qs=qs)
     assert "读队列" in page and "磁盘炸了" in page
+
+
+# ---------- 分栏导航 ----------
+#
+# 这一组盯的不是「好不好看」，是分栏引入的那个新失效面：**导航上有、栏体没有**。
+# 点下去是一张空白页，而空白页和「这一栏本来就没数据」在浏览器里长得一样。
+
+def _nav_and_sections(page: str) -> tuple[list[str], list[str]]:
+    nav = re.search(r'<nav class="nav">(.*?)</nav>', page, re.S)
+    assert nav, "页面上没有导航"
+    hrefs = re.findall(r'href="#([^"]+)"', nav.group(1))
+    ids = re.findall(r'<section class="view[^"]*" id="([^"]+)"', page)
+    return hrefs, ids
+
+
+def test_every_nav_link_points_at_a_section_that_exists(tmp_path):
+    """导航项和栏体一一对应。
+
+    两边都从 `_views()` 那一个列表生成，这条测的就是那个约定没被绕开。手写死
+    导航的实现会在加/删一栏时留下一个指向空气的链接 —— 而它在页面上看起来
+    和一个正常的标签毫无区别，点下去才是白屏。
+    """
+    store, db = _store(tmp_path)
+    _result(store, _attempt(store))
+    page = render(collect(db), db=db, token="tk")
+    hrefs, ids = _nav_and_sections(page)
+
+    extra = [h for h in hrefs if h != "all"]
+    assert extra == ids, f"导航 {extra} 和栏体 {ids} 对不上"
+    assert len(ids) == len(set(ids)), "栏体 id 重复了：重复 id 会让 data-live 只更新第一个"
+    assert "all" in hrefs, "少了「全部展开」——Ctrl-F 和打印都靠它"
+
+
+def test_exactly_one_view_is_open_server_side(tmp_path):
+    """首屏那一栏的 `on` 是服务端渲染的，且只有一个。
+
+    全靠 JS 决定显示哪一栏的实现，在 JS 挂掉时渲染成一张**纯白页**（所有
+    `.view` 都是 `display:none`），而纯白页看起来像「审计库是空的」。
+    一个都没有和好几个都开着都是错的，所以这里钉的是「恰好一个」。
+    """
+    store, db = _store(tmp_path)
+    _result(store, _attempt(store))
+    page = render(collect(db), db=db, token="tk")
+    assert len(re.findall(r'<section class="view on"', page)) == 1
+    # CSS 兜底也得在：没有 JS 时点导航靠 `:target` 切栏。
+    assert ".view:target" in page
+
+
+def test_all_sections_ship_in_one_document(tmp_path):
+    """所有栏的内容都在同一份 HTML 里，不是按 URL 分别取。
+
+    分栏是纯前端的，这正是 `--once` 单文件导出还能用的唯一理由。哪天改成
+    服务端路由，导出的那份文件会只剩一栏 —— 而它自己看起来完全正常。
+    """
+    store, db = _store(tmp_path)
+    _result(store, _attempt(store))
+    out = tmp_path / "o.html"
+    export(db, out)
+    page = out.read_text(encoding="utf-8")
+    for marker in ("跑批结果", "成本与人力账", "任务树", "监工命中率",
+                   "闸门体系", "每次尝试"):
+        assert marker in page, f"导出的单文件里少了「{marker}」这一栏"
+
+
+def test_no_actions_view_without_a_token(tmp_path):
+    """静态导出里连「人工介入」这个**导航项**都不该有。
+
+    `_actions` 早就不渲染表单了，但一个点进去空着的标签同样是在骗人 ——
+    所以这一栏是条件加进列表的，不是渲染成空栏。
+    """
+    store, db = _store(tmp_path)
+    _result(store, _attempt(store))
+    page = render(collect(db), db=db)
+    hrefs, ids = _nav_and_sections(page)
+    assert "actions" not in hrefs and "actions" not in ids
+    assert "提需求" not in page
+    assert "actions" in _nav_and_sections(
+        render(collect(db), db=db, token="tk"))[0], "给了 token 就该有这一栏"
+
+
+def test_demo_banner_and_live_bar_sit_outside_the_views(tmp_path):
+    """横幅和实时条在所有栏上都看得见，不属于某一栏。
+
+    「这是示例数据」被塞进某一栏的话，切到别的栏就没有它了 —— 一张编出来的
+    页面被当成真跑批结果拿出去，是这一页唯一真正有害的失效方式。
+    """
+    db = str(tmp_path / "demo.db")
+    build_demo(db)
+    page = render(collect(db), db=db, token="tk")
+    first = page.index('<section class="view')
+    assert page.index("示例数据") < first, "横幅掉进某一栏里了"
+    assert page.index('<p class="live">') < first, "实时条掉进某一栏里了"
+    assert page.index('<nav class="nav">') < first
+
+
+def test_sticky_nav_does_not_cover_the_targeted_view(tmp_path):
+    """带 hash 进来时，sticky 的导航不许压住那一栏的标题。
+
+    `.nav` 是 `position:sticky` 且有高度，浏览器锚定滚动却把目标顶到视口
+    最上沿 —— 于是 `#flow` 这种深链进来，那一栏的 `<h2>` 正好被导航盖掉。
+    页面上看着像「这一栏没有标题」，而不像一个滚动位置的错。
+
+    两条路都得堵，因为它们在不同情况下生效：
+    - 有 JS：首屏统一回到顶部（每一栏都当成「一页」看）；
+    - 没有 JS：切栏靠 CSS `:target`，那时只有 `scroll-margin-top` 兜得住。
+    只堵一条的实现在另一条路上照样翻车。
+    """
+    store, db = _store(tmp_path)
+    _result(store, _attempt(store))
+    page = render(collect(db), db=db, token="tk")
+
+    assert "position:sticky" in page, "导航不再是 sticky 的话，下面两条补偿要一起重估"
+    assert "scroll-margin-top" in page, "没有 JS 时锚定滚动会让导航压住 <h2>"
+    assert "if(location.hash) scrollTo(0,0);" in page, "深链进来没有回到顶部"

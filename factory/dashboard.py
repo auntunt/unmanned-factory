@@ -429,6 +429,21 @@ form.act textarea{flex:1 1 22rem;min-height:4.5rem}
 form.act button{font:inherit;font-weight:600;padding:.45rem 1rem;
 border:1px solid var(--line);border-radius:6px;background:var(--card);
 color:var(--fg);cursor:pointer}
+.nav{position:sticky;top:0;z-index:5;display:flex;gap:.15rem;
+overflow-x:auto;margin:1.25rem 0 0;padding:.35rem 0;background:var(--bg);
+border-bottom:1px solid var(--line);scrollbar-width:none}
+.nav::-webkit-scrollbar{display:none}
+.nav a{color:var(--dim);text-decoration:none;font-size:.88rem;font-weight:600;
+padding:.4rem .7rem;border-radius:6px;white-space:nowrap}
+.nav a:hover{color:var(--fg);background:var(--card)}
+.nav a[aria-current]{color:var(--fg);background:var(--card);
+box-shadow:inset 0 0 0 1px var(--line)}
+.nav a.alt{margin-left:auto;font-weight:400}
+.view{display:none;scroll-margin-top:3.25rem}
+.view.on,.view:target{display:block}
+.view>h2:first-child{margin-top:1.25rem}
+html.showall .view{display:block}
+@media print{.view{display:block}}
 """
 
 #: 3 秒轮询 `/state.json`，只替换标了 `data-live` 的那几个数字。
@@ -454,6 +469,47 @@ _LIVE_JS = """
     }).catch(function(){});
   };
   tick(); setInterval(tick,3000);
+})();
+"""
+
+#: 分栏切换。纯前端，**不是路由** —— 服务端仍然一次把所有栏渲染进同一份 HTML，
+#: 所以 `--once` 导出的单文件里分栏照样能用（这是不做服务端路由的唯一理由）。
+#:
+#: 三层保险，因为「一张空白页」和「这一栏没数据」在浏览器里长得一样：
+#: 1. 默认那一栏的 `class="view on"` 是**服务端渲染**的 —— JS 挂了也有内容；
+#: 2. CSS 里有 `.view:target`，所以就算这段脚本整个不执行，点导航仍然切得动；
+#: 3. hash 指到一个不存在的栏时回落到第一栏，不是谁都不显示。
+#: `#all` 走 `html.showall`（给 Ctrl-F 和打印用），刻意不复制一份内容出来：
+#: 复制会让同一个 id 在页面上出现两次，而重复 id 会让上面的 `data-live` 只更新
+#: 第一个 —— 那种错误在页面上完全看不出来。
+_NAV_JS = """
+(function(){
+  var nav=document.querySelector('.nav');
+  if(!nav) return;
+  var views=[].slice.call(document.querySelectorAll('.view'));
+  if(!views.length) return;
+  var apply=function(){
+    var h=(location.hash||'').replace('#',''), all=(h==='all');
+    document.documentElement.classList.toggle('showall',all);
+    var hit=null;
+    if(!all){
+      views.forEach(function(v){ if(v.id===h) hit=v; });
+      if(!hit) hit=views[0];
+      views.forEach(function(v){ v.classList.toggle('on',v===hit); });
+    }
+    var cur=all?'all':hit.id;
+    nav.querySelectorAll('a').forEach(function(a){
+      var t=(a.getAttribute('href')||'').replace('#','');
+      if(t===cur) a.setAttribute('aria-current','page');
+      else a.removeAttribute('aria-current');
+    });
+  };
+  addEventListener('hashchange',function(){ apply(); scrollTo(0,0); });
+  apply();
+  // 带 hash 进来时浏览器已经把那一栏锚定滚过去了，而 .nav 是 sticky 的 ——
+  // 它会正好压住这一栏的 <h2>。每一栏都当成「一页」看，所以首屏一律回到顶部。
+  // 没有 JS 时这件事由 .view 上的 scroll-margin-top 兜着。
+  if(location.hash) scrollTo(0,0);
 })();
 """
 
@@ -559,7 +615,11 @@ def _supervisor_table(sm: Summary) -> str:
 
 
 def _gate_table(sm: Summary) -> str:
-    """十四道机制闸门，各自拦下过几次。
+    """每道机制闸门各自拦下过几次。
+
+    刻意不在这里写道数：这段 docstring 曾经写着「十四道」，而 `harness` 挪进
+    FAULT_CLAIMS 之后表变成 13 行、这行字没跟着改。一个会过时的数字写在
+    注释里没有任何测试盯得住 —— 那道数唯一的来源是 `len(GATE_CLAIMS)`。
 
     「0 次」是这张表里最需要解释的一格，所以它渲染成灰色的 `0` 而不是留空：
     0 的含义是「这道闸门装着、但这个库里没触发过」，而留空会被读成
@@ -877,6 +937,59 @@ size="14">
 当前 launchd：{_e(launchd)}</p>"""
 
 
+def _views(sm: Summary, qs: QueueState, *, manual_hours: float,
+           token: str, launchd: str) -> list[tuple[str, str, str]]:
+    """分栏的**唯一来源**：(slug, 导航标签, 这一栏的 HTML)。
+
+    导航和栏体都从这一个列表生成，所以两边不可能对不上。分两处写的话，一个
+    「导航上有、栏体没有」的条目点下去是一张**空白页** —— 而空白页和「这一栏
+    本来就没数据」长得一模一样，那正是这个项目里反复吃亏的形状。
+
+    「人工介入」那一栏是**条件加进来**的，不是渲染成一个空栏：静态导出里没有
+    token，一个点不动的表单栏比没有这一栏更糟（见 `_actions`）。
+    """
+    vs = [
+        ("overview", "总览", f"""<h2>跑批结果</h2>
+{_cards(sm)}
+<h2>成本与人力账</h2>
+{_ledger(sm, manual_hours=manual_hours)}"""),
+        ("flow", "任务流转", f"""<h2>任务树 · 每一轮往复</h2>
+<p class="sub">树边是真依赖（前置没合并就不认领）。展开一个任务能看到它的
+每一轮：编码 → 测试 → 被谁打回 → 再编码。</p>
+{_tree(sm, qs)}"""),
+        ("verdicts", "监工判收", f"""<h2>监工命中率</h2>
+<p class="sub">四道监工各自判了多少、其中多少是真拦对了。命中率低不等于该关掉它 ——
+先看右边那列单次命中成本。</p>
+{_supervisor_table(sm)}
+<h2>打回的现场：谁反对、以及看到了什么</h2>
+{_claims_detail(sm)}"""),
+        ("gates", "防伪闸门", f"""<h2>闸门体系</h2>
+<p class="sub">这些闸门判的不是「代码好不好」，是「worker 有没有在伪造那份绿」。
+每一道都对应一条实测过的攻击路径 —— 拦下次数为 0 不代表它没装上。</p>
+{_gate_table(sm)}"""),
+        ("attempts", "每次尝试", f"""<h2>每次尝试</h2>
+<p class="sub">一行一个 attempt，最近的在上面。这是审计库的原始形状，
+上面几栏的数字都从这里聚出来。</p>
+{_attempts_table(sm)}"""),
+    ]
+    if token:
+        vs.append(("actions", "提需求 · 人工介入",
+                   f"<h2>提需求 / 人工介入</h2>{_actions(token, launchd=launchd)}"))
+    return vs
+
+
+def _nav(views: list[tuple[str, str, str]]) -> str:
+    """顶部导航。第一栏带 `aria-current` 是**服务端**给的，和 `.view.on` 同一个
+    下标 —— JS 没跑起来时导航的高亮和实际显示的那一栏仍然是一致的。
+    """
+    links = []
+    for i, (slug, label, _body) in enumerate(views):
+        cur = ' aria-current="page"' if i == 0 else ""
+        links.append(f'<a href="#{_e(slug)}"{cur}>{_e(label)}</a>')
+    return ('<nav class="nav">' + "".join(links)
+            + '<a class="alt" href="#all">全部展开</a></nav>')
+
+
 def render(sm: Summary, *, db: str, title: str = "自动化无人工厂",
            qs: QueueState | None = None, manual_hours: float = MANUAL_HOURS,
            token: str = "", launchd: str = "未检测") -> str:
@@ -887,41 +1000,28 @@ def render(sm: Summary, *, db: str, title: str = "自动化无人工厂",
     """
     qs = qs if qs is not None else QueueState()
     banner = _DEMO_BANNER if Path(db).name.startswith("demo") else ""
-    acts = (f"<h2>提需求 / 人工介入</h2>{_actions(token, launchd=launchd)}"
-            if token else "")
+    views = _views(sm, qs, manual_hours=manual_hours, token=token,
+                   launchd=launchd)
+    # 第一栏服务端就带 `on`。**不靠 JS 决定首屏显示哪一栏** —— JS 挂了的话
+    # 「全部 view 都是 display:none」会渲染成一张纯白页，而纯白页看起来像
+    # 「这个库是空的」。CSS 里 `.view:target` 是第二层兜底：没有 JS，点导航
+    # 仍然能切栏（多显示一栏，不会少显示）。
+    sections = "\n".join(
+        f'<section class="view{" on" if i == 0 else ""}" id="{_e(slug)}">'
+        f"{body}</section>"
+        for i, (slug, _label, body) in enumerate(views))
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_e(title)}</title><style>{_CSS}</style></head><body><div class="wrap">
 <h1>{_e(title)}</h1>
 <p class="sub">调度 + 审计层：任务派给 coding agent，四道监工判收，
-十四道机制闸门盯着「这份绿是不是真的」。数据源 <code>{_e(db)}</code>。</p>
+{len(GATE_CLAIMS)} 道机制闸门盯着「这份绿是不是真的」。数据源 <code>{_e(db)}</code>。</p>
 {banner}
 {_live_bar(sm, qs)}
-
-<h2>跑批结果</h2>
-{_cards(sm)}
-
-<h2>任务树 · 每一轮往复</h2>
-<p class="sub">树边是真依赖（前置没合并就不认领）。展开一个任务能看到它的
-每一轮：编码 → 测试 → 被谁打回 → 再编码。</p>
-{_tree(sm, qs)}
-
-<h2>成本与人力账</h2>
-{_ledger(sm, manual_hours=manual_hours)}
-{acts}
-<h2>每次尝试</h2>
-{_attempts_table(sm)}
-<h2>监工命中率</h2>
-{_supervisor_table(sm)}
-
-<h2>闸门体系</h2>
-<p class="sub">这些闸门判的不是「代码好不好」，是「worker 有没有在伪造那份绿」。
-每一道都对应一条实测过的攻击路径 —— 拦下次数为 0 不代表它没装上。</p>
-{_gate_table(sm)}
-<h2>打回的现场：谁反对、以及看到了什么</h2>
-{_claims_detail(sm)}
-</div><script>{_LIVE_JS}</script></body></html>"""
+{_nav(views)}
+{sections}
+</div><script>{_NAV_JS}{_LIVE_JS}</script></body></html>"""
 
 
 # ---------- 服务 ----------
