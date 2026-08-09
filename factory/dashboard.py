@@ -28,9 +28,14 @@ from __future__ import annotations
 
 import html
 import json
+import re
+import secrets
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
 
 from factory.audit.models import (
     NOT_DISPATCHED,
@@ -40,6 +45,15 @@ from factory.audit.models import (
     Verdict,
 )
 from factory.audit.store import AuditStore
+from factory.backlog.store import (
+    BLOCKED,
+    DONE,
+    INBOX,
+    NEEDS_HUMAN,
+    RUNNING,
+    STATES,
+    Backlog,
+)
 from factory.metrics import gate3_rework, supervisor_metrics
 
 #: dispatcher 里 `_blocked(...)` 的第一个参数全集 —— 也就是「机制闸门」的名字。
@@ -186,6 +200,120 @@ def collect(db_path: str | Path, *, task_id: str | None = None) -> Summary:
     )
 
 
+# ---------- 队列侧（树的数据源） ----------
+#
+# 依赖边只存在于**队列目录里的 YAML**（`depends_on`），审计库里没有这个字段。
+# 所以树要读第二个数据源。仍然只读：这一层一个字节都不往队列里写。
+
+#: 队列撞名后缀（`T-x.2.yaml`）。和 backlog/store.py 里的 `_PARK_SUFFIX` 同一件
+#: 事，刻意不 import 它 —— 那是私有名字，import 私有名会在对面改名时静默失配。
+#: 这里失配的后果只是树上多一个孤立节点（看得见），不是判决出错。
+_QSUFFIX = re.compile(r"\.\d+$")
+
+
+@dataclass(frozen=True)
+class QueueEntry:
+    """队列里的一个条目。`name` 是**文件名 stem**，也就是队列层的身份。"""
+
+    name: str
+    state: str
+    depends_on: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    title: str = ""
+
+    @property
+    def ident(self) -> str:
+        """剥掉撞名后缀的身份 —— 依赖边和 attempt 都按这个对上。"""
+        return _QSUFFIX.sub("", self.name)
+
+
+@dataclass
+class QueueState:
+    """队列的当下形状。给树、给 `/state.json`、给「谁在等谁」共用一份。"""
+
+    entries: tuple[QueueEntry, ...] = ()
+    counts: dict[str, int] = field(default_factory=dict)
+    running: tuple[str, ...] = ()
+    waiting: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    root: str | None = None
+    #: 读队列失败的原因。**必须渲染出来** —— 读不到队列和队列是空的，
+    #: 在页面上长得一模一样，而前者意味着这一页在说谎。
+    error: str = ""
+
+    @property
+    def by_ident(self) -> dict[str, QueueEntry]:
+        return {e.ident: e for e in self.entries}
+
+
+def queue_state(root: str | Path | None) -> QueueState:
+    """读队列目录。给 None（没传 `--queue`）就返回空壳，不报错。
+
+    任何异常都收进 `.error` 而不是往上抛：这一页挂掉的代价是客户面前一片白，
+    而队列读不出来时页面其余部分（审计库那半边）仍然是有效信息。
+    """
+    if root is None:
+        return QueueState()
+    try:
+        bl = Backlog(root)
+        # 先判「这地方到底是不是一个队列」。不判的话下面每个 `exists()` 都返
+        # False，于是路径写错、目录被删、指到一个文件上，全都渲染成「队列是空
+        # 的」—— 一个空队列在页面上是安静的，而这三种情况都需要人动手。
+        # 判据取「STATES 里有没有任何一个子目录存在」而不是「根目录在不在」：
+        # 一个刚 ensure() 过的空队列几个子目录都在、条目为零，那是真的空。
+        if not Path(root).is_dir():
+            return QueueState(root=str(root),
+                              error=f"{root} 不是一个目录")
+        if not any(bl.dir(s).is_dir() for s in STATES):
+            return QueueState(
+                root=str(root),
+                error=f"{root} 下面没有 inbox/running/done… 这些目录，"
+                      "不像一个队列（路径写错了？还是没跑过 factory prd --queue？）")
+        entries: list[QueueEntry] = []
+        merged = bl.merged_ids() if bl.dir(DONE).exists() else frozenset()
+        for state in STATES:
+            d = bl.dir(state)
+            if not d.exists():
+                continue
+            for p in bl._entries(d):
+                deps = _read_deps(p)
+                entries.append(QueueEntry(
+                    name=p.stem, state=state, depends_on=deps,
+                    missing=tuple(x for x in deps if x not in merged),
+                    title=_read_title(p),
+                ))
+        return QueueState(
+            entries=tuple(entries),
+            counts=bl.counts(),
+            running=tuple(p.stem for p in bl.running()),
+            waiting=tuple((p.stem, miss) for p, miss in bl.blocked_by_deps()),
+            root=str(root),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return QueueState(root=str(root), error=f"{type(exc).__name__}: {exc}")
+
+
+def _read_deps(path: Path) -> tuple[str, ...]:
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return ()
+    if not isinstance(doc, dict):
+        return ()
+    return tuple(str(d) for d in (doc.get("depends_on") or ()))
+
+
+def _read_title(path: Path) -> str:
+    """节点上显示的一句话。读不出来返回空字符串，节点照样画出来。"""
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return "（YAML 读不出来）"
+    if not isinstance(doc, dict):
+        return "（YAML 不是一个映射）"
+    text = str(doc.get("prompt") or doc.get("acceptance") or "")
+    return text.strip().splitlines()[0][:90] if text.strip() else ""
+
+
 # ---------- 渲染 ----------
 #
 # 手写 HTML 字符串，不引模板引擎：这一页的结构是固定的，而 jinja2 会变成
@@ -227,6 +355,66 @@ font-size:.78rem;font-weight:600}
 border:1px solid var(--warn);color:var(--warn);border-radius:6px;
 padding:.6rem .85rem;margin:0 0 2rem;font-size:.85rem}
 code{font:.82rem ui-monospace,SFMono-Regular,Menlo,monospace}
+.tree details{margin:0}
+.tree>details,.tree>.node{margin-bottom:.4rem}
+details.node{border-left:2px solid var(--line);padding-left:.7rem}
+details.node>summary{cursor:pointer;padding:.35rem 0;display:flex;
+flex-wrap:wrap;gap:.5rem;align-items:baseline}
+details.node>summary::marker{color:var(--dim)}
+details.node details.node{margin-top:.2rem}
+.node .ttl{font-size:.82rem;flex:1 1 14rem;min-width:0;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.node .wait{color:var(--warn);font-size:.8rem}
+.node.dup{padding:.35rem 0 .35rem .7rem;font-size:.85rem}
+.round{display:flex;flex-wrap:wrap;gap:.6rem;align-items:baseline;
+padding:.3rem 0 .3rem .2rem;font-size:.83rem;border-bottom:1px dashed var(--line)}
+.round .rno{font-weight:600;min-width:4.5rem}
+.pill.run{color:var(--warn)}
+.cards.assume{margin-top:.6rem}
+.cards.assume .card{border-style:dashed;border-color:var(--warn)}
+.assume-note{margin:.5rem 0 0;font-size:.82rem}
+.live{display:flex;flex-wrap:wrap;gap:.5rem 1.2rem;font-size:.85rem;
+color:var(--dim);align-items:baseline}
+.live b{color:var(--fg);font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;
+background:var(--dim);margin-right:.35rem}
+.dot.on{background:var(--ok);animation:p 1.4s ease-in-out infinite}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.25}}
+form.act{display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start;
+margin:0 0 1rem}
+form.act textarea,form.act input[type=text],form.act input[type=number]{
+font:inherit;padding:.45rem .55rem;border:1px solid var(--line);
+border-radius:6px;background:var(--card);color:var(--fg)}
+form.act textarea{flex:1 1 22rem;min-height:4.5rem}
+form.act button{font:inherit;font-weight:600;padding:.45rem 1rem;
+border:1px solid var(--line);border-radius:6px;background:var(--card);
+color:var(--fg);cursor:pointer}
+"""
+
+#: 3 秒轮询 `/state.json`，只替换标了 `data-live` 的那几个数字。
+#:
+#: 为什么不是 `<meta http-equiv=refresh>`：整页刷会丢滚动位置和所有 `details`
+#: 的展开态 —— 而这一页的主体就是一棵手动展开的树，客户演示时刷一下全合上。
+#: 为什么不是 SSE：`ThreadingHTTPServer` 上一个挂住的长连接占掉一个线程，
+#: 演示场合宁可多几个短请求。
+#: 为什么整个函数包在 try 里：这段脚本报错也不许把页面弄坏 —— 静态导出
+#: （`--once`）里 `/state.json` 根本不存在，那时它必须安静地失败。
+_LIVE_JS = """
+(function(){
+  var tick=function(){
+    fetch('/state.json',{cache:'no-store'}).then(function(r){
+      if(!r.ok) throw 0; return r.json();
+    }).then(function(s){
+      document.querySelectorAll('[data-live]').forEach(function(el){
+        var v=s[el.getAttribute('data-live')];
+        if(v!==undefined&&v!==null) el.textContent=String(v);
+      });
+      var d=document.querySelector('.dot');
+      if(d) d.className='dot'+(s.running_n>0?' on':'');
+    }).catch(function(){});
+  };
+  tick(); setInterval(tick,3000);
+})();
 """
 
 
@@ -368,15 +556,244 @@ def _claims_detail(sm: Summary) -> str:
             + "".join(rows) + f"</tbody></table></div>{more}")
 
 
+_STATE_CLS = {"done": "ok", "needs-human": "warn", "blocked": "bad",
+              "running": "run", "inbox": "dim"}
+
+
+def _tree(sm: Summary, qs: QueueState) -> str:
+    """任务树：依赖边来自队列 YAML，每个节点下挂它的每一轮 attempt。
+
+    没有依赖时**退化成平表**（每个任务一个顶层节点），不是显示成空 ——
+    一个刚起步、还没人写 depends_on 的仓库，树该是一排根，不是一片白。
+
+    队列读不出来时也不留白：审计库里有 task_id，照样把节点画出来，只是没有边。
+    """
+    if qs.error:
+        head = ('<p class="banner">读队列 <code>' + _e(qs.root)
+                + "</code> 失败，下面这棵树没有依赖边（只按审计库里的任务列）："
+                + f"<code>{_e(qs.error)}</code></p>")
+    elif qs.root is None:
+        head = ('<p class="sub">没给 <code>--queue</code>，所以没有依赖边 —— '
+                "下面按审计库里出现过的任务平铺。</p>")
+    else:
+        head = ""
+
+    by_task: dict[str, list[Row]] = {}
+    for r in sm.rows:
+        by_task.setdefault(r.task_id, []).append(r)
+
+    ents = {e.ident: e for e in qs.entries}
+    # 节点全集 = 队列里的 ∪ 审计库里跑过的。只取其一都会漏：队列条目合并后
+    # 仍在 done/（有），而 `--queue` 没传时队列侧一个都没有。
+    names = sorted(set(ents) | set(by_task))
+    children: dict[str, list[str]] = {n: [] for n in names}
+    roots = []
+    for n in names:
+        parents = [d for d in (ents[n].depends_on if n in ents else ())
+                   if d in children]
+        if parents:
+            for p in parents:
+                children[p].append(n)
+        else:
+            roots.append(n)
+    if not names:
+        return (head + '<p class="empty">队列和审计库都还没有任务。</p>')
+
+    seen: set[str] = set()
+    body = "".join(_node(n, children, ents, by_task, seen) for n in roots)
+    # 环会让上面的遍历漏掉节点。漏掉不许悄悄漏 —— 补在后面并说明原因，
+    # 否则「树上少了三个任务」和「这三个任务不存在」在页面上一样。
+    left = [n for n in names if n not in seen]
+    if left:
+        body += ('<p class="banner">下面这些没能挂进树（依赖成环，或前置只存在于'
+                 "另一个队列）：</p>"
+                 + "".join(_node(n, {**children, n: []}, ents, by_task, seen)
+                           for n in left))
+    return head + f'<div class="tree">{body}</div>'
+
+
+def _node(name: str, children: dict[str, list[str]], ents: dict[str, QueueEntry],
+          by_task: dict[str, list[Row]], seen: set[str]) -> str:
+    if name in seen:  # 菱形依赖：同一个节点两个父亲。只画第一次。
+        return (f'<div class="node dup dim"><code>{_e(name)}</code> '
+                "<span>（已在上面展开过）</span></div>")
+    seen.add(name)
+    e = ents.get(name)
+    state = e.state if e else "—"
+    cls = _STATE_CLS.get(state, "dim")
+    rows = sorted(by_task.get(name, []), key=lambda r: r.attempt_no)
+    # 「等 X」只挂在 inbox 条目上。一个已经合并（done/）的条目，它的前置当时
+    # 满足没满足是历史，不是现在在等 —— 挂上去会让人以为队列卡住了。
+    # 判据取 state 而不是 `e.missing` 本身：missing 对每个状态都算得出来，
+    # 而只有 inbox 里的「算得出来」等于「现在动不了」。
+    waiting = (f'<span class="wait">等 {_e(", ".join(e.missing))}</span>'
+               if e and e.missing and e.state == INBOX else "")
+    # attempt 条数**总是打出来**（0 也打）：留白会被读成「这个任务没跑过」，
+    # 而它也可能是「跑过但审计库是另一个」。
+    meta = (f'<span class="pill {cls}">{_e(state)}</span>'
+            f'<span class="dim">{len(rows)} 轮</span>{waiting}')
+    title = f'<span class="ttl dim">{_e(e.title)}</span>' if e and e.title else ""
+    inner = _rounds(rows) + "".join(
+        _node(c, children, ents, by_task, seen) for c in sorted(children[name]))
+    return (f'<details class="node" open><summary><code>{_e(name)}</code>'
+            f"{meta}{title}</summary>{inner}</details>")
+
+
+def _rounds(rows: tuple[Row, ...] | list[Row]) -> str:
+    """一个任务的每一轮。升序 —— 编码→测试→打回→再编码是**从上往下**读的。
+
+    倒序在页面上完全说得通（最新的在上面），所以这里必须有测试钉住方向：
+    两种顺序都渲染出一张好看的表，只有一种讲对了故事。
+    """
+    if not rows:
+        return '<p class="empty">这个任务在审计库里还没有 attempt。</p>'
+    out = []
+    for r in rows:
+        gates = ", ".join(c["check"] for c in r.gate_claims)
+        fired = [role for role, v in r.verdicts if v == Verdict.FAIL]
+        why = (f'<span class="bad">闸门 {_e(gates)}</span>' if gates
+               else (f'<span class="warn">监工 {_e(", ".join(fired))}</span>'
+                     if fired else '<span class="dim">无人反对</span>'))
+        out.append(
+            f'<div class="round"><span class="rno">第 {r.attempt_no} 轮</span>'
+            f'<span class="pill {_cls(r.resolution)}">{_e(r.resolution)}</span>'
+            f"{why}"
+            f'<span class="dim">${r.cost_usd:.3f} · '
+            f"{r.wall_clock_ms / 1000:.0f}s · {_e(r.model)}</span></div>")
+    return "".join(out)
+
+
+#: 「一个人手做这件事要多久」的默认假设，小时。
+#:
+#: 这是**编的数字**，不是测出来的。所以它在页面上必须带「假设」字样并且可改 ——
+#: 把一个我们拍的数字显示成实测值，是这一页唯一能造成真实损害的失效方式
+#: （客户会拿它做决定）。同一个理由：默认值取偏保守的一端。
+MANUAL_HOURS = 2.0
+
+
+def _ledger(sm: Summary, *, manual_hours: float = MANUAL_HOURS) -> str:
+    """成本与人力账。左边是实测，右边是假设，两边**在视觉上分开**。"""
+    tasks = len({r.task_id for r in sm.rows})
+    wall_h = sum(r.wall_clock_ms for r in sm.rows) / 3_600_000
+    saved = manual_hours * tasks - wall_h
+    real = (
+        (f"${sm.cost:.2f}", "实测 · 模型花费"),
+        (f"{wall_h:.2f} h", "实测 · 机器墙钟"),
+        (sm.total, "实测 · attempt 条数"),
+        (tasks, "实测 · 任务数"),
+    )
+    return (
+        '<div class="cards">' + "".join(
+            f'<div class="card"><div class="n">{_e(n)}</div>'
+            f'<div class="l">{_e(l)}</div></div>' for n, l in real)
+        + "</div>"
+        + '<div class="cards assume"><div class="card">'
+        f'<div class="n">{manual_hours:g} h</div>'
+        '<div class="l">假设 · 人工单任务估时（可改）</div></div>'
+        f'<div class="card"><div class="n">{saved:.1f} h</div>'
+        '<div class="l">假设 · 省下的人力 = 估时×任务数 − 墙钟</div></div>'
+        "</div>"
+        '<p class="sub assume-note">⚠ 上面第二排两个数字里含<b>人工填的假设</b>'
+        "（单任务估时），不是测量结果。改这个假设：<code>?manual_hours=4</code>。"
+        "第一排四个数字全部来自审计库。</p>")
+
+
 #: 示例库的横幅。判据是**库文件名**而不是一个参数：参数会漏传，而一张编出来的
 #: 页面被当成真跑批结果拿出去，是这一页唯一真正有害的失效方式。
 _DEMO_BANNER = ('<p class="banner">⚠ 这是 <b>示例数据</b>（<code>factory '
                 'dashboard --demo</code> 生成），不是真实跑批结果。</p>')
 
 
-def render(sm: Summary, *, db: str, title: str = "自动化无人工厂") -> str:
-    """整页 HTML。自包含 —— 没有外部 CSS/JS/字体，可以直接发给别人。"""
+def state_payload(sm: Summary, qs: QueueState) -> dict:
+    """`/state.json` 的内容。**只有聚合出来的数字和 task_id。**
+
+    刻意不放 prompt / class_reason / claims 的 got / transcript 路径：那些是
+    模型和 worker 的原文，可能含仓库内容甚至凭据。整页 HTML 里有它们是因为
+    那一页要人主动打开看；一个 3 秒被拉一次的 JSON 端点不该背同样的东西。
+    """
+    return {
+        "queue": dict(qs.counts),
+        # 各目录条数再拍平一份 `q_inbox` 这样的键：轮询脚本按 `data-live` 的
+        # 名字直接取值，不许让它在 JSON 里钻嵌套 —— 钻错一层就是静默不更新。
+        **{f"q_{k}": v for k, v in qs.counts.items()},
+        "running": list(qs.running),
+        "running_n": len(qs.running),
+        "waiting": [{"task": n, "missing": list(m)} for n, m in qs.waiting],
+        "waiting_n": len(qs.waiting),
+        "attempts": sm.total,
+        "merged": sm.merged,
+        "escalated": sm.escalated,
+        "cost": round(sm.cost, 4),
+        "gate_hits_n": sum(sm.gate_hits.values()),
+        "queue_error": qs.error,
+    }
+
+
+def _live_bar(sm: Summary, qs: QueueState) -> str:
+    """页面顶部那条会动的横条。静态导出里它就是一个定格的快照。
+
+    每个数字都有 `data-live` 名字，且**初值直接渲染在 HTML 里** —— 不靠 JS
+    填。JS 挂了（或者这是一份离线导出）的话，看到的是一个正确的旧数字，
+    不是一排空格。
+    """
+    s = state_payload(sm, qs)
+    q = s["queue"]
+    cells = (
+        ("inbox 待跑", "q_inbox", q.get("inbox", 0)),
+        ("正在跑", "running_n", s["running_n"]),
+        ("等前置", "waiting_n", s["waiting_n"]),
+        ("已合并", "merged", s["merged"]),
+        ("升级给人", "escalated", s["escalated"]),
+        ("闸门拦下", "gate_hits_n", s["gate_hits_n"]),
+        ("累计花费 $", "cost", f'{s["cost"]:.2f}'),
+    )
+    dot = f'<span class="dot{" on" if s["running_n"] else ""}"></span>'
+    return ('<p class="live">' + dot + "".join(
+        f'<span>{_e(label)} <b data-live="{key}">{_e(val)}</b></span>'
+        for label, key, val in cells)
+        + '<span class="dim">每 3s 自动刷新（只换数字，树不会合上）</span></p>')
+
+
+def _actions(token: str, *, launchd: str) -> str:
+    """三个表单。它们只是 CLI 的壳 —— 提交后调的就是 `factory prd` 那条路。
+
+    没有「开始跑批」按钮：`loop` 带预算上限、漏账熔断、超时杀孤儿，
+    一个网页按钮绕过其中任何一条都是静默的（页面上只会显示「已开始」）。
+    """
+    t = f'<input type="hidden" name="token" value="{_e(token)}">'
+    return f"""
+<form class="act" method="post" action="/prd">{t}
+<textarea name="text" required placeholder="口语化说清要做什么。会走完整闸门：
+没有可执行判据、碰了危险 op、spec_ref 缺失，都会被拦下并把原因显示出来。"
+></textarea>
+<button type="submit">提需求 → 过闸门 → 入队</button></form>
+<form class="act" method="post" action="/override">{t}
+<input type="text" name="attempt_id" required placeholder="attempt id" size="8">
+<input type="text" name="resolution" required placeholder="merged / escalated"
+size="14">
+<button type="submit">人工定案</button></form>
+<form class="act" method="post" action="/defect">{t}
+<input type="text" name="attempt_id" placeholder="attempt id（可空）" size="14">
+<input type="text" name="commit" placeholder="或 commit sha" size="12">
+<input type="text" name="defect_id" required placeholder="defect id" size="12">
+<button type="submit">报缺陷（记漏报）</button></form>
+<p class="sub">跑批<b>不在这个页面上</b>：用 <code>factory loop</code>，
+或让 launchd 定时拉起（预算上限、漏账熔断、超时杀孤儿都在那条路上）。
+当前 launchd：{_e(launchd)}</p>"""
+
+
+def render(sm: Summary, *, db: str, title: str = "自动化无人工厂",
+           qs: QueueState | None = None, manual_hours: float = MANUAL_HOURS,
+           token: str = "", launchd: str = "未检测") -> str:
+    """整页 HTML。自包含 —— 没有外部 CSS/JS/字体，可以直接发给别人。
+
+    `token` 为空（静态导出、`--once`）时**不渲染表单**：一份发出去的 HTML 里
+    带着能 POST 的表单没有意义，而它会让看的人以为按了有用。
+    """
+    qs = qs if qs is not None else QueueState()
     banner = _DEMO_BANNER if Path(db).name.startswith("demo") else ""
+    acts = (f"<h2>提需求 / 人工介入</h2>{_actions(token, launchd=launchd)}"
+            if token else "")
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -385,9 +802,19 @@ def render(sm: Summary, *, db: str, title: str = "自动化无人工厂") -> str
 <p class="sub">调度 + 审计层：任务派给 coding agent，四道监工判收，
 十四道机制闸门盯着「这份绿是不是真的」。数据源 <code>{_e(db)}</code>。</p>
 {banner}
+{_live_bar(sm, qs)}
 
 <h2>跑批结果</h2>
 {_cards(sm)}
+
+<h2>任务树 · 每一轮往复</h2>
+<p class="sub">树边是真依赖（前置没合并就不认领）。展开一个任务能看到它的
+每一轮：编码 → 测试 → 被谁打回 → 再编码。</p>
+{_tree(sm, qs)}
+
+<h2>成本与人力账</h2>
+{_ledger(sm, manual_hours=manual_hours)}
+{acts}
 <h2>每次尝试</h2>
 {_attempts_table(sm)}
 <h2>监工命中率</h2>
@@ -399,7 +826,7 @@ def render(sm: Summary, *, db: str, title: str = "自动化无人工厂") -> str
 {_gate_table(sm)}
 <h2>拦下的现场</h2>
 {_claims_detail(sm)}
-</div></body></html>"""
+</div><script>{_LIVE_JS}</script></body></html>"""
 
 
 # ---------- 服务 ----------
@@ -407,36 +834,237 @@ def render(sm: Summary, *, db: str, title: str = "自动化无人工厂") -> str
 #: 固定环回地址。**刻意不做成参数** —— 理由见模块 docstring。
 HOST = "127.0.0.1"
 
+#: 单次表单提交的上限（字节）。口述需求几百字就够，给到 64K 是为了粘贴长文档。
+MAX_POST = 64 * 1024
 
-def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None) -> int:
+
+def launchd_status(label: str = "com.factory.loop") -> str:
+    """launchd 里装了没有。页面上要显示这个，因为跑批不在网页上按。
+
+    查不到就说「查不到」，不说「没装」—— 这台机器上 `launchctl` 可能因为
+    权限或非 GUI 会话读不到列表，那和「用户没装」是两件事，处置也不一样。
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("launchctl")
+    if not exe:
+        return "查不到（这台机器上没有 launchctl）"
+    try:
+        p = subprocess.run([exe, "list"], capture_output=True, text=True,
+                           timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"查不到（launchctl list 失败：{type(exc).__name__}）"
+    if p.returncode != 0:
+        return f"查不到（launchctl list 退出码 {p.returncode}）"
+    if label in p.stdout:
+        return f"已装（{label}）"
+    return f"未装 —— 装法见 examples/launchd/{label}.plist"
+
+
+def _origin_ok(headers) -> str:
+    """跨 origin 的 POST 一律拒。返回空字符串 = 通过，否则是拒绝理由。
+
+    为什么需要这个：本机浏览器上**任何**网页都能往 `127.0.0.1:8787` POST 一个
+    表单（跨域限制拦的是读响应，不是发请求）。而这几个表单会花钱调模型、会往
+    审计库写 resolution。所以判据是 fail-closed：Origin/Referer 只要不是
+    我们自己，就拒 —— 包括「两个头都没有」的情况。curl 也会被拒，那没关系，
+    命令行本来就该直接用 `factory prd`。
+    """
+    raw = headers.get("Origin") or headers.get("Referer") or ""
+    if not raw:
+        return "请求没有 Origin/Referer 头 —— 这些表单只接受本页面提交"
+    host = urlparse(raw).hostname
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return f"Origin 是 {host}，不是本机页面 —— 拒绝"
+    return ""
+
+
+#: 表单能碰的动作。**白名单**，不是「凡 POST 都试着调一下」——
+#: 后者会让 `/prd/../something` 之类的路径落进一个我们没想过的分支。
+ACTIONS = ("/prd", "/override", "/defect")
+
+
+def perform(action: str, fields: dict[str, str], *, db: str | Path,
+            queue: str | None, workspace: str | None = None,
+            binary: str = "claude", propose_checks: bool = True) -> str:
+    """跑一个表单动作，返回一段结果 HTML。
+
+    做法是**造一个 Namespace 去调现有的 `_cmd_*`**，不在这里重写一遍逻辑：
+    重写等于把闸门、审计写入、退出码约定各实现两遍，而两份实现漂移的方向
+    不可预测 —— 「网页提的需求没过闸门」这种 bug 不会有任何报错。
+
+    所有异常都抓住并渲染出来（fail-closed 的展示侧含义）：一个空白结果页和
+    「入队成功」长得一样，而这两件事的后续动作完全相反。
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from factory import cli
+
+    if action not in ACTIONS:
+        return f'<p class="bad">不认识的动作 {_e(action)}</p>'
+    if action == "/prd":
+        if not queue:
+            # 没有队列目录就没有「入队」这件事，而落到默认 tasks/ 目录会让
+            # 页面说「已写入」却什么都没进队 —— 那是最难查的一种成功。
+            return ('<p class="bad">没给 <code>--queue</code>，'
+                    "网页提需求无处可入队。重启 dashboard 时带上它。</p>")
+        ns = argparse.Namespace(
+            text=fields.get("text", ""), text_file=None, audio=None,
+            whisper_binary="whisper", whisper_model="small", language=None,
+            binary=binary, intake_model="sonnet",
+            split=True, split_model="haiku",
+            dry_run=False, propose_checks=propose_checks,
+            workspace=workspace, queue=str(queue), output=None,
+        )
+        fn = cli._cmd_prd
+    elif action == "/override":
+        ns = argparse.Namespace(db=str(db),
+                                attempt_id=fields.get("attempt_id", ""),
+                                resolution=fields.get("resolution", ""))
+        fn = cli._cmd_override
+    else:
+        ns = argparse.Namespace(db=str(db),
+                                attempt_id=fields.get("attempt_id") or None,
+                                defect_id=fields.get("defect_id", ""),
+                                commit=fields.get("commit") or None)
+        fn = cli._cmd_defect
+
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        # attempt_id 在 CLI 里是 int（argparse 转的），网页表单给的是字符串。
+        # 在这里转而不是让底下崩：崩了的话页面上只有一句 ValueError，
+        # 看的人不知道是自己填错了还是系统坏了。
+        if action in ("/override", "/defect") and ns.attempt_id is not None:
+            if str(ns.attempt_id).strip() == "":
+                ns.attempt_id = None
+            else:
+                ns.attempt_id = int(str(ns.attempt_id).strip())
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = fn(ns)
+    except Exception as exc:  # noqa: BLE001
+        return (f'<p class="bad">{_e(action)} 抛异常了 —— '
+                f"{_e(type(exc).__name__)}: {_e(exc)}</p>"
+                f"<pre>{_e(out.getvalue() + err.getvalue())}</pre>")
+    # 退出码**必须显示**：3 是「闸门拦下了」，它是正常工作而不是错误，
+    # 但也绝不能和 0 一样显示成绿的。
+    verdict = {0: ("ok", "成功"), 3: ("warn", "被闸门拦下（这是闸门在正常工作）")
+               }.get(code, ("bad", f"失败（退出码 {code}）"))
+    return (f'<p class="{verdict[0]}"><b>{_e(action)} → {_e(verdict[1])}</b></p>'
+            f"<pre>{_e(out.getvalue())}{_e(err.getvalue())}</pre>")
+
+
+def _hours(path: str) -> float:
+    """从 `?manual_hours=4` 取那个人工假设。取不到就用默认值。
+
+    非法值静默回落到默认，不报错：这个参数只影响一个「假设」栏的算术，
+    为它把整页 500 掉是不成比例的。负数也回落 —— 一个负的「省下的人力」
+    在页面上是纯噪音。
+    """
+    from urllib.parse import parse_qs
+
+    raw = parse_qs(urlparse(path).query).get("manual_hours", [""])[0]
+    try:
+        v = float(raw)
+    except ValueError:
+        return MANUAL_HOURS
+    return v if 0 < v <= 1000 else MANUAL_HOURS
+
+
+def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None,
+          queue: str | None = None, workspace: str | None = None,
+          binary: str = "claude") -> int:
     """起一个只读的本地服务。每次请求重新读库，所以刷新就能看到新数据。
 
     每请求重读而不是启动时缓存：这一页的主要用途之一是「盯着正在跑的批」，
     缓存会让它显示一个不再为真的世界，而那种错误在页面上完全看不出来。
     库是 SQLite、只读、单人看，重读的代价可以忽略。
+
+    「只读」到这一版有了例外：三个 POST 表单。它们仍然只是 CLI 的壳
+    （见 `perform`），且受两道限制 —— 进程内随机 token + Origin 检查。
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    # 进程内随机 token，不落盘、不进环境变量。重启 dashboard 就换一个 ——
+    # 那正是想要的：一个存起来的 token 会被别的页面拿去用。
+    token = secrets.token_urlsafe(24)
+    launchd = launchd_status()
+
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
-            if self.path.startswith("/health"):
-                body = b'{"ok":true}'
-                ctype = "application/json; charset=utf-8"
-            else:
-                try:
-                    page = render(collect(db, task_id=task_id), db=str(db))
-                except Exception as exc:  # noqa: BLE001
-                    # 读库失败要**显示出来**，不能渲染成一张空表 ——
-                    # 空表和「库里没数据」长得一模一样。
-                    page = (f"<!doctype html><meta charset=utf-8>"
-                            f"<h1>读 {_e(db)} 失败</h1><pre>{_e(exc)}</pre>")
-                body = page.encode("utf-8")
-                ctype = "text/html; charset=utf-8"
-            self.send_response(200)
+        def _send(self, body: bytes, ctype: str, code: int = 200) -> None:
+            self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _page(self, extra: str = "") -> bytes:
+            try:
+                sm = collect(db, task_id=task_id)
+                qs = queue_state(queue)
+                page = render(sm, db=str(db), qs=qs, token=token,
+                              launchd=launchd,
+                              manual_hours=_hours(self.path))
+                if extra:
+                    page = page.replace("<h1>", extra + "<h1>", 1)
+            except Exception as exc:  # noqa: BLE001
+                # 读库失败要**显示出来**，不能渲染成一张空表 ——
+                # 空表和「库里没数据」长得一模一样。
+                page = (f"<!doctype html><meta charset=utf-8>"
+                        f"<h1>读 {_e(db)} 失败</h1><pre>{_e(exc)}</pre>")
+            return page.encode("utf-8")
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
+            if self.path.startswith("/health"):
+                self._send(b'{"ok":true}', "application/json; charset=utf-8")
+            elif self.path.startswith("/state.json"):
+                try:
+                    payload = state_payload(collect(db, task_id=task_id),
+                                            queue_state(queue))
+                except Exception as exc:  # noqa: BLE001
+                    # 这里也不许返一个空 JSON：轮询脚本会把它当成「一切归零」，
+                    # 于是页面上的数字全部掉到 0，看着像批跑完了。
+                    payload = {"error": f"{type(exc).__name__}: {exc}"}
+                self._send(json.dumps(payload, ensure_ascii=False).encode(),
+                           "application/json; charset=utf-8")
+            else:
+                self._send(self._page(), "text/html; charset=utf-8")
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib 要求这个名字
+            from urllib.parse import parse_qs
+
+            action = urlparse(self.path).path
+            bad = _origin_ok(self.headers)
+            if bad:
+                self._send(self._page(f'<p class="banner">{_e(bad)}</p>'),
+                           "text/html; charset=utf-8", 403)
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = 0
+            if n > MAX_POST:
+                self._send(self._page(
+                    f'<p class="banner">提交太大（{n} 字节 > {MAX_POST}）</p>'),
+                    "text/html; charset=utf-8", 413)
+                return
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            fields = {k: v[0] for k, v in parse_qs(raw).items()}
+            # 比长度再比内容：`compare_digest` 对长度不同的输入本来就返回
+            # False，但先判空能让「表单里根本没有 token 字段」有明确的提示。
+            got = fields.get("token", "")
+            if not got or not secrets.compare_digest(got, token):
+                self._send(self._page(
+                    '<p class="banner">表单 token 不对 —— dashboard 重启过的话'
+                    "刷新这一页再提交。</p>"),
+                    "text/html; charset=utf-8", 403)
+                return
+            result = perform(action, fields, db=db, queue=queue,
+                             workspace=workspace, binary=binary)
+            self._send(self._page(f'<div class="banner">{result}</div>'),
+                       "text/html; charset=utf-8")
 
         def log_message(self, *a) -> None:
             """默认会把每个请求打到 stderr，和 loop 的日志混在一起。"""
@@ -444,6 +1072,8 @@ def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None) -> in
     with ThreadingHTTPServer((HOST, port), Handler) as srv:
         print(f"dashboard: http://{HOST}:{port}   (Ctrl-C 停)")
         print(f"  数据源 : {db}")
+        print(f"  队列   : {queue or '（没给 --queue，树没有依赖边，也不能提需求）'}")
+        print(f"  launchd: {launchd}")
         print("  只绑环回地址，没有认证 —— 要给远程的人看请用 "
               "`factory dashboard --once out.html` 导出后发文件")
         try:
@@ -453,10 +1083,16 @@ def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None) -> in
     return 0
 
 
-def export(db: str | Path, out: str | Path, *, task_id: str | None = None) -> int:
-    """导出一份自包含的静态 HTML。发给别人比让他们连你的端口安全。"""
+def export(db: str | Path, out: str | Path, *, task_id: str | None = None,
+           queue: str | None = None) -> int:
+    """导出一份自包含的静态 HTML。发给别人比让他们连你的端口安全。
+
+    不传 token，所以导出的页面里**没有表单** —— 一份发出去的 HTML 上摆着
+    「提需求」按钮，按下去只会静默失败，那比没有这个按钮更糟。
+    """
     path = Path(out)
-    page = render(collect(db, task_id=task_id), db=str(db))
+    page = render(collect(db, task_id=task_id), db=str(db),
+                  qs=queue_state(queue))
     path.write_text(page, encoding="utf-8")
     print(f"写好了：{path}  ({len(page.encode('utf-8')) / 1024:.0f} KB)")
     print("自包含（无外部 CSS/JS/字体），双击就能看，也能直接发出去。")
@@ -501,6 +1137,36 @@ _DEMO_ROWS = (
     # 漏报：四道监工全放行，合并了，事后才发现问题。
     ("T-108", OracleClass.A, "有可执行判据：make check",
      Resolution.MERGED, 0.46, None, "D-7：合并后发现分页在空结果上崩"),
+)
+
+#: 同一个任务的三轮：被打回两次，第三轮才过。
+#:
+#: 单独列出来是因为 `_DEMO_ROWS` 是一 task 一行，而演示要讲的核心之一是
+#: **往复**（编码→测试→打回→再编码）。只有一轮的示例数据在树上每个节点都只挂
+#: 一行，看起来像「一次就过」—— 那不是这套系统实际的工作方式，用它去演示是
+#: 在展示一个不存在的顺利。
+_DEMO_ROUNDS = (
+    (Resolution.REWORKED, 0.51,
+     ("shadow-code", "新增 src/retry.py 被 .gitignore 挡住 —— check 却在跑它")),
+    (Resolution.REWORKED, 0.44,
+     ("fake-green", "金丝雀注入后测试仍退出 0 —— 这份绿推不翻")),
+    (Resolution.MERGED, 0.39, None),
+)
+
+#: 示例队列的依赖边：(文件名 stem, 落在哪个目录, 前置)。
+#:
+#: 树边只存在于队列 YAML 里，审计库没有这个字段。所以 `--demo` 不造队列的话，
+#: 演示页上那棵树是一排平铺的根 —— 而「真依赖」正是这一版要展示的东西。
+_DEMO_QUEUE = (
+    ("T-101", DONE, ()),
+    ("T-102", DONE, ("T-101",)),
+    ("T-110", DONE, ("T-101",)),
+    ("T-103", INBOX, ("T-102",)),
+    ("T-104", INBOX, ("T-103",)),
+    ("T-105", RUNNING, ("T-102",)),
+    ("T-106", NEEDS_HUMAN, ()),
+    ("T-107", INBOX, ("T-106",)),
+    ("T-109", BLOCKED, ()),
 )
 
 
@@ -570,4 +1236,69 @@ def build_demo(out: str | Path = "demo.db") -> str:
                  "expected": "A/B/C", "got": "D：无判据，不派发"}],
     )
     store.finalize(blocked, Resolution.ESCALATED)
+    _demo_rounds(store)
+    return str(path)
+
+
+def _demo_rounds(store: AuditStore) -> None:
+    """T-110：一个任务被打回两轮、第三轮合并。走真实写入路径，attempt_no 由
+    `open_attempt` 自己数（它按 task_id 递增），所以顺序是靠**插入顺序**成立的。
+    """
+    for resolution, cost, gate in _DEMO_ROUNDS:
+        aid = store.open_attempt(
+            task_id="T-110", spec_ref=["§4"], oracle_class=OracleClass.A,
+            class_reason="有可执行判据：pytest tests/test_retry.py",
+            harness="claude-code", harness_version="2.1.0",
+            model="claude-opus-5",
+        )
+        store.record_result(
+            aid, diff_hash=f"{abs(hash((cost, gate))):08x}"[:8], commit=None,
+            transcript_path="/tmp/transcripts/T-110.jsonl",
+            tokens_in=21_000, tokens_out=5_100, cost_usd=cost,
+            wall_clock_ms=140_000,
+        )
+        for role in (SupervisorRole.REGRESSION, SupervisorRole.SPEC,
+                     SupervisorRole.RISK, SupervisorRole.ARCHITECTURE):
+            fired = bool(gate) and role is SupervisorRole.REGRESSION
+            store.record_verdict(
+                aid, role=role,
+                verdict=Verdict.FAIL if fired else Verdict.PASS,
+                claims=([{"check": gate[0], "command": "",
+                          "expected": "这一轮没动过", "got": gate[1]}]
+                        if fired else []),
+                tokens=1_800, cost_usd=0.012)
+        store.finalize(aid, resolution)
+
+
+def build_demo_queue(root: str | Path = "demo-queue") -> str:
+    """造一份示例队列目录，让树有真的依赖边。
+
+    写的是**真的 Backlog 目录结构**（`Backlog.ensure()` 建的那几个目录），
+    不是一个假的 dict：树的读取路径要和真实队列完全一致，否则演示页上好看的
+    那棵树在真实队列上可能根本读不出来。
+
+    `running/` 里那个条目**故意不带 `.claim`**：它只用来让页面上「正在跑」
+    那个数字非零，而 `recover()` 会把没 claim 的条目当崩溃残留搬走 —— 所以
+    这个目录只适合看，不适合真的 `factory loop` 指过来。目录名带 demo 是提醒。
+    """
+    from factory.backlog.store import Backlog
+
+    path = Path(root)
+    if not path.name.startswith("demo"):
+        raise ValueError(
+            f"示例队列目录必须以 demo 开头（给的是 {path.name}）—— "
+            "它会被 loop 当成真队列，而里面的条目是编的。")
+    bl = Backlog(path).ensure()
+    for name, state, deps in _DEMO_QUEUE:
+        doc = {
+            "task_id": name,
+            "prompt": f"（示例）{name} 的需求描述",
+            "acceptance": "（示例）验收标准",
+            "spec_ref": [f"§{name[-1]}"],
+        }
+        if deps:
+            doc["depends_on"] = list(deps)
+        (bl.dir(state) / f"{name}.yaml").write_text(
+            yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
     return str(path)
