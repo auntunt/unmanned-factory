@@ -1243,11 +1243,26 @@ def test_sticky_nav_does_not_cover_the_targeted_view(tmp_path):
     - 有 JS：首屏统一回到顶部（每一栏都当成「一页」看）；
     - 没有 JS：切栏靠 CSS `:target`，那时只有 `scroll-margin-top` 兜得住。
     只堵一条的实现在另一条路上照样翻车。
+
+    **回顶必须延到 load 之后**，这一条是在真浏览器里量出来的，不是推出来的：
+    同步写法 `if(location.hash) scrollTo(0,0);` 会被浏览器的锚定滚动**反过来
+    覆盖** —— 实测 `scrollY` 仍是 313.5，`<h2>` 的 top=0 正好卡在 nav 的
+    bottom=48 底下。而那种错在这份 HTML 上是**断言不出来**的：那行 `scrollTo`
+    确确实实在文件里，差的只是它跑在哪一刻。所以这里钉的是「延迟」这个形状，
+    并且把量出来是坏的那个同步写法**明确列为禁止**。
     """
     store, db = _store(tmp_path)
     _result(store, _attempt(store))
     page = render(collect(db), db=db, token="tk")
 
     assert "position:sticky" in page, "导航不再是 sticky 的话，下面两条补偿要一起重估"
-    assert "scroll-margin-top" in page, "没有 JS 时锚定滚动会让导航压住 <h2>"
-    assert "if(location.hash) scrollTo(0,0);" in page, "深链进来没有回到顶部"
+    # 连着 `.view{` 一起断言，不是光找 `scroll-margin-top` 这个词：那个词还出现在
+    # 一句**注释**里，而注释是跟着 `<script>` 一起发到页面上的 —— 变异实测证明，
+    # 光找词能在 CSS 已经被删掉的情况下照样绿。
+    assert re.search(r"\.view\{[^}]*scroll-margin-top:", page), (
+        "没有 JS 时锚定滚动会让导航压住 <h2>")
+    assert "addEventListener('load',top)" in page, "回顶没有延到 load，会被锚定滚动覆盖"
+    assert "requestAnimationFrame(top)" in page, "少了 load 之前那一层回顶"
+    # 实测坏掉的那个写法，不许回来 —— 它能满足「文件里有 scrollTo」这种弱断言
+    assert "if(location.hash) scrollTo(0,0);" not in page, (
+        "回退成同步回顶了：实测会被浏览器的锚定滚动覆盖")

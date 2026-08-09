@@ -506,10 +506,20 @@ _NAV_JS = """
   };
   addEventListener('hashchange',function(){ apply(); scrollTo(0,0); });
   apply();
-  // 带 hash 进来时浏览器已经把那一栏锚定滚过去了，而 .nav 是 sticky 的 ——
-  // 它会正好压住这一栏的 <h2>。每一栏都当成「一页」看，所以首屏一律回到顶部。
+  // 带 hash 进来时 .nav 是 sticky 的，会正好压住这一栏的 <h2>。每一栏都当成
+  // 「一页」看，所以首屏一律回到顶部。
+  //
+  // **必须延到 load 之后**。浏览器的「滚到锚点」发生在这段脚本执行完之后，
+  // 写成同步的 scrollTo(0,0) 会被它反过来覆盖：实测 scrollY 仍是 313.5，
+  // <h2> 正好卡在导航底下（h2.top=0 < nav.bottom=48）。
+  // 而这种错在静态 HTML 上断言不出来 —— 那行 scrollTo 确实在文件里，
+  // 差的只是它跑在哪一刻。只有在真浏览器里量几何才看得见。
   // 没有 JS 时这件事由 .view 上的 scroll-margin-top 兜着。
-  if(location.hash) scrollTo(0,0);
+  if(location.hash){
+    var top=function(){ scrollTo(0,0); };
+    addEventListener('load',top);
+    requestAnimationFrame(top);
+  }
 })();
 """
 
