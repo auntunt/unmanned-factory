@@ -13,3 +13,6 @@ audit.db
 
 # worktree 池：并行派发的产物，人 review 完自行删
 .factory-worktrees/
+
+# playwright-mcp 的截图/快照落盘目录
+.playwright-mcp/
