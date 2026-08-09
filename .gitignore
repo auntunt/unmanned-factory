@@ -16,3 +16,6 @@ audit.db
 
 # playwright-mcp 的截图/快照落盘目录
 .playwright-mcp/
+
+# `--demo` 现造的队列目录：和 demo.db 一样是每次跑起来重新生成的
+demo-queue/
