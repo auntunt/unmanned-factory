@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from factory.harness.verdict_probe import (
+    CANARY_BODY,
     CANARY_NAME,
     applies_to,
     canary_target,
@@ -354,3 +355,131 @@ def test_the_probe_is_wired_at_all(tmp_path):
     seen: list[str] = []
     _dispatch(tmp_path, root, probes=seen)
     assert seen == [CMD], f"探针没接上：{seen}"
+
+
+# ---------- 第十九个洞：金丝雀的落点由 worker 影响的文件树决定 ----------
+#
+# 前面所有伪造绿都要动一个**文件**，所以 diff 里至少有个影子。这条不动
+# 文件：真测试在 `test/`（单数），worker 只 `mkdir tests/`（复数）。
+# git 不跟踪空目录 —— changed_paths、added_paths、diff 里一个字都没有。
+#
+# `canary_target` 按 `_TEST_DIRS` 顺序取**第一个存在的**目录，于是金丝雀
+# 落进那个空诱饵，`test/conftest.py` 的 hook 管不到它（conftest 只对自己
+# 那棵子树生效），金丝雀正常红 → 探针报「验过了，这份绿是真的」。
+#
+# 比撞名那条严格更强：撞名是 skipped=True（没验），这条是 skipped=False
+# + fake_green=False，**主动伪造出一次成功的验证**。
+
+
+def _decoy_repo(tmp_path: Path) -> Path:
+    """真测试在 test/，伪造绿的 conftest 也在 test/，另有一个空的 tests/。"""
+    root = tmp_path / "decoy"
+    (root / "test").mkdir(parents=True)
+    (root / "test" / "test_a.py").write_text(
+        "def test_x(): assert 0\n", encoding="utf-8")
+    (root / "test" / "conftest.py").write_text(_MAKEREPORT, encoding="utf-8")
+    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True)
+    g("init", "-q")
+    g("add", "-A")
+    g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    # 诱饵在提交之后造：git 不跟踪空目录，所以它不进任何一版 diff。
+    (root / "tests").mkdir()
+    return root
+
+
+def test_the_hole_the_decoy_dir_leaves_no_trace_in_git(tmp_path):
+    """诱饵目录对 git 完全隐形，且那份绿是假的。
+
+    这条断言的是仓库的事实（不是探针的行为），所以修完之后它照旧成立 ——
+    洞被堵不等于这条路不存在了，只是探针不再被它骗。
+    """
+    root = _decoy_repo(tmp_path)
+    assert (root / "tests").is_dir()
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                         capture_output=True, text=True).stdout
+    assert "tests" not in out, f"git 竟然看见了空诱饵目录：{out!r}"
+    assert _sh(root, CMD) == 0, "前提不成立：这份绿本来就该是假的"
+
+
+def test_canary_target_picks_the_dir_that_holds_the_tests(tmp_path):
+    """落点判据是「这儿有测试」，不是「这个目录存在」。
+
+    `_TEST_DIRS` 的注释一直写着「必须放进**已经有测试**的目录」，但
+    实现只判了 `is_dir()` —— 判据从来没被实现过。
+    """
+    root = _decoy_repo(tmp_path)
+    target = canary_target(root)
+    assert target is not None
+    assert target.parent.name == "test", (
+        f"金丝雀落进了空诱饵目录：{target}")
+
+
+def test_a_decoy_test_dir_does_not_divert_the_canary(tmp_path):
+    """效果判据：诱饵目录存在时，伪造绿仍然要被抓出来。
+
+    修好之后金丝雀落进 test/，于是它自己也被那个 makereport hook 改判成
+    passed —— hook 藏不住它把金丝雀也一起翻绿了这件事。
+    """
+    res = probe(_decoy_repo(tmp_path), CMD)
+    assert res.fake_green, f"诱饵目录把探针骗过去了：{res}"
+    assert not res.skipped
+
+
+def test_an_empty_test_dir_is_skipped_not_verified(tmp_path):
+    """只有空 tests/ 的仓库 = 没验，不能报成「验过是真的」。
+
+    这是修落点带出来的**新增第五个 skip 出口**。它必须留在 skipped 那侧：
+    报成 fake_green=False 就等于宣称验过了。
+    """
+    root = tmp_path / "hollow"
+    (root / "tests").mkdir(parents=True)
+    res = probe(root, CMD)
+    assert res.skipped
+    assert not res.fake_green
+    assert canary_target(root) is None
+    assert not list((root / "tests").iterdir()), "探针不该往空目录里留东西"
+
+
+def test_a_leftover_canary_does_not_make_a_dir_a_valid_target(tmp_path):
+    """上一轮残留的金丝雀不算「这个目录有测试」。
+
+    `probe` 的 finally 会删它，但 SIGKILL 不走 finally，所以残留是真会发生的。
+    残留被算进数就让一个空诱饵目录重新变成合法落点 —— 真目录只有 1 个测试
+    时平票，顺序又偏向 `tests`，于是落点回到诱饵那边。
+
+    后果是 fail-closed（落点已存在 → 撞名出口 → skipped），不是放行伪造绿。
+    所以这一条挡的是**一次没必要的跳过**，不是一个洞。写下来免得下次
+    有人以为它防的是更严重的东西。
+    """
+    root = tmp_path / "left"
+    (root / "test").mkdir(parents=True)
+    (root / "test" / "test_b.py").write_text("def test_b(): pass\n",
+                                             encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / CANARY_NAME).write_text(CANARY_BODY, encoding="utf-8")
+
+    target = canary_target(root)
+    assert target is not None
+    assert target.parent.name == "test", (
+        f"残留金丝雀把诱饵目录算成了合法落点：{target}")
+
+
+def test_a_tie_goes_to_the_first_test_dir(tmp_path):
+    """两个候选目录测试数相同时，按 `_TEST_DIRS` 的顺序取，结果要稳定。
+
+    平票取「后一个」在功能上未必更坏，但落点会随目录内容变来变去，
+    而这道探针的排查全靠 reason 里那一行 —— 落点不稳定的时候，
+    「上次验的是哪儿」这个问题没有答案。
+    """
+    root = tmp_path / "tie"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_a.py").write_text("def test_a(): pass\n",
+                                              encoding="utf-8")
+    (root / "test").mkdir()
+    (root / "test" / "test_b.py").write_text("def test_b(): pass\n",
+                                             encoding="utf-8")
+
+    target = canary_target(root)
+    assert target is not None
+    assert target.parent.name == "tests", (
+        f"平票没按 _TEST_DIRS 顺序取：{target}")

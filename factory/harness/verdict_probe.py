@@ -67,9 +67,20 @@ _JUDGE_FILES = frozenset({
     "pytest.ini", ".pytest.ini", "sitecustomize.py", "usercustomize.py",
 })
 
-#: 金丝雀往哪放。必须放进**已经有测试**的目录，否则 pytest 的
+#: 金丝雀往哪放的候选。必须放进**已经有测试**的目录，否则 pytest 的
 #: `testpaths` / `addopts=--ignore` 可能压根不看它。
+#:
+#: 这个判据以前只写在注释里、没被实现（`canary_target` 只判 `is_dir()`）——
+#: 于是 worker 在 `test/` 放真测试的仓库里 `mkdir tests/`，金丝雀就落进那个
+#: 空目录。空目录 git 不跟踪，changed_paths / added_paths / diff 里一个字
+#: 都没有。而且它不是 `skipped=True`，是 `fake_green=False, skipped=False`
+#: —— **主动报告「验过了，这份绿是真的」**。第十九个洞。
 _TEST_DIRS = ("tests", "test")
+
+#: pytest 默认收集的两种文件名形状（`python_files = test_*.py *_test.py`）。
+#: 数金丝雀落点用。故意不读仓库的 pytest 配置：读配置就等于让 worker 通过
+#: 改 pyproject.toml 来影响落点，而 pyproject.toml 正是他合法能改的东西。
+_TEST_FILE_GLOBS = ("test_*.py", "*_test.py")
 
 #: 只有跑 pytest 的 check 才验。别的（grep、test -f、npm）金丝雀说明不了
 #: 任何事：往 tests/ 里加一个文件不该让 `test -f greet.py` 变红。
@@ -96,18 +107,43 @@ def applies_to(command: str) -> bool:
     return bool(_PYTEST_RE.search(command))
 
 
+def _count_tests(d: Path) -> int:
+    """这个目录（含子目录）里有几个 pytest 会收集的测试文件。"""
+    if not d.is_dir():
+        return 0
+    n = 0
+    for pat in _TEST_FILE_GLOBS:
+        for p in d.rglob(pat):
+            # 上一轮残留的金丝雀不算数 —— 否则一个空的诱饵目录只要留着
+            # 一份没删干净的金丝雀，就又变成合法落点了。
+            if p.is_file() and p.name != CANARY_NAME:
+                n += 1
+    return n
+
+
 def canary_target(root: Path) -> Path | None:
-    """金丝雀该写到哪。没有测试目录就返回 None（= 不验）。
+    """金丝雀该写到哪。**没有任何已存测试**就返回 None（= 不验）。
 
     不在仓库根造一个 `tests/`：造出来的目录会进 `git status`，而这道
     探针跑在 capture_diff 之后、判绿之前，多一个目录会让「提交的正好是
     监工审过的那一组」这条不变量出现一个没人审过的成员。
+
+    落点取「测试文件最多」的那个候选目录，而不是「第一个存在」的：
+    后者能被一个空的诱饵目录改道（见 `_TEST_DIRS`）。平票按 `_TEST_DIRS`
+    的顺序，让结果稳定可预测。
+
+    能挡住什么、挡不住什么，说清楚：空目录（git 不跟踪、diff 里看不见）
+    这条彻底堵死了。但 worker 往诱饵目录里塞**比真目录更多**的哑测试仍然
+    能改道 —— 代价是那些文件全部进 diff、进 changed_paths、范围监工看得见，
+    从「零成本且隐形」变成「要在 diff 里放一堆没人要求过的测试文件」。
+    这是抬高成本，不是证明不可能。
     """
+    best: tuple[int, Path] | None = None
     for name in _TEST_DIRS:
-        d = Path(root) / name
-        if d.is_dir():
-            return d / CANARY_NAME
-    return None
+        n = _count_tests(Path(root) / name)
+        if n and (best is None or n > best[0]):
+            best = (n, Path(root) / name)
+    return None if best is None else best[1] / CANARY_NAME
 
 
 @dataclass(frozen=True)
@@ -139,7 +175,8 @@ def probe(root: Path, command: str, *, timeout_s: int = 300) -> ProbeResult:
     """
     target = canary_target(root)
     if target is None:
-        return ProbeResult(reason="没有测试目录，金丝雀无处可放")
+        return ProbeResult(
+            reason="没有带测试的目录，金丝雀无处可放（空的 tests/ 也算没有）")
     if not applies_to(command):
         return ProbeResult(reason=f"不是 pytest 命令，金丝雀说明不了什么：{command}")
     if target.exists():
