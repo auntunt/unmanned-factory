@@ -313,11 +313,93 @@ def _cmd_prd(ns: argparse.Namespace) -> int:
 
     extractor = TaskExtractor(binary=ns.binary, model=ns.intake_model)
     try:
-        draft: DraftTask = extractor.run(description)
+        if getattr(ns, "split", False):
+            drafts = _split_and_extract(description, extractor, ns)
+        else:
+            drafts = [extractor.run(description)]
     except IntakeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
+    # 多条时逐条走完全同一条路（补 check → 闸门 → 落盘）。退出码取最差的：
+    # 三条里有一条被闸门拦下，`prd --queue && loop` 就不该当成全都进队了。
+    if len(drafts) > 1:
+        clash = _dep_id_clash(drafts, ns)
+        if clash:
+            print(clash, file=sys.stderr)
+            return 2
+        codes = [_emit_draft(d, ns) for d in drafts]
+        return max(codes)
+    return _emit_draft(drafts[0], ns)
+
+
+def _dep_id_clash(drafts: list[DraftTask], ns: argparse.Namespace) -> str:
+    """撞名会让依赖悄悄挂到**另一个任务**上，所以在写之前就停。
+
+    `_admit_to_queue` 撞名时改成 `T-x.2.yaml`，而队列层判依赖满足要剥掉
+    `.N` 后缀（不剥的话跑第二遍的前置永远满足不了后继）。两条规矩合起来的
+    后果：新入队的 `T-x.2` 的后继，会在**老的** `T-x` 合并时就解锁 ——
+    一个没跑的前置被当成跑过了，而这在任何一处日志里都看不出来。
+
+    只在真有依赖边时拦。没有依赖的多条任务撞名是老行为（加后缀），不动它。
+    """
+    if not any(d.depends_on for d in drafts):
+        return ""
+    ids = {d.task_id for d in drafts}
+    if not ns.queue:
+        return ""
+    from factory.backlog.store import STATES
+    bl = Backlog(ns.queue)
+    for state in STATES:
+        d = bl.dir(state)
+        if not d.is_dir():
+            continue
+        for p in d.iterdir():
+            if p.suffix in (".yaml", ".yml") and p.stem in ids:
+                return (f"队列里已有 {p.stem}（在 {state}/），而这一批任务之间"
+                        f"有依赖边。撞名后依赖会挂到旧的那个上，"
+                        f"且在日志里看不出来 —— 一条都没写。"
+                        f"改掉需求描述让 task_id 不同，或先清掉 {p}")
+    return ""
+
+
+def _split_and_extract(description: str, extractor: TaskExtractor,
+                       ns: argparse.Namespace) -> list[DraftTask]:
+    """拆分 → 逐条抽取 → 把 slug 之间的依赖边翻成真 task_id。
+
+    slug → task_id 的映射在**这里**做，拆分器不认识真 id（它看不到队列里
+    已有什么，让它编 id 等于让它猜一个可能撞名的身份）。用抽取器给出的
+    task_id 而不是自己拼 slug：那是抽取器的产出，两套 id 并存会让
+    「YAML 里的 task_id」和「依赖里写的名字」对不上，而依赖对不上的表现是
+    任务永远等下去。
+    """
+    from factory.intake.split import TaskSplitter
+
+    result = TaskSplitter(binary=ns.binary, model=ns.split_model).run(description)
+    for line in result.dropped:
+        print(f"  拆分提示  : {line}", file=sys.stderr)
+    if not result.split:
+        print("  拆分      : 只有一件事，按一条处理", file=sys.stderr)
+        return [extractor.run(result.subtasks[0].description)]
+
+    print(f"  拆分      : {len(result.subtasks)} 条子任务 "
+          f"(+{result.tokens} tokens, +${result.cost_usd:.4f})", file=sys.stderr)
+
+    ids: dict[str, str] = {}
+    drafts: list[DraftTask] = []
+    for sub in result.subtasks:
+        d = extractor.run(sub.description)
+        ids[sub.slug] = d.task_id
+        drafts.append(d)
+
+    out: list[DraftTask] = []
+    for sub, d in zip(result.subtasks, drafts):
+        deps = tuple(ids[s] for s in sub.depends_on if s in ids)
+        out.append(replace(d, depends_on=deps) if deps else d)
+    return out
+
+
+def _emit_draft(draft: DraftTask, ns: argparse.Namespace) -> int:
     if ns.dry_run:
         print(draft.to_yaml())
         if draft.unclear:
@@ -972,6 +1054,11 @@ def main(argv: list[str] | None = None) -> int:
                           "提议失败不抛，退化回「等人补 check」")
     prd.add_argument("--workspace", default=None, metavar="DIR",
                      help="仓库路径，供 --propose-checks 跑探针")
+    prd.add_argument("--split", action="store_true",
+                     help="先把需求切成多条子任务，再逐条抽取（多一次模型调用，"
+                          "且每条子任务都会单独花钱跑）。默认关")
+    prd.add_argument("--split-model", default="haiku",
+                     help="做拆分的模型档位。这一跳只切分不判对错")
     prd.add_argument("--binary", default="claude", help="做提取的 CLI")
     prd.add_argument("--intake-model", default="sonnet",
                      help="提取用的模型档位（结构化转写，不需要最强档）")
