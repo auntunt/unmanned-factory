@@ -58,6 +58,11 @@ class Task:
     declared_ops: tuple[str, ...] = ()
     checks: tuple[CheckSpec, ...] = ()
     max_rounds: int = 3
+    #: 必须先合并（进 done/）才能认领本任务的前置。填的是**队列里的文件名
+    #: stem**，不是 YAML 里的 task_id —— 队列层从头到尾用文件名当身份
+    #: （见 Claim.task_id），两套身份混用会让依赖在「文件名和 task_id 不一致」
+    #: 时静默永不满足。判满足的是 backlog，dispatcher 不看这个字段。
+    depends_on: tuple[str, ...] = ()
 
     def resolve_spec(self, root: str | Path | None = None) -> Resolved:
         """把 spec_ref 的编号解析成规格文档里的正文。"""
@@ -97,4 +102,5 @@ class Task:
                 for c in doc.get("checks", ())
             ),
             max_rounds=int(doc.get("max_rounds", 3)),
+            depends_on=tuple(str(d) for d in (doc.get("depends_on") or ())),
         )

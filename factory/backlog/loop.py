@@ -104,6 +104,10 @@ class LoopReport:
     # 两个都留：熔断看前者，早上看报表想知道的是后者。
     unpriced_streak: int = 0
     unpriced_total: int = 0
+    #: 因前置永远等不到而被搬去 needs-human 的条目数。单独一栏而不是并进
+    #: errors：errors 是「跑了但出错」，这些一次都没跑，混一起会让
+    #: 「派发 0 / 异常 3」读起来像三次失败的派发。
+    dep_deadlocked: int = 0
 
     def bump(self, outcome: str) -> None:
         """按 outcome 计数。未知 outcome 记成 errors 而不是静默丢掉 ——
@@ -118,9 +122,11 @@ class LoopReport:
         # $0.8，而实际账单可能是它的几倍 —— 一个已知偏低的数必须自带这个提示。
         leak = (f"（另有 {self.unpriced_total} 次派发未计价，真实花费更高）"
                 if self.unpriced_total else "")
+        dead = (f"，另有 {self.dep_deadlocked} 条等不到前置（已转 needs-human）"
+                if self.dep_deadlocked else "")
         return (f"派发 {self.dispatched}：合并 {self.merged} / "
                 f"升级 {self.escalated} / 硬闸门 {self.blocked} / "
-                f"异常 {self.errors}，花费 ${self.cost_usd:.4f}{leak}")
+                f"异常 {self.errors}，花费 ${self.cost_usd:.4f}{leak}{dead}")
 
 
 class BacklogLoop:
@@ -214,7 +220,24 @@ class BacklogLoop:
                                 merged=report.merged,
                                 escalated=report.escalated,
                                 blocked=report.blocked,
-                                errors=report.errors)
+                                errors=report.errors,
+                                dep_deadlocked=report.dep_deadlocked)
+
+    def _park_deadlocks(self, report: LoopReport):
+        """把等不到前置的条目搬去 needs-human 并记日志。
+
+        只在「认领不到东西」时调用，不在每轮开头：running/ 里正在跑的那个
+        可能马上就合并，早一秒判死锁就会把它的后继误杀。
+        """
+        dead = self._backlog.park_deadlocked()
+        for entry in dead:
+            report.dep_deadlocked += 1
+            self._log(f"[deadlock] {entry.task_id} 前置永远等不到 → "
+                      f"needs-human：{entry.reason}")
+            self._journal.event("dep_deadlock", task_id=entry.task_id,
+                                missing=list(entry.missing),
+                                reason=entry.reason)
+        return dead
 
     def _run(self, report: LoopReport) -> LoopReport:
         started = self._now()
@@ -234,6 +257,23 @@ class BacklogLoop:
 
             claim = self._backlog.claim_next()
             if claim is None:
+                # 认领不到有三种原因，**必须分开**：队列真空了、都被别的
+                # worker 抢走了、有活但前置没合并。第三种如果被算进「队列
+                # 已抽干」，一整夜什么都没跑会显示成正常收工。
+                waiting = self._backlog.blocked_by_deps()
+                if waiting:
+                    for entry in self._park_deadlocks(report):
+                        waiting = tuple(w for w in waiting
+                                        if w[0].stem != entry.task_id)
+                if waiting:
+                    if self._limits.idle is Idle.WATCH:
+                        report.idle_polls += 1
+                        self._sleep(self._limits.poll_s)
+                        continue
+                    report.stopped_by = (
+                        f"{len(waiting)} 条在等前置合并"
+                        f"（--idle {'once' if self._limits.idle is Idle.ONCE else 'drain'}）")
+                    break
                 if self._limits.idle is not Idle.WATCH:
                     report.stopped_by = (
                         "队列空（--idle once）" if self._limits.idle is Idle.ONCE

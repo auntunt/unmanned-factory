@@ -111,6 +111,10 @@ class DraftTask:
     declared_ops: tuple[str, ...] = ()
     checks: tuple[dict, ...] = ()
     unclear: tuple[str, ...] = ()
+    #: 前置任务的队列文件名 stem。抽取器**不填这个** —— 一段话里的「先 A
+    #: 再 B」是拆分器的判断，而抽取器一次只看一条子描述，看不到别的任务。
+    #: 由 factory/intake/split.py 在组装时填。
+    depends_on: tuple[str, ...] = ()
     guard_findings: tuple[GuardFinding, ...] = ()
     source_text: str = ""
     tokens: int = 0
@@ -128,6 +132,10 @@ class DraftTask:
             "max_rounds": 3,
             "checks": [dict(c) for c in self.checks],
         }
+        # 只在真有前置时才写这个键。恒定写一个空列表会让每份手写 YAML 都多
+        # 一行噪音，而 Task.from_yaml 对缺键和空列表的处理本来就一样。
+        if self.depends_on:
+            doc["depends_on"] = list(self.depends_on)
         body = yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=88)
         return _header(self) + body
 

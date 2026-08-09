@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 INBOX = "inbox"
 RUNNING = "running"
@@ -39,6 +42,10 @@ STATES = (INBOX, RUNNING, DONE, NEEDS_HUMAN, BLOCKED)
 
 CLAIM_SUFFIX = ".claim"
 RESULT_SUFFIX = ".result.json"
+
+#: `_park` 撞名时加的数字后缀（T-foo.2.yaml）。判依赖满足要剥掉它，
+#: 否则「跑了第二遍才合并」的前置永远满足不了后继。
+_PARK_SUFFIX = re.compile(r"\.\d+$")
 
 # outcome（DispatchReport.outcome 的字符串值）→ 归档目录。
 # blocked 和 needs-human 刻意分开：两者都要人介入，但要人做的事不一样 ——
@@ -77,6 +84,16 @@ class Claim:
         一个读 YAML 就崩掉的条目，正是最需要在日志里看到名字的那种。
         """
         return self.path.stem
+
+
+@dataclass(frozen=True)
+class Deadlock:
+    """一个永远等不到前置的 inbox 条目。path 是它当前位置（还没搬走）。"""
+
+    path: Path
+    task_id: str
+    missing: tuple[str, ...]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -163,6 +180,143 @@ class Backlog:
         return tuple(sorted((p for p in d.iterdir() if _is_task(p)),
                             key=lambda p: p.name))
 
+    # ---------- 依赖 ----------
+
+    def merged_ids(self) -> frozenset[str]:
+        """已合并的任务身份 = `done/` 里条目的文件名 stem（剥掉 `.N` 后缀）。
+
+        判据是「在 done/ 里」，**不是「不在 inbox 里」**。后者会把
+        needs-human 和 blocked 里的前置算成满足 —— 而那两个恰好是最需要人
+        先看一眼的状态：前置没过验收就放后继去改同一片代码，等于把一个失败
+        接着往下堆。
+
+        只看文件名，不打开 YAML：一个读 YAML 就崩的条目正是最该被看见的那种，
+        而在这里崩会让整个认领挂掉。
+        """
+        return frozenset(_PARK_SUFFIX.sub("", p.stem)
+                         for p in self._entries(self.dir(DONE)))
+
+    def missing_deps(self, path: Path, merged: frozenset[str] | None = None
+                     ) -> tuple[str, ...]:
+        """这个条目还缺哪几个前置。空元组 = 可以认领。
+
+        读不出 YAML 时返回 ()，让它照常被认领 —— 坏 YAML 该由 dispatcher
+        报错并归到 needs-human，在这里悄悄扣下它会让它变成一个永不派发、
+        报表上又看不出来的条目。
+        """
+        if merged is None:
+            merged = self.merged_ids()
+        return tuple(d for d in self._declared_deps(path) if d not in merged)
+
+    def _declared_deps(self, path: Path) -> tuple[str, ...]:
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return ()
+        if not isinstance(doc, dict):
+            return ()
+        return tuple(str(d) for d in (doc.get("depends_on") or ()))
+
+    def blocked_by_deps(self) -> tuple[tuple[Path, tuple[str, ...]], ...]:
+        """inbox 里因前置未合并而不可认领的条目，附上缺的前置。
+
+        单独给一个查询而不是让 `claim_next()` 用返回值表达：`None` 已经背了
+        「队列空」和「都被别人抢走了」两个意思。再压进「被前置挡住」的话，
+        一批永远不跑的任务和一个跑空了的队列在日志里就长得一样 —— 这个仓库
+        反复踩的正是这个形状。
+        """
+        merged = self.merged_ids()
+        out = []
+        for path in self.pending():
+            missing = self.missing_deps(path, merged)
+            if missing:
+                out.append((path, missing))
+        return tuple(out)
+
+    def deadlocked(self) -> tuple[Deadlock, ...]:
+        """inbox 里**永远等不到**前置的条目。
+
+        判法是不动点：一个条目「终将可跑」当且仅当它的每个前置要么已经合并、
+        要么在 running/（马上就有结果）、要么是另一个终将可跑的 inbox 条目。
+        反复扫到集合不再增长，剩下的就是死锁 —— 环和「前置根本不在队列里」
+        用同一个判据抓，不需要单独写一遍环检测。
+
+        把 running/ 里的算成「终将满足」是刻意的：它可能失败进 needs-human，
+        但那时它已经不在 running/ 了，下一轮扫描自然会把后继判成死锁。
+        乐观一轮的代价是等一次 poll，悲观的代价是把正在跑的任务的后继误杀。
+        """
+        merged = self.merged_ids()
+        in_flight = frozenset(_PARK_SUFFIX.sub("", p.stem)
+                              for p in self.running())
+        entries = {_PARK_SUFFIX.sub("", p.stem): p for p in self.pending()}
+        deps = {name: self._declared_deps(p) for name, p in entries.items()}
+
+        ok: set[str] = set()
+        while True:
+            grew = False
+            for name, need in deps.items():
+                if name in ok:
+                    continue
+                if all(d in merged or d in in_flight or d in ok for d in need):
+                    ok.add(name)
+                    grew = True
+            if not grew:
+                break
+
+        out = []
+        for name in sorted(set(entries) - ok):
+            missing = tuple(
+                d for d in deps[name]
+                if not (d in merged or d in in_flight or d in ok)
+            )
+            out.append(Deadlock(
+                path=entries[name], task_id=name, missing=missing,
+                reason=self._dep_reason(name, missing, entries, deps, ok)))
+        return tuple(out)
+
+    def _dep_reason(self, name: str, missing: tuple[str, ...],
+                    entries: dict[str, Path], deps: dict[str, tuple[str, ...]],
+                    ok: set[str]) -> str:
+        """逐个前置说清它现在在哪。
+
+        「缺 B」「缺 B，B 自己也等不到」「和 B 成环」要人做的事完全不同：
+        补一个任务 / 顺着链往上查 / 拆一个环。含糊成一句「可能成环」的话，
+        人会先去找环，而链上根本没有环 —— 诊断方向被引偏。
+        环用可达性真判，不猜：从 d 出发能回到 name 就是环。
+        """
+        parked = {state: {_PARK_SUFFIX.sub("", p.stem)
+                          for p in self._entries(self.dir(state))}
+                  for state in (NEEDS_HUMAN, BLOCKED)}
+        parts = []
+        for d in missing:
+            if d in entries and d not in ok:
+                where = ("和它成环" if self._reaches(d, name, deps)
+                         else "也在 inbox 里，它自己也等不到前置")
+            elif d in parked[NEEDS_HUMAN]:
+                where = "在 needs-human，没过验收"
+            elif d in parked[BLOCKED]:
+                where = "在 blocked，D 类永不无人跑"
+            else:
+                where = "队列里根本没有这个条目"
+            parts.append(f"{d}（{where}）")
+        return "；".join(parts) or "无"
+
+    @staticmethod
+    def _reaches(start: str, target: str,
+                 deps: dict[str, tuple[str, ...]]) -> bool:
+        """沿 depends_on 从 start 能不能走到 target。带 seen 防自环卡死。"""
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            if cur == target:
+                return True
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(deps.get(cur, ()))
+        return False
+
     # ---------- 认领 ----------
 
     def claim(self, path: Path) -> Claim | None:
@@ -195,8 +349,15 @@ class Backlog:
 
         循环而不是只试第一个：并发跑多个 loop 时，第一个总是被抢走的那个,
         只试一次会让后面的 worker 明明有活干却报 "队列空了"。
+
+        前置未合并的条目被**跳过**（不是停下）：名字序在前的那个等着，不该
+        挡住后面已经能跑的任务。判据和 `blocked_by_deps()` 是同一个
+        （`missing_deps`），两边分头实现会让「跳过的」和「报出来的」对不上。
         """
+        merged = self.merged_ids()
         for path in self.pending():
+            if self.missing_deps(path, merged):
+                continue
             got = self.claim(path)
             if got is not None:
                 return got
@@ -258,6 +419,34 @@ class Backlog:
             encoding="utf-8",
         )
         return dst
+
+    def park_deadlocked(self) -> tuple[Deadlock, ...]:
+        """把死锁条目搬去 needs-human，各写一份 .result.json。
+
+        **必须真的搬走。** 留在 inbox 里只打一行日志的话，一个永不被认领的
+        条目和一个空队列在 `counts()`、在 `pending()` 的长度、在循环报表上
+        全都长得一样 —— 于是「整夜没跑任何东西」会显示成「队列已抽干」。
+
+        outcome 用现成的 `error`，不发明第六个状态目录：needs-human 的含义
+        本来就是「要人看一眼」，死锁正是这个。
+        """
+        out = []
+        for entry in self.deadlocked():
+            moved = self._park(entry.path, NEEDS_HUMAN)
+            # 返回的 path 指向**搬完之后**的位置。返回 inbox 里那个已经不存在的
+            # 路径，会让调用方（循环、看板）拿着它去读文件时报「文件不存在」，
+            # 而真正的原因是死锁 —— 诊断方向立刻被引偏。
+            out.append(Deadlock(path=moved, task_id=entry.task_id,
+                                missing=entry.missing, reason=entry.reason))
+            moved.with_name(moved.name + RESULT_SUFFIX).write_text(
+                json.dumps({"outcome": "error", "state": NEEDS_HUMAN,
+                            "note": f"前置永远等不到：{entry.reason}",
+                            "missing_deps": list(entry.missing),
+                            "finished_at": time.time()},
+                           ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return tuple(out)
 
     def _park(self, task_path: Path, state: str) -> Path:
         """把条目搬到终态目录，同名时加数字后缀。
