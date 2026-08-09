@@ -94,6 +94,45 @@ def test_merge_rate_is_none_on_empty_db(tmp_path):
     assert sm.merge_rate is None
 
 
+def test_upstream_fault_stays_in_the_merge_rate_denominator(tmp_path):
+    """502 打回的 attempt **留在**合并率分母里 —— 和 gate3 排掉它恰好相反。
+
+    这条是在修完「502 污染三层数字」之后特意加的，防的是过度修正：把 502 从
+    gate_hits、监工命中率、gate3 分子里排掉都是对的，顺手把这里也排掉就错了。
+    两个数问的不是同一件事 —— gate3 问「验收条件够不够机器可判定」，502 对那件
+    事一个字都没说；这个数问「端到端要几次才出货」，502 是那个「几次」的真实
+    组成部分。
+
+    排掉的代价：网关九成时间挂着的日子会显示 100% 合并率，和上游完美的日子长得
+    一模一样，而偏差方向又是「系统很健康」。所以这里必须是 50%。
+
+    非空基线在分子上：那次 merge 是真的，`merge_rate` 恒返回 0.0 也过不了。
+    """
+    store, db = _store(tmp_path)
+
+    # attempt#1：真跑起来过（派发过），撞上 502 被打回。
+    fault = _attempt(store)
+    _result(store, fault, cost=0.0)
+    store.record_verdict(
+        fault, role=SupervisorRole.REGRESSION, verdict=Verdict.FAIL,
+        claims=[{"check": "harness", "command": "claude_code",
+                 "expected": "exit_status ok", "got": "API Error: 502"}],
+    )
+    store.finalize(fault, Resolution.REWORKED)
+
+    # attempt#2：重试，合并。链路处理得完全正确，但它确实花了两次。
+    ok = _attempt(store)
+    _result(store, ok)
+    store.finalize(ok, Resolution.MERGED)
+
+    sm = collect(db)
+    assert len(sm.dispatched) == 2, "502 那次是真派发过的，不许当成没跑"
+    assert sm.merge_rate == 0.5
+    # 而「那一半是谁的锅」由紧挨着的故障计数说清楚，不靠改分母来表达。
+    assert dict(sm.fault_hits) == {"harness": 1}
+    assert dict(sm.gate_hits) == {}
+
+
 def test_d_class_stays_out_of_the_denominator(tmp_path):
     """D 类硬闸门拦下的从没派发过，不许进合并率的分母。
 
