@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from factory.audit.models import NOT_DISPATCHED, Resolution, Verdict
+from factory.audit.models import (
+    NOT_DISPATCHED,
+    HumanAction,
+    HumanGate,
+    Resolution,
+    Verdict,
+)
 from factory.supervisors.model_base import (
     HARNESS_FAULT_CHECKS,
     SUPERVISOR_ERROR_PREFIX,
@@ -224,3 +230,247 @@ def gate3_rework(store, *, target: float = 1.0) -> Gate3Rework:
         tasks=len(reworks), total_reworks=sum(reworks.values()), target=target,
         upstream_reworks=upstream,
     )
+
+
+# --------------------------------------------------------------- 端到端人时账
+#
+# P1 判据「闸门 3 上人平均打回次数 ≤ 1」量的是验收质量，答不了「这个需求让人
+# 花了多少分钟」。没那个数，就没法证明这套东西省了时间，也没法判断下一步该往
+# 哪投工（改闸门 1 的验收条件？还是加一道监工？）。
+#
+# 这里的所有分母都和上面一个规矩：量不到就 None，不是 0。「还没攒到数据」和
+# 「人一分钟没花」两个结论差得远，混成一个数就没人会去区分了。
+
+
+@dataclass(frozen=True)
+class TaskHumanTime:
+    """一个需求上的人时分布。"""
+
+    task_id: str
+    #: 闸门 1（人确认需求可判定）：confirm − blocked，按轮次累加。
+    gate1_seconds: float | None = None
+    #: 闸门 3（人验收交付）：override − resolved_at。
+    gate3_seconds: float | None = None
+    #: 从草稿第一次被拦到最后一轮判决落下。人时是它的一个子集。
+    wall_clock_seconds: float | None = None
+    #: 真的在等人（有 blocked 没 confirm / 判完了没人 override）。
+    #: 和「量不到」分开：还在跑的 attempt 不算等人。
+    gate1_pending: bool = False
+    gate3_pending: bool = False
+
+    @property
+    def human_seconds(self) -> float | None:
+        """两道闸门相加。一道量不到就只算另一道，两道都没有才 None。"""
+        parts = [s for s in (self.gate1_seconds, self.gate3_seconds) if s is not None]
+        return sum(parts) if parts else None
+
+    @property
+    def human_ratio(self) -> float | None:
+        """人时占墙钟的比例 —— 「无人」到什么程度的直接读数。"""
+        if self.human_seconds is None or not self.wall_clock_seconds:
+            return None
+        return self.human_seconds / self.wall_clock_seconds
+
+
+@dataclass(frozen=True)
+class HumanTimeLedger:
+    """全库（或单个任务）的人时汇总。"""
+
+    tasks: tuple[TaskHumanTime, ...] = ()
+    #: 配不上对的端点数：只有 confirm 没有 blocked、override 早于 resolved_at。
+    #: 留着而不是丢掉，和 Gate3Rework.upstream_reworks 一个道理 —— 悄悄丢掉的
+    #: 话，一个记漏了一半的库和一个干净的库在这张表上长得一样。
+    unpaired_events: int = 0
+
+    def _measured(self, attr: str) -> list[float]:
+        return [v for t in self.tasks if (v := getattr(t, attr)) is not None]
+
+    def _total(self, attr: str) -> float | None:
+        vals = self._measured(attr)
+        return sum(vals) if vals else None
+
+    def _mean(self, attr: str) -> float | None:
+        vals = self._measured(attr)
+        return sum(vals) / len(vals) if vals else None
+
+    def _max(self, attr: str) -> float | None:
+        vals = self._measured(attr)
+        return max(vals) if vals else None
+
+    @property
+    def gate1_total(self) -> float | None:
+        return self._total("gate1_seconds")
+
+    @property
+    def gate1_mean(self) -> float | None:
+        return self._mean("gate1_seconds")
+
+    @property
+    def gate1_max(self) -> float | None:
+        return self._max("gate1_seconds")
+
+    @property
+    def gate3_total(self) -> float | None:
+        return self._total("gate3_seconds")
+
+    @property
+    def gate3_mean(self) -> float | None:
+        return self._mean("gate3_seconds")
+
+    @property
+    def gate3_max(self) -> float | None:
+        return self._max("gate3_seconds")
+
+    @property
+    def human_total(self) -> float | None:
+        return self._total("human_seconds")
+
+    @property
+    def wall_clock_mean(self) -> float | None:
+        return self._mean("wall_clock_seconds")
+
+    @property
+    def tasks_with_data(self) -> tuple[TaskHumanTime, ...]:
+        """有话可说的那些 —— 量到了人时，或者真的在等人。
+
+        一个刚派出去还没判的 attempt 会在 `tasks` 里留一行全是「—」的记录。
+        那行在展示层是纯噪音，更糟的是它让「这库还没人时数据」的空态提示显示
+        不出来，于是一张什么都没量到的表看起来像一张量过的表。
+
+        `tasks` 保留全集：口径层不该替展示层做减法（按 task 查明细时，
+        「这个任务确实一点人时都没有」本身是个答案）。
+        """
+        return tuple(
+            t for t in self.tasks
+            if t.human_seconds is not None or t.gate1_pending or t.gate3_pending
+        )
+
+    @property
+    def gate1_pending_tasks(self) -> int:
+        return sum(1 for t in self.tasks if t.gate1_pending)
+
+    @property
+    def gate3_pending_tasks(self) -> int:
+        return sum(1 for t in self.tasks if t.gate3_pending)
+
+
+def _gate1_seconds(events) -> tuple[float | None, bool, int]:
+    """(用时, 是否在等人, 配不上对的端点数)。
+
+    按轮次配对：blocked 开一段，下一个 confirm 关一段。累加而不是只取最后一段
+    —— 一份草稿可以被拦两次（人补了一半又被拦），只算最后一次会低估人时。
+
+    两个 blocked 之间的空档**不算**：人时是人花的时间，不是需求躺在队列里的
+    时间。躺着那段归墙钟，混进来的话一个放了三天的需求会显示成三天人时。
+    """
+    total = 0.0
+    counted = False
+    unpaired = 0
+    open_at = None
+    for ev in events:
+        if ev.gate != HumanGate.INTAKE:
+            continue
+        if ev.action == HumanAction.BLOCKED:
+            # 连着两个 blocked（中间没人确认）：起点取后一个，前一个那段
+            # 没有终点，不该凭空算出用时。
+            if open_at is not None:
+                unpaired += 1
+            open_at = ev.created_at
+        elif ev.action == HumanAction.CONFIRM:
+            if open_at is None:
+                # 人手写 YAML 直接塞 needs-human 再入队，就只有 confirm。
+                # 和任何时刻相减都是编数。
+                unpaired += 1
+                continue
+            total += (ev.created_at - open_at).total_seconds()
+            counted = True
+            open_at = None
+    return (total if counted else None), open_at is not None, unpaired
+
+
+def _gate3_seconds(attempts, events) -> tuple[float | None, bool, int]:
+    """(用时, 是否在等人, 配不上对的端点数)。
+
+    起点是 resolved_at（判决落下 = 开始等人），不是派发时刻 —— 从派发算会把
+    worker 干活的时间算成人时。终点是 override 事件。
+
+    多轮打回时取「override 之前最后一个落了判决的 attempt」：人验收的是最后
+    那一轮，取第一轮会把中间 worker 重跑的时间全算成人在看。
+    """
+    resolved = sorted(
+        (a.resolved_at for a in attempts if a.resolved_at is not None),
+    )
+    overrides = [
+        ev.created_at for ev in events
+        if ev.gate == HumanGate.DELIVERY and ev.action == HumanAction.OVERRIDE
+    ]
+    if not resolved:
+        # 还在跑，没人在等。pending 必须是 False，否则积压数会把在跑的算进去。
+        return None, False, len(overrides)
+    if not overrides:
+        return None, True, 0
+
+    total = 0.0
+    counted = False
+    unpaired = 0
+    for at in overrides:
+        prior = [r for r in resolved if r <= at]
+        if not prior:
+            # override 早于任何判决 → 相减是负数。负人时是记错了，不是省下来的。
+            unpaired += 1
+            continue
+        total += (at - prior[-1]).total_seconds()
+        counted = True
+    return (total if counted else None), False, unpaired
+
+
+def human_time(store, *, task_id: str | None = None) -> HumanTimeLedger:
+    """端到端人时账：闸门 1 用时、闸门 3 用时、需求→上线墙钟。
+
+    数据源只有审计库一处（human_event + task_attempt.resolved_at）。刻意不读
+    Journal：把一个度量建在「回读 JSONL 再拼接」上，就等于让它依赖文本解析。
+
+    按人时降序返回，最费人的在最上面 —— 这张表要答的是「下一步该往哪投工」。
+    """
+    events = store.human_events(task_id=task_id)
+    by_task: dict[str, list] = {}
+    for ev in events:
+        by_task.setdefault(ev.task_id, []).append(ev)
+    # 只有 attempt 没有 human_event 的任务也要在表上（它们可能正在等验收）。
+    attempts_by_task: dict[str, list] = {}
+    for row in store.all_attempts(task_id=task_id):
+        attempts_by_task.setdefault(row.task_id, []).append(row)
+        by_task.setdefault(row.task_id, [])
+
+    rows = []
+    unpaired = 0
+    for tid, evs in by_task.items():
+        attempts = attempts_by_task.get(tid, ())
+        g1, g1_pending, u1 = _gate1_seconds(evs)
+        g3, g3_pending, u3 = _gate3_seconds(attempts, evs)
+        unpaired += u1 + u3
+        starts = [e.created_at for e in evs]
+        resolved = [a.resolved_at for a in attempts if a.resolved_at is not None]
+        # 终点要**同时**考虑判决时刻和人定案的时刻。只取 resolved_at 的话，
+        # 闸门 3 那段人时整个落在窗口之外（override 永远晚于 resolved_at），
+        # 于是人时占比能超过 100% —— 一个当场就说不通的数（人花的时间比这个
+        # 需求存在的时间还长）。实测跑出来就是 109.8%。
+        ends = resolved + [
+            e.created_at for e in evs
+            if e.gate == HumanGate.DELIVERY and e.action == HumanAction.OVERRIDE
+        ]
+        # 但「落地了」的判据仍然只看 resolved_at：一个只有人时事件、从没被判过
+        # 的需求没有上线时刻，给它一个墙钟等于说它交付了。
+        if not resolved:
+            ends = []
+        rows.append(TaskHumanTime(
+            task_id=tid, gate1_seconds=g1, gate3_seconds=g3,
+            # 墙钟要两端都在：只有起点说明还没落地，给个数就等于说它上线了。
+            wall_clock_seconds=(
+                (max(ends) - min(starts)).total_seconds()
+                if starts and ends else None
+            ),
+            gate1_pending=g1_pending, gate3_pending=g3_pending,
+        ))
+    rows.sort(key=lambda t: (-(t.human_seconds or 0.0), t.task_id))
+    return HumanTimeLedger(tasks=tuple(rows), unpaired_events=unpaired)

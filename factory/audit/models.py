@@ -39,6 +39,25 @@ class Resolution(StrEnum):
 NOT_DISPATCHED = "n/a"
 
 
+class HumanGate(StrEnum):
+    """人时账只按「人在哪道闸门上」分类，不按事件在哪个子命令里发生。
+
+    INTAKE 是闸门 1（人确认需求可判定），DELIVERY 是闸门 3（人验收交付）。
+    两道的用时口径不同（见 metrics.human_time），合成一个枚举值就没法分开算。
+    """
+
+    INTAKE = "intake"
+    DELIVERY = "delivery"
+
+
+class HumanAction(StrEnum):
+    """一段人时的端点。BLOCKED 是「开始等人」，CONFIRM/OVERRIDE 是「人做完了」。"""
+
+    BLOCKED = "blocked"
+    CONFIRM = "confirm"
+    OVERRIDE = "override"
+
+
 class Verdict(StrEnum):
     PASS = "pass"
     FAIL = "fail"
@@ -89,10 +108,37 @@ class TaskAttempt(Base):
     linked_defects: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    #: 判决落下的时刻，也就是「开始等人」的时刻 —— 闸门 3 人时的起点。
+    #: 必须可空且默认 None：默认 utc_now 会让一个从没被判过的 attempt 算出
+    #: 一个看起来正常的数，而「还没判」和「判完等了 0 分钟」是两回事。
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     supervisors: Mapped[list["SupervisorVerdict"]] = relationship(
         back_populates="attempt", cascade="all, delete-orphan",
     )
+
+
+class HumanEvent(Base):
+    """一次「人被叫上来」或「人做完了」的时刻。端到端人时账的唯一数据源。
+
+    只挂 task_id，不挂 attempt_id 外键：闸门 1 的两个事件都发生在派发之前，
+    那时还没有 attempt 行可挂。task_id 是这条链上唯一从草稿贯通到落地的键。
+
+    不走 Journal：Journal 是 append-only 文本日志，把人时账建在「回读 JSONL
+    再拼接」上，就等于让一个度量依赖文本解析。人时账单一数据源 = 审计库。
+    """
+
+    __tablename__ = "human_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    task_id: Mapped[str] = mapped_column(String(128))
+    gate: Mapped[HumanGate] = mapped_column(String(16))
+    action: Mapped[HumanAction] = mapped_column(String(16))
+    #: 人手写的一句话。可空 —— 逼着人每次写一句会让人绕过这个命令。
+    note: Mapped[str | None] = mapped_column(String(1024), default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
 class SupervisorVerdict(Base):

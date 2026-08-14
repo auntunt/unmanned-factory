@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 
-from factory.audit.models import Resolution
+from factory.audit.models import HumanAction, HumanGate, Resolution
 from factory.audit.store import AuditStore
 from factory.backlog.journal import Journal, Rollup
 from factory.backlog.loop import (
@@ -49,7 +49,7 @@ from factory.harness.worktree import WorktreePool
 from factory.intake.extract import DraftTask, IntakeError, TaskExtractor
 from factory.intake.guard import KNOWN_OPS, harden_ops
 from factory.intake.transcribe import TranscribeError, read_source
-from factory.metrics import gate3_rework, supervisor_metrics
+from factory.metrics import gate3_rework, human_time, supervisor_metrics
 from factory.runbook import RunbookError, RunbookLibrary
 from factory.supervisors.architecture import ArchitectureSupervisor
 from factory.supervisors.model_base import ClaudeJudge
@@ -476,6 +476,47 @@ def _propose_checks(draft: DraftTask, ns: argparse.Namespace) -> DraftTask:
     )
 
 
+#: 「没连审计库所以没记人时」只抱怨一次。一次 `prd --split` 会连着落好几张
+#: 草稿，每张都抱怨一遍会把真正要看的提示刷出屏幕。
+_HUMAN_TIME_WARNED = False
+
+
+def _record_human_time(
+    ns: argparse.Namespace,
+    *,
+    task_id: str,
+    gate: HumanGate,
+    action: HumanAction,
+    note: str | None = None,
+) -> None:
+    """记一个人时端点。失败只抱怨，绝不抛。
+
+    和 Journal.event 同一条规矩：人时账是观测性功能，拦下一个本该派发的任务
+    比丢一条记录贵得多。所以两条路都 fail-open：
+
+    - ns 上没有 db（`prd` / `queue` 不带 --db，或调用方只造了半个 Namespace）
+      → 跳过 + 抱怨一次。
+    - 库写不进去（路径不存在、锁着）→ 抱怨，任务照走。
+
+    读 db 用 getattr 而不是 ns.db：现有测试造 Namespace 时只填被测的那几个
+    属性，直接取属性会让它们变成 AttributeError。
+    """
+    global _HUMAN_TIME_WARNED
+    db = getattr(ns, "db", None)
+    if not db:
+        if not _HUMAN_TIME_WARNED:
+            _HUMAN_TIME_WARNED = True
+            print("[人时账] 没给 --db，这一段人时没记进审计库"
+                  "（`factory metrics --human` 会少算）。", file=sys.stderr)
+        return
+    try:
+        AuditStore(db).record_human_event(
+            task_id=task_id, gate=gate, action=action, note=note,
+        )
+    except Exception as exc:      # noqa: BLE001 - 观测性失败不阻断派发
+        print(f"[人时账] 写 {db} 失败，这一段人时没记上：{exc}", file=sys.stderr)
+
+
 def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
     """草稿过闸门 → 进 inbox；不过 → 落 needs-human 等人。
 
@@ -515,6 +556,15 @@ def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
         cost_usd=draft.cost_usd,
     )
 
+    if not verdict.admitted:
+        # 闸门 1 人时的起点：这一刻起，这个需求在等人。终点在 _cmd_queue
+        # （人把草稿放回 inbox）。放行的草稿不记 —— 没人被叫上来。
+        _record_human_time(
+            ns, task_id=draft.task_id, gate=HumanGate.INTAKE,
+            action=HumanAction.BLOCKED,
+            note="；".join(verdict.codes) or None,
+        )
+
     print(f"已写入 {dst}")
     print(f"  task_id   : {draft.task_id}")
     for w in verdict.warnings:
@@ -529,7 +579,10 @@ def _admit_to_queue(draft: DraftTask, ns: argparse.Namespace) -> int:
     print(f"\n闸门拦下（{len(verdict.reasons)} 条）→ 落在 needs-human，等人：")
     for r in verdict.reasons:
         print(f"  - {r}")
-    print(f"\n补齐后入队：factory queue {dst} --queue {ns.queue}")
+    # 这条命令被拦下的人直接复制粘贴。**带上 --db** —— 少了它，闸门 1 的人时
+    # 只有起点没有终点，那段用时永远算不出来，而报表上看起来只是「还在等人」。
+    db_arg = f" --db {db}" if (db := getattr(ns, "db", None)) else ""
+    print(f"\n补齐后入队：factory queue {dst} --queue {ns.queue}{db_arg}")
     return 3
 
 
@@ -805,6 +858,14 @@ def _cmd_queue(ns: argparse.Namespace) -> int:
         if Path(src).expanduser().resolve().parent == parked:
             journal.event("gate_overruled", task_id=dst.stem, path=str(dst),
                           note="人把 needs-human 的草稿放回 inbox")
+            # 闸门 1 人时的终点。和上面那条 Journal 事件同一个动作、两份口径：
+            # Journal 那条算误拒率，这条算人花了多久。合成一处就得让人时账
+            # 依赖文本日志回读。
+            _record_human_time(
+                ns, task_id=dst.stem, gate=HumanGate.INTAKE,
+                action=HumanAction.CONFIRM,
+                note="人把 needs-human 的草稿放回 inbox",
+            )
             overruled.add(dst)
 
     for path in added:
@@ -875,6 +936,9 @@ def _cmd_show(ns: argparse.Namespace) -> int:
         print(f"   tokens     : in={row.tokens_in} out={row.tokens_out}"
               f"  cost=${row.cost_usd:.4f}  {row.wall_clock_ms}ms")
         print(f"   created_at : {row.created_at}")
+        # 判决落下的时刻 = 闸门 3 人时的起点。show 是审计轨迹，人时账里那个数
+        # 要对得上就得在这儿看得见。「-」是还没判，不是判完等了 0 分钟。
+        print(f"   resolved_at: {row.resolved_at or '-'}")
         print(f"   resolution : {row.resolution}")
         print(f"   defects    : {list(row.linked_defects)}")
         for v in row.supervisors:
@@ -891,7 +955,17 @@ def _cmd_override(ns: argparse.Namespace) -> int:
     if not store.exists(ns.attempt_id):
         print(f"没有 attempt id={ns.attempt_id}")
         return 1
+    # 先取 task_id 再 finalize：人时账贯通全链的键是 task_id，命令行上只有
+    # attempt_id。取不到就宁可不记 —— 挂错任务的人时比没有人时更难发现。
+    task_id = store.get(ns.attempt_id).task_id
     store.finalize(ns.attempt_id, Resolution(ns.resolution))
+    # 闸门 3 人时的终点。起点是 resolved_at（判决落下 = 开始等人），
+    # 所以 finalize 只在第一次盖 resolved_at，否则这段用时恒等于 0。
+    _record_human_time(
+        ns, task_id=task_id, gate=HumanGate.DELIVERY,
+        action=HumanAction.OVERRIDE,
+        note=getattr(ns, "note", None) or f"人工定案 {ns.resolution}",
+    )
     print(f"attempt {ns.attempt_id} → resolution={ns.resolution}")
     return 0
 
@@ -977,7 +1051,64 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
         print("  → 达标：验收系统的判据基本对得上人的判断")
     else:
         print("  → 未达标：打回多是判据没写对，不是 agent 不行 —— 改 checks")
+
+    if getattr(ns, "human", False):
+        _print_human_time(store, task_id=ns.task_id)
     return 0
+
+
+def _fmt_dur(seconds: float | None) -> str:
+    """None 打「—」，不打 0。这两个在这张表上是完全不同的结论：
+    前者是还没攒到数据（继续攒），后者是人真的一分钟没花（已经无人了）。"""
+    if seconds is None:
+        return "—"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}min"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _print_human_time(store, *, task_id: str | None = None) -> None:
+    """人时账。跟在 metrics 后面而不是单独一个子命令：它和 P1 判据读同一个库、
+    答的是同一个问题的两半（验收质量 / 验收花了多少人）。"""
+    led = human_time(store, task_id=task_id)
+    print("[人时账]")
+    # 刚派出去还没判的 attempt 会留一行全「—」，它会把下面那句空态提示挤掉，
+    # 于是一份什么都没量到的报表看起来像量过的。
+    shown = led.tasks_with_data
+    if not shown:
+        print("  还没有人时数据。记的是两段：闸门 1（prd 被拦 → queue 放回）"
+              "和闸门 3（判决落下 → override）。")
+        print("  prd / queue 要带 --db 才会记 —— 不带只是不记，不影响派发。")
+        return
+
+    print(f"  闸门 1 确认需求: 合计 {_fmt_dur(led.gate1_total)}"
+          f"  均 {_fmt_dur(led.gate1_mean)}  最长 {_fmt_dur(led.gate1_max)}"
+          f"  （还在等人 {led.gate1_pending_tasks} 个）")
+    print(f"  闸门 3 验收交付: 合计 {_fmt_dur(led.gate3_total)}"
+          f"  均 {_fmt_dur(led.gate3_mean)}  最长 {_fmt_dur(led.gate3_max)}"
+          f"  （还在等人 {led.gate3_pending_tasks} 个）")
+    print(f"  人时合计        : {_fmt_dur(led.human_total)}"
+          f"   需求→上线墙钟均 {_fmt_dur(led.wall_clock_mean)}")
+    if led.unpaired_events:
+        # 悄悄丢掉的话，一个记漏了一半的库和一个干净的库长得一样。
+        print(f"  （另有 {led.unpaired_events} 个端点配不上对，未计入 —— "
+              "多半是人绕过命令直接动了队列文件）")
+    print("  按人时降序（最费人的在最上面，那儿才是下一步该投工的地方）：")
+    for t in shown:
+        ratio = "—" if t.human_ratio is None else f"{t.human_ratio:.1%}"
+        pend = []
+        if t.gate1_pending:
+            pend.append("等人确认")
+        if t.gate3_pending:
+            pend.append("等人验收")
+        tail = f"  ← {'/'.join(pend)}" if pend else ""
+        print(f"    {t.task_id:<24} 闸门1 {_fmt_dur(t.gate1_seconds):>7}"
+              f"  闸门3 {_fmt_dur(t.gate3_seconds):>7}"
+              f"  人时 {_fmt_dur(t.human_seconds):>7}"
+              f"  墙钟 {_fmt_dur(t.wall_clock_seconds):>7}"
+              f"  人时占比 {ratio:>6}{tail}")
 
 
 def _cmd_dashboard(ns: argparse.Namespace) -> int:
@@ -1083,6 +1214,11 @@ def main(argv: list[str] | None = None) -> int:
     prd.add_argument("--list-ops", action="version",
                      version="guard 识别的 ops: " + " ".join(KNOWN_OPS),
                      help="打印 guard 能扫出的 declared_ops")
+    # 默认 None 而不是 "audit.db"：prd 本来不碰审计库，给个默认值会让每次
+    # 在任意目录跑 prd 都凭空建一个空库。不给就只是不记人时，会在 stderr 说。
+    prd.add_argument("--db", default=None, metavar="PATH",
+                     help="审计库。给了才记闸门 1 的人时"
+                          "（`factory metrics --human`）")
     prd.set_defaults(func=_cmd_prd)
 
     run = sub.add_parser("run", help="派发一个或多个任务")
@@ -1101,6 +1237,9 @@ def main(argv: list[str] | None = None) -> int:
                    metavar="N",
                    help="不看当前状态，看跑批日志汇总：花了多少、"
                         "有几个待人介入、循环有没有非正常退出（默认最近 50 条）")
+    # 同 prd：默认不建库。从 needs-human 入队时给了才记闸门 1 的人时终点。
+    q.add_argument("--db", default=None, metavar="PATH",
+                   help="审计库。从 needs-human 入队时记人时（闸门 1 的终点）")
     q.set_defaults(func=_cmd_queue)
 
     lp = sub.add_parser("loop", help="跑批：不断认领队列里的任务并派发")
@@ -1159,6 +1298,9 @@ def main(argv: list[str] | None = None) -> int:
     mx = sub.add_parser("metrics", help="监工命中率 / 漏报 / 单位命中成本")
     mx.add_argument("--task-id", default=None, help="省略则统计全库")
     mx.add_argument("--db", default="audit.db")
+    mx.add_argument("--human", action="store_true",
+                    help="加一段端到端人时账：闸门 1 / 闸门 3 各花了多少人时、"
+                         "需求→上线的墙钟、以及人时占比")
     mx.set_defaults(func=_cmd_metrics)
 
     # 变量名不叫 db：这一段里 `--db` 满天飞，`db.add_argument("--db")` 读起来

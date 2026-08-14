@@ -54,7 +54,12 @@ from factory.backlog.store import (
     STATES,
     Backlog,
 )
-from factory.metrics import gate3_rework, supervisor_metrics
+from factory.metrics import (
+    HumanTimeLedger,
+    gate3_rework,
+    human_time,
+    supervisor_metrics,
+)
 
 #: dispatcher 里 `_blocked(...)` 的第一个参数全集 —— 也就是「机制闸门」的名字。
 #:
@@ -139,6 +144,10 @@ class Summary:
     rows: tuple[Row, ...]
     supervisors: dict = field(default_factory=dict)
     rework_mean: float | None = None
+    #: 端到端人时账。默认一个空账而不是 None：调用方少传一个参数时，
+    #: 「没有这一栏」和「这一栏是空的」在页面上该长得一样（都是没数据），
+    #: 而 None 会让渲染抛。
+    human: HumanTimeLedger = field(default_factory=HumanTimeLedger)
 
     @property
     def total(self) -> int:
@@ -237,6 +246,9 @@ def collect(db_path: str | Path, *, task_id: str | None = None) -> Summary:
         rows=tuple(rows),
         supervisors=supervisor_metrics(store, task_id=task_id),
         rework_mean=gate3_rework(store).mean_reworks,
+        # 跟着 task_id 收窄。不收窄的话单任务页上会显示全库人时 —— 一个
+        # 看着完全正常的错数，页面上分辨不出来。
+        human=human_time(store, task_id=task_id),
     )
 
 
@@ -857,6 +869,89 @@ def _ledger(sm: Summary, *, manual_hours: float = MANUAL_HOURS) -> str:
         "第一排四个数字全部来自审计库。</p>")
 
 
+def _dur(seconds: float | None) -> str:
+    """量不到就「—」，**永远不画 0**。
+
+    0min 会被读成「人一分钟没花」，也就是「已经无人了」—— 这一页上最贵的一个
+    误读，因为看的人会拿它做决定。和 metrics 里 None ≠ 0 是同一条规矩，只是
+    这里的后果更直接：代码里的 None 会让人去看，页面上的 0 不会。
+    """
+    if seconds is None:
+        return "—"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}min"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _human_ledger(sm: Summary) -> str:
+    """人时账。**单独一个 h2**，不并进「成本与人力账」。
+
+    那一段里有「假设 · 人工单任务估时」这个我们拍的数字。人时是实测的，两者
+    都以小时计、都在讲人力 —— 摆在同一排卡片里，那个拍的数会借实测数的可信度
+    被当成测量结果。分开，并且每张卡片自己标「实测」。
+    """
+    led = sm.human
+    # 只画有话可说的行。一个刚派出去还没判的 attempt 会留一行全「—」的记录，
+    # 它把空态提示挤掉，于是一张什么都没量到的表看起来像量过的。
+    shown = led.tasks_with_data
+    if not shown:
+        return ('<p class="sub">还没有人时数据。记的是两段：闸门 1'
+                '（<code>prd</code> 被拦 → <code>queue</code> 放回）和闸门 3'
+                '（判决落下 → <code>override</code>）。'
+                '<code>prd</code> / <code>queue</code> 要带 <code>--db</code>'
+                '才会记 —— 不带只是不记，不影响派发。</p>')
+
+    cards = (
+        (_dur(led.gate1_total), "实测 · 闸门 1 确认需求（合计）"),
+        (_dur(led.gate3_total), "实测 · 闸门 3 验收交付（合计）"),
+        (_dur(led.human_total), "实测 · 人时合计"),
+        (_dur(led.wall_clock_mean), "实测 · 需求→上线墙钟（均）"),
+    )
+    rows = []
+    for t in shown:
+        pend = [p for p, on in (("等人确认", t.gate1_pending),
+                                ("等人验收", t.gate3_pending)) if on]
+        ratio = "—" if t.human_ratio is None else f"{t.human_ratio:.1%}"
+        rows.append(
+            f"<tr><td>{_e(t.task_id)}</td>"
+            f"<td>{_e(_dur(t.gate1_seconds))}</td>"
+            f"<td>{_e(_dur(t.gate3_seconds))}</td>"
+            f"<td>{_e(_dur(t.human_seconds))}</td>"
+            f"<td>{_e(_dur(t.wall_clock_seconds))}</td>"
+            f"<td>{_e(ratio)}</td>"
+            f'<td><span class="dim">{_e(" / ".join(pend))}</span></td></tr>')
+    waiting = ""
+    if led.gate1_pending_tasks or led.gate3_pending_tasks:
+        # 积压得说出来。不说的话「还没人来看」和「已经验收完」在合计上
+        # 都表现为那一段人时偏小。
+        waiting = (f" 还在等人：闸门 1 有 {led.gate1_pending_tasks} 个，"
+                   f"闸门 3 有 {led.gate3_pending_tasks} 个。")
+    unpaired = ""
+    if led.unpaired_events:
+        # 悄悄丢掉的话，一个记漏了一半的库和一个干净的库在这张表上长得一样。
+        unpaired = (f'<p class="sub">另有 {led.unpaired_events} 个端点配不上对，'
+                    "未计入 —— 多半是人绕过命令直接动了队列文件。</p>")
+    return (
+        '<div class="cards">' + "".join(
+            f'<div class="card"><div class="n">{_e(n)}</div>'
+            f'<div class="l">{_e(l)}</div></div>' for n, l in cards)
+        + "</div>"
+        + '<p class="sub">这一排全是实测：闸门 1 是「草稿被拦 → 人放回队列」，'
+        "闸门 3 是「判决落下 → 人定案」。中间机器在跑的时间不算人时，"
+        "所以人时占比越低越接近「无人」。"
+        f"{waiting}</p>"
+        + unpaired
+        + '<table class="t"><thead><tr><th>任务</th><th>闸门 1</th>'
+        "<th>闸门 3</th><th>人时</th><th>需求→上线墙钟</th>"
+        "<th>人时占比</th><th>状态</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table>"
+        + '<p class="sub">按人时降序 —— 最上面那个才是下一步该投工的地方。'
+        "「—」是量不到（还在等人 / 端点配不上对），不是 0：这两件事在这张表上"
+        "必须能分开。</p>")
+
+
 #: 示例库的横幅。判据是**库文件名**而不是一个参数：参数会漏传，而一张编出来的
 #: 页面被当成真跑批结果拿出去，是这一页唯一真正有害的失效方式。
 _DEMO_BANNER = ('<p class="banner">⚠ 这是 <b>示例数据</b>（<code>factory '
@@ -962,7 +1057,9 @@ def _views(sm: Summary, qs: QueueState, *, manual_hours: float,
         ("overview", "总览", f"""<h2>跑批结果</h2>
 {_cards(sm)}
 <h2>成本与人力账</h2>
-{_ledger(sm, manual_hours=manual_hours)}"""),
+{_ledger(sm, manual_hours=manual_hours)}
+<h2>人时账 · 人到底花了多久</h2>
+{_human_ledger(sm)}"""),
         ("flow", "任务流转", f"""<h2>任务树 · 每一轮往复</h2>
 <p class="sub">树边是真依赖（前置没合并就不认领）。展开一个任务能看到它的
 每一轮：编码 → 测试 → 被谁打回 → 再编码。</p>

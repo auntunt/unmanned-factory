@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from factory.audit.models import (
-    Base, TaskAttempt, SupervisorVerdict,
+    Base, HumanAction, HumanEvent, HumanGate, TaskAttempt, SupervisorVerdict,
     OracleClass, Resolution, Verdict, SupervisorRole, utc_now,
 )
 
@@ -78,3 +78,55 @@ def test_supervisor_verdicts_cascade(session):
     session.delete(row)
     session.commit()
     assert session.query(SupervisorVerdict).count() == 0
+
+
+# ---------- 人时账：resolved_at + human_event ----------
+
+def test_resolved_at_defaults_to_none(session):
+    """attempt 刚开时还没被人处理完 —— 必须是 None，不是「刚才」。
+
+    人时账的闸门 3 用时 = override 时刻 − resolved_at。默认填 utc_now 的话，
+    一个从没被判过的 attempt 会算出一个看起来正常的负数或零，而「没数据」
+    和「零分钟」是两回事。
+    """
+    session.add(_attempt())
+    session.commit()
+    assert session.query(TaskAttempt).one().resolved_at is None
+
+
+def test_resolved_at_is_naive_when_set(session):
+    a = _attempt()
+    a.resolved_at = utc_now()
+    session.add(a)
+    session.commit()
+    row = session.query(TaskAttempt).one()
+    assert isinstance(row.resolved_at, datetime)
+    assert row.resolved_at.tzinfo is None
+
+
+def test_human_event_roundtrip_with_naive_timestamp(session):
+    session.add(HumanEvent(
+        task_id="T-1", gate=HumanGate.INTAKE, action=HumanAction.BLOCKED,
+    ))
+    session.commit()
+    row = session.query(HumanEvent).one()
+    assert row.task_id == "T-1"
+    assert row.gate == HumanGate.INTAKE
+    assert row.action == HumanAction.BLOCKED
+    assert row.note is None
+    assert isinstance(row.created_at, datetime)
+    assert row.created_at.tzinfo is None
+
+
+def test_human_event_is_not_tied_to_an_attempt(session):
+    """闸门 1 的两个事件都发生在 attempt 存在之前，所以只能挂 task_id。
+
+    草稿被拦下时还没派发过，没有 attempt 行可挂外键；等人确认放回 inbox
+    才会有 attempt。用 task_id 关联是这条链唯一贯通的键。
+    """
+    session.add(HumanEvent(
+        task_id="T-未派发", gate=HumanGate.INTAKE, action=HumanAction.CONFIRM,
+    ))
+    session.commit()
+    assert session.query(TaskAttempt).count() == 0
+    assert session.query(HumanEvent).one().task_id == "T-未派发"

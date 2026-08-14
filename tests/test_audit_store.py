@@ -1,6 +1,15 @@
+from datetime import datetime, timedelta
+
 import pytest
 
-from factory.audit.models import OracleClass, Resolution, SupervisorRole, Verdict
+from factory.audit.models import (
+    HumanAction,
+    HumanGate,
+    OracleClass,
+    Resolution,
+    SupervisorRole,
+    Verdict,
+)
 from factory.audit.store import AuditStore
 
 
@@ -227,3 +236,105 @@ def test_attempts_with_no_commit_are_never_matched(store):
     # 所有还没落地的 attempt。
     _open(store)
     assert store.attempt_by_commit("a") is None
+
+
+# ---------- 人时账：resolved_at ----------
+
+def test_finalize_stamps_resolved_at(store):
+    """闸门 3 用时的起点。判决落下的那一刻就是「等人」的开始。"""
+    aid = _open(store)
+    assert store.get(aid).resolved_at is None
+    store.finalize(aid, Resolution.ESCALATED)
+    row = store.get(aid)
+    assert isinstance(row.resolved_at, datetime)
+    assert row.resolved_at.tzinfo is None
+
+
+def test_finalize_keeps_the_first_resolved_at(store):
+    """override 会再调一次 finalize —— 那一刻不许把「等人开始」推到现在。
+
+    推了的话闸门 3 用时恒等于 0，人等了多久永远看不见。
+    """
+    aid = _open(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    first = store.get(aid).resolved_at
+    store.finalize(aid, Resolution.HUMAN_OVERRIDE)
+    assert store.get(aid).resolved_at == first
+
+
+# ---------- 人时账：human_event ----------
+
+def test_record_human_event_roundtrip(store):
+    store.record_human_event(
+        task_id="T-1", gate=HumanGate.INTAKE, action=HumanAction.BLOCKED,
+        note="验收条件缺少可判定断言",
+    )
+    (ev,) = store.human_events()
+    assert ev.task_id == "T-1"
+    assert ev.gate == HumanGate.INTAKE
+    assert ev.action == HumanAction.BLOCKED
+    assert ev.note == "验收条件缺少可判定断言"
+    assert ev.created_at.tzinfo is None
+
+
+def test_human_events_are_ordered_by_time(store):
+    for i in range(3):
+        store.record_human_event(
+            task_id=f"T-{i}", gate=HumanGate.INTAKE,
+            action=HumanAction.BLOCKED,
+        )
+    evs = store.human_events()
+    assert [e.task_id for e in evs] == ["T-0", "T-1", "T-2"]
+    assert [e.created_at for e in evs] == sorted(e.created_at for e in evs)
+
+
+def test_human_events_can_be_scoped_to_one_task(store):
+    store.record_human_event(task_id="T-1", gate=HumanGate.INTAKE,
+                             action=HumanAction.BLOCKED)
+    store.record_human_event(task_id="T-2", gate=HumanGate.INTAKE,
+                             action=HumanAction.BLOCKED)
+    assert [e.task_id for e in store.human_events(task_id="T-1")] == ["T-1"]
+    assert store.human_events(task_id="T-nope") == ()
+
+
+def test_human_event_note_is_redacted(store):
+    """人写的备注也走脱敏边界 —— Global Constraint 11 不留旁路。
+
+    「我用 password=Hunter2!x 手动验过了」是人真会写的一句话。
+    """
+    store.record_human_event(
+        task_id="T-sec", gate=HumanGate.DELIVERY, action=HumanAction.OVERRIDE,
+        note="手动验过了，用的 password=Hunter2!x",
+    )
+    (ev,) = store.human_events()
+    assert "Hunter2!x" not in ev.note
+    assert "password" in ev.note
+
+
+def test_human_event_accepts_an_explicit_timestamp(store):
+    """测试要能造出「人花了 12 分钟」这种时间差，不能只依赖真实时钟。"""
+    t = datetime(2026, 8, 14, 9, 0, 0)
+    store.record_human_event(task_id="T-1", gate=HumanGate.INTAKE,
+                             action=HumanAction.BLOCKED, created_at=t)
+    store.record_human_event(task_id="T-1", gate=HumanGate.INTAKE,
+                             action=HumanAction.CONFIRM,
+                             created_at=t + timedelta(minutes=12))
+    a, b = store.human_events(task_id="T-1")
+    assert (b.created_at - a.created_at) == timedelta(minutes=12)
+
+
+def test_human_events_persist_across_store_instances(tmp_path):
+    db = tmp_path / "audit.db"
+    AuditStore(db).record_human_event(
+        task_id="T-1", gate=HumanGate.INTAKE, action=HumanAction.BLOCKED,
+    )
+    assert len(AuditStore(db).human_events()) == 1
+
+
+def test_no_plaintext_secret_from_a_human_note_in_the_db_file(tmp_path):
+    db = tmp_path / "audit.db"
+    AuditStore(db).record_human_event(
+        task_id="T-sec", gate=HumanGate.DELIVERY, action=HumanAction.OVERRIDE,
+        note="api_key=abc123xyz789 试过了",
+    )
+    assert b"abc123xyz789" not in db.read_bytes()

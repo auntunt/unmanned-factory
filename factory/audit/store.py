@@ -25,12 +25,16 @@ from sqlalchemy.orm import Session, selectinload
 
 from factory.audit.models import (
     Base,
+    HumanAction,
+    HumanEvent,
+    HumanGate,
     OracleClass,
     Resolution,
     SupervisorRole,
     SupervisorVerdict,
     TaskAttempt,
     Verdict,
+    utc_now,
 )
 from factory.redact import redact
 
@@ -195,9 +199,52 @@ class AuditStore:
             s.commit()
 
     def finalize(self, attempt_id: int, resolution: Resolution) -> None:
+        """落 resolution，并且**只在第一次**盖 resolved_at。
+
+        resolved_at 是闸门 3 人时的起点（判决落下 = 开始等人）。`override`
+        会再调一次 finalize —— 那一刻若把起点推到现在，闸门 3 用时就恒等于 0，
+        人到底等了多久永远看不见。
+        """
         with self._session() as s:
-            s.get(TaskAttempt, attempt_id).resolution = resolution
+            row = s.get(TaskAttempt, attempt_id)
+            row.resolution = resolution
+            if row.resolved_at is None:
+                row.resolved_at = utc_now()
             s.commit()
+
+    def record_human_event(
+        self,
+        *,
+        task_id: str,
+        gate: HumanGate,
+        action: HumanAction,
+        note: str | None = None,
+        created_at=None,
+    ) -> None:
+        """记一次人时端点。created_at 可显式给，测试要能造出时间差。"""
+        with self._session() as s:
+            s.add(
+                HumanEvent(
+                    task_id=task_id,
+                    gate=gate,
+                    action=action,
+                    # 人手写的备注和监工 claims 同一条边界：「我用
+                    # password=xxx 手动验过了」是人真会写的一句话。
+                    note=None if note is None else redact(note),
+                    created_at=utc_now() if created_at is None else created_at,
+                )
+            )
+            s.commit()
+
+    def human_events(self, *, task_id: str | None = None) -> tuple[HumanEvent, ...]:
+        """按时间升序返回人时事件。同一时刻的多条按 id 定序，保证可重复。"""
+        with self._session() as s:
+            stmt = select(HumanEvent).order_by(HumanEvent.created_at, HumanEvent.id)
+            if task_id is not None:
+                stmt = stmt.where(HumanEvent.task_id == task_id)
+            rows = tuple(s.scalars(stmt))
+            s.expunge_all()
+            return rows
 
     def link_defect(self, attempt_id: int, defect_id: str) -> None:
         """幂等：同一个 defect 重复挂只留一条。

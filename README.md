@@ -69,7 +69,39 @@ launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败�
 | `show` | 打印一个任务的完整审计轨迹 |
 | `override` | 人工定案 resolution（事后回填） |
 | `defect` | 事后挂 defect 捕获漏报，支持 `--commit <sha>` 反查 |
-| `metrics` | 监工命中率 / 漏报 / 单位命中成本 |
+| `metrics` | 监工命中率 / 漏报 / 单位命中成本，加 `--human` 看人时账 |
+
+## 人时账：人到底花了多久
+
+P1 判据「闸门 3 上人平均打回次数 ≤ 1」量的是**验收质量**，答不了「这个需求让人
+花了多少分钟」。没有那个数，就没法证明这套东西省了时间，也没法判断下一步该往
+哪投工。所以额外记两段人时：
+
+| 闸门 | 起点 | 终点 |
+|---|---|---|
+| 闸门 1 · 人确认需求 | `prd` 的草稿被入口闸门拦下 | `queue` 把它从 `needs-human/` 放回 |
+| 闸门 3 · 人验收交付 | 判决落下（`resolved_at`） | `override` 定案 |
+
+```bash
+# 闸门 1：草稿被拦（退出码 3），人补完再入队。
+# 被拦时 prd 会把下一条命令连 --db 一起印出来，照抄即可。
+factory prd --text "改个接口" --queue backlog --db audit.db
+factory queue backlog/needs-human/<那个>.yaml --queue backlog --db audit.db
+
+# 闸门 3：人给一个已升级的 attempt 定案
+factory override <attempt_id> human_override --db audit.db
+
+# 看账
+factory metrics --db audit.db --human
+```
+
+`prd` / `queue` 的 `--db` **可以不给** —— 不给只是这一段人时不记，往 stderr 说
+一句，任务照走。观测性功能不该拦下一个本该派发的任务。
+
+表上的「—」是**量不到**（还在等人、或端点配不上对），不是 0。这两件事必须分开：
+0 分钟的意思是「已经无人了」，而那是要拿去做决定的结论。看板上同一份数据在
+「人时账 · 人到底花了多久」那一栏，和「假设 · 人工单任务估时」**刻意分成两段** ——
+后者是我们拍的数字，混在一排里会借实测数的可信度。
 
 ## 四道监工
 
