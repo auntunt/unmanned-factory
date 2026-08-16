@@ -118,6 +118,95 @@ def test_a_confirm_without_a_blocked_is_not_counted(store):
     assert led.unpaired_events == 1, "对不上的端点必须看得见，不许静默丢掉"
 
 
+# ---------- 积压等了多久 ----------
+
+def test_a_waiting_task_reports_how_long_it_has_been_waiting(store):
+    """在等人 = 一个布尔值不够用：等 3 天和等 1 分钟得分得开。
+
+    这张表答的是「下一步该往哪投工」。只说「有 3 个在等」的话，一个刚判完的
+    队列和一个积了一周的队列读数一样，那个数就没法用来排优先级。
+    """
+    aid = _attempt(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    r = store.get(aid).resolved_at
+    (t,) = human_time(store, now=r + timedelta(days=3)).tasks
+    assert t.gate3_pending is True
+    assert t.waiting_seconds == pytest.approx(3 * 86400.0)
+
+
+def test_gate1_waiting_is_measured_from_the_open_blocked(store):
+    """闸门 1 那边等的是「草稿被拦下之后还没人来补」。"""
+    t0 = utc_now() - timedelta(hours=6)
+    _blocked(store, "T-1", t0)
+    (t,) = human_time(store, now=t0 + timedelta(hours=6)).tasks
+    assert t.gate1_pending is True
+    assert t.waiting_seconds == pytest.approx(6 * 3600.0)
+
+
+def test_a_task_stuck_at_both_gates_counts_from_the_earlier_one(store):
+    """两道闸门同时卡着：等待时长从**先**卡住那一刻算。
+
+    这个任务是一份第一轮被打回、人补了一半又搁下、同时上一轮判决还挂着人的
+    草稿。取更晚那个端点会把已经卡了三天的活报成刚卡一小时，于是最该先动的
+    那个在排序里沉到下面。
+    """
+    aid = _attempt(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    r = store.get(aid).resolved_at
+    # 闸门 1 先卡住（三天前有人拦下没补），闸门 3 后卡住（判决刚落）。
+    _blocked(store, "T-1", r - timedelta(days=3))
+
+    (t,) = human_time(store, now=r + 1 * MIN).tasks
+    assert (t.gate1_pending, t.gate3_pending) == (True, True)
+    assert t.waiting_seconds == pytest.approx(3 * 86400.0 + 60.0), "从先卡住那刻算"
+
+
+def test_a_task_not_waiting_has_no_waiting_time(store):
+    """没在等的任务不报等待时长 —— 报 0 会混进「刚刚才进队列」里。"""
+    aid = _attempt(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    _override_event(store, "T-1", store.get(aid).resolved_at + 5 * MIN)
+    (t,) = human_time(store).tasks
+    assert t.gate3_pending is False
+    assert t.waiting_seconds is None
+
+
+def test_the_ledger_reports_the_longest_wait(store):
+    """积压里最久的那个是该先动的。合计没用 —— 10 个各等 1 分钟不是急事。"""
+    old = _attempt(store, "T-old")
+    store.finalize(old, Resolution.ESCALATED)
+    r = store.get(old).resolved_at
+    _blocked(store, "T-fresh", r + timedelta(days=2))
+    led = human_time(store, now=r + timedelta(days=2, minutes=5))
+    assert led.longest_wait_seconds == pytest.approx(2 * 86400.0 + 300.0)
+    assert led.longest_waiting_task == "T-old"
+
+
+def test_no_backlog_means_no_longest_wait(store):
+    """空积压报 None，不报 0 —— 和这个文件里其他分母一个规矩。"""
+    store.finalize(_attempt(store), Resolution.MERGED)
+    led = human_time(store)
+    assert led.longest_wait_seconds is None
+    assert led.longest_waiting_task is None
+
+
+def test_waiting_time_is_not_added_into_human_time(store):
+    """等待时长不是人时。人还没来看，这段时间没人在花。
+
+    混进去的话「人时占比」会随着积压变久一路涨到 100% 以上，而那个数是拿来
+    证明「无人」程度的。
+    """
+    aid = _attempt(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    r = store.get(aid).resolved_at
+    _blocked(store, "T-1", r - 10 * MIN)
+    _confirm(store, "T-1", r - 8 * MIN)
+    led = human_time(store, now=r + timedelta(days=1))
+    (t,) = led.tasks
+    assert t.human_seconds == pytest.approx(120.0, abs=2.0), "只有闸门 1 那 2 分钟"
+    assert led.human_total == pytest.approx(120.0, abs=2.0)
+
+
 # ---------- 闸门 3：override − resolved_at ----------
 
 def test_gate3_starts_at_resolved_at_not_at_dispatch(store):
@@ -147,6 +236,73 @@ def test_an_attempt_never_resolved_is_not_pending_on_a_human(store):
     assert t.gate3_pending is False
 
 
+def test_an_auto_landed_task_is_not_waiting_on_a_human(store):
+    """全绿自动合并 = 人一分钟没花，不是「等人验收」。
+
+    「有判决、没 override」不足以判定在等人：自动落地的任务永远长这样，而它
+    恰好是这套系统的**常态**。只看这两样，工厂跑得越顺，假积压就越大。
+    """
+    store.finalize(_attempt(store), Resolution.MERGED)
+    (t,) = human_time(store).tasks
+    assert t.gate3_pending is False, "MERGED 意味着机器自己判完了，没人在等"
+
+
+def test_auto_landed_tasks_do_not_inflate_the_backlog(store):
+    """8 个自动落地 + 1 个真上人 → 积压数必须是 1。
+
+    这个数是「该往哪投人」的依据。它把常态算进去的话，读数永远接近任务总数，
+    于是没人会拿它做决定 —— 一个没人看的指标和没有这个指标一样。
+    """
+    for i in range(8):
+        store.finalize(_attempt(store, f"T-auto-{i}"), Resolution.MERGED)
+    store.finalize(_attempt(store, "T-escalated"), Resolution.ESCALATED)
+    led = human_time(store)
+    assert led.gate3_pending_tasks == 1
+    assert [t.task_id for t in led.tasks if t.gate3_pending] == ["T-escalated"]
+
+
+def test_an_auto_landed_task_is_not_a_row_in_the_detail_table(store):
+    """明细表答的是「人花在哪」。没花人的任务在那张表上是纯噪音。"""
+    store.finalize(_attempt(store, "T-auto"), Resolution.MERGED)
+    store.finalize(_attempt(store, "T-human"), Resolution.ESCALATED)
+    led = human_time(store)
+    assert [t.task_id for t in led.tasks_with_data] == ["T-human"]
+    assert len(led.tasks) == 2, "口径层仍留全集，只是展示层不画"
+
+
+def test_an_escalated_task_is_still_waiting(store):
+    """反面：ESCALATED 就是「机器判不了，上人」，这个必须还算积压。
+
+    和上面几条一起钉住判据是 resolution 本身，而不是「有没有 override 事件」。
+    """
+    store.finalize(_attempt(store), Resolution.ESCALATED)
+    (t,) = human_time(store).tasks
+    assert t.gate3_pending is True
+
+
+def test_the_latest_round_decides_whether_a_human_is_waiting(store, monkeypatch):
+    """打回一轮再升级：判据取最后一轮。
+
+    中间轮次是 REWORKED（worker 自己重跑，没人在等）。拿第一轮判会说没人等，
+    可这个任务此刻正躺在人的桌上。
+    """
+    t0 = utc_now() - timedelta(hours=1)
+    stamps = iter([t0, t0 + timedelta(minutes=30)])
+    monkeypatch.setattr("factory.audit.store.utc_now", lambda: next(stamps))
+    store.finalize(_attempt(store, "T-1"), Resolution.REWORKED)
+    store.finalize(_attempt(store, "T-1"), Resolution.ESCALATED)
+    monkeypatch.undo()
+    (t,) = human_time(store).tasks
+    assert t.gate3_pending is True
+
+
+def test_a_reworked_round_alone_is_not_waiting_on_a_human(store):
+    """只被打回、还没升级：worker 会自己重跑，人没在等。"""
+    store.finalize(_attempt(store), Resolution.REWORKED)
+    (t,) = human_time(store).tasks
+    assert t.gate3_pending is False
+
+
 def test_gate3_uses_the_latest_resolved_attempt_before_the_override(
     store, monkeypatch,
 ):
@@ -169,6 +325,73 @@ def test_gate3_uses_the_latest_resolved_attempt_before_the_override(
     _override_event(store, "T-1", t0 + timedelta(hours=2, minutes=4))
     (t,) = human_time(store).tasks
     assert t.gate3_seconds == pytest.approx(240.0), "只算最后一轮判决之后那 4 分钟"
+
+
+def test_two_overrides_on_one_ruling_are_charged_once(store):
+    """人把 override 跑了两遍（手滑 / 改主意）：那一轮只许收一次费。
+
+    每个 override 各自减一次 resolved_at 的话，两次命令 = 两倍人时。这里人最多
+    花了 11 分钟，按每个都算会报 21 分钟。这个方向让系统显得更费人（不是更好看），
+    但一样是错的 —— 这张表要拿去做投工决定，虚高和虚低一样没法用。
+    """
+    aid = _attempt(store)
+    store.finalize(aid, Resolution.ESCALATED)
+    r = store.get(aid).resolved_at
+    _override_event(store, "T-1", r + 10 * MIN)
+    _override_event(store, "T-1", r + 11 * MIN)
+
+    led = human_time(store)
+    (t,) = led.tasks
+    assert t.gate3_seconds == pytest.approx(600.0, abs=2.0), "取最早那次定案"
+    assert led.unpaired_events == 0, (
+        "重复定案不是「配不上对」—— 那个计数器的意思是有人绕过命令动了队列，"
+        "混进来会报假警"
+    )
+
+
+def test_each_round_is_charged_separately(store, monkeypatch):
+    """反面：真的两轮判决、两次定案，两段都得算。
+
+    和上一条一起钉住去重的粒度是「每轮判决一次」，不是「整个任务一次」。
+    """
+    t0 = utc_now() - timedelta(hours=5)
+    stamps = iter([t0, t0 + timedelta(hours=2)])
+    monkeypatch.setattr("factory.audit.store.utc_now", lambda: next(stamps))
+    store.finalize(_attempt(store, "T-1"), Resolution.REWORKED)
+    store.finalize(_attempt(store, "T-1"), Resolution.ESCALATED)
+    monkeypatch.undo()
+
+    _override_event(store, "T-1", t0 + timedelta(minutes=3))          # 第一轮 3min
+    _override_event(store, "T-1", t0 + timedelta(hours=2, minutes=4))  # 第二轮 4min
+    (t,) = human_time(store).tasks
+    assert t.gate3_seconds == pytest.approx(420.0), "3min + 4min，两轮各收一次"
+
+
+def test_a_task_that_bounced_back_to_a_human_is_waiting_again(store, monkeypatch):
+    """人定过案 → worker 又跑一轮 → 又判不了。这一刻是重新在等人。
+
+    守卫那行（定过案的就不算在等）必须只掐**那一轮**。要是拿「这个任务有没有被
+    定过案」当判据，第二次上人就永远看不见了 —— 而这条路恰恰是最该被看见的：
+    一个来回过两遍人手的任务，正是投工该先看的。
+
+    另外钉住等待时长从**第二轮**判决算起，不是第一轮：从第一轮算会把中间
+    worker 自己在跑的两小时算进人的等待里。
+    """
+    t0 = utc_now() - timedelta(hours=4)
+    stamps = iter([t0, t0 + timedelta(hours=2)])
+    monkeypatch.setattr("factory.audit.store.utc_now", lambda: next(stamps))
+    store.finalize(_attempt(store, "T-1"), Resolution.ESCALATED)   # 第一轮
+    store.finalize(_attempt(store, "T-1"), Resolution.ESCALATED)   # 第二轮，没人管
+    monkeypatch.undo()
+
+    _override_event(store, "T-1", t0 + timedelta(minutes=5))  # 只定了第一轮
+
+    (t,) = human_time(store, now=t0 + timedelta(hours=4)).tasks
+    assert t.gate3_seconds == pytest.approx(300.0), "第一轮那 5min 照收"
+    assert t.gate3_pending is True, "第二轮还挂在人手上"
+    assert t.waiting_seconds == pytest.approx(7200.0), (
+        "从第二轮判决算起 2h；从第一轮算会把 worker 重跑那段算成人在等"
+    )
 
 
 def test_an_override_before_any_resolution_is_unpaired(store):
@@ -354,8 +577,43 @@ def test_metrics_human_marks_tasks_still_waiting(store, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "等人确认" in out
     # 那一行的闸门 1 必须是「—」而不是任何数：还在等人不是花了 0 分钟。
-    (line,) = [ln for ln in out.splitlines() if "T-等着" in ln]
+    (line,) = [ln for ln in out.splitlines()
+               if "T-等着" in ln and "闸门1" in ln]
     assert "闸门1       —" in line, line
+
+
+def test_metrics_human_prints_how_long_the_backlog_has_waited(
+    store, tmp_path, capsys,
+):
+    """积压得说出「等了多久 / 谁在等」，不能只说「有几个」。
+
+    只报个数的话，一个刚判完的队列和一个积了三天的队列打出来一样，那行字就
+    没法拿来排优先级。
+    """
+    import argparse
+
+    from factory.cli import _cmd_metrics
+
+    aid = _attempt(store, "T-躺了三天")
+    store.finalize(aid, Resolution.ESCALATED)
+    # 把判决时刻推到三天前：等待时长是「此刻 − 判决时刻」，不推的话是 0 秒，
+    # 「等了多久」这件事在断言里就区分不出对错。
+    with store._session() as s:  # noqa: SLF001 - 造积压只能直接改时间戳
+        s.get(type(store.get(aid)), aid).resolved_at = utc_now() - timedelta(days=3)
+        s.commit()
+
+    _cmd_metrics(argparse.Namespace(db=str(tmp_path / "audit.db"),
+                                    task_id=None, human=True))
+    out = capsys.readouterr().out
+    assert "T-躺了三天" in out
+    (summary,) = [ln for ln in out.splitlines() if "等最久" in ln]
+    assert "T-躺了三天" in summary, summary
+    assert "3.0d" in summary, summary
+    assert "不算人时" in summary, "得说清这段不进人时，否则会被读成人花的时间"
+    # 明细那一行也得带上等待时长，不能只在汇总里出现一次。
+    (row,) = [ln for ln in out.splitlines()
+              if "T-躺了三天" in ln and "闸门1" in ln]
+    assert "已等 " in row and "3.0d" in row, row
 
 
 def test_the_ledger_does_not_touch_gate3_rework(store):

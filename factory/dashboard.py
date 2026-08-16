@@ -882,7 +882,23 @@ def _dur(seconds: float | None) -> str:
         return f"{seconds:.0f}s"
     if seconds < 5400:
         return f"{seconds / 60:.1f}min"
-    return f"{seconds / 3600:.1f}h"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    # 积压能到天级。「72.0h」得让人自己换算才知道是三天，而这个数是拿来判断
+    # 「该不该现在去处理」的。和 cli._fmt_dur 同一套档位。
+    return f"{seconds / 86400:.1f}d"
+
+
+def _waited(seconds: float | None) -> str:
+    """等待时长专用：不到一分钟写「刚刚」，不写「0s」。
+
+    「0s」在这一页上是个禁止出现的形状 —— 时长格里的 0 会被读成「量到了，是
+    零」。刚判完就在等人时那个数确实趋近 0，但它的意思是「刚进队列」，
+    和「等了很久」比起来根本不是同一件事该急着处理的。
+    """
+    if seconds is None:
+        return "—"
+    return "刚刚" if seconds < 60 else _dur(seconds)
 
 
 def _human_ledger(sm: Summary) -> str:
@@ -914,6 +930,10 @@ def _human_ledger(sm: Summary) -> str:
         pend = [p for p, on in (("等人确认", t.gate1_pending),
                                 ("等人验收", t.gate3_pending)) if on]
         ratio = "—" if t.human_ratio is None else f"{t.human_ratio:.1%}"
+        status = " / ".join(pend)
+        if pend:
+            # 等待时长跟在状态里，不进用时那几格 —— 那几格是人时，这个不是。
+            status += f" 已等 {_waited(t.waiting_seconds)}"
         rows.append(
             f"<tr><td>{_e(t.task_id)}</td>"
             f"<td>{_e(_dur(t.gate1_seconds))}</td>"
@@ -921,13 +941,19 @@ def _human_ledger(sm: Summary) -> str:
             f"<td>{_e(_dur(t.human_seconds))}</td>"
             f"<td>{_e(_dur(t.wall_clock_seconds))}</td>"
             f"<td>{_e(ratio)}</td>"
-            f'<td><span class="dim">{_e(" / ".join(pend))}</span></td></tr>')
+            f'<td><span class="dim">{_e(status)}</span></td></tr>')
     waiting = ""
     if led.gate1_pending_tasks or led.gate3_pending_tasks:
         # 积压得说出来。不说的话「还没人来看」和「已经验收完」在合计上
         # 都表现为那一段人时偏小。
         waiting = (f" 还在等人：闸门 1 有 {led.gate1_pending_tasks} 个，"
                    f"闸门 3 有 {led.gate3_pending_tasks} 个。")
+        if led.longest_waiting_task is not None:
+            # 只报个数排不了优先级：10 个各等 1 分钟不是急事，1 个等三天是。
+            # 「不算人时」这句必须跟着 —— 否则「等了三天」会被读成人花了三天。
+            waiting += (f" 等最久的是 {_e(led.longest_waiting_task)}，"
+                        f"已等 {_waited(led.longest_wait_seconds)}"
+                        "（这段不算人时，人还没来看）。")
     unpaired = ""
     if led.unpaired_events:
         # 悄悄丢掉的话，一个记漏了一半的库和一个干净的库在这张表上长得一样。

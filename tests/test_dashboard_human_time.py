@@ -130,6 +130,52 @@ def test_a_task_waiting_on_a_human_is_shown_as_waiting(tmp_path):
     assert row.count("<td>—</td>") >= 3, row
 
 
+def test_an_auto_landed_task_is_not_shown_as_waiting(tmp_path):
+    """全绿自动落地 = 没人在等。它是这套系统的常态，画成积压的话跑得越顺
+    积压越大，那句话就没人看了。"""
+    store, db = _store(tmp_path)
+    store.finalize(_attempt(store, "T-auto"), Resolution.MERGED)
+    page = render(collect(db), db=db, qs=queue_state(None))
+    sec = _section(page)
+    assert "还没有人时数据" in sec, "一个没人参与的任务不该让这一栏看起来有数据"
+    assert "T-auto" not in sec, sec
+
+
+def test_the_backlog_shows_how_long_it_has_waited(tmp_path):
+    """积压要说「等了多久 / 谁在等」。只报个数排不了优先级。"""
+    store, db = _store(tmp_path)
+    aid = _attempt(store, "T-躺着")
+    store.finalize(aid, Resolution.ESCALATED)
+    with store._session() as s:  # noqa: SLF001 - 造积压只能直接改时间戳
+        s.get(type(store.get(aid)), aid).resolved_at = utc_now() - timedelta(days=3)
+        s.commit()
+    sec = _section(render(collect(db), db=db, qs=queue_state(None)))
+    assert "T-躺着" in sec
+    assert "3.0d" in sec, sec
+    # 判据必须落在**说积压那句话**上。整段里另有一句固定文案「中间机器在跑的
+    # 时间不算人时」，拿 `"不算人时" in sec` 当断言的话，那句话会替这条断言
+    # 兜住，于是「积压旁边根本没写清这段不进人时」照样能过。
+    (line,) = [s for s in sec.split("。") if "等最久" in s]
+    assert "不算人时" in line, line
+
+
+def test_the_wait_is_not_rendered_as_human_time(tmp_path):
+    """等待时长不许进人时合计那张卡片。
+
+    混进去的话「人时占比」会随积压涨过 100%，而那个数正是用来证明「无人」的。
+    """
+    store, db = _store(tmp_path)
+    aid = _attempt(store, "T-躺着")
+    store.finalize(aid, Resolution.ESCALATED)
+    with store._session() as s:  # noqa: SLF001
+        s.get(type(store.get(aid)), aid).resolved_at = utc_now() - timedelta(days=3)
+        s.commit()
+    sec = _section(render(collect(db), db=db, qs=queue_state(None)))
+    (card,) = re.findall(r'<div class="n">([^<]*)</div>\s*'
+                         r'<div class="l">实测 · 人时合计</div>', sec)
+    assert card.strip() == "—", f"人一分钟没花，这里必须是「—」而不是 3d：{card}"
+
+
 def test_the_per_task_table_is_ordered_by_human_time(tmp_path):
     """最费人的在最上面。这一栏要答的就是「下一步该往哪投工」。
 

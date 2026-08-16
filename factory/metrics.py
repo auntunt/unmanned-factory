@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from factory.audit.models import (
     NOT_DISPATCHED,
@@ -22,6 +23,7 @@ from factory.audit.models import (
     HumanGate,
     Resolution,
     Verdict,
+    utc_now,
 )
 from factory.supervisors.model_base import (
     HARNESS_FAULT_CHECKS,
@@ -257,6 +259,12 @@ class TaskHumanTime:
     #: 和「量不到」分开：还在跑的 attempt 不算等人。
     gate1_pending: bool = False
     gate3_pending: bool = False
+    #: 已经等了多久（此刻 − 开始等的时刻）。没在等就是 None，不是 0 ——
+    #: 报 0 会和「刚刚才进队列」混在一起。
+    #:
+    #: **不进人时**：人还没来看，这段时间没人在花。混进去的话人时占比会随积压
+    #: 一路涨过 100%，而那个数正是用来证明「无人」程度的。
+    waiting_seconds: float | None = None
 
     @property
     def human_seconds(self) -> float | None:
@@ -346,6 +354,26 @@ class HumanTimeLedger:
         )
 
     @property
+    def _longest(self) -> TaskHumanTime | None:
+        """积压里等最久的那个。取最长而不是合计 —— 10 个各等 1 分钟不是急事，
+        1 个等了三天是。合计会把前者报成 10 分钟，把后者埋在平均数里。
+        """
+        waiting = [t for t in self.tasks if t.waiting_seconds is not None]
+        if not waiting:
+            return None
+        return max(waiting, key=lambda t: (t.waiting_seconds, t.task_id))
+
+    @property
+    def longest_wait_seconds(self) -> float | None:
+        t = self._longest
+        return t.waiting_seconds if t is not None else None
+
+    @property
+    def longest_waiting_task(self) -> str | None:
+        t = self._longest
+        return t.task_id if t is not None else None
+
+    @property
     def gate1_pending_tasks(self) -> int:
         return sum(1 for t in self.tasks if t.gate1_pending)
 
@@ -354,8 +382,32 @@ class HumanTimeLedger:
         return sum(1 for t in self.tasks if t.gate3_pending)
 
 
-def _gate1_seconds(events) -> tuple[float | None, bool, int]:
-    """(用时, 是否在等人, 配不上对的端点数)。
+#: 这些判决意味着「机器交不出结论，躺在人的桌上」。其余的都不是人在等：
+#: MERGED 是全绿自动落地（这套系统的常态），REWORKED 是 worker 自己会重跑，
+#: PENDING 是还在跑。
+_AWAITING_HUMAN = frozenset({Resolution.ESCALATED})
+
+
+def _awaiting_human(attempts) -> datetime | None:
+    """人是不是真的挂在这个任务上；是的话，从哪一刻开始等。
+
+    判据取**最后一轮**的 resolution，不是「有没有后续 override 事件」。后者对
+    自动落地的任务永远成立 —— 而自动落地正是这套系统的常态，于是那个读数会随
+    系统跑得越顺涨得越高，最后没人会看它。
+    """
+    ruled = [a for a in attempts if a.resolved_at is not None]
+    if not ruled:
+        return None
+    last = max(ruled, key=lambda a: (a.resolved_at, a.id))
+    return last.resolved_at if last.resolution in _AWAITING_HUMAN else None
+
+
+def _gate1_seconds(events) -> tuple[float | None, datetime | None, int]:
+    """(用时, 从哪一刻起在等人, 配不上对的端点数)。
+
+    第二个位置返回时刻而不是布尔：它既是「在不在等」也是「等了多久」的起点。
+    只给布尔的话，等了三天的和刚进队列一分钟的在表上长得一样，而这张表是拿去
+    做投工决定的。
 
     按轮次配对：blocked 开一段，下一个 confirm 关一段。累加而不是只取最后一段
     —— 一份草稿可以被拦两次（人补了一半又被拦），只算最后一次会低估人时。
@@ -385,11 +437,11 @@ def _gate1_seconds(events) -> tuple[float | None, bool, int]:
             total += (ev.created_at - open_at).total_seconds()
             counted = True
             open_at = None
-    return (total if counted else None), open_at is not None, unpaired
+    return (total if counted else None), open_at, unpaired
 
 
-def _gate3_seconds(attempts, events) -> tuple[float | None, bool, int]:
-    """(用时, 是否在等人, 配不上对的端点数)。
+def _gate3_seconds(attempts, events) -> tuple[float | None, datetime | None, int]:
+    """(用时, 从哪一刻起在等人, 配不上对的端点数)。
 
     起点是 resolved_at（判决落下 = 开始等人），不是派发时刻 —— 从派发算会把
     worker 干活的时间算成人时。终点是 override 事件。
@@ -405,13 +457,12 @@ def _gate3_seconds(attempts, events) -> tuple[float | None, bool, int]:
         if ev.gate == HumanGate.DELIVERY and ev.action == HumanAction.OVERRIDE
     ]
     if not resolved:
-        # 还在跑，没人在等。pending 必须是 False，否则积压数会把在跑的算进去。
-        return None, False, len(overrides)
-    if not overrides:
-        return None, True, 0
+        # 还在跑，没人在等。这里必须是 None，否则积压数会把在跑的算进去。
+        return None, None, len(overrides)
 
-    total = 0.0
-    counted = False
+    # 一轮判决只收一次费：人把 override 跑了两遍（手滑 / 改主意）的话，每个
+    # override 各减一次 resolved_at 会算出两倍人时。取最早那次定案。
+    first_by_ruling: dict[datetime, datetime] = {}
     unpaired = 0
     for at in overrides:
         prior = [r for r in resolved if r <= at]
@@ -419,19 +470,39 @@ def _gate3_seconds(attempts, events) -> tuple[float | None, bool, int]:
             # override 早于任何判决 → 相减是负数。负人时是记错了，不是省下来的。
             unpaired += 1
             continue
-        total += (at - prior[-1]).total_seconds()
-        counted = True
-    return (total if counted else None), False, unpaired
+        ruling = prior[-1]
+        # 重复定案**不算** unpaired：那个计数器的含义是「有人绕过命令动了队列」，
+        # 把正常的手滑混进去会让它报假警，于是真信号被埋掉。
+        if ruling not in first_by_ruling or at < first_by_ruling[ruling]:
+            first_by_ruling[ruling] = at
+
+    waiting_from = _awaiting_human(attempts)
+    # 只掐**这一轮**已经被定过案的情况。拿「这个任务有没有被定过案」当判据的话，
+    # 人定完案 worker 又跑一轮又判不了（第二次上人）就永远看不见了。
+    if waiting_from is not None and waiting_from in first_by_ruling:
+        waiting_from = None
+    if not first_by_ruling:
+        return None, waiting_from, unpaired
+    total = sum(
+        (at - ruling).total_seconds() for ruling, at in first_by_ruling.items()
+    )
+    return total, waiting_from, unpaired
 
 
-def human_time(store, *, task_id: str | None = None) -> HumanTimeLedger:
+def human_time(
+    store, *, task_id: str | None = None, now: datetime | None = None,
+) -> HumanTimeLedger:
     """端到端人时账：闸门 1 用时、闸门 3 用时、需求→上线墙钟。
+
+    `now` 可注入：算「已经等了多久」得有个此刻。用真时钟的话，测试只能断言
+    `> 0`，而那个断言在起点取错的时候照样通过。
 
     数据源只有审计库一处（human_event + task_attempt.resolved_at）。刻意不读
     Journal：把一个度量建在「回读 JSONL 再拼接」上，就等于让它依赖文本解析。
 
     按人时降序返回，最费人的在最上面 —— 这张表要答的是「下一步该往哪投工」。
     """
+    now = now or utc_now()
     events = store.human_events(task_id=task_id)
     by_task: dict[str, list] = {}
     for ev in events:
@@ -446,9 +517,14 @@ def human_time(store, *, task_id: str | None = None) -> HumanTimeLedger:
     unpaired = 0
     for tid, evs in by_task.items():
         attempts = attempts_by_task.get(tid, ())
-        g1, g1_pending, u1 = _gate1_seconds(evs)
-        g3, g3_pending, u3 = _gate3_seconds(attempts, evs)
+        g1, g1_waiting_from, u1 = _gate1_seconds(evs)
+        g3, g3_waiting_from, u3 = _gate3_seconds(attempts, evs)
         unpaired += u1 + u3
+        # 两道闸门都在等的话取更早那个：这个任务被卡住的总时长是从第一次卡住算起。
+        waits = [w for w in (g1_waiting_from, g3_waiting_from) if w is not None]
+        waiting_seconds = (
+            max(0.0, (now - min(waits)).total_seconds()) if waits else None
+        )
         starts = [e.created_at for e in evs]
         resolved = [a.resolved_at for a in attempts if a.resolved_at is not None]
         # 终点要**同时**考虑判决时刻和人定案的时刻。只取 resolved_at 的话，
@@ -470,7 +546,9 @@ def human_time(store, *, task_id: str | None = None) -> HumanTimeLedger:
                 (max(ends) - min(starts)).total_seconds()
                 if starts and ends else None
             ),
-            gate1_pending=g1_pending, gate3_pending=g3_pending,
+            gate1_pending=g1_waiting_from is not None,
+            gate3_pending=g3_waiting_from is not None,
+            waiting_seconds=waiting_seconds,
         ))
     rows.sort(key=lambda t: (-(t.human_seconds or 0.0), t.task_id))
     return HumanTimeLedger(tasks=tuple(rows), unpaired_events=unpaired)

@@ -1066,7 +1066,22 @@ def _fmt_dur(seconds: float | None) -> str:
         return f"{seconds:.0f}s"
     if seconds < 5400:
         return f"{seconds / 60:.1f}min"
-    return f"{seconds / 3600:.1f}h"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    # 积压能到天级。「72.0h」得让人自己换算才知道是三天，而这个数是拿来
+    # 判断「该不该现在去处理」的。
+    return f"{seconds / 86400:.1f}d"
+
+
+def _fmt_waited(seconds: float | None) -> str:
+    """等待时长专用：不到一分钟写「刚刚」。
+
+    刚判完就在等人时这个数趋近 0，而「0s」读起来像「量到了，是零」。它真正的
+    意思是「刚进队列」—— 和「等了三天」比，这两件事的紧迫程度完全不同。
+    """
+    if seconds is None:
+        return "—"
+    return "刚刚" if seconds < 60 else _fmt_dur(seconds)
 
 
 def _print_human_time(store, *, task_id: str | None = None) -> None:
@@ -1091,6 +1106,12 @@ def _print_human_time(store, *, task_id: str | None = None) -> None:
           f"  （还在等人 {led.gate3_pending_tasks} 个）")
     print(f"  人时合计        : {_fmt_dur(led.human_total)}"
           f"   需求→上线墙钟均 {_fmt_dur(led.wall_clock_mean)}")
+    if led.longest_waiting_task is not None:
+        # 「有 3 个在等」排不了优先级：等一分钟和等三天在那个数上一样。
+        # 报最久的那一个（带名字，光有时长没法拿去做动作）。
+        print(f"  积压里等最久    : {led.longest_waiting_task} "
+              f"已等 {_fmt_waited(led.longest_wait_seconds)}"
+              "（这段不算人时 —— 人还没来看）")
     if led.unpaired_events:
         # 悄悄丢掉的话，一个记漏了一半的库和一个干净的库长得一样。
         print(f"  （另有 {led.unpaired_events} 个端点配不上对，未计入 —— "
@@ -1103,7 +1124,8 @@ def _print_human_time(store, *, task_id: str | None = None) -> None:
             pend.append("等人确认")
         if t.gate3_pending:
             pend.append("等人验收")
-        tail = f"  ← {'/'.join(pend)}" if pend else ""
+        tail = (f"  ← {'/'.join(pend)} 已等 {_fmt_waited(t.waiting_seconds)}"
+                if pend else "")
         print(f"    {t.task_id:<24} 闸门1 {_fmt_dur(t.gate1_seconds):>7}"
               f"  闸门3 {_fmt_dur(t.gate3_seconds):>7}"
               f"  人时 {_fmt_dur(t.human_seconds):>7}"
