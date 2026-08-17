@@ -1,0 +1,42 @@
+[Unit]
+Description=Unmanned Factory 审计看板
+# 反复重启就停手，别静默重启到天荒地老 —— 这两个键属于 [Unit]，
+# 放在 [Service] 里 systemd 会直接忽略（journal 报 Unknown key name）。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+After=network.target
+# Caddy 反代到这里；它不起来时 Caddy 返 502，不会静默给空页
+Before=caddy.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/unmanned-factory
+
+# 刻意不传 --host：看板固定绑 127.0.0.1，公网暴露面全部交给 Caddy 管控。
+# 它自带的 token + Origin 检查只防 CSRF，不防「谁都能打开这一页」——
+# 审计库里有 diff 和模型输出，认证必须在反代层补上（见 Caddyfile 的 basic_auth）。
+ExecStart=/home/ubuntu/workspace/unmanned-factory/.venv/bin/python -m factory.cli dashboard \
+    --db /home/ubuntu/factory-data/audit.db \
+    --port 8788 \
+    --queue /home/ubuntu/factory-data/queue \
+    --workspace /home/ubuntu/workspace/unmanned-factory
+
+Restart=on-failure
+RestartSec=5
+
+# 收紧权限：看板只需要读审计库 + 读队列目录。
+# 它有三个 POST 表单（改 resolution），那些写的是 audit.db，所以
+# factory-data 要可写；除此之外整个文件系统只读。
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/factory-data
+PrivateTmp=true
+NoNewPrivileges=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
