@@ -53,6 +53,15 @@ class SupervisorRole(StrEnum):
     # PASS/FAIL）。共用角色会让同一个 attempt 出现两条方向相反的 RISK 裁决，
     # §5.1 的 fired 和 passed 会同时 +1，那张表的裁剪结论就建在坏数字上。
     SCOPE = "scope"
+    # 金丝雀探针的可见性记录，不是一道闸门（§9.1）。探针 skipped 时原来什么都
+    # 不写：审计里「验过是真的」和「根本没验」长得一模一样。非标测试目录
+    # （spec/、t/）的仓库就落在这个盲区里 —— 恶意 agent 在那种仓库上伪造绿能
+    # 直接出货，而报表上看不出任何异常。
+    #
+    # 独立成 role 而不是复用 RISK：BEACON 写的是「探针有没有真的跑」这个事实，
+    # 每轮至多一条，且**从不 FAIL**（skipped 不该拦货，见 dispatcher 里的取舍）。
+    # 混进 RISK 会让 §5.1 那张 fired/passed 表把「探针没跑」算成一次风险命中。
+    BEACON = "beacon"
 
 
 class Base(DeclarativeBase):

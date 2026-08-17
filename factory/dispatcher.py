@@ -508,6 +508,12 @@ class Dispatcher:
         soft: list[dict] = []
 
         for r in reports:
+            # BEACON 不是闸门，是「金丝雀到底跑过没有」的可见性记录（§9.1）。
+            # 它的 claims 必须落库（不然盲区不可见），但绝不能进 hard/soft ——
+            # 进 hard 会让所有非标测试目录（spec/、t/）的仓库一律拦停，
+            # 那是把审计完整性问题换成整类仓库无法出货。
+            if r.role == SupervisorRole.BEACON:
+                continue
             for c in r.claims:
                 if str(c.get("check", "")).startswith(SUPERVISOR_ERROR_PREFIX):
                     faults.append(c)
@@ -894,9 +900,11 @@ class Dispatcher:
         # pyproject.toml 各改过 2 次（约 7%），所以绝大多数轮次不多花这一次。
         # 而合法改动的金丝雀是红的（实测：加夹具、加 marker 都是非 0），
         # 所以这 7% 也不会变成误拒。
+        beacon: SupervisorReport | None = None
         if regression.verdict is Verdict.PASS and (
             touched_judges := judge_files_touched(result.changed_paths)
         ):
+            probe_skips: list[tuple[str, str]] = []
             for spec in checks:
                 res = probe(Path(workspace), spec.command,
                             timeout_s=spec.timeout_s)
@@ -910,6 +918,35 @@ class Dispatcher:
                             f"{_listed(touched_judges)}",
                         ),
                     )
+                if res.skipped:
+                    probe_skips.append((spec.command, res.reason))
+
+            # §9.1：探针没跑成必须在审计里留痕。走 reports 路径（下面的 append），
+            # 由调用方那个 record_verdict 循环统一落库 —— 直写要重复实现落库、
+            # tokens、cost 三件事。
+            #
+            # 为什么不拦：skipped 的主因是「测试目录不叫 tests/」这类仓库约定
+            # 差异（spec/、t/ 都常见），拦住等于让整类仓库无法出货 —— 拿可用性
+            # 问题换停摆问题。探针本身也会因自己超时而 skip，那时任务其实是全绿的。
+            # 不拦的代价写在 claims 里，由报表兜。
+            #
+            # 为什么必须记：不记的话审计里「验过是真的」和「根本没验」完全同形，
+            # 而后者是伪造绿的可乘之机。
+            if probe_skips:
+                beacon = SupervisorReport(
+                    role=SupervisorRole.BEACON,
+                    verdict=Verdict.PASS,
+                    claims=tuple(
+                        {
+                            "check": "probe-skipped",
+                            "command": cmd,
+                            "expected": "金丝雀能落地并跑一次",
+                            "actual": reason,
+                            "note": "这一轮的绿没有被反向验证过",
+                        }
+                        for cmd, reason in probe_skips
+                    ),
+                )
 
         reports = [
             regression,
@@ -947,6 +984,10 @@ class Dispatcher:
                     withheld=(result.error_text, self._render(reports[0].claims)),
                 )
             )
+        # BEACON 最后追加：它不参与任何 withheld 计算（上面两处用 reports[0]），
+        # 位置靠后也让 `factory show` 的裁决列表把可见性记录排在闸门后面。
+        if beacon is not None:
+            reports.append(beacon)
         return tuple(reports)
 
     def _runbook_checks(self, workspace: Path, result) -> tuple:
