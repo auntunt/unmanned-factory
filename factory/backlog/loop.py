@@ -29,7 +29,9 @@ state='blocked' 的结果。
 
 from __future__ import annotations
 
+import contextlib
 import signal
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -43,6 +45,10 @@ from factory.backlog.store import LOG, Backlog, Claim
 Outcome = Literal["merged", "escalated", "blocked_hard_gate", "error"]
 
 DEFAULT_BUDGET_USD = 5.0
+
+#: 认领心跳间隔。要远小于 recover() 的 stale_after_s（默认 6h）——
+#: 取 5 分钟，一次错过、两次错过都还差得远。
+HEARTBEAT_S = 300.0
 
 
 class Idle(StrEnum):
@@ -287,7 +293,8 @@ class BacklogLoop:
             self._log(f"\n[{report.dispatched}] {claim.task_id}  "
                       f"→ 派发（已花 ${report.cost_usd:.4f}）")
             t0 = self._now()
-            run = self._one(claim)
+            with self._heartbeat(claim):
+                run = self._one(claim)
             report.cost_usd += run.cost_usd
             # 归零而不是自减：熔断要的是「连续」。中间夹一个正常计价的任务
             # 就说明环境还活着，前面那次超时是任务自己的问题。
@@ -310,6 +317,37 @@ class BacklogLoop:
         self._log(f"\n== 停机：{report.stopped_by}")
         self._log(report.summary())
         return report
+
+    @contextlib.contextmanager
+    def _heartbeat(self, claim: Claim):
+        """派发期间定期刷新认领 mtime，防止被别的机器误判成僵尸（H-2）。
+
+        为什么要线程：一次派发是几十分钟到几小时的阻塞调用（模型跑、测试跑），
+        中间没有可以插钩子的地方。`recover()` 判跨主机认领只能看 mtime ——
+        合法跑满 6h 的任务不刷新就会被另一台机器捞走，同一个任务派两遍。
+
+        daemon=True：主循环收到 SIGKILL 时不希望被一个 sleep 中的线程拖住退出。
+        心跳丢一次的代价远小于停机慢 5 分钟。
+        """
+        stop = threading.Event()
+
+        def beat() -> None:
+            # 先等再刷：刚 claim 完 mtime 本来就是新的。
+            while not stop.wait(HEARTBEAT_S):
+                if not self._backlog.heartbeat(claim):
+                    return    # 认领没了（被归档/被捞走），没必要继续
+
+        thread = threading.Thread(
+            target=beat, name=f"heartbeat-{claim.task_id}", daemon=True,
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            # join 给一个上限：心跳线程正常会在 wait 被唤醒后立刻退出。
+            # 卡住也不阻塞收工 —— 它是 daemon。
+            thread.join(timeout=5.0)
 
     def _one(self, claim: Claim) -> TaskRun:
         """跑一个任务。派发抛异常不许把循环带下去。
