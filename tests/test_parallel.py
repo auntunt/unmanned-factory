@@ -22,6 +22,7 @@ from factory.audit.models import (
 )
 from factory.audit.store import AuditStore
 from factory.cli import main
+from factory.harness.worktree import _slug
 
 
 # ── AuditStore 并发 ───────────────────────────────────────────────────────
@@ -292,7 +293,9 @@ def test_single_task_with_worktree_flag_opts_in(tmp_path, repo, capsys):
     ])
     out = capsys.readouterr().out
     assert code == 0, out
-    assert (wt_root / "T-iso" / "out.py").exists()
+    # 目录名走 _slug()（带哈希后缀），不是 task_id 原文 —— 单射是硬需求，
+    # 见 worktree._slug 的注释（纯清洗会让所有中文 task_id 塌成同一棵树）。
+    assert (wt_root / _slug("T-iso") / "out.py").exists()
     assert not (repo / "out.py").exists(), "开了 worktree 就不该碰父仓库工作树"
 
 
@@ -306,7 +309,7 @@ def test_worktrees_are_kept_for_human_review(tmp_path, repo, capsys):
         "--worktree-root", str(wt_root), "--worktree",
     ])
     out = capsys.readouterr().out
-    assert (wt_root / "T-keep").is_dir()
+    assert (wt_root / _slug("T-keep")).is_dir()
     assert "保留未删" in out
 
 
