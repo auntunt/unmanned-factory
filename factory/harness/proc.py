@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -115,8 +116,28 @@ def _reap(proc: subprocess.Popen) -> bool:
         hard = True
     if pgid:
         _killpg(pgid, signal.SIGKILL)
+    # 抽干管道、回收僵尸。
+    #
+    # 这里的 communicate 会超时，而且不算罕见：只要被杀的进程派生过**逃出进程组**
+    # 的后代（`os.setsid()` 之后 sleep，或者 nohup/setsid 起的守护进程），killpg
+    # 就打不到那个后代，它继承的管道写端一直开着，communicate 永远读不到 EOF。
+    # 实测 10/10 次触发（/tmp/verify_c2_real.py：子进程 fork 后 setsid 再 sleep）。
+    #
+    # 关键是**不能让 subprocess.TimeoutExpired 穿出去**。run_bounded 的契约是
+    # 超时抛 factory 自己的 Timeout；漏一个 TimeoutExpired 出去，上层会当成
+    # 未预期崩溃处理，任务被判为 harness 故障而不是超时。曾经写成再 communicate
+    # 一次而不 catch，就是这个后果。
+    #
+    # 至于 fd：Popen 的管道由 Popen 对象持有，函数返回后引用归零就关掉了，
+    # 不 catch 也不泄漏（实测连跑 10 次 delta=0）。所以这里 catch 之后
+    # 什么都不用做 —— 逃出去的孙子进程我们本来就管不了，那是它自己的生命周期。
     try:
         proc.communicate(timeout=GRACE_S)
-    except subprocess.TimeoutExpired:      # pragma: no cover - KILL 之后极少
-        proc.kill()
+    except subprocess.TimeoutExpired:
+        # 逃出进程组的后代还抱着管道写端。已经 KILL 过整组，能做的都做了。
+        # 显式关掉自己这侧的管道，不依赖 GC 的时机。
+        for stream in (proc.stdout, proc.stderr, proc.stdin):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
     return hard
