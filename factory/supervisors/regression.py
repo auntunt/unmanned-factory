@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from factory.audit.models import SupervisorRole, Verdict
+from factory.harness.checkenv import check_env
 from factory.harness.proc import Timeout as ProcTimeout
 from factory.harness.proc import run_bounded
 from factory.supervisors.base import SupervisorReport
@@ -22,11 +23,15 @@ def _sh(command: str, workspace: Path, timeout_s: int):
     # 不是 subprocess.run：这里 shell=True，command 是 task YAML 里的一串
     # 用户写的 shell。超时只 kill 那个 sh，它拉起的 pytest / node / docker
     # 全都活下来 —— 一条挂住的 check 能在机器上留一地进程。见 proc 模块。
+    #
+    # env=check_env()：白名单式最小环境，不继承工厂进程的凭据（H-3）。
+    # check 命令来自 task YAML，可能是模型生成的，权限不该等于工厂本身。
     return run_bounded(
         command,
         cwd=workspace,
         timeout_s=timeout_s,
         shell=True,
+        env=check_env(),
     )
 
 
