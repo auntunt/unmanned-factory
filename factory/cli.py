@@ -162,11 +162,12 @@ def _resolve_sandbox(ns: argparse.Namespace) -> int:
         ns.sandbox = True
         return 0
     if ns.sandbox is True:
-        print(f"--sandbox 要求隔离，但本机没有 {sb.SANDBOX_BINARY}（非 macOS?）。"
-              "不静默降级：要么去掉 --sandbox，要么换容器。", file=sys.stderr)
+        print(f"--sandbox 要求隔离，但本机 {sb.SANDBOX_BINARY} 不可用。"
+              "不静默降级：要么去掉 --sandbox，要么修好沙箱（见 docs/），要么换容器。",
+              file=sys.stderr)
         return 2
     ns.sandbox = False
-    print("提示：本平台无 Seatbelt，worker 未隔离副作用。", file=sys.stderr)
+    print("提示：本平台沙箱不可用，worker 未隔离副作用。", file=sys.stderr)
     return 0
 
 
