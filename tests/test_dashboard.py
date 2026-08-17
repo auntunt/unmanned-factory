@@ -28,6 +28,7 @@ from factory.dashboard import (
     FAULT_CLAIMS,
     GATE_CLAIMS,
     MANUAL_HOURS,
+    _actions,
     _e,
     _hours,
     _origin_ok,
@@ -1266,3 +1267,44 @@ def test_sticky_nav_does_not_cover_the_targeted_view(tmp_path):
     # 实测坏掉的那个写法，不许回来 —— 它能满足「文件里有 scrollTo」这种弱断言
     assert "if(location.hash) scrollTo(0,0);" not in page, (
         "回退成同步回顶了：实测会被浏览器的锚定滚动覆盖")
+
+
+# ---------- 反向代理后面的可用性（同源判定 + 相对 action） ----------
+
+
+@pytest.mark.parametrize("headers,ok", [
+    # 经 Caddy 访问：Origin 和 Host 都是公网 IP —— 必须放行。
+    # 枚举 127.0.0.1 的旧实现在这里全拒，表现是「表单点了没反应」。
+    ({"Origin": "http://43.153.76.85", "Host": "43.153.76.85"}, True),
+    ({"Origin": "http://factory.example", "Host": "factory.example"}, True),
+    # 带端口：Host 有端口，Origin 的 hostname 没有，两边要能对上
+    ({"Origin": "http://127.0.0.1:8788", "Host": "127.0.0.1:8788"}, True),
+    # IPv6 字面量不能被端口剥离切碎
+    ({"Origin": "http://[::1]:8788", "Host": "[::1]:8788"}, True),
+    # 跨站仍然要拒：攻击者页面的 Origin 与我们的 Host 不同
+    ({"Origin": "http://evil.example", "Host": "43.153.76.85"}, False),
+    # 后缀伪装：evil 把我们的 host 拼进自己域名里
+    ({"Origin": "http://43.153.76.85.evil.example", "Host": "43.153.76.85"}, False),
+    # 缺 Host 且 Origin 非本机 → 拒（少一个头不该成为绕过口子）
+    ({"Origin": "http://43.153.76.85"}, False),
+])
+def test_origin_check_works_behind_a_reverse_proxy(headers, ok):
+    """判据是同源（Origin.host == Host），不是本机名白名单。
+
+    这个 bug 的形态值得记：页面能打开、表单能填、一提交 403，而 403 页面
+    和「操作没生效」在观感上没区别 —— 用户会以为看板是只读的。
+    """
+    assert (_origin_ok(headers) == "") is ok
+
+
+def test_action_forms_use_relative_paths():
+    """表单 action 必须是相对路径，否则反代加前缀后 POST 会打到别的服务。
+
+    绝对路径 "/prd" 在 https://host/factory/ 这一页上解析成 https://host/prd。
+    那个路径归另一个服务，POST 直接 502 —— 而页面上看不出任何异常。
+    """
+    html = _actions("tok3n", launchd="未装")
+    for name in ("prd", "override", "defect"):
+        assert f'action="{name}"' in html, f"{name} 的 action 应是相对路径"
+        assert f'action="/{name}"' not in html, (
+            f"{name} 用了绝对路径 —— 反代加前缀后会打到别的服务")

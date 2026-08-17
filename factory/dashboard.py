@@ -361,10 +361,10 @@ def _read_title(path: Path) -> str:
 
 _CSS = """
 :root{--bg:#fbfbfa;--fg:#1a1a18;--dim:#6b6b66;--line:#e3e3df;
---ok:#2f7d4f;--bad:#b3341f;--warn:#8a6d1f;--card:#fff}
+--ok:#2f7d4f;--bad:#b3341f;--warn:#8a6d1f;--card:#fff;--accent:#2158c9}
 @media(prefers-color-scheme:dark){:root{--bg:#161614;--fg:#eceae4;
 --dim:#9a9a92;--line:#2e2e2a;--ok:#6bbb85;--bad:#e0765c;--warn:#d0ac52;
---card:#1e1e1b}}
+--card:#1e1e1b;--accent:#6f9dff}}
 *{box-sizing:border-box}
 body{margin:0;padding:2rem 1.25rem 4rem;background:var(--bg);color:var(--fg);
 font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
@@ -420,15 +420,52 @@ color:var(--dim);align-items:baseline}
 background:var(--dim);margin-right:.35rem}
 .dot.on{background:var(--ok);animation:p 1.4s ease-in-out infinite}
 @keyframes p{0%,100%{opacity:1}50%{opacity:.25}}
+/* 操作区：每个表单是一张卡片，有标题和一句「这会做什么」。
+   原来三个表单裸着并排，占位符是唯一的说明，且主次按钮长得一样 ——
+   看不出哪个是常用动作、哪个是补记录。 */
+.acts{display:grid;gap:.75rem;margin:0 0 1rem}
+/* 假设值的内联编辑（GET，纯读）。原来要手改地址栏 ?manual_hours=4 */
+.assume-edit{display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end;
+margin:.5rem 0 0;font-size:.78rem;color:var(--dim)}
+.assume-edit label{display:flex;flex-direction:column;gap:.2rem}
+.assume-edit input{font:inherit;width:6.5rem;padding:.35rem .45rem;
+border:1px solid var(--line);border-radius:6px;background:var(--bg);
+color:var(--fg)}
+.assume-edit button{font:inherit;padding:.35rem .8rem;border-radius:6px;
+border:1px solid var(--line);background:var(--card);color:var(--fg);
+cursor:pointer}
+.assume-edit button:hover{border-color:var(--dim)}
+.assume-edit input:focus-visible,.assume-edit button:focus-visible{
+outline:2px solid var(--accent);outline-offset:2px}
 form.act{display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start;
-margin:0 0 1rem}
-form.act textarea,form.act input[type=text],form.act input[type=number]{
+margin:0;padding:.85rem .95rem;border:1px solid var(--line);
+border-radius:10px;background:var(--card)}
+form.act>.act-hd{flex:1 1 100%;margin:0 0 .15rem}
+form.act>.act-hd b{font-size:.95rem}
+form.act>.act-hd .sub{margin:.15rem 0 0;font-size:.8rem;line-height:1.5}
+/* 每个输入框带可见 label（点文字也能聚焦）。原来只有 placeholder，
+   而 placeholder 一开始打字就消失，填到第三个框已经忘了第一个是什么。 */
+form.act .fld{display:flex;flex-direction:column;gap:.2rem;
+font-size:.78rem;color:var(--dim)}
+form.act textarea,form.act input[type=text],form.act input[type=number],
+form.act select{
 font:inherit;padding:.45rem .55rem;border:1px solid var(--line);
-border-radius:6px;background:var(--card);color:var(--fg)}
+border-radius:6px;background:var(--bg);color:var(--fg)}
+form.act select{cursor:pointer}
+form.act textarea:focus-visible,form.act input:focus-visible,
+form.act button:focus-visible,.nav a:focus-visible{
+outline:2px solid var(--accent,#2563eb);outline-offset:2px}
 form.act textarea{flex:1 1 22rem;min-height:4.5rem}
 form.act button{font:inherit;font-weight:600;padding:.45rem 1rem;
-border:1px solid var(--line);border-radius:6px;background:var(--card);
-color:var(--fg);cursor:pointer}
+border:1px solid var(--line);border-radius:6px;background:var(--bg);
+color:var(--fg);cursor:pointer;align-self:flex-end}
+form.act button:hover{border-color:var(--dim)}
+/* primary：一屏里只有一个。第一个表单是这一页的主动作，另两个是事后补记录。
+   注意别在 CSS 注释里写业务词（如那三个字的动作名）—— 注释会内联进每个
+   页面，测试「无 token 时页面不出现写入口字样」会被注释文字带得误判。 */
+form.act button.primary{background:var(--fg);color:var(--bg);
+border-color:var(--fg)}
+form.act button.primary:hover{opacity:.88}
 .nav{position:sticky;top:0;z-index:5;display:flex;gap:.15rem;
 overflow-x:auto;margin:1.25rem 0 0;padding:.35rem 0;background:var(--bg);
 border-bottom:1px solid var(--line);scrollbar-width:none}
@@ -439,6 +476,11 @@ padding:.4rem .7rem;border-radius:6px;white-space:nowrap}
 .nav a[aria-current]{color:var(--fg);background:var(--card);
 box-shadow:inset 0 0 0 1px var(--line)}
 .nav a.alt{margin-left:auto;font-weight:400}
+/* 唯一的写入口，视觉上与只读页区分开 —— 原来和 5 个只读 tab 完全同款，
+   用户找不到「在哪儿能操作」。左边一道竖条是最轻的区分手段，
+   不动布局也不抢 aria-current 的选中态。 */
+.nav a.do{color:var(--fg);box-shadow:inset 2px 0 0 var(--accent,#2563eb)}
+.nav a.do:hover{background:var(--card)}
 .view{display:none;scroll-margin-top:3.25rem}
 .view.on,.view:target{display:block}
 .view>h2:first-child{margin-top:1.25rem}
@@ -853,8 +895,19 @@ def _ledger(sm: Summary, *, manual_hours: float = MANUAL_HOURS) -> str:
         '<div class="l">假设 · 省下的人力 = 估时×任务数 − 墙钟</div></div>'
         "</div>"
         '<p class="sub assume-note">⚠ 上面第二排两个数字里含<b>人工填的假设</b>'
-        "（单任务估时），不是测量结果。改这个假设：<code>?manual_hours=4</code>。"
-        "第一排四个数字全部来自审计库。</p>")
+        "（单任务估时），不是测量结果。第一排四个数字全部来自审计库。</p>"
+        # 原来只在文案里写「改这个假设：?manual_hours=4」，等于让人手改地址栏。
+        # 用 GET 表单：纯读、无副作用，所以不需要 token，也不该用 POST。
+        # GET 表单提交会丢掉 fragment（#ledger 之类），页面跳回第一栏。
+        # onsubmit 把当前 hash 塞进 action，提交后还停在这一栏。JS 没跑
+        # 也只是回到第一栏，功能不坏 —— 不是渐进增强的必要条件。
+        '<form class="assume-edit" method="get"'
+        ' onsubmit="this.action=location.pathname+location.hash">'
+        '<label>人工单任务估时（假设）'
+        f'<input type="number" name="manual_hours" value="{manual_hours:g}"'
+        ' min="0.1" max="200" step="0.5" aria-label="人工单任务估时（小时）">'
+        "</label><button type=\"submit\">重算</button>"
+        '<span class="dim">只影响第二排两个数字</span></form>')
 
 
 #: 示例库的横幅。判据是**库文件名**而不是一个参数：参数会漏传，而一张编出来的
@@ -926,22 +979,50 @@ def _actions(token: str, *, launchd: str) -> str:
     一个网页按钮绕过其中任何一条都是静默的（页面上只会显示「已开始」）。
     """
     t = f'<input type="hidden" name="token" value="{_e(token)}">'
+    # action 用**相对**路径（"prd" 而不是 "/prd"）。绝对路径在反向代理后面
+    # 会指错地方：Caddy 的 handle_path /factory* 剥掉前缀后，浏览器仍然按
+    # 页面地址算 action，"/prd" 解析成 http://host/prd —— 那个路径可能归
+    # 另一个服务，POST 直接 502，而页面上看不出任何异常（按钮点了没反应）。
+    # 相对路径跟着当前目录走：/factory/ → /factory/prd，本地 / → /prd，
+    # 两种部署都对，不需要往页面里注入前缀配置。
     return f"""
-<form class="act" method="post" action="/prd">{t}
-<textarea name="text" required placeholder="口语化说清要做什么。会走完整闸门：
-没有可执行判据、碰了危险 op、spec_ref 缺失，都会被拦下并把原因显示出来。"
+<div class="acts">
+<form class="act" method="post" action="prd">{t}
+<div class="act-hd"><b>提一个需求</b>
+<p class="sub">口语化说清要做什么就行。提交后走完整闸门：没有可执行判据、
+碰了危险 op、spec_ref 缺失，都会被拦下并把原因显示在这一页上。
+过了闸门才入队，不会直接开跑。</p></div>
+<textarea name="text" required aria-label="需求描述"
+placeholder="例：登录页加一个「忘记密码」入口，点了发重置邮件。
+判据：未注册邮箱也返回成功（不泄露注册状态）；重置链接 30 分钟过期。"
 ></textarea>
-<button type="submit">提需求 → 过闸门 → 入队</button></form>
-<form class="act" method="post" action="/override">{t}
-<input type="text" name="attempt_id" required placeholder="attempt id" size="8">
-<input type="text" name="resolution" required placeholder="merged / escalated"
-size="14">
-<button type="submit">人工定案</button></form>
-<form class="act" method="post" action="/defect">{t}
-<input type="text" name="attempt_id" placeholder="attempt id（可空）" size="14">
-<input type="text" name="commit" placeholder="或 commit sha" size="12">
-<input type="text" name="defect_id" required placeholder="defect id" size="12">
-<button type="submit">报缺陷（记漏报）</button></form>
+<button class="primary" type="submit">提需求 → 过闸门 → 入队</button></form>
+<form class="act" method="post" action="override">{t}
+<div class="act-hd"><b>人工定案</b>
+<p class="sub">机器判不了、或者判错了的那次尝试，由你拍板。attempt id
+在下面「每次尝试」里，点开就能看到。写进审计库，会算进监工的准确率。</p></div>
+<label class="fld">attempt id
+<input type="text" name="attempt_id" required placeholder="如 A-1042" size="10">
+</label>
+<label class="fld">定成
+<select name="resolution" required>
+<option value="merged">merged（这次是好的，合并）</option>
+<option value="escalated">escalated（升级给人处理）</option>
+</select></label>
+<button type="submit">写入定案</button></form>
+<form class="act" method="post" action="defect">{t}
+<div class="act-hd"><b>报缺陷</b>
+<p class="sub">出货之后才发现的问题，记在这里 —— 它会被算成漏报，
+反过来压低放行它的那道闸门的可信度。attempt id 和 commit 填一个就行。</p></div>
+<label class="fld">attempt id
+<input type="text" name="attempt_id" placeholder="可空" size="10"></label>
+<label class="fld">或 commit
+<input type="text" name="commit" placeholder="sha" size="12"></label>
+<label class="fld">缺陷编号
+<input type="text" name="defect_id" required placeholder="如 BUG-77" size="12">
+</label>
+<button type="submit">记一笔漏报</button></form>
+</div>
 <p class="sub">跑批<b>不在这个页面上</b>：用 <code>factory loop</code>，
 或让 launchd 定时拉起（预算上限、漏账熔断、超时杀孤儿都在那条路上）。
 当前 launchd：{_e(launchd)}</p>"""
@@ -995,7 +1076,10 @@ def _nav(views: list[tuple[str, str, str]]) -> str:
     links = []
     for i, (slug, label, _body) in enumerate(views):
         cur = ' aria-current="page"' if i == 0 else ""
-        links.append(f'<a href="#{_e(slug)}"{cur}>{_e(label)}</a>')
+        # actions 是唯一能写的一栏，给它一道竖条 —— 五个只读 tab 里混一个
+        # 写入口而外观完全一致的话，用户找不到「哪儿能操作」。
+        cls = ' class="do"' if slug == "actions" else ""
+        links.append(f'<a href="#{_e(slug)}"{cls}{cur}>{_e(label)}</a>')
     return ('<nav class="nav">' + "".join(links)
             + '<a class="alt" href="#all">全部展开</a></nav>')
 
@@ -1067,21 +1151,47 @@ def launchd_status(label: str = "com.factory.loop") -> str:
     return f"未装 —— 装法见 examples/launchd/{label}.plist"
 
 
+#: 缺 Host 头时的回退白名单（见 _origin_ok）。正常路径不用它。
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
 def _origin_ok(headers) -> str:
     """跨 origin 的 POST 一律拒。返回空字符串 = 通过，否则是拒绝理由。
 
-    为什么需要这个：本机浏览器上**任何**网页都能往 `127.0.0.1:8787` POST 一个
-    表单（跨域限制拦的是读响应，不是发请求）。而这几个表单会花钱调模型、会往
-    审计库写 resolution。所以判据是 fail-closed：Origin/Referer 只要不是
-    我们自己，就拒 —— 包括「两个头都没有」的情况。curl 也会被拒，那没关系，
-    命令行本来就该直接用 `factory prd`。
+    为什么需要这个：浏览器上**任何**网页都能往这个服务 POST 一个表单（跨域
+    限制拦的是读响应，不是发请求）。而这几个表单会花钱调模型、会往审计库写
+    resolution。所以判据是 fail-closed：Origin/Referer 只要不是我们自己，
+    就拒 —— 包括「两个头都没有」的情况。curl 也会被拒，那没关系，命令行本来
+    就该直接用 `factory prd`。
+
+    判据是「Origin 的 host 等于请求自己的 Host」，即同源，而不是枚举
+    127.0.0.1/localhost。枚举本机名的版本在反向代理后面必然全拒：经 Caddy
+    访问时 Origin 是 `43.153.76.85`，不在名单里 —— 页面能打开、表单能填、
+    一提交就 403，而 403 页面和「操作没生效」在观感上没区别。
+
+    比 Host 头是安全的：它由**浏览器**按用户实际访问的地址填，攻击者页面
+    没法让浏览器在往我们这里发请求时伪造 Origin。反代要求转发真实 Host
+    （Caddy 默认就转发）。
     """
     raw = headers.get("Origin") or headers.get("Referer") or ""
     if not raw:
         return "请求没有 Origin/Referer 头 —— 这些表单只接受本页面提交"
-    host = urlparse(raw).hostname
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        return f"Origin 是 {host}，不是本机页面 —— 拒绝"
+    origin_host = urlparse(raw).hostname
+    # Host 头带端口，Origin 的 hostname 不带，比之前先剥掉。
+    # 用 rpartition 而不是 split(":")，IPv6 字面量（[::1]:8788）才不会被切碎。
+    self_host = (headers.get("Host") or "").strip()
+    if self_host.startswith("["):                      # [::1]:8788 / [::1]
+        self_host = self_host.partition("]")[0].lstrip("[")
+    elif ":" in self_host:
+        self_host = self_host.rpartition(":")[0]
+    if not self_host:
+        # HTTP/1.1 要求带 Host，真实浏览器一定带。没有的话退回本机白名单，
+        # 不放行任何新东西 —— 少一个头不该成为绕过同源判定的口子。
+        if origin_host not in _LOCAL_HOSTS:
+            return f"Origin 是 {origin_host}，且请求没有 Host 头 —— 拒绝"
+        return ""
+    if origin_host != self_host:
+        return (f"Origin 是 {origin_host}，与本页地址 {self_host} 不同源 —— 拒绝")
     return ""
 
 
