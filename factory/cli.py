@@ -938,6 +938,18 @@ def _cmd_defect(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_api(ns: argparse.Namespace) -> int:
+    """起只读 JSON API。前端（frontend/）靠它拿数据。
+
+    延迟 import：`factory.api` 只在跑这个子命令时才需要，放模块顶会让
+    每次跑 `factory dispatch` 都白读一遍 http.server。
+    """
+    from factory.api import serve_api
+
+    serve_api(ns.db, ns.queue, port=ns.port)
+    return 0
+
+
 def _cmd_metrics(ns: argparse.Namespace) -> int:
     store = AuditStore(ns.db)
     report = supervisor_metrics(store, task_id=ns.task_id)
@@ -1141,6 +1153,14 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--task-id", default=None, help="省略则统计全库")
     mx.add_argument("--db", default="audit.db")
     mx.set_defaults(func=_cmd_metrics)
+
+    ap = sub.add_parser("api", help="只读 JSON API（给前端用）")
+    ap.add_argument("--db", default="audit.db", help="审计库路径")
+    ap.add_argument("--queue", default="backlog", help="队列根目录")
+    # 只绑 127.0.0.1：外部访问一律走反向代理，认证在那一层做。
+    # API 本身没有任何认证，直接暴露到公网等于把审计库敞开。
+    ap.add_argument("--port", type=int, default=8788, help="监听端口")
+    ap.set_defaults(func=_cmd_api)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)

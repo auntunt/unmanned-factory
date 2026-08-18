@@ -1,0 +1,142 @@
+tasks:
+  - id: T01
+    name: "后端 API 层实现"
+    type: implement
+    depends_on: []
+    estimated_lines: 200
+    can_parallel: true
+    description: |
+      在 factory/ 下新增 api.py，提供三个 JSON 端点：
+      - GET /api/tasks （任务列表，按状态分组）
+      - GET /api/task/:id （单任务详情 + 轮次）
+      - GET /api/stats （全局统计）
+      
+      数据源：audit.db + queue/*.yaml
+      框架：Bottle（已有依赖）
+      不涉及前端代码
+
+  - id: T02
+    name: "React 前端脚手架搭建"
+    type: implement
+    depends_on: []
+    estimated_lines: 100
+    can_parallel: true
+    description: |
+      在项目根目录新建 frontend/ 子目录：
+      - 用 Vite 初始化 React + TypeScript 项目
+      - 配置 TailwindCSS
+      - 安装 react-router-dom、axios
+      - 配置代理：开发时 /api/* → http://localhost:8788/api/*
+      
+      产物：frontend/package.json + vite.config.ts + 基础目录结构
+      不涉及具体页面实现
+
+  - id: T03
+    name: "任务列表页（首页）"
+    type: implement
+    depends_on: [T01, T02]
+    estimated_lines: 150
+    can_parallel: false
+    description: |
+      实现 /app 路由（TaskList.tsx）：
+      - 调用 GET /api/tasks 获取数据
+      - 按状态分五组展示（inbox/running/done/needs-human/blocked）
+      - 每个任务显示：task_id、prompt 前 50 字、状态徽章
+      - 点击跳转 /app/task/:id
+      - 每 60 秒自动刷新（useEffect + setInterval）
+      
+      样式：卡片布局，状态用颜色区分
+
+  - id: T04
+    name: "任务详情页（时间线）"
+    type: implement
+    depends_on: [T01, T02]
+    estimated_lines: 200
+    can_parallel: false
+    description: |
+      实现 /app/task/:id 路由（TaskDetail.tsx）：
+      - 调用 GET /api/task/:id 获取数据
+      - 顶部：任务信息（prompt 全文、闸门等级、总花费）
+      - 中部：轮次时间线（垂直步骤条，attempt 1 → 2 → ... → merged）
+      - 每轮显示：attempt_no、model、cost、tokens、resolution、监工判词
+      - 判词默认折叠，点击展开 JSON
+      
+      样式：时间线用 Ant Design Steps 或自实现
+
+  - id: T05
+    name: "统计页"
+    type: implement
+    depends_on: [T01, T02]
+    estimated_lines: 100
+    can_parallel: false
+    description: |
+      实现 /app/stats 路由（Stats.tsx）：
+      - 调用 GET /api/stats
+      - 显示：总任务数、总花费、成功率、平均每任务花费
+      - 简单卡片布局，数字大号显示
+      
+      可选：echarts/recharts 画费用趋势图（nice-to-have）
+
+  - id: T06
+    name: "删除旧 dashboard 和 console"
+    type: implement
+    depends_on: []
+    estimated_lines: 50
+    can_parallel: true
+    description: |
+      删除以下文件：
+      - factory/dashboard.py
+      - factory/console.py
+      - factory/console_read.py
+      - factory/console_render.py
+      - factory/console_server.py
+      
+      从 factory/cli.py 移除对应的 CLI 命令注册
+      （dashboard / console 子命令）
+
+  - id: T07
+    name: "前端打包与部署配置"
+    type: implement
+    depends_on: [T03, T04, T05]
+    estimated_lines: 100
+    can_parallel: false
+    description: |
+      - 编写 frontend/build.sh：npm run build，产物到 frontend/dist
+      - 新增 deploy/factory-frontend.service：
+        ExecStart=npm run dev --prefix /path/to/frontend（开发模式）
+        或 serve frontend/dist（生产模式，需装 serve）
+      - 更新 deploy/Caddyfile：
+        反代 /app/* → http://localhost:5173（Vite dev）
+        或 /app/* → 静态文件 frontend/dist
+      
+      产物：systemd 单元 + Caddy 配置片段
+
+  - id: T08
+    name: "集成测试与文档"
+    type: test
+    depends_on: [T01, T03, T04, T05, T07]
+    estimated_lines: 150
+    can_parallel: false
+    description: |
+      - 编写 tests/test_api.py：
+        测试三个 API 端点返回 200 + JSON schema 正确
+      - 编写 frontend/README.md：
+        本地开发、打包、部署步骤
+      - 手动冒烟测试：
+        启动后端 + 前端，打开浏览器验证任务列表、详情页、统计页
+      
+      产物：pytest 测试用例 + README
+
+# 并行批次划分（DAG 拓扑排序）
+batches:
+  - batch: 1
+    tasks: [T01, T02, T06]  # 三个独立任务，可并行
+  
+  - batch: 2
+    tasks: [T03, T04, T05]  # 依赖 T01+T02，三个页面可并行开发
+  
+  - batch: 3
+    tasks: [T07]            # 依赖前端三页面完成
+  
+  - batch: 4
+    tasks: [T08]            # 最后集成测试
