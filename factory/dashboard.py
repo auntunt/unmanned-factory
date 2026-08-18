@@ -1307,6 +1307,13 @@ def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None,
     token = secrets.token_urlsafe(24)
     launchd = launchd_status()
 
+    # 对话式控制台。挂 /console/*，和这一页共存而不是取代它：
+    # 两者服务的是两种人（维护者看指标 / 提需求的人看进度），
+    # 合成一页的结果是首屏一半在讲「分母=派发过」。见 console.py 顶部。
+    from factory.console_server import ConsoleHandler
+    console = ConsoleHandler(db=str(db), queue=queue, binary=binary,
+                             intake_model="sonnet")
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, body: bytes, ctype: str, code: int = 200) -> None:
             self.send_response(code)
@@ -1332,6 +1339,11 @@ def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None,
             return page.encode("utf-8")
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
+            # /console/* 先走控制台。放在最前面而不是 else 分支里：
+            # SSE 那条要长连接，不能被下面任何 _page() 逻辑碰到。
+            if urlparse(self.path).path.startswith("/console"):
+                if console.handle_get(urlparse(self.path).path, self):
+                    return
             if self.path.startswith("/health"):
                 self._send(b'{"ok":true}', "application/json; charset=utf-8")
             elif self.path.startswith("/state.json"):
@@ -1351,6 +1363,21 @@ def serve(db: str | Path, *, port: int = 8787, task_id: str | None = None,
             from urllib.parse import parse_qs
 
             action = urlparse(self.path).path
+
+            # /console/prd 不走 CSRF token 检查，走自己的 Origin 检查。
+            # Origin 检查和 dashboard 的是同一个函数，不开豁口。
+            if action.startswith("/console"):
+                bad = _origin_ok(self.headers)
+                if bad:
+                    console._json(self, 403, {"ok": False, "error": bad})
+                    return
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = 0
+                body = self.rfile.read(min(n, MAX_POST))
+                if console.handle_post(action, body, self):
+                    return
             bad = _origin_ok(self.headers)
             if bad:
                 self._send(self._page(f'<p class="banner">{_e(bad)}</p>'),
