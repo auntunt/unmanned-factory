@@ -146,7 +146,79 @@ def build_argv(
     if common:
         out += ["--bind", str(common), str(common)]
 
+    # worker binary 自己。第 2 段把 /home 整个 tmpfs 掉了，而 npm -g 的默认
+    # prefix 就在 ~/.npm-global —— 于是 bwrap 报 `execvp <binary>: No such
+    # file or directory`，退出码 127，三轮全灭升级给人。而错误信息里不含
+    # "sandbox" 字样，从日志完全看不出是遮蔽导致的（实测踩过）。
+    #
+    # ro-bind 而不是 bind：worker 有权改 workspace 里的代码，但不该能改
+    # 自己的解释器 —— 那等于给下次派发留后门。只读同时满足可执行。
+    #
+    # 只 bind binary 所在目录而不是整个 $HOME：node 版 CLI 会从
+    # <prefix>/lib/node_modules 加载实现，光 bind bin/ 里的 symlink 不够，
+    # 所以取 prefix 级目录（bin/ 的父级）。
+    exe = _worker_exe(argv)
+    if exe is not None and argv:
+        for d in _binary_deps(argv[0], exe):
+            out += ["--ro-bind-try", str(d), str(d)]
+
     return [*out, *argv]
+
+
+def _worker_exe(argv: list[str]) -> Path | None:
+    """argv[0] → 真实可执行文件路径。解析 symlink，查 PATH。"""
+    if not argv:
+        return None
+    raw = argv[0]
+    found = raw if "/" in raw else shutil.which(raw)
+    if not found:
+        return None
+    try:
+        return Path(found).resolve()
+    except OSError:
+        return None
+
+
+def _which_dir(name: str) -> Path | None:
+    """裸名（不含 /）→ which 后的目录。找不到返回 None。"""
+    found = shutil.which(name)
+    return Path(found).parent if found else None
+
+
+def _binary_deps(raw: str, exe: Path) -> list[Path]:
+    """binary 需要挂进沙箱的目录集合。
+
+    要挂**两处**，因为 argv[0] 和它 resolve 后的目标常常不在同一棵子树：
+
+      ~/.npm-global/bin/claude              ← argv[0]，一个 symlink
+        → ~/.npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+
+    只挂 resolve 后的目标，execvp 找 argv[0] 那个 symlink 时仍然扑空
+    （bwrap 报 `No such file or directory`，看不出是遮蔽导致的）；只挂
+    argv[0] 的目录，symlink 能找到但指向的实现不在。实测两个都踩过。
+
+    /home 之外的路径不用管：第 1 段的 ro-bind / 已经覆盖。
+    """
+    home = Path.home()
+    out: list[Path] = []
+
+    # 裸名（argv[0] 不含 /）时 which 已经解析出了带路径的形式，用它的目录；
+    # 写 Path(raw).parent 会得到 "."，于是 symlink 那一层的挂载静默丢掉。
+    lookup = Path(raw).parent if "/" in raw else _which_dir(raw)
+
+    for p in (lookup, exe.parent):
+        if p is None:
+            continue
+        try:
+            p.resolve().relative_to(home)
+        except (ValueError, OSError):
+            continue
+        # bin/ 下的可执行 → 挂父级，一起覆盖同级 lib/（node 包的实现在那）
+        d = p.parent if p.name in ("bin", "sbin") else p
+        if d not in out:
+            out.append(d)
+
+    return out
 
 
 def prepare(argv: list[str], workspace: Path, stack: object) -> tuple[list[str], dict[str, str]]:
