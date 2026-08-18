@@ -981,26 +981,6 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_dashboard(ns: argparse.Namespace) -> int:
-    # 延迟 import：dashboard 拉了 http.server，而 run/loop 这两条热路径不需要它。
-    from factory.dashboard import build_demo, build_demo_queue, export, serve
-
-    db = ns.db
-    if ns.demo:
-        # 固定写 demo.db 而不是覆盖 --db：--demo 覆盖真实审计库是不可逆的。
-        db = build_demo("demo.db")
-        print(f"示例库：{db}（页面上会挂「示例数据」横幅）")
-        # 队列也一并造。同理固定写 demo-queue/ 而不是往 --queue 指的目录里塞
-        # 编出来的条目 —— 那些条目会被真的 loop 认领并真的花钱。
-        if not ns.queue:
-            ns.queue = build_demo_queue("demo-queue")
-            print(f"示例队列：{ns.queue}（树的依赖边从这里读）")
-    if ns.once:
-        return export(db, ns.once, task_id=ns.task_id, queue=ns.queue)
-    return serve(db, port=ns.port, task_id=ns.task_id, queue=ns.queue,
-                 workspace=ns.workspace, binary=ns.binary)
-
-
 def _add_dispatch_args(p: argparse.ArgumentParser) -> None:
     """run 和 loop 共用的派发参数。
 
@@ -1161,25 +1141,6 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--task-id", default=None, help="省略则统计全库")
     mx.add_argument("--db", default="audit.db")
     mx.set_defaults(func=_cmd_metrics)
-
-    # 变量名不叫 db：这一段里 `--db` 满天飞，`db.add_argument("--db")` 读起来
-    # 像是在给自己加参数。
-    dash = sub.add_parser("dashboard", help="本地网页看板：跑批结果 + 闸门体系")
-    dash.add_argument("--db", default="audit.db")
-    dash.add_argument("--task-id", default=None, help="省略则看全库")
-    dash.add_argument("--port", type=int, default=8787)
-    dash.add_argument("--once", metavar="OUT.html", default=None,
-                      help="不起服务，导出一份自包含的静态 HTML（发给别人用这个）")
-    dash.add_argument("--demo", action="store_true",
-                      help="用示例数据（写 demo.db，页面会挂「示例数据」横幅）")
-    dash.add_argument("--queue", default=None, metavar="DIR",
-                      help="队列目录。给了才有依赖边（树）和网页提需求；"
-                           "不给的话树退化成平表")
-    dash.add_argument("--workspace", default=None, metavar="DIR",
-                      help="仓库路径，供网页提需求时跑 check 探针")
-    dash.add_argument("--binary", default="claude",
-                      help="网页提需求时做提取的 CLI")
-    dash.set_defaults(func=_cmd_dashboard)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)

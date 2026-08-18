@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from factory.audit.models import Resolution, SupervisorRole, Verdict
-from factory.dashboard import FAULT_CLAIMS, GATE_CLAIMS
+from factory.gate_claims import FAULT_CLAIMS, GATE_CLAIMS
 from factory.dispatcher import Dispatcher
 from factory.metrics import GateMetrics, gate_metrics
 from factory.supervisors.base import SupervisorReport
@@ -201,10 +201,10 @@ def test_dashboard_claim_tables_cover_every_blocked_name():
     undocumented = names - documented
     assert not undocumented, (
         f"这些闸门拦了货却没有说明文字：{sorted(undocumented)}。"
-        f"加进 dashboard.GATE_CLAIMS（是闸门）或 FAULT_CLAIMS（是故障）"
+        f"加进 gate_claims.GATE_CLAIMS（是闸门）或 FAULT_CLAIMS（是故障）"
     )
 
     stale = documented - names
     assert not stale, (
-        f"这些名字在 dashboard 表里但 dispatcher 已经不用了：{sorted(stale)}"
+        f"这些名字在 gate_claims 表里但 dispatcher 已经不用了：{sorted(stale)}"
     )

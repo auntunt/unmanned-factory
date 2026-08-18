@@ -175,7 +175,7 @@ class GateMetrics:
     12 道的命中稀释掉了。改进决策要的是「哪一道该删、哪一道该修」，那必须
     按闸门看。
 
-    身份取 claim 的 `check` 字段，不新增数据库列：dashboard 的 GATE_CLAIMS /
+    身份取 claim 的 `check` 字段，不新增数据库列：gate_claims 的 GATE_CLAIMS /
     FAULT_CLAIMS 已经用同一套读法，加列等于把同一个事实存两遍，然后等它们
     不一致。
     """
@@ -225,7 +225,7 @@ def gate_metrics(
 ) -> dict[str, GateMetrics]:
     """按 (role, claim 的 check 名) 二级聚合，键是 `role:gate`（§9.2）。
 
-    `known_gates` 传闸门名清单（dashboard.GATE_CLAIMS）时，**没触发过的闸门
+    `known_gates` 传闸门名清单（gate_claims.GATE_CLAIMS）时，**没触发过的闸门
     也会出现在结果里**，fired=0。这是这个函数存在的主要理由：一道从不触发的
     闸门只有在报表上占一行、写着「从未触发」，才会有人去查它是不是写坏了。
     只统计出现过的 claim 等于让坏掉的闸门继续隐身。
