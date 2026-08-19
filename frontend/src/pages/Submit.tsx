@@ -8,8 +8,6 @@ export default function Submit() {
 
   const [taskId, setTaskId] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [checkCommand, setCheckCommand] = useState('uv run pytest tests/ -q')
-  const [checkTimeout, setCheckTimeout] = useState(300)
   const [maxRounds, setMaxRounds] = useState(3)
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -26,30 +24,12 @@ export default function Submit() {
         throw new Error('任务描述不能为空')
       }
 
-      // 构造 YAML
+      // 构造最小 YAML：只有目标，AI 自己决定怎么验证
       const yaml = `task_id: ${taskId}
 prompt: |
 ${prompt.split('\n').map(line => '  ' + line).join('\n')}
 
-declared_ops:
-  - edit_code
-  - run_tests
-
 max_rounds: ${maxRounds}
-
-checks:
-  - name: main_check
-    command: ${checkCommand}
-    expect: exit_zero
-    timeout_s: ${checkTimeout}
-
-  - name: no_regression
-    command: |
-      uv run pytest tests/ -q \\
-        --deselect tests/test_e2e_smoke.py \\
-        --deselect tests/test_parallel.py::test_three_tasks_run_in_parallel_and_all_merge
-    expect: exit_zero
-    timeout_s: 900
 `
 
       // 调用后端 API 投递
@@ -77,7 +57,7 @@ checks:
     <div className="mx-auto max-w-3xl">
       <h1 className="text-2xl font-semibold">投递新任务</h1>
       <p className="mt-2 text-sm text-slate-600">
-        填写任务描述和验收判据，提交后 worker 会自动开始处理
+        只需描述目标，AI 会自己决定怎么验证、怎么改代码
       </p>
 
       {error && (
@@ -96,7 +76,7 @@ checks:
             type="text"
             value={taskId}
             onChange={(e) => setTaskId(e.target.value)}
-            placeholder="T-fix-test-bar-failure"
+            placeholder="T-fix-login-crash"
             className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
             required
           />
@@ -113,7 +93,7 @@ checks:
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            rows={10}
+            rows={12}
             placeholder={`修复 tests/test_foo.py::test_bar 失败
 
 失败信息：assert result == 42, got 41
@@ -125,39 +105,8 @@ checks:
             required
           />
           <p className="mt-1 text-xs text-slate-500">
-            包含：目标、背景、约束、已知信息。越具体越好。
+            包含：目标、背景、约束、已知信息。AI 会自己决定怎么验证。
           </p>
-        </div>
-
-        {/* Check Command */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700">
-            验收命令 <span className="text-red-500">*</span>
-          </label>
-          <input
-            type="text"
-            value={checkCommand}
-            onChange={(e) => setCheckCommand(e.target.value)}
-            placeholder="uv run pytest tests/test_target.py -v"
-            className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
-            required
-          />
-          <p className="mt-1 text-xs text-slate-500">
-            验证修复目标的命令，如 pytest 测试、编译命令等
-          </p>
-        </div>
-
-        {/* Check Timeout */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700">验收超时（秒）</label>
-          <input
-            type="number"
-            value={checkTimeout}
-            onChange={(e) => setCheckTimeout(parseInt(e.target.value))}
-            min={30}
-            max={3600}
-            className="mt-1 block w-32 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
-          />
         </div>
 
         {/* Max Rounds */}
@@ -172,7 +121,7 @@ checks:
             className="mt-1 block w-32 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
           />
           <p className="mt-1 text-xs text-slate-500">
-            3 轮：haiku → sonnet → opus；失败后升级给人工
+            默认 3 轮：haiku → sonnet → opus；失败后升级给人工
           </p>
         </div>
 
