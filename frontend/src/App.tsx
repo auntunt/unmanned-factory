@@ -2,6 +2,7 @@ import { createBrowserRouter, Link, RouterProvider, useRouteError } from 'react-
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import Stats from './pages/Stats'
+import Submit from './pages/Submit'
 
 /** 顶部导航 + 内容区。三个页面共用，所以放在路由的 element 外层。 */
 function Shell({ children }: { children: React.ReactNode }) {
@@ -15,6 +16,9 @@ function Shell({ children }: { children: React.ReactNode }) {
           <nav className="flex gap-4 text-sm">
             <Link to="/" className="text-slate-600 hover:text-slate-900">
               任务
+            </Link>
+            <Link to="/submit" className="text-slate-600 hover:text-slate-900">
+              投递
             </Link>
             <Link to="/stats" className="text-slate-600 hover:text-slate-900">
               统计
@@ -57,6 +61,15 @@ const router = createBrowserRouter([
     element: (
       <Shell>
         <TaskList />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/submit',
+    element: (
+      <Shell>
+        <Submit />
       </Shell>
     ),
     errorElement: <ErrorPage />,

@@ -374,7 +374,7 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
             return 200, global_stats(db, queue)
         if clean.startswith("/api/task/"):
             # unquote：task_id 里出现 `/` 或中文时地址栏里是百分号编码的。
-            task_id = unquote(clean[len("/api/task/"):])
+            task_id = unquote(clean[len("/api/task/") :])
             if not task_id:
                 return 404, {"error": "缺少 task_id"}
             detail = task_detail(db, queue, task_id)
@@ -391,6 +391,47 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
         # error 在排查时等于没有。
         return 500, {"error": f"{type(exc).__name__}: {exc}"}
     return 404, {"error": f"no such endpoint: {clean}"}
+
+
+def route_post(path: str, data: dict, *, queue: str | Path) -> tuple[int, dict]:
+    """处理 POST 请求路由"""
+    clean = urlparse(path).path.rstrip("/") or "/"
+    try:
+        if clean == "/api/submit":
+            return submit_task(data, queue)
+    except Exception as exc:  # noqa: BLE001
+        return 500, {"error": f"{type(exc).__name__}: {exc}"}
+    return 404, {"error": f"no such endpoint: {clean}"}
+
+
+def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
+    """投递任务到 inbox"""
+    task_id = data.get("task_id", "").strip()
+    yaml_content = data.get("yaml", "").strip()
+
+    # 验证
+    if not task_id:
+        return 400, {"error": "task_id 不能为空"}
+    if not yaml_content:
+        return 400, {"error": "yaml 内容不能为空"}
+    if not re.match(r"^T-[a-z0-9-]+$", task_id):
+        return 400, {"error": "task_id 必须是 T- 开头的 kebab-case"}
+
+    # 检查是否已存在
+    queue_path = Path(queue)
+    for state_dir in STATES:
+        task_file = queue_path / state_dir / f"{task_id}.yaml"
+        if task_file.exists():
+            return 409, {"error": f"任务已存在于 {state_dir}/"}
+
+    # 写入 inbox（用 open 而不是 write_text，避免某些环境下的权限问题）
+    inbox_file = queue_path / INBOX / f"{task_id}.yaml"
+    try:
+        with open(inbox_file, "w", encoding="utf-8") as f:
+            f.write(yaml_content)
+        return 200, {"ok": True, "task_id": task_id, "file": str(inbox_file)}
+    except Exception as exc:
+        return 500, {"error": f"写入失败: {exc}"}
 
 
 def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
@@ -411,7 +452,7 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
             """CORS 头集中一处。漏贴一个端点的话前端只看到一句语焉不详的
             network error，而后端日志里那次请求是 200 —— 排查方向会被带偏。"""
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
         def _json(self, code: int, payload: dict) -> None:
@@ -426,6 +467,22 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
         def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
             code, payload = route(self.path, db=db, queue=queue)
             self._json(code, payload)
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib 要求这个名字
+            """处理投递任务请求"""
+            try:
+                # 读请求体
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(body)
+                
+                # 路由到 submit 处理函数
+                code, payload = route_post(self.path, data, queue=queue)
+                self._json(code, payload)
+            except json.JSONDecodeError:
+                self._json(400, {"error": "Invalid JSON"})
+            except Exception as exc:  # noqa: BLE001
+                self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
         def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib 要求这个名字
             """CORS 预检。前端跨端口带自定义头时浏览器会先发这个。"""
