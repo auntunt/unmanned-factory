@@ -22,12 +22,18 @@ import contextlib
 import os
 import signal
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 # TERM 之后等多久再 KILL。够 node 跑完 flush，又不至于让「超时」变成
 # 「超时 + 一段谁也说不清的额外等待」。
 GRACE_S = 3.0
+
+# 停滞检测的轮询间隔。0.2s 足够及时（停滞阈值是分钟级），又不至于让
+# 一个空转的 while 占掉可观的 CPU —— 无人循环会连着跑几百个任务。
+_POLL_S = 0.2
 
 
 @dataclass(frozen=True)
@@ -48,14 +54,26 @@ class Timeout(Exception):
     hard_killed = TERM 之后 GRACE_S 内没退，得上 KILL。它进审计的 error_text：
     「超时」和「超时且拒绝优雅退出」是两种不同的现场 —— 后者意味着 transcript
     可能没来得及落盘，而漏账警告唯一能给人的线索就是那个文件。
+
+    stalled = 不是跑满 timeout_s，而是「活着但一直没有任何输出」被提前杀掉。
+    两者进审计要能分辨：跑满超时说明任务太大或判据太慢，是**任务**的问题；
+    停滞说明 worker CLI 起来了却没发出请求（实测 CPU 0%、ep_poll、无网络连接），
+    是**环境**的问题。混成一种，就会拿模型阶梯去重试一个环境故障。
     """
 
-    def __init__(self, timeout_s: float, hard_killed: bool) -> None:
-        super().__init__(f"timeout after {timeout_s}s"
-                         + ("（TERM 无效，已 KILL 整个进程组）"
-                            if hard_killed else ""))
+    def __init__(self, timeout_s: float, hard_killed: bool,
+                 stalled: bool = False, idle_s: float | None = None) -> None:
+        if stalled:
+            msg = (f"stalled: no output for {idle_s:.0f}s "
+                   f"(limit {timeout_s}s not reached)")
+        else:
+            msg = f"timeout after {timeout_s}s"
+        super().__init__(msg + ("（TERM 无效，已 KILL 整个进程组）"
+                                if hard_killed else ""))
         self.timeout_s = timeout_s
         self.hard_killed = hard_killed
+        self.stalled = stalled
+        self.idle_s = idle_s
 
 
 def _killpg(pgid: int, sig: int) -> bool:
@@ -67,13 +85,44 @@ def _killpg(pgid: int, sig: int) -> bool:
         return False
 
 
+def _drain(stream, chunks: list[str], counter: list[int]) -> None:
+    """把一条管道抽干到 EOF，边抽边记字节数。
+
+    按行读而不是 read()：read() 要等 EOF 才返回，那就又变成一次性阻塞，
+    观察不到增量。counter 用单元素 list 而不是 int —— 主线程要看到它变，
+    而 int 是不可变的。GIL 保证 += 对 list 元素的赋值不会撕裂。
+    """
+    try:
+        for line in iter(stream.readline, ""):
+            chunks.append(line)
+            counter[0] += len(line)
+    except (OSError, ValueError):
+        # 管道被 _reap 关掉了。正常竞态，不是错误。
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            stream.close()
+
+
 def run_bounded(argv: list[str] | str, *, cwd: Path | str | None = None,
                 env: dict[str, str] | None = None,
                 timeout_s: float | None = None,
-                shell: bool = False) -> Completed:
+                shell: bool = False,
+                stall_timeout_s: float | None = None) -> Completed:
     """跑一个程序，超时杀整棵进程树，抛 Timeout。
 
     timeout_s=None 表示不限时（探针路径不需要这一层）。
+
+    stall_timeout_s 是**停滞**上限：进程活着但连续这么久没有任何 stdout/stderra
+    增量，就判定挂死，提前杀掉并抛 Timeout(stalled=True)。None 表示不检测。
+
+    为什么需要它：实测 claude CLI 会随机挂死 —— 进程起来了，CPU 0%、卡在
+    ep_poll、**没有任何到中转站的网络连接**，也不退出。光靠 timeout_s 得干等
+    满 15 分钟，而且那种 attempt 记 $0，预算闸门拦不住。一次真实派发里三轮
+    有两轮这么烧掉了。
+
+    判据必须是「无输出增量」而不是「总时长」：真在生成的慢任务一直有 token
+    流出，不能被误杀；挂死的进程一个字节都没有。
 
     shell=True 是给回归监工用的：task YAML 里的 check 命令本来就是 shell
     串（`pytest -q && npm test`）。这条路**更**需要杀整组 —— sh 自己派生的
@@ -86,11 +135,51 @@ def run_bounded(argv: list[str] | str, *, cwd: Path | str | None = None,
         # **我们自己**的进程组 —— 那等于工厂自杀。
         start_new_session=True,
     )
-    try:
-        out, err = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        raise Timeout(timeout_s or 0.0, _reap(proc)) from None
-    return Completed(proc.returncode, out or "", err or "")
+
+    # 不开停滞检测就走原路。communicate 比双线程便宜，而且探针/短命令
+    # （version 探测那种）没必要为了一个用不上的功能多两个线程。
+    if stall_timeout_s is None:
+        try:
+            out, err = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            raise Timeout(timeout_s or 0.0, _reap(proc)) from None
+        return Completed(proc.returncode, out or "", err or "")
+
+    out_chunks: list[str] = []
+    err_chunks: list[str] = []
+    seen = [0]  # 两条管道共用一个计数器：任一条有输出就算「还活着」
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout, out_chunks, seen),
+                         daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, err_chunks, seen),
+                         daemon=True),
+    ]
+    for t in threads:
+        t.start()
+
+    start = time.monotonic()
+    last_seen, last_change = 0, start
+    while True:
+        if proc.poll() is not None:
+            break
+        now = time.monotonic()
+        if timeout_s is not None and now - start >= timeout_s:
+            raise Timeout(timeout_s, _reap(proc)) from None
+        if seen[0] != last_seen:
+            last_seen, last_change = seen[0], now
+        elif now - last_change >= stall_timeout_s:
+            # 活着但一直没吐字节。杀掉并标 stalled —— 上层据此区分
+            # 「任务太慢」和「worker 挂死」，后者不该走模型阶梯重试。
+            raise Timeout(timeout_s or 0.0, _reap(proc),
+                          stalled=True, idle_s=now - last_change) from None
+        time.sleep(_POLL_S)
+
+    # 进程已退出，但管道里可能还有缓冲没读完。join 有上限：逃出进程组的
+    # 后代仍可能抱着写端不放（见 _reap 的注释），那时 readline 永远等不到
+    # EOF，无限 join 会把整个循环挂死在这里 —— 比原来的 bug 更糟。
+    for t in threads:
+        t.join(timeout=GRACE_S)
+    return Completed(proc.returncode, "".join(out_chunks), "".join(err_chunks))
 
 
 def _reap(proc: subprocess.Popen) -> bool:

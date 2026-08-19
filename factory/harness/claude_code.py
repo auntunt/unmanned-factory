@@ -143,6 +143,10 @@ class ClaudeCodeAdapter:
                     cwd=workspace,
                     env=env,
                     timeout_s=limits.timeout_s,
+                    # 挂死止损：CLI 会随机起来但不发请求也不退出（CPU 0%、
+                    # ep_poll、零网络连接）。没有这一层就得干等满 timeout_s，
+                    # 而那种 attempt 记 $0，预算闸门拦不住。
+                    stall_timeout_s=limits.stall_timeout_s,
                 )
             except ProcTimeout as exc:
                 return self._result(
@@ -151,6 +155,9 @@ class ClaudeCodeAdapter:
                     version,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                     error_text=str(exc),
+                    # 停滞和跑满超时都是 TIMEOUT，但成因不同：前者是环境
+                    # 故障（该熔断），后者是任务太大（该换模型重试）。
+                    stalled=getattr(exc, "stalled", False),
                 )
             except OSError as exc:
                 return self._result(
@@ -239,6 +246,7 @@ class ClaudeCodeAdapter:
         session_id: str | None = None,
         transcript_path: str | None = None,
         tool_calls: tuple[ToolCall, ...] = (),
+        stalled: bool = False,
     ) -> AttemptResult:
         """无论成败都捕获 diff —— 失败的 attempt 也可能留下改动，必须入审计。"""
         try:
@@ -246,6 +254,7 @@ class ClaudeCodeAdapter:
         except RuntimeError:
             diff, paths = "", ()
         return AttemptResult(
+            stalled=stalled,
             exit_status=status,
             diff=diff,
             diff_hash=diff_hash(diff),

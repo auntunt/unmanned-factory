@@ -89,6 +89,12 @@ class DispatchReport:
 
 _MAX_LISTED_PATHS = 20
 
+#: 连续多少次「worker 起来了但不产出」就判执行环境故障、当场上人。
+#:
+#: 取 2 而不是 1：单次挂死可能只是中转站抖一下，值得再试一次 —— 实测的
+#: 那次派发里，唯一跑通的产出正是重试拿到的。连着两次就不是抖动。
+_STALL_STREAK_LIMIT = 2
+
 
 def _criteria_delta(before: tuple[str, ...], after: tuple[str, ...]) -> tuple[str, ...]:
     """派发时有、现在没了的标准。给 worker 看的是**丢了哪几条**。
@@ -345,6 +351,12 @@ class Dispatcher:
         # 索引里也是 mode 160000。本仓库一条都没有，但不应写死这个假设。
         gitlinks_before = staged_gitlinks(workspace)
 
+        # 连续「worker 起来了但不吐字节」的次数。挂死是**环境**故障（CLI 卡在
+        # ep_poll、零网络连接），不是模型能力不够 —— 拿 haiku→sonnet→opus 的
+        # 阶梯去重试它，只是把同一个环境问题烧三遍。实测一次派发三轮里两轮
+        # 这么没了，总墙钟 2276s，真正的产出来自唯一没挂的那一轮。
+        stall_streak = 0
+
         for round_no in range(1, task.max_rounds + 1):
             model = self._router.model_for(pre.oracle_class, round_no)
             aid = self._store.open_attempt(
@@ -375,6 +387,31 @@ class Dispatcher:
                 wall_clock_ms=result.wall_clock_ms,
                 harness_version=result.harness_version,
             )
+
+            # 挂死熔断。和下面 merged.faults 那条同构：「重试也是坏的，当场
+            # 上人，不浪费剩余轮次」—— 只是坏的那一侧从监工换成了执行环境。
+            #
+            # 放在监工之前：worker 一个字节都没吐，工作区必然没有产出，
+            # 跑一遍回归监工只是白花几分钟去确认「没改动」。
+            #
+            # 阈值 2 而不是 1：单次挂死可能是中转站抖一下，值得再试一次
+            # （实测里 attempt1 就是重试后跑通的）。连着两次就不是抖动了。
+            if result.stalled:
+                stall_streak += 1
+                if stall_streak >= _STALL_STREAK_LIMIT:
+                    self._store.finalize(aid, Resolution.ESCALATED)
+                    return DispatchReport(
+                        Outcome.ESCALATED,
+                        tuple(attempt_ids),
+                        round_no,
+                        grade,
+                        f"worker 连续 {stall_streak} 次挂死（起来了但不产出），"
+                        f"判为执行环境故障，不再往上换模型：\n{result.error_text}",
+                    )
+            else:
+                # 只要有一轮正常产出就清零 —— 连续性才是环境故障的信号，
+                # 累计次数不是。
+                stall_streak = 0
 
             # 后分级（= 风险监工）：用真实改动的文件再判一次
             # 用 _ops 而不是 task.declared_ops：后分级和预分级必须同一份输入，

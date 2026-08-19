@@ -165,6 +165,9 @@ class ShellAdapter:
                 cwd=workspace,
                 env=env,
                 timeout_s=limits.timeout_s,
+                # 同 claude_code：worker 起来了但不吐字节就提前止损，
+                # 不要干等满 timeout_s 再记一笔 $0 的账。
+                stall_timeout_s=limits.stall_timeout_s,
             )
         except ProcTimeout as exc:
             return self._result(
@@ -173,6 +176,7 @@ class ShellAdapter:
                 version,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 error_text=str(exc),
+                stalled=getattr(exc, "stalled", False),
             )
         except OSError as exc:
             return self._result(
@@ -212,6 +216,7 @@ class ShellAdapter:
         *,
         elapsed_ms: int,
         error_text: str = "",
+        stalled: bool = False,
     ) -> AttemptResult:
         """成败都捕获 diff —— 和 ClaudeCodeAdapter 一致：失败也可能留下改动。
 
@@ -223,6 +228,7 @@ class ShellAdapter:
         except RuntimeError:
             diff, paths = "", ()
         return AttemptResult(
+            stalled=stalled,
             exit_status=status,
             diff=diff,
             diff_hash=diff_hash(diff),
