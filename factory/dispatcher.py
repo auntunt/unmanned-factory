@@ -919,7 +919,10 @@ class Dispatcher:
                 ),
             )
 
-        checks = task.checks + self._runbook_checks(workspace, result)
+        # 读取 checks：优先从任务 YAML，如果为空则从 worktree 的 .checks.json 读取
+        # （允许 worker 自己定义验证方式）
+        checks = task.checks or self._load_worktree_checks(workspace)
+        checks = checks + self._runbook_checks(workspace, result)
         regression = self._supervisor.review(workspace, checks)
 
         # 金丝雀：这一轮动了「能改变裁决」的文件（conftest.py / pyproject.toml
@@ -1026,6 +1029,35 @@ class Dispatcher:
         if beacon is not None:
             reports.append(beacon)
         return tuple(reports)
+
+    def _load_worktree_checks(self, workspace: Path) -> tuple:
+        """从 worktree 的 .checks.json 读取 worker 自己定义的检查。
+        
+        允许 worker 在执行过程中决定验证方式（符合"AI 自己决定 checks"的设计）。
+        文件不存在或格式错误时返回空元组（静默失败，让监工报 no-checks-defined）。
+        """
+        import json
+        from factory.task import CheckSpec
+        
+        checks_file = workspace / ".checks.json"
+        if not checks_file.exists():
+            return ()
+        
+        try:
+            data = json.loads(checks_file.read_text(encoding="utf-8"))
+            return tuple(
+                CheckSpec(
+                    name=c["name"],
+                    command=c["command"],
+                    expect=c.get("expect", "exit_zero"),
+                    value=c.get("value", ""),
+                    timeout_s=int(c.get("timeout_s", 300)),
+                )
+                for c in data.get("checks", [])
+            )
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # 文件格式错误，返回空（监工会报 no-checks-defined）
+            return ()
 
     def _runbook_checks(self, workspace: Path, result) -> tuple:
         """runbook 规则库选出的检查，接在任务自带 check 后面。
