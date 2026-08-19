@@ -101,6 +101,7 @@ def build_argv(
     *,
     factory_root: Path | None = None,
     git_common: Path | None = None,
+    transcript_dir: Path | None = None,
 ) -> list[str]:
     """拼出完整的 bwrap 命令行。独立出来是为了让测试能直接检查顺序。
 
@@ -145,6 +146,11 @@ def build_argv(
     common = git_common if git_common is not None else git_dir(ws)
     if common:
         out += ["--bind", str(common), str(common)]
+    # transcript 出口：worker 把 ~/.claude 写到这里，沙箱外才能读到。
+    # 必须在 --tmpfs /home 之后（此处已是第 3 段），否则 tmpfs 会盖掉它。
+    if transcript_dir is not None:
+        td = Path(transcript_dir).resolve()
+        out += ["--bind", str(td), str(td)]
 
     # worker binary 自己。第 2 段把 /home 整个 tmpfs 掉了，而 npm -g 的默认
     # prefix 就在 ~/.npm-global —— 于是 bwrap 报 `execvp <binary>: No such
@@ -240,8 +246,26 @@ def prepare(argv: list[str], workspace: Path, stack: object) -> tuple[list[str],
 
     ws = Path(workspace).resolve()
     tmp = Path(tempfile.mkdtemp(prefix="factory-work-"))
+    # transcript 出口目录。**每次执行一个新的 mkdtemp**，不是共享路径：
+    # 并行派发（`--parallel`）下两个 attempt 同时跑，共享目录会让 A 的
+    # session 文件出现在 B 的出口里，而 find_transcript 是按 session-id
+    # 全局 glob 的 —— 那时审计里的 transcript_path 指向谁的记录不确定。
+    #
+    # 只 bind 这一个目录，不 bind ~/.claude：worker 有权改 workspace 里的
+    # 代码，但不该能改自己的配置和凭据 —— 那等于给下次派发留后门。
+    #
+    # **刻意不注册进 stack 清理。** tmp 是 worker 的暂存，跑完即弃；transcript
+    # 是审计现场，attempt 记录里的 transcript_path 指着它，事后复盘要读。
+    # 跟着 ExitStack 一起删掉的话，这个修复就等于没做：字段有值，文件没了。
+    transcript = Path(tempfile.mkdtemp(prefix="factory-transcript-"))
     cleanup = getattr(stack, "callback", None)
     if cleanup:
         cleanup(shutil.rmtree, tmp, ignore_errors=True)
 
-    return build_argv(argv, ws, tmp), {"TMPDIR": str(tmp)}
+    # HOME 指向出口目录：claude 只认 $HOME 来决定 transcript 写哪儿，没有
+    # 单独的 flag。第 2 段的 --tmpfs /home 让宿主真 HOME 依然不可见，
+    # 所以这里不是"把家目录还给 worker"，是给它一个空的、一次性的家。
+    return build_argv(argv, ws, tmp, transcript_dir=transcript), {
+        "TMPDIR": str(tmp),
+        "HOME": str(transcript),
+    }

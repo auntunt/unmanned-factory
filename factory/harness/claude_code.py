@@ -31,7 +31,7 @@ from factory.harness import sandbox as sb
 from factory.harness.base import AttemptResult, ExitStatus, Limits, ToolCall
 from factory.harness.proc import Timeout as ProcTimeout
 from factory.harness.proc import run_bounded
-from factory.harness.transcript import find_transcript, parse_tool_calls
+from factory.harness.transcript import find_transcript, parse_tool_calls, projects_root
 from factory.harness.workspace import capture_diff, diff_hash
 from factory.task import Task
 
@@ -110,6 +110,12 @@ class ClaudeCodeAdapter:
         version = self.version()
         started = time.monotonic()
 
+        # 这次执行的 transcript 在哪棵树下。沙箱模式下不是宿主的 ~/.claude
+        # （那边被 --tmpfs /home 盖掉了，worker 写进 tmpfs，沙箱一销毁就没了），
+        # 而是 prepare() 给的那个出口目录。声明在 with 之外：find_transcript
+        # 在沙箱退出之后才跑，那时 argv/overrides 已经出了作用域。
+        transcript_root: Path | None = None
+
         with contextlib.ExitStack() as stack:
             argv = self._argv(task, limits, model)
             env: dict[str, str] | None = None
@@ -118,6 +124,16 @@ class ClaudeCodeAdapter:
                 # 实际没有 —— 那比不开沙箱更危险。
                 argv, overrides = sb.prepare(argv, Path(workspace), stack)
                 env = {**os.environ, **overrides}
+                # prepare() 把出口目录作为 HOME 交回来；claude 只认 $HOME 来
+                # 决定 transcript 写哪儿。用 projects_root() 而不是自己拼
+                # ".claude"/"projects"：那个布局归 transcript 模块管，两处
+                # 各拼一遍的话哪天 CLI 改了目录名，这里会安静地找不到文件
+                # —— 而"找不到"的表现就是 transcript_path=None，正是本次要修的东西。
+                #
+                # 用 `.get` 而非 `in`+索引：后端没给 HOME（macOS Seatbelt 那边
+                # 就没有）时留 None，走下面宿主 ~/.claude 的老路，行为不变。
+                if (sandbox_home := overrides.get("HOME")):
+                    transcript_root = projects_root(Path(sandbox_home))
             try:
                 # 不是 subprocess.run：超时要杀掉整棵进程树。claude 是个
                 # node 进程，会拉起 MCP server 和 Bash 工具的每条命令，
@@ -184,8 +200,10 @@ class ClaudeCodeAdapter:
         # 实测同一次调用 usage.in=27415 而 modelUsage 累计 77856。见 drift 模块。
         tok_in, tok_out = drift.token_split(payload)
         session_id = payload.get("session_id")
+        # 沙箱模式下先看出口目录；transcript_root 为 None（非沙箱、或后端不给
+        # HOME）时退回构造参数 / 宿主 ~/.claude，非沙箱路径一个字没变。
         transcript = (
-            find_transcript(session_id, root=self._projects_root)
+            find_transcript(session_id, root=transcript_root or self._projects_root)
             if session_id
             else None
         )

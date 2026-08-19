@@ -10,12 +10,16 @@
 """
 
 import contextlib
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from factory.harness.transcript import find_transcript, projects_root
 
 # 条件导入：只有 Linux 才能 import sandbox_linux
 if sys.platform.startswith("linux"):
@@ -34,9 +38,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def run_in_sandbox(argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
-    """在沙箱里跑一条命令，返回 CompletedProcess。"""
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=10)
+def run_in_sandbox(
+    argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """在沙箱里跑一条命令，返回 CompletedProcess。
+
+    env 给的是**覆盖**而不是整份环境：bwrap 自己要 PATH 才找得到 sh。
+    transcript 那组测试用它传 HOME —— prepare() 在真实路径上就是这么把
+    出口目录交给 claude 的（CLI 只认 $HOME，没有单独的 flag）。
+    """
+    merged = {**os.environ, **env} if env else None
+    proc = subprocess.run(
+        argv, cwd=cwd, env=merged, capture_output=True, text=True, timeout=10
+    )
     return proc
 
 
@@ -205,3 +219,143 @@ def test_prepare_returns_correct_env(tmp_path):
         assert "TMPDIR" in env
         assert Path(env["TMPDIR"]).exists()
         assert env["TMPDIR"].startswith("/tmp/factory-work-")
+
+
+# --- transcript 出口目录 ---
+#
+# 沙箱丢 transcript 的机制：claude 把对话写 $HOME/.claude/projects/<slug>/
+# <session_id>.jsonl，而第 2 段的 `--tmpfs /home` 把整个 /home 盖掉了 ——
+# 沙箱里的 claude 于是写进 tmpfs，沙箱一销毁记录就没了，审计里
+# transcript_path 永远是 None，事后无法复盘 worker 跟模型说了什么。
+#
+# 修法是开一个**专用**出口目录并把它当 $HOME，而不是把 ~/.claude 整个
+# bind 进去。下面这组测试盯三件事：出口通（写得进、活得下来）、
+# 隔离没被这个洞破坏（宿主 ~/.claude 依然不可见）、每次执行互不可见。
+
+
+def _transcript_dir() -> Path:
+    """造一个出口目录。测试自己负责删 —— prepare() 刻意不删（它是审计现场）。"""
+    return Path(tempfile.mkdtemp(prefix="factory-transcript-"))
+
+
+def test_transcript_dir_is_writable_in_sandbox(tmp_path):
+    """出口通了：沙箱内写得进去，且**沙箱退出后宿主还读得到**。
+
+    这是本次修复的核心判据。断言分两半是刻意的：只断言沙箱内 returncode==0
+    的话，写进 tmpfs 也会是 0（那正是坏掉时的表现 —— 包装器不报错，
+    隔离却是错的），要到沙箱外去 stat 才能分清写的是 bind 还是 tmpfs。
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+
+    home = _transcript_dir()
+    try:
+        # 复刻 claude 的真实布局，连 $HOME 都走 ~ 展开：验的是"把出口目录
+        # 当 HOME 交给子进程"这条路，不是"往一个绝对路径里写文件"。
+        argv = build_argv(
+            ["sh", "-c", 'mkdir -p ~/.claude/projects/slug && '
+                         'echo \'{"type":"assistant"}\' > '
+                         '~/.claude/projects/slug/sess-1.jsonl && echo written'],
+            workspace=ws,
+            tmp_dir=tmp_dir,
+            transcript_dir=home,
+        )
+        proc = run_in_sandbox(argv, cwd=ws, env={"HOME": str(home)})
+        assert proc.returncode == 0, f"沙箱内写 transcript 失败：{proc.stderr}"
+        assert "written" in proc.stdout
+        landed = home / ".claude" / "projects" / "slug" / "sess-1.jsonl"
+        assert landed.exists(), "写进了 tmpfs：沙箱一销毁 transcript 就没了"
+        # find_transcript 是审计真正走的那条路（按 session-id 全局 glob），
+        # 所以判据下到它身上，而不是停在"文件在磁盘上"。
+        found = find_transcript("sess-1", root=projects_root(home))
+        assert found == landed, f"find_transcript 找不到出口里的记录：{found}"
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_real_claude_dir_stays_invisible(tmp_path):
+    """硬约束：出口目录不许把宿主 ~/.claude 带进沙箱。
+
+    worker 有权改 workspace 里的代码，但不该能读改自己的配置和凭据 ——
+    那等于给下次派发留后门。这条测的是"开了出口之后隔离还在"，
+    是上面那条的对偶：少了它，把 ~/.claude 整个 bind 进去也能让上面全绿。
+    """
+    real = Path.home() / ".claude"
+    if not real.exists():
+        pytest.skip("宿主没有 ~/.claude，这条无从验证")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+
+    home = _transcript_dir()
+    try:
+        argv = build_argv(
+            ["sh", "-c", f"test -e {real} && echo VISIBLE || echo hidden"],
+            workspace=ws,
+            tmp_dir=tmp_dir,
+            transcript_dir=home,
+        )
+        proc = run_in_sandbox(argv, cwd=ws)
+        assert "hidden" in proc.stdout, (
+            f"宿主 {real} 在沙箱里可见：worker 能读到自己的凭据")
+        assert "VISIBLE" not in proc.stdout
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_build_argv_transcript_dir_bind_after_tmpfs(tmp_path):
+    """transcript_dir 的 --bind 必须出现在 --tmpfs /home 之后（mount 顺序保证）。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+
+    transcript_home = Path(tempfile.mkdtemp(prefix="factory-transcript-"))
+    try:
+        argv = build_argv(
+            ["true"],
+            workspace=ws,
+            tmp_dir=tmp_dir,
+            transcript_dir=transcript_home,
+        )
+        # 找 --tmpfs /home 和 --bind transcript 的位置
+        home_tmpfs_idx = next(
+            i for i, a in enumerate(argv) if a == "--tmpfs" and argv[i + 1] == "/home"
+        )
+        bind_idx = next(
+            i for i, a in enumerate(argv) if a == "--bind" and argv[i + 1] == str(transcript_home)
+        )
+        assert bind_idx > home_tmpfs_idx, (
+            f"transcript --bind (idx {bind_idx}) 必须在 --tmpfs /home (idx {home_tmpfs_idx}) 之后"
+        )
+    finally:
+        shutil.rmtree(transcript_home, ignore_errors=True)
+
+
+def test_home_isolation_not_broken_by_transcript_dir(tmp_path):
+    """给定 transcript_dir 时，宿主真实 HOME 仍然隔离——沙箱内写 $HOME 不穿透。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tmp_dir = tmp_path / "tmp"
+    tmp_dir.mkdir()
+
+    transcript_home = Path(tempfile.mkdtemp(prefix="factory-transcript-"))
+    real_home_marker = Path.home() / f".bwtest-isolation-{tmp_path.name}"
+    assert not real_home_marker.exists()
+
+    try:
+        argv = build_argv(
+            ["sh", "-c", f"echo x > {real_home_marker}; echo done"],
+            workspace=ws,
+            tmp_dir=tmp_dir,
+            transcript_dir=transcript_home,
+        )
+        run_in_sandbox(argv, cwd=ws)
+        assert not real_home_marker.exists(), "宿主 HOME 隔离被 transcript_dir 破坏了"
+    finally:
+        real_home_marker.unlink(missing_ok=True)
+        shutil.rmtree(transcript_home, ignore_errors=True)

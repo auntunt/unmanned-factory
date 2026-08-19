@@ -15,8 +15,14 @@ from pathlib import Path
 from factory.harness.base import ToolCall
 
 
-def projects_root() -> Path:
-    return Path.home() / ".claude" / "projects"
+def projects_root(home: Path | None = None) -> Path:
+    """`<home>/.claude/projects`。home 省略时用宿主的 `~`。
+
+    带 home 参数是给沙箱用的：那边 claude 的 $HOME 被指到一个每次执行独立的
+    出口目录，transcript 落在那棵树里而不是宿主 `~`。布局只写在这一处，
+    调用方不该自己拼 ".claude"/"projects"。
+    """
+    return (home or Path.home()) / ".claude" / "projects"
 
 
 def find_transcript(session_id: str, root: Path | None = None) -> Path | None:
