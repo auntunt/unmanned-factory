@@ -32,16 +32,26 @@ class Limits:
     max_turns: int | None = None
     timeout_s: int = 900
     #: 连续多久没有任何 stdout/stderr 增量就判 worker 挂死，提前杀掉。
-    #: None = 不检测（只保留 timeout_s 那道墙）。
+    #: None = 不检测（只保留 timeout_s 那道墙）。**默认必须是 None。**
     #:
-    #: 120s 是这么定的：实测挂死的进程从头到尾**一个字节都没有**，而正常
-    #: 执行在首个 token 之前也有等待 —— claude 要先做 init、读 CLAUDE.md、
-    #: 起 MCP server，stream-json 的第一帧不是立刻来的。取 2 分钟给足冷启动
-    #: 余量，同时把干等从 900s 砍到 120s：一轮省 13 分钟，三轮阶梯省 40 分钟。
+    #: 为什么默认关掉：ClaudeCodeHarness 用 `--output-format json`，那是
+    #: **非流式**的 —— claude 全程不输出任何东西，跑完才一次性吐出整个 JSON。
+    #: 在这种格式下「无输出增量」不代表挂死，它是正常状态。开了就会把每个
+    #: 真实任务都杀掉。
     #:
-    #: 不要用「总时长」代替它 —— 真在生成的慢任务持续吐 token，按总时长杀
-    #: 会误杀，按增量杀不会。
-    stall_timeout_s: float | None = 120.0
+    #: 血的教训（2026-08-19 实测）：默认设 120.0 之后投一个真任务，三轮
+    #: haiku/sonnet/opus 的 wall_clock_ms 是 120098 / 120097 / 120099 ——
+    #: 毫秒级贴着阈值，diff_hash 三轮相同（都是空 diff）。全被自己的停滞
+    #: 检测杀掉，报成 `cannot launch claude: [Errno 9] Bad file descriptor`
+    #: （管道已被 _drain 关闭，_reap 再 communicate 时抛的 OSError），
+    #: 一路误导到「启动失败」。
+    #:
+    #: 当初的验证之所以没抓到：拿 `--output-format stream-json` 测的，
+    #: 那个格式一直吐帧，194s 都不会触发。**用错格式验证等于没验证。**
+    #:
+    #: 什么时候可以开：调用方明确知道自己跑的是流式命令（stream-json、
+    #: pytest -v 这类持续输出的），显式传值。别在这里给默认。
+    stall_timeout_s: float | None = None
 
 
 @dataclass(frozen=True)

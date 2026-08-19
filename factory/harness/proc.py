@@ -229,4 +229,14 @@ def _reap(proc: subprocess.Popen) -> bool:
             if stream is not None:
                 with contextlib.suppress(OSError):
                     stream.close()
+    except OSError:
+        # 走停滞检测那条路时，_drain 线程已经把 stdout/stderr close() 了，
+        # 这里的 communicate 再去读就是 EBADF（[Errno 9] Bad file descriptor）。
+        #
+        # 必须在这里咽掉：_reap 是**清理**函数，它的职责是回收，不是报错。
+        # 漏一个 OSError 出去，会被 claude_code / shell 的 `except OSError`
+        # 当成「进程压根没启动」，claim 里写成 `cannot launch claude: ...`
+        # —— 而真相是进程跑过了、被我们自己杀的。实测这个假象让三轮
+        # haiku/sonnet/opus 全烧在一个错误方向上。
+        pass
     return hard
