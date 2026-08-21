@@ -6,6 +6,9 @@ import type { QueueState, TaskDetail as TaskDetailData } from '../types'
 import { usePolling } from '../hooks/usePolling'
 import PipelineStages from '../components/PipelineStages'
 import AttemptTimeline from '../components/AttemptTimeline'
+import { StatusBar } from '../components/ConsoleChrome'
+import { fmtDuration } from '../lib/attemptFormat'
+import { resolutionText } from '../lib/humanize'
 
 const POLL_INTERVAL_MS = 60_000
 
@@ -118,10 +121,12 @@ export default function TaskDetail() {
   }
 
   const running = data.state === 'running'
+  // 真实派工过的轮次。未派工轮 cost 为 0，混在总数里会虚报工作量。
+  const execRounds = data.attempts.filter((a) => (a.cost_usd ?? 0) > 0).length
 
   return (
     <Shell taskId={data.task_id}>
-      <div className="space-y-4">
+      <div className="space-y-3">
         <header className="rounded-lg border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="font-mono text-lg font-semibold text-slate-900">
@@ -157,20 +162,32 @@ export default function TaskDetail() {
             </span>
           </div>
 
-          <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Metric label="总花费" value={`$${data.total_cost_usd.toFixed(4)}`} mono />
-            <Metric
-              label="总耗时"
-              value={`${Math.round(data.total_wall_clock_s)}s`}
-              mono
+          <div className="mt-3 border-t border-slate-200 pt-2">
+            <StatusBar
+              items={[
+                { label: 'cost', value: `$${data.total_cost_usd.toFixed(4)}` },
+                { label: 'wall', value: fmtDuration(data.total_wall_clock_s) },
+                {
+                  label: 'attempts',
+                  value: `${data.attempts.length}${
+                    execRounds === data.attempts.length
+                      ? ''
+                      : ` (${execRounds} 真跑)`
+                  }`,
+                },
+                {
+                  label: 'oracle',
+                  value: data.oracle_class,
+                  tone: 'text-slate-600',
+                },
+              ]}
             />
-            <Metric label="轮次" value={`${data.attempts.length}`} mono />
-            <Metric
-              label="判据类"
-              value={data.oracle_class}
-              hint={data.class_reason}
-            />
-          </dl>
+            {data.class_reason && (
+              <p className="mt-1 font-mono text-[10px] text-slate-400">
+                oracle 依据：{data.class_reason}
+              </p>
+            )}
+          </div>
         </header>
 
         <PipelineStages task={data} />
@@ -211,39 +228,6 @@ export default function TaskDetail() {
         <AttemptTimeline attempts={data.attempts} />
       </div>
     </Shell>
-  )
-}
-
-function Metric({
-  label,
-  value,
-  mono = false,
-  hint,
-}: {
-  label: string
-  value: string
-  mono?: boolean
-  hint?: string
-}) {
-  return (
-    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2">
-      <dt className="text-[11px] uppercase tracking-wide text-slate-400">
-        {label}
-      </dt>
-      <dd
-        className={
-          'text-sm font-semibold text-slate-800' + (mono ? ' font-mono tabular-nums' : '')
-        }
-        title={hint}
-      >
-        {value}
-      </dd>
-      {hint && (
-        <dd className="mt-0.5 truncate text-[11px] text-slate-400" title={hint}>
-          {hint}
-        </dd>
-      )}
-    </div>
   )
 }
 
@@ -311,9 +295,10 @@ function Conclusion({ task }: { task: TaskDetailData }) {
           </>
         ) : task.state === 'needs_human' ? (
           <>
-            自动流程没能收尾，已交回人工。试了 <strong>{attempts}</strong> 轮，
+            自动流程没能收尾，已经交回给你。试了 <strong>{attempts}</strong> 轮
+            {realRuns !== attempts ? `（其中 ${realRuns} 轮真实执行）` : null}，
             花费 <strong>${task.total_cost_usd.toFixed(2)}</strong>。
-            最后一轮结局是 <code className="font-mono text-xs">{last?.resolution ?? '未知'}</code>。
+            {last ? <> 最后一轮：{resolutionText(last.resolution).what}</> : null}
           </>
         ) : task.state === 'running' ? (
           <>
@@ -322,7 +307,7 @@ function Conclusion({ task }: { task: TaskDetailData }) {
           </>
         ) : (
           <>
-            当前状态 <code className="font-mono text-xs">{task.state}</code>，
+            当前状态：{STATE_LABEL[task.state] ?? task.state}。
             {attempts > 0 ? (
               <>
                 {' '}

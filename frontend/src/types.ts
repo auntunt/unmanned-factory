@@ -24,12 +24,22 @@ export interface Verdict {
   claims: Claim[];
 }
 
+export interface PermissionEvent {
+  tool: string;
+  target: string;
+  decision: 'allow' | 'deny' | 'escalate';
+  rule: string;
+  reason: string;
+  tokens: number;
+  cost_usd: number;
+}
+
 export interface Attempt {
   attempt_no: number;
   model: string;
   harness: string;
   harness_version: string;
-  resolution: Resolution;
+  resolution: string;
   commit: string | null;
   cost_usd: number;
   tokens_in: number;
@@ -37,6 +47,7 @@ export interface Attempt {
   wall_clock_s: number;
   created_at: string;
   verdicts: Verdict[];
+  permission_events: PermissionEvent[];
 }
 
 export interface TaskSummary {
