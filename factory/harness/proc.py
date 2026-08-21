@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import resource
 import signal
 import subprocess
 import threading
@@ -76,6 +77,23 @@ class Timeout(Exception):
         self.idle_s = idle_s
 
 
+def _fence(limit: int):
+    """造一个只调 setrlimit 的 preexec 回调。
+
+    工厂函数而不是闭包内联：Popen 的参数表里要能一眼看出这里只挂了一个
+    极小的回调。函数体里**刻意没有 try/except** —— fork 后的子进程里
+    抛异常，CPython 会把它转成 exec 失败并在父进程重新抛出，
+    这正是我们要的：围栏设不上就该让这次派发失败，而不是静默无围栏地跑。
+    上层要软失败的话，在 plan() 那层决定不设（返回 limit=None），不在这里。
+    """
+    soft = int(limit)
+
+    def apply() -> None:
+        resource.setrlimit(resource.RLIMIT_NPROC, (soft, soft))
+
+    return apply
+
+
 def _killpg(pgid: int, sig: int) -> bool:
     """给整组发信号。组已经没了返回 False —— 那是正常竞态，不是错误。"""
     try:
@@ -108,10 +126,15 @@ def run_bounded(argv: list[str] | str, *, cwd: Path | str | None = None,
                 env: dict[str, str] | None = None,
                 timeout_s: float | None = None,
                 shell: bool = False,
-                stall_timeout_s: float | None = None) -> Completed:
+                stall_timeout_s: float | None = None,
+                nproc_limit: int | None = None) -> Completed:
     """跑一个程序，超时杀整棵进程树，抛 Timeout。
 
     timeout_s=None 表示不限时（探针路径不需要这一层）。
+
+    nproc_limit 是**进程围栏**：给子进程设 RLIMIT_NPROC，失控 fork 撞上限
+    就 fork 失败，而不是把整机进程表打满（那时连 sshd 都起不来）。None = 不设。
+    算这个值的是 factory/harness/procfence.py，这里只负责施加。
 
     stall_timeout_s 是**停滞**上限：进程活着但连续这么久没有任何 stdout/stderra
     增量，就判定挂死，提前杀掉并抛 Timeout(stalled=True)。None 表示不检测。
@@ -134,6 +157,15 @@ def run_bounded(argv: list[str] | str, *, cwd: Path | str | None = None,
         # 这一行是整个模块存在的理由。没有它，下面的 killpg 会打到
         # **我们自己**的进程组 —— 那等于工厂自杀。
         start_new_session=True,
+        # 进程围栏。preexec_fn 在 fork 之后、exec 之前跑，所以设的是
+        # **子进程**的 rlimit，编排层自己不受影响。
+        #
+        # preexec_fn 在多线程程序里官方标注 unsafe（fork 后子进程只有
+        # 当前线程，别的线程持有的锁永远解不开）。这里安全的理由很具体：
+        # 回调只调 setrlimit(2) —— 一个不加锁、不分配内存的裸系统调用。
+        # 不要往里加任何 Python 层的东西（日志、字符串格式化都可能触发
+        # 分配器的锁），会在 stall 检测那条双线程路径上偶发死锁。
+        preexec_fn=(_fence(nproc_limit) if nproc_limit else None),  # noqa: PLW1509
     )
 
     # 不开停滞检测就走原路。communicate 比双线程便宜，而且探针/短命令
