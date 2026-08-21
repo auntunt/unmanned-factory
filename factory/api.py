@@ -186,8 +186,8 @@ def _resolution(attempt) -> str:
     return str(attempt.resolution)
 
 
-def _attempt_json(attempt) -> dict:
-    """一轮 attempt 的完整 JSON，含监工裁决。
+def _attempt_json(attempt, permission_events: tuple = ()) -> dict:
+    """一轮 attempt 的完整 JSON，含监工裁决和权限门事件。
 
     `wall_clock_s` 是秒（ms / 1000），单位换算在后端做：契约里写死了这件事，
     让前端除 1000 的话每个用到它的组件都得记住这个数，漏一处就差三个数量级。
@@ -213,6 +213,18 @@ def _attempt_json(attempt) -> dict:
                 "claims": list(v.claims or ()),
             }
             for v in attempt.supervisors
+        ],
+        "permission_events": [
+            {
+                "tool": e.tool,
+                "target": e.target,
+                "decision": e.decision,
+                "rule": e.rule,
+                "reason": e.reason,
+                "tokens": e.tokens,
+                "cost_usd": round(e.cost_usd, 6),
+            }
+            for e in permission_events
         ],
     }
 
@@ -292,7 +304,8 @@ def task_detail(db: str | Path, queue: str | Path, task_id: str) -> dict | None:
     """
     root = _queue_root(queue)
     state, path = _locate(root, task_id)
-    attempts = AuditStore(db).attempts_for(task_id)
+    store = AuditStore(db)
+    attempts = store.attempts_for(task_id)
     if state is None and not attempts:
         return None
 
@@ -311,7 +324,10 @@ def task_detail(db: str | Path, queue: str | Path, task_id: str) -> dict | None:
         "total_wall_clock_s": round(
             sum(a.wall_clock_ms for a in attempts) / 1000, 1),
         # attempts_for() 已按 attempt_no 升序，契约要求的就是这个顺序。
-        "attempts": [_attempt_json(a) for a in attempts],
+        "attempts": [
+            _attempt_json(a, store.permission_events_for(a.id))
+            for a in attempts
+        ],
     }
 
 

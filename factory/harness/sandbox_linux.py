@@ -102,6 +102,7 @@ def build_argv(
     factory_root: Path | None = None,
     git_common: Path | None = None,
     transcript_dir: Path | None = None,
+    extra_writable: tuple[Path, ...] = (),
 ) -> list[str]:
     """拼出完整的 bwrap 命令行。独立出来是为了让测试能直接检查顺序。
 
@@ -151,6 +152,16 @@ def build_argv(
     if transcript_dir is not None:
         td = Path(transcript_dir).resolve()
         out += ["--bind", str(td), str(td)]
+
+    # 权限门的 broker 目录（hook 脚本 + Unix socket）。
+    #
+    # 必须是 --bind 不是 --ro-bind：connect() 到一个 AF_UNIX socket 需要对
+    # 该路径的**写**权限。第 1 段的 `--ro-bind / /` 已经把 /tmp 变成只读，
+    # 于是 hook 里的 connect 拿到 EACCES → 走 except OSError → 静默放行。
+    # 那时门看起来接上了（settings 有、hook 在跑），实际一个动作都拦不住。
+    for extra in extra_writable:
+        p = Path(extra).resolve()
+        out += ["--bind", str(p), str(p)]
 
     # worker binary 自己。第 2 段把 /home 整个 tmpfs 掉了，而 npm -g 的默认
     # prefix 就在 ~/.npm-global —— 于是 bwrap 报 `execvp <binary>: No such
@@ -227,12 +238,21 @@ def _binary_deps(raw: str, exe: Path) -> list[Path]:
     return out
 
 
-def prepare(argv: list[str], workspace: Path, stack: object) -> tuple[list[str], dict[str, str]]:
+def prepare(
+    argv: list[str],
+    workspace: Path,
+    stack: object,
+    *,
+    extra_writable: tuple[Path, ...] = (),
+) -> tuple[list[str], dict[str, str]]:
     """adapter 用的入口：给 argv 套沙箱，并给出要覆盖的环境变量。
 
     返回 env 覆盖而不是直接改 os.environ：TMPDIR 必须指到本次派发私有的目录，
     并且沙箱里只 bind 了这一个 tmp —— 指向别处的话 worker 的工具链
     （pytest、编译器、包管理器）会往只读的 /tmp 写，失败信息跟"沙箱"毫无字面关联。
+
+    extra_writable 是权限门 broker 目录这类「必须可写、又在 workspace 之外」
+    的路径。默认空元组：不传的行为跟接门之前一个字节都不差。
     """
     if not available():
         raise SandboxUnavailable(
@@ -265,7 +285,10 @@ def prepare(argv: list[str], workspace: Path, stack: object) -> tuple[list[str],
     # HOME 指向出口目录：claude 只认 $HOME 来决定 transcript 写哪儿，没有
     # 单独的 flag。第 2 段的 --tmpfs /home 让宿主真 HOME 依然不可见，
     # 所以这里不是"把家目录还给 worker"，是给它一个空的、一次性的家。
-    return build_argv(argv, ws, tmp, transcript_dir=transcript), {
+    wrapped = build_argv(
+        argv, ws, tmp, transcript_dir=transcript, extra_writable=extra_writable
+    )
+    return wrapped, {
         "TMPDIR": str(tmp),
         "HOME": str(transcript),
     }

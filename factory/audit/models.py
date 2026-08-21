@@ -118,3 +118,31 @@ class SupervisorVerdict(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
     attempt: Mapped[TaskAttempt] = relationship(back_populates="supervisors")
+
+
+class PermissionEvent(Base):
+    """权限门事件：一次非 ALLOW 的判决。
+
+    只记 DENY 和 ESCALATE，ALLOW 不记（一次派发几百个 allow 全存下来审计库
+    会被噪声灌满）。和 SupervisorVerdict 平级：都是一次 attempt 里的质量数据。
+    """
+    __tablename__ = "permission_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("task_attempt.id"))
+
+    #: 工具名，如 "Write" / "Bash"
+    tool: Mapped[str] = mapped_column(String(64))
+    #: 目标（文件路径或命令），截断到 500 字符
+    target: Mapped[str] = mapped_column(String(512))
+    #: allow / deny / escalate
+    decision: Mapped[str] = mapped_column(String(16))
+    #: 命中的规则名，如 "protected-path:.github/workflows/**" / "git-reset-hard"
+    rule: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(512))
+
+    #: 走了模型审批的话记成本，静态规则判的是 0
+    tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

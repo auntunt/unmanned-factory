@@ -203,6 +203,22 @@ class Dispatcher:
         self._store.finalize(aid, Resolution.ESCALATED)
         return aid
 
+    def _record_gate_events(self, aid: int) -> None:
+        """把 adapter 上权限门累计的非 ALLOW 事件写进审计。
+
+        用 getattr 探而不是 isinstance(ClaudeCodeAdapter)：dispatcher 只依赖
+        HarnessAdapter 协议，测试里的假 adapter 和将来别的 harness 都不该被迫
+        长出这个方法。没有 broker 的 adapter 直接跳过，行为跟接门之前一致。
+
+        每轮 drain 一次并清空累计：不清的话第 2 轮会把第 1 轮的事件再写一遍，
+        审计里同一个拦截出现在多个 attempt 下，看起来像 worker 反复撞墙。
+        """
+        drain = getattr(self._adapter, "drain_gate_events", None)
+        if drain is None:
+            return
+        for event in drain():
+            self._store.record_permission_event(aid, **event)
+
     def _ops(self, task: Task) -> tuple[str, ...]:
         """分级用的 declared_ops —— **在这里重扫一遍 prompt**，不信 YAML。
 
@@ -387,6 +403,12 @@ class Dispatcher:
                 wall_clock_ms=result.wall_clock_ms,
                 harness_version=result.harness_version,
             )
+
+            # 权限门的事件落库。**紧跟 record_result**，不放在轮次末尾：
+            # 中间任何一个 return（挂死熔断、后分级硬闸门、监工判失败）都会
+            # 跳过后面的代码，那时这一轮被拦下的动作就永远进不了审计 ——
+            # 而恰恰是「被拦了所以任务失败」那几轮最需要留证据。
+            self._record_gate_events(aid)
 
             # 挂死熔断。和下面 merged.faults 那条同构：「重试也是坏的，当场
             # 上人，不浪费剩余轮次」—— 只是坏的那一侧从监工换成了执行环境。

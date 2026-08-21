@@ -230,18 +230,30 @@ def tag_version(raw: str, enabled: bool) -> str:
     return (raw[: 64 - len(VERSION_TAG)] + VERSION_TAG)[:64]
 
 
-def prepare(argv: list[str], workspace: Path, stack: object) -> tuple[list[str], dict[str, str]]:
+def prepare(
+    argv: list[str],
+    workspace: Path,
+    stack: object,
+    *,
+    extra_writable: tuple[Path, ...] = (),
+) -> tuple[list[str], dict[str, str]]:
     """adapter 用的入口：给 argv 套沙箱，并给出要覆盖的环境变量。
 
     返回 env 覆盖而不是直接改 os.environ：TMPDIR 必须指到本次派发私有的目录，
     否则 worker 的工具链会去写 /var/folders 根下 —— 那里住着所有别的任务的
     临时目录，并行派发时互相可写。同时策略也只放开这个私有目录。
+
+    extra_writable 走 policy_for 的同名参数（权限门 broker 目录用它）。
+    签名必须和 sandbox_linux.prepare 一致：sandbox.py 那层是按名字转发的，
+    这边少一个关键字参数的话，Linux 上能跑的调用到了 macOS 直接 TypeError。
     """
     tmp = Path(tempfile.mkdtemp(prefix="factory-work-"))
     cleanup = getattr(stack, "callback", None)
     if cleanup:
         cleanup(shutil.rmtree, tmp, ignore_errors=True)
-    policy = policy_for(Path(workspace), tmp_dir=tmp)
+    policy = policy_for(
+        Path(workspace), tmp_dir=tmp, extra_writable=tuple(extra_writable)
+    )
     return wrap(argv, policy, stack=stack), {"TMPDIR": str(tmp)}
 
 
