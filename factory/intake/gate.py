@@ -36,9 +36,13 @@ _OPS_REASON = "声明了不可逆操作，抽取可能漏项，分级输入必�
 # 每条拦截理由都带一个 [code] 前缀。文案是给人看的、会随时改写，而
 # 「哪条规则拦得最多、拦得对不对」要的是一个不会随文案漂移的键。
 # 没有它，误拒率只能靠 grep 中文串来数 —— 改一次措辞历史数据就断了。
+#
+# `no-checks` 曾在这张表里，随「无 check 不再硬拦」一起删掉。**编码不留空位**：
+# 留着一个永不命中的编码，那张命中率表上就有一行恒为 0，而恒为 0 的行读起来
+# 像「这条规则从没拦到东西」（该删的规则），不像「这条规则已经不存在」。
+# 有元测试守着这件事（test_every_declared_code_is_reachable）。
 RULE_CODES: tuple[str, ...] = (
     "unclear-no-acceptance",
-    "no-checks",
     "no-acceptance",
     "dangling-spec-ref",
     "declared-ops",
@@ -122,12 +126,28 @@ def admit(draft) -> Admission:
         else:
             reasons.append(f"[unclear-no-acceptance] 模型有 {n} 条待确认问题，且没有验收标准兜底")
 
-    # 2. 没有 check → 回归监工无从判定。
-    #    这条不是「检查缺失」这么轻：没有 check 的任务在回归监工那里拿到的是
-    #    no-checks-defined FAIL，三轮全红然后上人。放它进队等于确定烧三轮钱
-    #    换一次「这任务没写验收方式」，而这句话现在就能免费说出来。
+    # 2. 没有 check → worker 自己补。**曾经是硬拦，现在降级成提示。**
+    #
+    #    原来的理由是「没有 check 的任务在回归监工那里拿 no-checks-defined
+    #    FAIL，三轮全红然后上人，放它进队等于确定烧三轮钱」。那个理由当时
+    #    完全成立 —— 但成立的根因不是「任务没写 check」，而是**没有任何一处
+    #    告诉 worker 该把 check 写到哪**：dispatcher 的读取端一直在等 worktree
+    #    根的 `.checks.json`，而第一轮 prompt 只有 task.prompt 原文。
+    #    契约不送达，worker 再聪明也猜不到那个文件名。
+    #
+    #    契约补上之后（factory/checks_contract.py 注入 prompt，dispatcher
+    #    读回并用 vacuous_checks 拦掉 `echo ok` 这类永真判据），「无 check」
+    #    不再等于「确定烧三轮」，而是这套工厂本来的设计姿势：人只说目标，
+    #    验证方式由 worker 决定（ba72d46 的投递表单就是按这个简化的）。
+    #
+    #    仍然留一条 warning：worker 自定判据是自己给自己出考题，比人写的
+    #    check 弱。落在草稿上让人有机会顺手补一条硬的。
+    #
+    #    第 3 条（必须有 acceptance）不动，且正是这条降级的前提 ——
+    #    acceptance 是 worker 写 check 时唯一的锚。两条都空才是真的没法跑。
     if not getattr(draft, "checks", ()):
-        reasons.append("[no-checks] 没有可执行的 check，进队只会烧三轮再上人")
+        warnings.append("没有预置 check，验收判据由 worker 自己写进 "
+                        ".checks.json（acceptance 是它的锚）")
 
     # 3. 验收标准为空 → 只有 check 没有标准时，「全绿」的含义取决于 check 写得
     #    多严。人写 YAML 时能自己权衡，自动进队没人权衡。

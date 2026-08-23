@@ -430,8 +430,28 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
         return 400, {"error": "task_id 不能为空"}
     if not yaml_content:
         return 400, {"error": "yaml 内容不能为空"}
+    # 报错指名道姓。含糊的「必须是 kebab-case」会让人对着
+    # T-FED-updata-001 找不出问题在大写字母上。前端有同样的分级校验，
+    # 这里是绕过前端直接 POST 时的同等待遇。
     if not re.match(r"^T-[a-z0-9-]+$", task_id):
-        return 400, {"error": "task_id 必须是 T- 开头的 kebab-case"}
+        if not task_id.startswith("T-"):
+            return 400, {"error": f"task_id 必须以 T- 开头，当前是 {task_id!r}"}
+        # 只看 T- 之后：前缀那个 T 本来就该大写，连它一起判会把
+        # T-fed_update 误报成「含大写字母 T」，还建议改成 t-fed_update
+        # —— 把合法前缀也毁掉。
+        rest = task_id[2:]
+        if any(c.isupper() for c in rest):
+            upper = "".join(sorted({c for c in rest if c.isupper()}))
+            return 400, {
+                "error": f"task_id 不能含大写字母（{upper}），"
+                f"改成 T-{rest.lower()} 即可"
+            }
+        bad = "".join(sorted({c for c in rest if not re.match(r"[a-z0-9-]", c)}))
+        if bad:
+            return 400, {
+                "error": f"task_id 含不允许的字符（{bad}），只能用小写字母、数字、连字符"
+            }
+        return 400, {"error": "task_id 的 T- 后面不能为空，如 T-fix-bug-123"}
 
     # 检查是否已存在
     queue_path = Path(queue)

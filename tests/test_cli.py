@@ -79,7 +79,11 @@ def test_run_merges_and_returns_zero(tmp_path, repo, task_file, capsys):
     row = AuditStore(db).get(1)
     assert row.task_id == "T-cli-1"
     assert row.resolution == "merged"
-    assert row.model == "haiku"
+    # 第一轮用的就是阶梯第一档。不写死模型名 —— routing.yaml 会调
+    # （曾从 haiku 起步改成 sonnet 起步），写死等于每次改表都得改这里。
+    from factory.audit.models import OracleClass
+    from factory.routing import Router
+    assert row.model == Router.default().model_for(OracleClass.A, 1)
     assert row.diff_hash is not None
 
 

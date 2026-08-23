@@ -175,17 +175,21 @@ def test_multi_claim_verdict_counts_each_gate_once():
 
 
 def test_dashboard_claim_tables_cover_every_blocked_name():
-    """不变量：dispatcher 里每个 _blocked("x") 的 x 都要在两张表之一里。
+    """不变量：dispatcher 和 gates 里每个闸门名都要在两张表之一里。
 
     漏一个的后果是那道闸门在页面上没有说明文字、在闸门报表上不存在 ——
     它拦了货但没人知道是什么拦的。用 AST 抓而不是正则：正则会被
     多行调用和注释里的字符串骗到。
-    """
-    src = (REPO / "factory" / "dispatcher.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
 
+    十道 git 闸门搬到 gates/ 之后,dispatcher 里只剩 `self._blocked(breach.name)`
+    一个间接调用,真正的名字在 `GateSpec.name` 字段里。所以两个文件都要扫。
+    """
     names: set[str] = set()
-    for node in ast.walk(tree):
+
+    # 1. dispatcher.py 里的直接调用: self._blocked("harness", ...)
+    disp_src = (REPO / "factory" / "dispatcher.py").read_text(encoding="utf-8")
+    disp_tree = ast.parse(disp_src)
+    for node in ast.walk(disp_tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
@@ -195,7 +199,20 @@ def test_dashboard_claim_tables_cover_every_blocked_name():
                 if isinstance(node.args[0].value, str):
                     names.add(node.args[0].value)
 
-    assert names, "一个 _blocked() 调用都没抓到，AST 遍历写坏了"
+    # 2. gates/specs.py 里的 GateSpec(name="...", ...)
+    gates_src = (REPO / "factory" / "gates" / "specs.py").read_text(encoding="utf-8")
+    gates_tree = ast.parse(gates_src)
+    for node in ast.walk(gates_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        # GateSpec(name="git-hook-touched", ...)
+        if isinstance(node.func, ast.Name) and node.func.id == "GateSpec":
+            for kw in node.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                    if isinstance(kw.value.value, str):
+                        names.add(kw.value.value)
+
+    assert names, "一个闸门名都没抓到，AST 遍历写坏了"
 
     documented = set(GATE_CLAIMS) | set(FAULT_CLAIMS)
     undocumented = names - documented
@@ -206,5 +223,5 @@ def test_dashboard_claim_tables_cover_every_blocked_name():
 
     stale = documented - names
     assert not stale, (
-        f"这些名字在 gate_claims 表里但 dispatcher 已经不用了：{sorted(stale)}"
+        f"这些名字在 gate_claims 表里但代码已经不用了：{sorted(stale)}"
     )

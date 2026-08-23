@@ -44,6 +44,11 @@ def test_this_repo_itself_reports_nothing():
     """在真仓库上零命中（.venv 里有 724 个 .py，实测过）。
 
     单测里的假仓库不含依赖目录，所以过滤逻辑对不对只有这条能验。
+
+    这条曾经真的红过：前端上线后 frontend/dist/assets/index-*.js 是
+    vite 的构建产物、被 frontend/.gitignore 挡着，于是每次跑都命中一条。
+    修法是在 shadow_code 里排掉打包产物文件名（见 _BUNDLED_ASSET），
+    不是把 dist 加进 _VENDOR_DIRS —— dist/ 正是最好藏代码的地方。
     """
     assert shadow_code(Path(".")) == ()
 
@@ -126,6 +131,23 @@ def test_build_is_checked_even_though_skip_dirs_contains_it(tmp_path):
     (root / "build").mkdir()
     (root / "build" / "hook.py").write_text("print('x')\n", encoding="utf-8")
     assert shadow_code(root) == ("build/hook.py",)
+
+
+def test_hashed_bundles_are_not_reported_but_handwritten_dist_code_is(tmp_path):
+    """打包产物放过，同一个目录里手写的代码照抓。
+
+    这两条必须一起验。只留前半条，等于给 dist/ 开了目录级白名单 ——
+    而 dist/ 正是最好藏代码的地方（见上一条测试）。
+    """
+    root = _repo(tmp_path, ignore="dist/\n")
+    (root / "dist" / "assets").mkdir(parents=True)
+    for name in ("index-DK7trwX8.js", "vendor.a1b2c3d4e5.js", "app-9f8e7d6c.css"):
+        (root / "dist" / "assets" / name).write_text("//x\n", encoding="utf-8")
+    assert shadow_code(root) == (), "vite/webpack 的哈希产物不该报"
+
+    (root / "dist" / "hook.py").write_text("print('x')\n", encoding="utf-8")
+    (root / "dist" / "sneaky.js").write_text("//x\n", encoding="utf-8")
+    assert shadow_code(root) == ("dist/hook.py", "dist/sneaky.js")
 
 
 def test_an_untracked_but_not_ignored_file_is_not_shadow(tmp_path):

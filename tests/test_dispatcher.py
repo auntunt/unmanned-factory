@@ -107,7 +107,7 @@ def test_class_a_all_green_merges_on_first_round(store, tmp_path):
     assert row.spec_ref == ["AC-1"]
     assert row.harness == "fake"
     assert row.harness_version == "2.1.223"
-    assert row.model == "haiku"
+    assert row.model == "sonnet"
     assert row.diff_hash == "a" * 64
     assert row.transcript_path == "/tmp/s.jsonl"
     assert (row.tokens_in, row.tokens_out) == (10, 20)
@@ -128,7 +128,7 @@ def test_failure_sends_claims_back_and_escalates_model(store, tmp_path):
     # 第二轮的 prompt 必须带上具体失败项
     assert "exit 1: 2 failed" in adapter.calls[1][0]
     # 第二轮换更强的模型
-    assert [m for _, m in adapter.calls] == ["haiku", "sonnet"]
+    assert [m for _, m in adapter.calls] == ["sonnet", "opus"]
     assert store.get(report.attempt_ids[0]).resolution == Resolution.REWORKED
     assert store.get(report.attempt_ids[1]).resolution == Resolution.MERGED
 
@@ -286,9 +286,9 @@ def test_a_merge_that_took_two_rounds_leaves_a_complete_audit_trail(store, tmp_p
     assert rows[-1].resolution == Resolution.MERGED
     assert rows[0].resolution == Resolution.REWORKED
 
-    # A 类阶梯 [haiku, sonnet, opus]：第几轮就该是第几档。
-    assert [m for _, m in adapter.calls] == ["haiku", "sonnet"]
-    assert [r.model for r in rows] == ["haiku", "sonnet"]
+    # A 类阶梯 [sonnet, opus, opus]：第几轮就该是第几档。
+    assert [m for _, m in adapter.calls] == ["sonnet", "opus"]
+    assert [r.model for r in rows] == ["sonnet", "opus"]
 
     # 打回的那一轮同样是审计现场：字段要齐，而且要能解释「为什么重跑」。
     assert rows[0].diff_hash and len(rows[0].diff_hash) == 64
@@ -441,3 +441,116 @@ def test_the_commit_covers_exactly_what_diff_hash_covered(store, tmp_path, spec_
     assert report.commit, report.landing_note
     names = g(wt, "show", "--name-only", "--format=", "HEAD").stdout.split()
     assert names == ["greet.py"], f"提交了监工没审过的东西：{names}"
+
+
+# ---------- .checks.json 契约的注入（断链回归） ----------
+
+
+def test_checkless_task_is_told_how_to_leave_checks(store, tmp_path):
+    """没有 checks 的任务，prompt 里必须带上 .checks.json 契约。
+
+    这是一条断链的回归：读取端一直在等 worktree 根的 .checks.json，而
+    worker 从没被告知这个文件的存在 —— 于是它必然三轮全红在
+    no-checks-defined 上（audit.db 里两条实测轨迹，$4.96 / 900s 换回一句
+    「你没写判据」）。契约不送达，这条无人路径就是确定烧钱。
+    """
+    from factory.checks_contract import CHECKS_FILENAME
+
+    adapter = FakeAdapter([_result()])
+    d = Dispatcher(adapter=adapter, store=store,
+                   engine=GradingEngine.default(), limits=Limits())
+    d.run(_task(checks=()), tmp_path)
+
+    first_prompt = adapter.calls[0][0]
+    assert "add greet" in first_prompt, "原任务描述不能被契约挤掉"
+    assert CHECKS_FILENAME in first_prompt
+
+
+def test_task_with_checks_is_not_told_to_write_its_own(store, tmp_path):
+    """自带 checks 的任务不附契约。
+
+    判据已经有了，再要 worker 写一份只会让它去猜一组和 YAML 里那组竞争的
+    判据 —— 而 dispatcher 用的是 `task.checks or load(...)`，worker 写的那组
+    根本不会被读，纯浪费 token 和轮次。
+    """
+    from factory.checks_contract import CHECKS_FILENAME
+
+    adapter = FakeAdapter([_result()])
+    _dispatcher(store, adapter).run(_task(), tmp_path)
+    assert CHECKS_FILENAME not in adapter.calls[0][0]
+
+
+def test_worker_written_checks_are_picked_up_and_can_merge(store, tmp_path):
+    """worker 写下 .checks.json → 真回归监工读到它 → 能 merge。
+
+    这条是「契约送达之后确实走得通」的端到端证据。上一条只证明我们说了，
+    这条证明说了有用 —— 两条都要，缺后者的话读取端悄悄坏掉不会有人知道。
+    """
+    import json as _json
+    import sys
+
+    from factory.checks_contract import CHECKS_FILENAME
+
+    class WritesChecks:
+        """模拟一个照契约行事的 worker。"""
+
+        name = "fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def run(self, task, workspace, limits, *, model=None):
+            self.calls.append((task.prompt, model))
+            # 真写出产物，再写一条真的验它的 check —— 用 `true` 当 check
+            # 会被 vacuous-checks 闸门拦下（这一点本身有测试覆盖），
+            # 那样这条测试就验不到「读取端接通了」这件事。
+            (workspace / "greet.py").write_text(
+                "def greet(n):\n    return n\n", encoding="utf-8")
+            (workspace / CHECKS_FILENAME).write_text(
+                _json.dumps({"checks": [
+                    {"name": "unit",
+                     "command": f"{sys.executable} -c 'import greet'"},
+                ]}),
+                encoding="utf-8",
+            )
+            return _result()
+
+    d = Dispatcher(adapter=WritesChecks(), store=store,
+                   engine=GradingEngine.default(), limits=Limits())
+    report = d.run(_task(checks=()), tmp_path)
+    assert report.outcome == Outcome.MERGED
+    assert report.rounds == 1, "契约送达后应当一轮就过，不该再烧三轮"
+
+
+def test_vacuous_worker_checks_are_rejected_not_merged(store, tmp_path):
+    """worker 用 `echo ok` 糊弄契约 → 打回 vacuous-checks，不能 merge。
+
+    这条比 no-checks-defined 更要紧：没有 check 会打回，而一条永真 check
+    会**骗过**回归监工并 merge —— 那时工厂在「什么都没验」的状态下出货，
+    而审计记录上写着全绿。
+    """
+    import json as _json
+
+    from factory.checks_contract import CHECKS_FILENAME
+
+    class WritesVacuous:
+        name = "fake"
+
+        def __init__(self):
+            self.calls = []
+
+        def run(self, task, workspace, limits, *, model=None):
+            self.calls.append((task.prompt, model))
+            (workspace / CHECKS_FILENAME).write_text(
+                _json.dumps({"checks": [{"name": "ok", "command": "echo ok"}]}),
+                encoding="utf-8",
+            )
+            return _result()
+
+    d = Dispatcher(adapter=WritesVacuous(), store=store,
+                   engine=GradingEngine.default(), limits=Limits())
+    report = d.run(_task(checks=()), tmp_path)
+    assert report.outcome == Outcome.ESCALATED
+    claims = _verdict(store.get(report.attempt_ids[0]),
+                      SupervisorRole.REGRESSION).claims
+    assert claims[0]["check"] == "vacuous-checks"

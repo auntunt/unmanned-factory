@@ -47,64 +47,63 @@ export interface TaskCardProps {
 export function TaskCard({ task, state }: TaskCardProps) {
   const isRunning = state === 'running'
   const absoluteTime = parseMtime(task.mtime)?.toLocaleString('zh-CN') ?? task.mtime
-  // done / needs_human 才带成本与轮次
-  const hasRunInfo =
-    task.total_cost_usd !== undefined || task.attempts_count !== undefined
 
   return (
+    // 方角 + 单像素边 + 左侧状态色条：终端列表项，不是卡片。
+    // hover 用底色变化而不是阴影浮起——阴影在密排列表里会互相干扰。
     <Link
       to={`/task/${encodeURIComponent(task.task_id)}`}
       className={
-        'block rounded-lg border bg-white p-3 shadow-sm transition ' +
-        'hover:border-slate-300 hover:shadow focus:outline-none ' +
-        'focus-visible:ring-2 focus-visible:ring-blue-500 ' +
-        (isRunning ? 'border-blue-200' : 'border-slate-200')
+        'block border-l-2 border-y border-r border-slate-200 bg-white ' +
+        'px-2 py-1.5 font-mono transition hover:bg-sky-50/60 ' +
+        'focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-600 ' +
+        (isRunning ? 'border-l-cyan-600' : 'border-l-slate-300')
       }
     >
-      <div className="flex items-start justify-between gap-2">
-        <span className="font-mono text-xs font-semibold break-all text-slate-800">
+      <div className="flex items-baseline gap-1.5">
+        {/* 行首提示符：终端里每条记录的起始标记 */}
+        <span className="shrink-0 text-slate-400" aria-hidden="true">
+          {isRunning ? '>' : '$'}
+        </span>
+        <span className="min-w-0 flex-1 break-all text-xs font-semibold text-slate-800">
           {task.task_id}
         </span>
-        {isRunning && (
-          <span
-            className="shrink-0 text-blue-600 animate-pulse"
-            aria-label="执行中"
-            title="执行中"
-          >
-            ⟳
-          </span>
+        {task.resolution !== undefined && (
+          <ResolutionBadge resolution={task.resolution} className="shrink-0" />
         )}
       </div>
 
-      <p className="mt-1.5 line-clamp-2 text-sm text-slate-600">
+      <p className="mt-0.5 line-clamp-2 pl-3 text-xs leading-snug text-slate-500">
         {task.prompt_preview}
       </p>
 
-      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-        <span>{task.checks_count} 条判据</span>
-        <span aria-hidden="true">·</span>
-        <time dateTime={task.mtime} title={absoluteTime}>
+      {/* 数据行：字段名淡、值重、数字等宽对齐，一行扫完 */}
+      <div className="mt-1 flex flex-wrap items-baseline gap-x-3 pl-3 text-xs tabular-nums">
+        <span className="text-slate-400">
+          chk <span className="font-medium text-slate-700">{task.checks_count}</span>
+        </span>
+        {task.attempts_count !== undefined && (
+          <span className="text-slate-400">
+            rnd{' '}
+            <span className="font-medium text-slate-700">{task.attempts_count}</span>
+          </span>
+        )}
+        {task.total_cost_usd !== undefined && (
+          <span className="text-slate-400">
+            cost{' '}
+            <span className="font-medium text-amber-700">
+              {formatCost(task.total_cost_usd)}
+            </span>
+          </span>
+        )}
+        <time
+          dateTime={task.mtime}
+          title={absoluteTime}
+          className="ml-auto text-slate-400"
+        >
           {relativeTime(task.mtime)}
         </time>
       </div>
-
-      {hasRunInfo && (
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-slate-100 pt-2 text-xs text-slate-500">
-          {task.total_cost_usd !== undefined && (
-            <span className="font-medium text-slate-700">
-              {formatCost(task.total_cost_usd)}
-            </span>
-          )}
-          {task.total_cost_usd !== undefined &&
-            task.attempts_count !== undefined && <span aria-hidden="true">·</span>}
-          {task.attempts_count !== undefined && (
-            <span>{task.attempts_count} 轮</span>
-          )}
-          {task.resolution !== undefined && (
-            <ResolutionBadge resolution={task.resolution} />
-          )}
-        </div>
-      )}
     </Link>
   )
 }

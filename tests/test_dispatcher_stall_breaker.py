@@ -48,7 +48,15 @@ def test_two_consecutive_stalls_escalate_without_burning_ladder(
     # 把 opus 也喂给同一个环境故障。
     assert report.rounds == 2
     assert len(adapter.calls) == 2, "第三轮不该派发"
-    assert [m for _, m in adapter.calls] == ["haiku", "sonnet"]
+    # 模型名不写死：阶梯表 routing.yaml 是会调的（曾从 haiku 起步改成 sonnet
+    # 起步），写死会让「改表」和「改熔断」这两件不相干的事互相打架。
+    # 这里要验的是「按阶梯前两档走、且没走到第三档」。
+    from factory.audit.models import OracleClass
+    from factory.routing import Router
+    ladder = Router.default()  # _task() 有 checks + declared_paths → A 类
+    assert [m for _, m in adapter.calls] == [
+        ladder.model_for(OracleClass.A, n) for n in (1, 2)
+    ]
     assert "连续 2 次挂死" in report.escalation_reason
     assert "执行环境故障" in report.escalation_reason
 

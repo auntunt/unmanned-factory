@@ -36,6 +36,7 @@ GATE_CLAIMS: dict[str, str] = {
     "runner-hook-added": "新增 runner 自动加载文件（自己出卷子）",
     "shadow-code": "被 .gitignore 挡住的代码文件",
     "spec-criteria-mutated": "worker 改了自己的验收标准",
+    "vacuous-checks": "worker 自定的判据恒为真，等于没有验收",
 }
 
 #: 不是闸门 —— 是我们这一侧或上游坏了。

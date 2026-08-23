@@ -10,29 +10,32 @@ export const STATE_LABELS: Record<QueueState, string> = {
   blocked: '已阻塞',
 }
 
+// TUI 配色（k9s/lazydocker）：底色不填，靠文字色区分，深色高对比。
+// 浅底上填色块会把信息密度拉低——一屏五桶时那些色块比数据更抢眼。
 export const STATE_BADGE_CLASSES: Record<QueueState, string> = {
-  inbox: 'bg-slate-100 text-slate-600',
-  running: 'bg-blue-50 text-blue-700 animate-pulse',
-  done: 'bg-emerald-50 text-emerald-700',
-  needs_human: 'bg-amber-50 text-amber-700',
-  blocked: 'bg-red-50 text-red-700',
+  inbox: 'text-slate-500',
+  running: 'text-cyan-700',
+  done: 'text-emerald-700',
+  needs_human: 'text-amber-700',
+  blocked: 'text-red-700',
 }
 
-// 桶标题上的圆点，用实色以便在浅色徽章旁仍能分辨
+// 桶标题的状态色（原来是圆点，现在给方括号状态码上色）
 export const STATE_DOT_CLASSES: Record<QueueState, string> = {
-  inbox: 'bg-slate-400',
-  running: 'bg-blue-500 animate-pulse',
-  done: 'bg-emerald-500',
-  needs_human: 'bg-amber-500',
-  blocked: 'bg-red-500',
+  inbox: 'text-slate-500',
+  running: 'text-cyan-700',
+  done: 'text-emerald-700',
+  needs_human: 'text-amber-700',
+  blocked: 'text-red-700',
 }
 
+// 终端里的状态记号。ASCII 优先——等宽字体下宽度稳定，不会把表格挤歪。
 export const STATE_ICONS: Record<QueueState, string> = {
   inbox: '·',
-  running: '⟳',
-  done: '✓',
-  needs_human: '⚠',
-  blocked: '✕',
+  running: '>',
+  done: 'OK',
+  needs_human: '!',
+  blocked: 'X',
 }
 
 export const RESOLUTION_LABELS: Record<Resolution, string> = {
@@ -44,15 +47,15 @@ export const RESOLUTION_LABELS: Record<Resolution, string> = {
 }
 
 const RESOLUTION_BADGE_CLASSES: Record<Resolution, string> = {
-  merged: 'bg-emerald-50 text-emerald-700',
-  reworked: 'bg-slate-100 text-slate-600',
-  escalated: 'bg-amber-50 text-amber-700',
-  blocked: 'bg-red-50 text-red-700',
-  not_dispatched: 'bg-slate-100 text-slate-500',
+  merged: 'text-emerald-700',
+  reworked: 'text-slate-500',
+  escalated: 'text-amber-700',
+  blocked: 'text-red-700',
+  not_dispatched: 'text-slate-400',
 }
 
-const BASE = 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 ' +
-  'text-xs font-medium whitespace-nowrap'
+// 无圆角、无填充、等宽——徽章在终端里就是一段带色的文本。
+const BASE = 'inline-flex items-center gap-1 font-mono text-xs whitespace-nowrap'
 
 export interface StateBadgeProps {
   state: QueueState
@@ -72,8 +75,8 @@ export function StateBadge({
       className={`${BASE} ${STATE_BADGE_CLASSES[state]} ${className}`}
       title={`状态：${STATE_LABELS[state]}`}
     >
-      {showIcon && <span aria-hidden="true">{STATE_ICONS[state]}</span>}
-      {STATE_LABELS[state]}
+      [{showIcon && <span aria-hidden="true">{STATE_ICONS[state]}</span>}
+      {STATE_LABELS[state]}]
     </span>
   )
 }
@@ -93,7 +96,7 @@ export function ResolutionBadge({
       className={`${BASE} ${RESOLUTION_BADGE_CLASSES[resolution]} ${className}`}
       title={`处置：${RESOLUTION_LABELS[resolution]}`}
     >
-      {RESOLUTION_LABELS[resolution]}
+      [{RESOLUTION_LABELS[resolution]}]
     </span>
   )
 }

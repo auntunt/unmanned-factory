@@ -47,16 +47,17 @@ def test_every_reason_carries_a_stable_code():
 
 
 def test_codes_line_up_with_reasons():
-    v = admit(_draft(checks=()))
+    # 样例从 `checks=()` 换成 `acceptance/spec_ref 都空`：前者已降级成 warning
+    # （契约送达后 worker 自己写判据），拿它当样例这条会测出 codes == ()。
+    v = admit(_draft(acceptance=(), spec_ref=()))
     assert len(v.codes) == len(v.reasons)
-    assert v.codes == ("no-checks",)
+    assert v.codes == ("no-acceptance",)
 
 
 def test_every_declared_code_is_reachable():
     # 一条列在 RULE_CODES 里但没有任何草稿能触发的编码 = 报表上永远的 0。
     hit: set[str] = set()
     for kw in ({"unclear": ("?",), "acceptance": (), "spec_ref": ()},
-               {"checks": ()},
                {"acceptance": (), "spec_ref": ()},
                {"spec_ref": ("AC-1",)},      # 有编号没文档 → dangling-spec-ref
                {"declared_ops": ("prod_deploy",)}):
@@ -162,14 +163,17 @@ def _events(queue: Path, kind: str) -> tuple[dict, ...]:
 
 def test_a_blocked_draft_writes_its_codes_to_the_journal(tmp_path):
     # 只打 stdout 不够：stdout 在下一次 prd 之后就没了，误拒率无从计算。
-    draft = DraftTask(task_id="T-blocked", prompt="改点东西", checks=())
+    # acceptance/spec_ref 都空 → no-acceptance。DraftTask 默认这两项就是空的，
+    # 显式写出来是为了让这条测试的拦截理由摆在明面上。
+    draft = DraftTask(task_id="T-blocked", prompt="改点东西",
+                      acceptance=(), spec_ref=())
     rc = _admit_to_queue(draft, argparse.Namespace(queue=str(tmp_path)))
     assert rc == 3
 
     ev = _events(tmp_path, "gate")
     assert len(ev) == 1
     assert ev[0]["admitted"] is False
-    assert "no-checks" in ev[0]["codes"]
+    assert "no-acceptance" in ev[0]["codes"]
 
 
 def test_an_admitted_draft_is_also_recorded(tmp_path):
@@ -207,7 +211,10 @@ def test_a_normal_enqueue_is_not_counted_as_an_overrule(tmp_path):
 
 
 def test_a_draft_parked_then_overruled_gives_a_computable_rate(tmp_path):
-    draft = DraftTask(task_id="T-both", prompt="改点东西", checks=())
+    # 拦截理由用 no-acceptance + dangling-spec-ref（有编号没文档）两条，
+    # 好让下面 gate_rule_hits 那个断言仍验到「多条编码各记一次」。
+    draft = DraftTask(task_id="T-both", prompt="改点东西",
+                      acceptance=(), spec_ref=("AC-1",), spec_doc="")
     _admit_to_queue(draft, argparse.Namespace(queue=str(tmp_path)))
     parked = Backlog(tmp_path).dir(NEEDS_HUMAN) / "T-both.yaml"
     _cmd_queue(argparse.Namespace(queue=str(tmp_path), task=[str(parked)],
@@ -215,7 +222,7 @@ def test_a_draft_parked_then_overruled_gives_a_computable_rate(tmp_path):
 
     roll = Rollup(Journal(Backlog(tmp_path).dir(LOG)).tail(limit=50))
     assert roll.false_reject_rate == 1.0
-    assert roll.gate_rule_hits == {"no-checks": 1, "no-acceptance": 1}
+    assert roll.gate_rule_hits == {"no-acceptance": 1, "dangling-spec-ref": 1}
 
 
 # ------------------------------------- ops 的归属：谁报的，别记到对方账上

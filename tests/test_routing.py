@@ -30,9 +30,14 @@ def test_from_yaml(tmp_path):
     assert r.model_for(OracleClass.B, 2) == "opus"
 
 
-def test_builtin_table_starts_cheap_for_class_a():
+def test_builtin_table_does_not_start_with_haiku():
+    """A 类第一轮就上 sonnet。
+
+    haiku 起步省下的钱换不来什么 —— 真实编码任务上它大概率第一轮就打不过，
+    白烧一轮 token 和墙上时间，还得等它失败才升级。
+    """
     r = Router.default()
-    assert r.model_for(OracleClass.A, 1) == "haiku"
+    assert r.model_for(OracleClass.A, 1) == "sonnet"
     assert r.model_for(OracleClass.A, 3) == "opus"
 
 

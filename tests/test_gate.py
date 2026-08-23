@@ -101,12 +101,29 @@ def test_a_spec_doc_without_any_ref_is_not_flagged():
 
 # ── 硬性拦截 ──────────────────────────────────────────────────────────────
 
-def test_no_checks_is_blocked():
-    """没有 check 的任务在回归监工那里拿 no-checks-defined FAIL，
-    三轮全红上人。放它进队 = 确定烧三轮换一句现在就能免费说的话。"""
+def test_no_checks_is_admitted_with_a_warning():
+    """没有 check 不再拦，降级成 warning。
+
+    这条曾经是硬拦，理由是「进队只会烧三轮再上人」—— 那个理由当时成立，
+    但根因不是任务没写 check，而是没有任何一处告诉 worker 该把 check 写到
+    哪（dispatcher 的读取端在等 `.checks.json`，第一轮 prompt 里却没提过它）。
+    契约补上之后，无 check 就是这套工厂本来的姿势：人说目标，worker 定判据。
+
+    仍然要有 warning：worker 自定判据是自己给自己出考题，人有机会顺手补硬的。
+    """
     v = admit(draft(checks=()))
+    assert v.admitted, "契约已送达，无 check 不该再拦"
+    assert any(".checks.json" in w for w in v.warnings)
+
+
+def test_no_checks_and_no_acceptance_is_still_blocked():
+    """两条都空才是真的没法跑 —— acceptance 是 worker 写 check 时唯一的锚。
+
+    这条守的是上面那条降级的边界：放开「无 check」不等于放开「无标准」。
+    """
+    v = admit(draft(checks=(), acceptance=(), spec_ref=()))
     assert not v.admitted
-    assert any("烧三轮" in r for r in v.reasons)
+    assert any("验收标准" in r for r in v.reasons)
 
 
 def test_no_acceptance_and_no_spec_ref_is_blocked():
@@ -134,9 +151,9 @@ def test_guard_findings_block_even_when_the_model_declared_nothing():
 
 def test_every_reason_is_reported_not_just_the_first():
     """草稿会带着 reasons 落到 needs-human。只报第一条会让人来回补三次。"""
-    v = admit(draft(checks=(), acceptance=(), spec_ref=(),
+    v = admit(draft(acceptance=(), spec_ref=("AC-1",), spec_doc="",
                     declared_ops=("force_push",)))
-    assert len(v.reasons) == 3
+    assert len(v.reasons) == 3, v.reasons
 
 
 # ── 提示，不拦 ────────────────────────────────────────────────────────────
@@ -192,7 +209,9 @@ def test_a_blocked_draft_lands_in_needs_human_and_returns_3(tmp_path):
     """退出码 3 而不是 1：被拦是闸门在正常工作，不是错误。
     但也不能是 0，否则 `prd --queue && loop` 会在空队列上继续跑。"""
     q = tmp_path / "q"
-    rc = _admit_to_queue(draft(checks=()), ns(q))
+    # 用「没有验收标准」当被拦样例。`checks=()` 曾经也拦，现在只是 warning
+    # （契约送达后 worker 自己写判据），拿它当样例会让这条测试悄悄测不到东西。
+    rc = _admit_to_queue(draft(acceptance=(), spec_ref=()), ns(q))
     assert rc == 3
     assert (q / NEEDS_HUMAN / "T-ok.yaml").is_file()
     assert Backlog(q).counts()[INBOX] == 0
