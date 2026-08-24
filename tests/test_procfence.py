@@ -2,6 +2,7 @@
 
 核心：验证 current_usage 数线程、plan 按公式算、fence 真能拦 fork。
 """
+import os
 import resource
 import sys
 
@@ -45,6 +46,12 @@ def test_plan_respects_reserve_ratio():
         assert f.limit == expected_limit
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="RLIMIT_NPROC 对 root 不生效（内核跳过 uid 的进程数核算），"
+           "围栏拦不住 root 的 fork —— 这是内核语义，不是围栏的实现问题。"
+           "非 root 下这条照跑，CI 和开发机都不是 root。",
+)
 def test_fence_blocks_fork_bomb():
     """围栏真能拦 fork 吗？对照组 vs 实验组。
 

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -333,6 +334,12 @@ def test_runbook_claim_names_the_rule_source(tmp_path):
     assert "global:" in report.escalation_reason
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="孤儿回收靠 RLIMIT_NPROC 兜底，而它对 root 不生效（内核跳过 uid "
+           "的进程数核算），root 下这条必败。是内核语义，不是回收逻辑的问题。"
+           "非 root 下照跑，CI 和开发机都不是 root。",
+)
 def test_a_hanging_requires_probe_leaves_no_children_behind(
     tmp_path, leak_probe, monkeypatch
 ):
