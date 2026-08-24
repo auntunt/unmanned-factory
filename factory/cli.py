@@ -39,6 +39,13 @@ from factory.backlog.store import (
     Backlog,
     BacklogError,
 )
+from factory.config import (
+    CONFIG_NAME,
+    ConfigError,
+    explain,
+    explicit_keys,
+    resolve,
+)
 from factory.dispatcher import Dispatcher, Outcome
 from factory.grading.rules import GradingEngine
 from factory.harness.base import Limits
@@ -938,6 +945,110 @@ def _cmd_defect(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_config(ns: argparse.Namespace) -> int:
+    """打印每个配置值和它的来源。
+
+    存在的理由是一个具体的排查场景：服务里沙箱没开，但命令行看着是对的。
+    四层配置里任何一层都可能是元凶，逐层翻文件要好几分钟，而这几分钟里
+    worker 还在跑。这张表把「从哪来」变成一眼可见。
+    """
+    path = ns.config or CONFIG_NAME
+    try:
+        r = resolve({}, cli_explicit=set(), project_file=path)
+    except ConfigError as exc:
+        print(f"配置有问题：{exc}", file=sys.stderr)
+        return 2
+    if not Path(path).exists():
+        print(f"（没有 {path}，下面只有环境变量和内置默认）")
+    print(explain(r))
+    return 0
+
+
+def _cmd_init(ns: argparse.Namespace) -> int:
+    """生成 factory.toml + 队列骨架，让「装好」和「能跑」之间不再有断层。
+
+    之前新机器上手要自己 mkdir 六个队列子目录（inbox/running/done/
+    needs-human/blocked/log），漏一个的报错是 loop 起来之后才炸的
+    FileNotFoundError —— 那时候人已经以为装完了。
+
+    写出的配置里每个键都带注释说明它管什么，因为配置文件是这套东西唯一
+    会被反复打开的文档。
+    """
+    ws = Path(ns.workspace or ".").resolve()
+    if not (ws / ".git").exists():
+        print(f"{ws} 不是 git 仓库（没有 .git）。"
+              f"工厂靠 git 记录 worker 干了什么，非仓库没法托管。",
+              file=sys.stderr)
+        return 2
+
+    cfg = Path(CONFIG_NAME)
+    if cfg.exists() and not ns.force:
+        print(f"{cfg} 已存在。要覆盖加 --force（会丢掉里面的改动）",
+              file=sys.stderr)
+        return 2
+
+    queue = Path(ns.queue)
+    made = []
+    # LOG 不在 STATES 里（它不是状态，是流水），但少了它 Journal 写第一条
+    # 记录时就炸 —— 而那是 loop 起来之后才发生的事，人已经以为装完了。
+    # 所以这里必须显式带上，不能只遍历 STATES。
+    for sub_dir in (*STATES, LOG):
+        d = queue / sub_dir
+        if not d.exists():
+            d.mkdir(parents=True, exist_ok=True)
+            made.append(str(d))
+
+    cfg.write_text(
+        f"""# unmanned-factory 配置。优先序：命令行 > 环境变量 FACTORY_* > 本文件 > 内置默认。
+# 查某个值实际从哪来：factory config
+
+[factory]
+# 审计库。记每一次派发、每个监工的判决、每笔 token 花费。
+db = "audit.db"
+
+# 队列根目录。子目录是任务的状态机：{" / ".join(STATES)}
+queue = "{ns.queue}"
+
+# worker 用的 CLI。写全路径 —— systemd 的 PATH 和你的 shell 不一样，
+# 写 "claude" 在服务里常见的表现是 FileNotFoundError。
+binary = "claude"
+
+# 监工用的 CLI。换 worker 不换裁判，所以和 binary 分开。
+judge_binary = "claude"
+
+# 单轮 worker 的墙钟上限（秒）。到点杀掉算这一轮失败，不算 worker 无罪。
+timeout = 900
+
+# 沙箱。注释掉表示「能开就开」（推荐）。显式 false 会让 worker 能写 $HOME、
+# 系统目录、以及工厂自己的代码 —— 包括它自己的分级规则。
+# sandbox = true
+
+# 内置全局 runbook 规则（docker restart 陷阱等）。默认关：
+# 升级工厂不该让既有任务的检查集悄悄变大。
+# global_runbook = true
+
+# 项目规则 YAML。不能放在 workspace 里 —— worker 能写 workspace，
+# 从那儿读规则等于让它自己出卷子。
+# runbook = "../factory-rules.yaml"
+
+# 跑批预算（美元）。花超了停下等人，不是继续跑。
+# budget_usd = 20.0
+""",
+        encoding="utf-8",
+    )
+
+    print(f"✓ 写了 {cfg}")
+    if made:
+        print(f"✓ 建了队列骨架 {queue}/ （{len(made)} 个子目录）")
+    else:
+        print(f"· 队列 {queue}/ 已齐全，没动")
+    print(f"\n下一步：")
+    print(f"  factory config                     # 核对配置从哪来")
+    print(f"  factory prd --text '...' --queue {ns.queue}   # 投第一个任务")
+    print(f"  factory loop --workspace {ws}      # 起跑批")
+    return 0
+
+
 def _cmd_api(ns: argparse.Namespace) -> int:
     """起只读 JSON API。前端（frontend/）靠它拿数据。
 
@@ -1162,7 +1273,44 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8788, help="监听端口")
     ap.set_defaults(func=_cmd_api)
 
+    cf = sub.add_parser("config", help="打印配置从哪来（排查「为什么沙箱没开」）")
+    cf.add_argument("--config", default=None, metavar="FILE",
+                    help=f"项目配置路径，默认当前目录的 {CONFIG_NAME}")
+    cf.set_defaults(func=_cmd_config)
+
+    it = sub.add_parser("init", help="在当前目录生成 factory.toml 与队列骨架")
+    it.add_argument("--workspace", default=None, metavar="DIR",
+                    help="要托管的 git 仓库，默认当前目录")
+    it.add_argument("--queue", default="backlog", help="队列根目录")
+    it.add_argument("--force", action="store_true",
+                    help=f"覆盖已存在的 {CONFIG_NAME}")
+    it.set_defaults(func=_cmd_init)
+
     ns = parser.parse_args(argv)
+
+    # 四级配置只作用于真正要跑活的子命令。prd/show/metrics 这些不碰仓库、
+    # 参数就是它们的全部意图，套配置进去只会让「我明明没写这个参数」变得难查。
+    if ns.cmd in ("run", "loop", "api"):
+        raw = list(sys.argv[1:] if argv is None else argv)
+        dest_of = {
+            opt: act.dest
+            for act in sub.choices[ns.cmd]._actions
+            for opt in act.option_strings
+        }
+        try:
+            r = resolve(
+                vars(ns),
+                cli_explicit=explicit_keys(raw, dest_of),
+                project_file=getattr(ns, "config", None) or CONFIG_NAME,
+            )
+        except ConfigError as exc:
+            # 配置错必须在动任何仓库之前退出，而且要指名文件和键。
+            print(f"配置有问题：{exc}", file=sys.stderr)
+            return 2
+        for k, v in r.values.items():
+            setattr(ns, k, v)
+        ns._config_origins = r.origins
+
     return ns.func(ns)
 
 
