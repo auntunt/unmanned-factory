@@ -162,11 +162,12 @@ def _resolve_sandbox(ns: argparse.Namespace) -> int:
         ns.sandbox = True
         return 0
     if ns.sandbox is True:
-        print(f"--sandbox 要求隔离，但本机没有 {sb.SANDBOX_BINARY}（非 macOS?）。"
-              "不静默降级：要么去掉 --sandbox，要么换容器。", file=sys.stderr)
+        print(f"--sandbox 要求隔离，但本机 {sb.SANDBOX_BINARY} 不可用。"
+              "不静默降级：要么去掉 --sandbox，要么修好沙箱（见 docs/），要么换容器。",
+              file=sys.stderr)
         return 2
     ns.sandbox = False
-    print("提示：本平台无 Seatbelt，worker 未隔离副作用。", file=sys.stderr)
+    print("提示：本平台沙箱不可用，worker 未隔离副作用。", file=sys.stderr)
     return 0
 
 
@@ -937,6 +938,18 @@ def _cmd_defect(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_api(ns: argparse.Namespace) -> int:
+    """起只读 JSON API。前端（frontend/）靠它拿数据。
+
+    延迟 import：`factory.api` 只在跑这个子命令时才需要，放模块顶会让
+    每次跑 `factory dispatch` 都白读一遍 http.server。
+    """
+    from factory.api import serve_api
+
+    serve_api(ns.db, ns.queue, port=ns.port)
+    return 0
+
+
 def _cmd_metrics(ns: argparse.Namespace) -> int:
     store = AuditStore(ns.db)
     report = supervisor_metrics(store, task_id=ns.task_id)
@@ -978,26 +991,6 @@ def _cmd_metrics(ns: argparse.Namespace) -> int:
     else:
         print("  → 未达标：打回多是判据没写对，不是 agent 不行 —— 改 checks")
     return 0
-
-
-def _cmd_dashboard(ns: argparse.Namespace) -> int:
-    # 延迟 import：dashboard 拉了 http.server，而 run/loop 这两条热路径不需要它。
-    from factory.dashboard import build_demo, build_demo_queue, export, serve
-
-    db = ns.db
-    if ns.demo:
-        # 固定写 demo.db 而不是覆盖 --db：--demo 覆盖真实审计库是不可逆的。
-        db = build_demo("demo.db")
-        print(f"示例库：{db}（页面上会挂「示例数据」横幅）")
-        # 队列也一并造。同理固定写 demo-queue/ 而不是往 --queue 指的目录里塞
-        # 编出来的条目 —— 那些条目会被真的 loop 认领并真的花钱。
-        if not ns.queue:
-            ns.queue = build_demo_queue("demo-queue")
-            print(f"示例队列：{ns.queue}（树的依赖边从这里读）")
-    if ns.once:
-        return export(db, ns.once, task_id=ns.task_id, queue=ns.queue)
-    return serve(db, port=ns.port, task_id=ns.task_id, queue=ns.queue,
-                 workspace=ns.workspace, binary=ns.binary)
 
 
 def _add_dispatch_args(p: argparse.ArgumentParser) -> None:
@@ -1161,24 +1154,13 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--db", default="audit.db")
     mx.set_defaults(func=_cmd_metrics)
 
-    # 变量名不叫 db：这一段里 `--db` 满天飞，`db.add_argument("--db")` 读起来
-    # 像是在给自己加参数。
-    dash = sub.add_parser("dashboard", help="本地网页看板：跑批结果 + 闸门体系")
-    dash.add_argument("--db", default="audit.db")
-    dash.add_argument("--task-id", default=None, help="省略则看全库")
-    dash.add_argument("--port", type=int, default=8787)
-    dash.add_argument("--once", metavar="OUT.html", default=None,
-                      help="不起服务，导出一份自包含的静态 HTML（发给别人用这个）")
-    dash.add_argument("--demo", action="store_true",
-                      help="用示例数据（写 demo.db，页面会挂「示例数据」横幅）")
-    dash.add_argument("--queue", default=None, metavar="DIR",
-                      help="队列目录。给了才有依赖边（树）和网页提需求；"
-                           "不给的话树退化成平表")
-    dash.add_argument("--workspace", default=None, metavar="DIR",
-                      help="仓库路径，供网页提需求时跑 check 探针")
-    dash.add_argument("--binary", default="claude",
-                      help="网页提需求时做提取的 CLI")
-    dash.set_defaults(func=_cmd_dashboard)
+    ap = sub.add_parser("api", help="只读 JSON API（给前端用）")
+    ap.add_argument("--db", default="audit.db", help="审计库路径")
+    ap.add_argument("--queue", default="backlog", help="队列根目录")
+    # 只绑 127.0.0.1：外部访问一律走反向代理，认证在那一层做。
+    # API 本身没有任何认证，直接暴露到公网等于把审计库敞开。
+    ap.add_argument("--port", type=int, default=8788, help="监听端口")
+    ap.set_defaults(func=_cmd_api)
 
     ns = parser.parse_args(argv)
     return ns.func(ns)

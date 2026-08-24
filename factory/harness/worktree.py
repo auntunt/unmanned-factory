@@ -16,13 +16,50 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+# 注意 `.` **不在**安全集里。曾经在，那是个数据全毁级的洞：
+# task_id='..' 原样穿过清洗，`root / '..'` 指向 worktree 池的父目录
+# —— 也就是用户主仓库 —— 然后 _force_release() 的 shutil.rmtree 把它清空。
+# task_id='.' 则指向池本身，一次删掉所有并行任务的未合并产出。
+# 两者都实测复现过。现在 `.` 被清洗掉，且 _slug() 另有兜底校验。
+_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+# slug 的清洗部分留多长。够读就行，唯一性由哈希后缀保证。
+_SLUG_STEM_MAX = 48
+# 哈希后缀长度。6 个 hex = 16M 种，任务量级下碰撞概率可忽略。
+_SLUG_HASH_LEN = 6
+
+
+def _slug(task_id: str) -> str:
+    """task_id → 既安全又**单射**的短标识。
+
+    单射是必须的，不是锦上添花：slug 同时用作目录名和分支名，而 acquire()
+    开头就无条件 _force_release() 掉同名的树。两个 task_id 撞到同一个 slug，
+    后来的那个会删掉前一个还没合并的产出，并且审计里没有任何痕迹。
+
+    纯清洗做不到单射 —— `_SAFE.sub('-', ...)` 是多对一的。实测过的塌缩：
+      `feat/login`、`feat-login`、`feat login` → 全都是 `feat-login`
+      `重构/队列`、`修复/超时`               → 全都是 `task`（中文整体被吃掉）
+    后者尤其糟：中文 task_id 是常规用法，等于所有中文任务共用一棵树。
+
+    所以 slug = 清洗后的可读部分 + 原始 task_id 的哈希后缀。哈希取自
+    **原始**字符串，清洗前，这样上面那些例子彼此区分。可读部分只为人眼服务，
+    唯一性完全由哈希承担。
+    """
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:_SLUG_HASH_LEN]
+    stem = _SAFE.sub("-", task_id).strip("-")[:_SLUG_STEM_MAX].strip("-")
+    # stem 可能整体被清洗成空（纯中文、纯符号），那就只留哈希。
+    # 另外挡掉 git 不接受的分支名和路径穿越残留：'.' / '..' 已被 _SAFE 吃掉，
+    # 这里是第二道 —— 万一日后有人放宽 _SAFE，这条还在。
+    if not stem or stem in {".", ".."}:
+        return f"task-{digest}"
+    return f"{stem}-{digest}"
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -34,9 +71,11 @@ def branch_name(task_id: str, *, prefix: str = "factory") -> str:
 
     task_id 来自 YAML，可能带空格、斜杠、中文。斜杠在 git 里是层级分隔符，
     `a/b` 和 `a` 不能同时存在为分支 —— 直接用会在第二个任务上莫名失败。
+
+    走 _slug() 而不是自己清洗：分支名和 worktree 目录名必须**同源**，
+    否则会出现"目录复用了但分支没复用"这种半残状态。
     """
-    slug = _SAFE.sub("-", task_id).strip("-") or "task"
-    return f"{prefix}/{slug}"
+    return f"{prefix}/{_slug(task_id)}"
 
 
 @dataclass(frozen=True)
@@ -94,7 +133,13 @@ class WorktreePool:
         """
         self._ensure_repo()
         branch = branch_name(task_id, prefix=self._prefix)
-        path = self._root / _SAFE.sub("-", task_id).strip("-")
+        path = self._root / _slug(task_id)
+
+        # 兜底：确认算出来的路径真的落在池内。_slug() 已经保证了这点，这里是
+        # 第二道 —— 下一行就是 _force_release() 的 shutil.rmtree，它删什么
+        # 完全取决于这个 path。曾经 task_id='..' 能让它删掉用户主仓库。
+        # 一道 rmtree 前的 assert 值这个钱。
+        self._assert_inside_pool(path)
 
         self._root.mkdir(parents=True, exist_ok=True)
         self._force_release(path, branch)
@@ -106,12 +151,38 @@ class WorktreePool:
             )
         return Worktree(path=path, branch=branch, repo=self._repo)
 
+    def _assert_inside_pool(self, path: Path) -> None:
+        """确认 path 严格落在 worktree 池内部，否则拒绝动它。
+
+        `strict=False` 的 resolve：路径此刻通常还不存在（正要创建），
+        strict 模式会直接抛 FileNotFoundError。我们要判的是**归一化之后的
+        字符串归属**，不是存在性。
+
+        用 is_relative_to 而不是 str.startswith：后者会把
+        `/pool-evil` 当成 `/pool` 的子路径（前缀匹配的经典坑）。
+        另外显式排除 path == root 本身：那是 task_id='.' 的情形，
+        删掉它等于清空整个池。
+        """
+        root = self._root.resolve()
+        target = path.resolve()
+        if target == root or not target.is_relative_to(root):
+            raise WorktreeError(
+                f"拒绝操作 worktree 池外的路径：{target}（池根={root}）。"
+                "这通常意味着 task_id 含路径穿越成分，或 _slug() 被改坏了。"
+            )
+
     def _force_release(self, path: Path, branch: str) -> None:
         """把可能残留的目录/分支/注册项一起清干净。
 
         三样东西可以各自单独残留（上次崩在中途、目录被手删、分支被留下），
         所以三条命令都无条件跑一遍，谁失败都不算错。
+
+        进 rmtree 之前再验一次归属。调用方（acquire / release）都已经验过，
+        这里重复是因为**这个函数是唯一真正执行删除的地方** —— 谁日后新增一条
+        调用路径，都不会绕过这道检查。检查失败时抛而不是静默返回：
+        走到这儿说明有更上游的东西已经错了，静默会把 bug 藏起来。
         """
+        self._assert_inside_pool(path)
         _git(self._repo, "worktree", "remove", "--force", str(path))
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)

@@ -35,6 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from factory.harness.checkenv import check_env
 from factory.harness.proc import Timeout as ProcTimeout
 from factory.harness.proc import run_bounded
 
@@ -206,7 +207,12 @@ def probe_check(check: dict, workspace: Path, *, timeout_s: int = _PROBE_TIMEOUT
     try:
         # 探针跑的是模型刚提议的、没人审过的 shell。超时杀整组，
         # 别让一条乱写的 check 在机器上留东西。见 proc 模块。
-        proc = run_bounded(command, cwd=workspace, timeout_s=timeout_s, shell=True)
+        #
+        # env=check_env()：不继承工厂进程的环境（H-3）。这里跑的是模型
+        # 刚生成、**一个字都没人看过**的 shell —— 继承等于把 ~/.aws、
+        # ANTHROPIC_API_KEY 之类交给它。实测 `echo $FAKE_API_KEY` 能读到值。
+        proc = run_bounded(command, cwd=workspace, timeout_s=timeout_s,
+                           shell=True, env=check_env())
     except ProcTimeout:
         # 超时的 check 在回归监工那里也会超时。不留。
         return Probe(check, "broken", None, f"探针超时（{timeout_s}s）")

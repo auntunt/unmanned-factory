@@ -251,13 +251,35 @@ def test_a_clean_round_still_merges(tmp_path: Path) -> None:
 
 
 def test_review_refuses_to_run_without_the_baseline(tmp_path: Path) -> None:
-    """`skipped_before` 没有默认值。三个基线是同一个教训的三份。"""
+    """基线参数没有默认值。判据必须是「这一轮变了什么」，拿不到基线要炸。
+
+    原来这里守的是 `skipped_before`。八个 git 基线合并成一个
+    `gate_before: gates.Snapshot` 之后，不变量没变，只是从「八个参数各自
+    不许有默认值」变成「这一个不许有默认值」—— 填 `{}` 的后果更直接：
+    `gates.evaluate` 取不到 key 当场 KeyError，而不是静默判红。
+    """
     import inspect
 
     from factory.dispatcher import Dispatcher
 
-    p = inspect.signature(Dispatcher._review).parameters["skipped_before"]
+    p = inspect.signature(Dispatcher._review).parameters["gate_before"]
     assert p.default is inspect.Parameter.empty
+
+
+def test_missing_gate_baseline_raises_instead_of_guessing() -> None:
+    """`gates.evaluate` 拿到缺 key 的基线要炸，不许当成「之前是空的」。
+
+    这一条是上面那条的另一半：签名不给默认值挡住的是「漏传整个基线」，
+    这条挡住的是「传了一个不完整的基线」。后者更危险 —— 空集合 vs 有 hook
+    看起来就是一次违规，闸门会判红，而红看起来像闸门在干活。
+    """
+    import pytest
+
+    from factory import gates
+
+    with pytest.raises(KeyError, match="没有这道闸门|git-hook-touched"):
+        # 空基线缺所有差分闸门的 key，第一道（git-hook-touched）就炸
+        gates.evaluate(Path("."), {}, changed_paths=())
 
 
 def test_a_pre_existing_flag_does_not_block_the_merge(tmp_path: Path) -> None:

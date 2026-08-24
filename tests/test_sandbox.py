@@ -14,17 +14,28 @@ from pathlib import Path
 
 import pytest
 
-from factory.harness.sandbox import (
-    SandboxPolicy,
-    available,
-    git_dir,
-    policy_for,
-    wrap,
-)
-from factory.harness.sandbox import prepare as sandbox_prepare
+# 从 sandbox_macos 导入而不是 sandbox：后者是平台分发层，只暴露三个后端的
+# 公共接口。SandboxPolicy / policy_for / wrap / git_dir 是 Seatbelt 专有的。
+# 并且必须**条件导入** —— 顶层 import 在 Linux 上会在收集期就炸，
+# pytestmark 的 skipif 根本来不及生效（实测：ImportError during collection）。
+_IS_MACOS = sys.platform == "darwin"
+
+if _IS_MACOS:
+    from factory.harness.sandbox_macos import (
+        SandboxPolicy,
+        available,
+        git_dir,
+        policy_for,
+        wrap,
+    )
+    from factory.harness.sandbox_macos import prepare as sandbox_prepare
+
+    _AVAILABLE = available()
+else:
+    _AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(
-    not available() or sys.platform != "darwin",
+    not _IS_MACOS or not _AVAILABLE,
     reason="Seatbelt 只在 macOS 上有",
 )
 

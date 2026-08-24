@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 from factory.audit.models import (
     Base,
     OracleClass,
+    PermissionEvent,
     Resolution,
     SupervisorRole,
     SupervisorVerdict,
@@ -272,6 +273,51 @@ class AuditStore:
                     .options(selectinload(TaskAttempt.supervisors))
                     .where(TaskAttempt.task_id == task_id)
                     .order_by(TaskAttempt.attempt_no)
+                )
+            )
+            s.expunge_all()
+            return rows
+
+    def record_permission_event(
+        self,
+        attempt_id: int,
+        *,
+        tool: str,
+        target: str,
+        decision: str,
+        rule: str,
+        reason: str,
+        tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """记录一次权限门事件（DENY 或 ESCALATE）。
+
+        ALLOW 不记，调用方已经过滤掉了。target / reason 可能带敏感信息，
+        走 redact 脱敏。
+        """
+        with self._session() as s:
+            s.add(
+                PermissionEvent(
+                    attempt_id=attempt_id,
+                    tool=tool,
+                    target=redact(target)[:512],
+                    decision=decision,
+                    rule=rule[:128],
+                    reason=redact(reason)[:512],
+                    tokens=tokens,
+                    cost_usd=cost_usd,
+                )
+            )
+            s.commit()
+
+    def permission_events_for(self, attempt_id: int) -> tuple[PermissionEvent, ...]:
+        """某次 attempt 的全部权限门事件，按时间升序。供 API / CLI show 用。"""
+        with self._session() as s:
+            rows = tuple(
+                s.scalars(
+                    select(PermissionEvent)
+                    .where(PermissionEvent.attempt_id == attempt_id)
+                    .order_by(PermissionEvent.id)
                 )
             )
             s.expunge_all()

@@ -19,3 +19,7 @@ audit.db
 
 # `--demo` 现造的队列目录：和 demo.db 一样是每次跑起来重新生成的
 demo-queue/
+
+# 前端构建产物：留在工作树里会被 shadow_code 影子代码闸门判为违规
+frontend/dist/
+frontend/node_modules/

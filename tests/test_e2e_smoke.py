@@ -88,9 +88,11 @@ def test_class_a_task_end_to_end(tmp_path):
     assert row.class_reason
     assert row.harness == "claude_code"
     assert row.harness_version and row.harness_version != "unknown"
-    # 模型按 A 类的重试阶梯 [haiku, sonnet, opus] 走，第几轮就是第几档。
-    # 写死 "haiku" 是同一个 get(1) 假设的第二处实例：只在一轮就过时成立。
-    assert row.model == ("haiku", "sonnet", "opus")[min(row.attempt_no - 1, 2)]
+    # 模型按 A 类的重试阶梯走，第几轮就是第几档。阶梯本身读 routing.yaml，
+    # 不在这里抄一份 —— 抄了就会像之前那样：表改成 sonnet 起步，这条挂。
+    from factory.audit.models import OracleClass
+    from factory.routing import Router
+    assert row.model == Router.default().model_for(OracleClass.A, row.attempt_no)
     assert row.diff_hash and len(row.diff_hash) == 64
     assert row.transcript_path and row.transcript_path.endswith(".jsonl")
     assert row.tokens_in > 0 and row.tokens_out > 0
@@ -104,7 +106,11 @@ def test_class_a_task_end_to_end(tmp_path):
 
     # spec §5 的最后一个字段：commit。产出在任务分支上，**主工作树没被动过**。
     assert row.commit and len(row.commit) == 40
-    wt = wt_root / "T-smoke-1"
+    # 目录名走 _slug()，不在这里手拼 —— slug 现在带哈希后缀
+    # （`T-smoke-1-4aefa6`），拼 task_id 会指到一个不存在的路径，
+    # 而下面几条断言恰好都会因为「路径不存在」而红，看起来像产出丢了。
+    from factory.harness.worktree import _slug
+    wt = wt_root / _slug("T-smoke-1")
     assert (wt / "greet.py").exists(), "产出在 worktree 里，不在主工作树"
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt,
                           capture_output=True, text=True).stdout.strip()

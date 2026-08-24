@@ -33,7 +33,12 @@ def _init_repo(base: Path) -> Path:
 # ── branch_name ──────────────────────────────────────────────────────────
 
 def test_branch_name_simple():
-    assert branch_name("T-1") == "factory/T-1"
+    # 前缀 + 可读部分 + 哈希后缀。后缀是 H-4 修复引入的：纯清洗是多对一的，
+    # `feat/login` 和 `feat-login` 会撞同一棵树，后来者删掉前者未合并的产出。
+    # 唯一性靠哈希，可读性靠 stem，所以这里断言形状而不是确切字符串。
+    b = branch_name("T-1")
+    assert b.startswith("factory/T-1-")
+    assert len(b.removeprefix("factory/T-1-")) == 6
 
 
 def test_branch_name_sanitises_slashes():

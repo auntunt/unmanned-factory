@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -439,6 +440,26 @@ def runner_hooks(root: Path) -> tuple[str, ...]:
 
 _CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java"}
 
+#: 打包器的内容哈希产物：`index-DK7trwX8.js`、`vendor.a1b2c3d4.js`。
+#: vite/webpack/rollup 都是这个形状 —— 名字末尾挂一段 8 位以上的
+#: base64url/hex 摘要，改一行源码就换一个名字。
+#:
+#: 为什么按**文件名**排、不把 dist/ 加进 _VENDOR_DIRS：dist/ 恰好是最好藏
+#: 代码的地方（见 test_build_is_checked_even_though_skip_dirs_contains_it），
+#: 整个目录开白名单等于把这道闸门的用处送掉。手写的 dist/hook.py 没有哈希
+#: 后缀，照样会被报出来。
+_BUNDLED_ASSET = re.compile(r"[-.][A-Za-z0-9_-]{8,}\.(?:js|mjs|cjs|css)$")
+
+
+def _is_build_artifact(p: PurePosixPath) -> bool:
+    """打包产物，不是 worker 手写的代码。
+
+    这条不是理论上的洁癖：前端上线后 frontend/dist/assets/index-*.js 让
+    「干净仓库零命中」那条不变量红了一次。每次都响的闸门等于没有闸门。
+    """
+    return bool(_BUNDLED_ASSET.search(p.name))
+
+
 def shadow_code(root: Path) -> tuple[str, ...]:
     """被 .gitignore 挡住、四道闸门都看不见的**代码**文件。
 
@@ -469,6 +490,8 @@ def shadow_code(root: Path) -> tuple[str, ...]:
         if p.suffix not in _CODE_SUFFIXES:
             continue
         if any(part in _VENDOR_DIRS for part in p.parts):
+            continue
+        if _is_build_artifact(p):
             continue
         out.append(line)
     return tuple(out)

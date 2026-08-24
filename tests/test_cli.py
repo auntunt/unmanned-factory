@@ -79,7 +79,11 @@ def test_run_merges_and_returns_zero(tmp_path, repo, task_file, capsys):
     row = AuditStore(db).get(1)
     assert row.task_id == "T-cli-1"
     assert row.resolution == "merged"
-    assert row.model == "haiku"
+    # 第一轮用的就是阶梯第一档。不写死模型名 —— routing.yaml 会调
+    # （曾从 haiku 起步改成 sonnet 起步），写死等于每次改表都得改这里。
+    from factory.audit.models import OracleClass
+    from factory.routing import Router
+    assert row.model == Router.default().model_for(OracleClass.A, 1)
     assert row.diff_hash is not None
 
 
@@ -346,7 +350,8 @@ def test_loop_warns_when_there_is_no_wall_clock_bound(tmp_path, repo, capsys):
     """
     code = main(["loop", "--queue", str(tmp_path / "q"),
                  "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
-                 "--idle", "drain", "--no-sandbox", "--budget-usd", "5"])
+                 "--idle", "drain", "--no-sandbox", "--budget-usd", "5",
+                 "--binary", str(_fake_claude(tmp_path, repo))])
     assert code == 0
     err = capsys.readouterr().err
     assert "--max-runtime 0" in err and "$0" in err
@@ -357,7 +362,8 @@ def test_loop_does_not_warn_when_a_wall_clock_bound_is_given(
     code = main(["loop", "--queue", str(tmp_path / "q"),
                  "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
                  "--idle", "drain", "--no-sandbox", "--budget-usd", "5",
-                 "--max-runtime", "14400"])
+                 "--max-runtime", "14400",
+                 "--binary", str(_fake_claude(tmp_path, repo))])
     assert code == 0
     assert "--max-runtime 0" not in capsys.readouterr().err
 
@@ -367,9 +373,17 @@ def test_loop_does_not_warn_when_a_wall_clock_bound_is_given(
 # 真的传下去了」。写它们的直接原因：把这两处接线各删一次，整个测试套件
 # 62 + 21 条全过 —— 一道谁都没接上的闸门在报表上和接上了长得一样。
 
-def _captured_limits(argv, tmp_path, monkeypatch):
-    """跑一次 loop，把 CLI 造出来的 LoopLimits 截下来。"""
+def _captured_limits(argv, tmp_path, monkeypatch, repo=None):
+    """跑一次 loop，把 CLI 造出来的 LoopLimits 截下来。
+
+    自动补 --binary：这些测试测的是**参数传递**，但 CLI 在造 loop 之前就会
+    先查 worker 可执行体在不在 PATH 里。不补的话，一台没装 claude 的机器上
+    这几条会挂在那道检查上 —— 报的是「PATH 里找不到 claude」，和被测行为
+    毫无关系，纯噪音。
+    """
     import factory.cli as cli
+    if "--binary" not in argv and repo is not None:
+        argv = [*argv, "--binary", str(_fake_claude(tmp_path, repo))]
     seen = {}
 
     class Spy(cli.BacklogLoop):
@@ -386,7 +400,7 @@ def test_the_unpriced_streak_flag_reaches_the_loop(tmp_path, repo, monkeypatch):
     limits = _captured_limits(
         ["loop", "--queue", str(tmp_path / "q"), "--workspace", str(repo),
          "--db", str(tmp_path / "a.db"), "--idle", "drain", "--no-sandbox",
-         "--max-unpriced-streak", "7"], tmp_path, monkeypatch)
+         "--max-unpriced-streak", "7"], tmp_path, monkeypatch, repo)
     assert limits.max_unpriced_streak == 7
 
 
@@ -396,7 +410,7 @@ def test_the_breaker_is_on_by_default_from_the_command_line(
     limits = _captured_limits(
         ["loop", "--queue", str(tmp_path / "q"), "--workspace", str(repo),
          "--db", str(tmp_path / "a.db"), "--idle", "drain", "--no-sandbox"],
-        tmp_path, monkeypatch)
+        tmp_path, monkeypatch, repo)
     assert limits.max_unpriced_streak >= 1
 
 
@@ -404,7 +418,8 @@ def test_loop_warns_when_the_breaker_is_switched_off(tmp_path, repo, capsys):
     code = main(["loop", "--queue", str(tmp_path / "q"),
                  "--workspace", str(repo), "--db", str(tmp_path / "a.db"),
                  "--idle", "drain", "--no-sandbox", "--max-runtime", "60",
-                 "--max-unpriced-streak", "0"])
+                 "--max-unpriced-streak", "0",
+                 "--binary", str(_fake_claude(tmp_path, repo))])
     assert code == 0
     assert "--max-unpriced-streak 0" in capsys.readouterr().err
 

@@ -166,6 +166,115 @@ def supervisor_metrics(store, *, task_id: str | None = None) -> dict[str, Superv
 
 
 @dataclass(frozen=True)
+class GateMetrics:
+    """单道闸门的表现（§9.2）。
+
+    为什么 role 层不够：13 道硬闸门全报 `role='risk'`，按 role 聚合等于把
+    13 件事的命中率搅成一个数。一道从不触发的闸门（写错了判据、或者它防的
+    那类问题根本不存在）在 role 表上完全看不出来 —— 它的 0 次触发被另外
+    12 道的命中稀释掉了。改进决策要的是「哪一道该删、哪一道该修」，那必须
+    按闸门看。
+
+    身份取 claim 的 `check` 字段，不新增数据库列：gate_claims 的 GATE_CLAIMS /
+    FAULT_CLAIMS 已经用同一套读法，加列等于把同一个事实存两遍，然后等它们
+    不一致。
+    """
+
+    role: str
+    gate: str
+    fired: int = 0
+    true_positives: int = 0
+    false_positives: int = 0
+    unadjudicated: int = 0
+    cost_usd: float = 0.0
+
+    @property
+    def gate_id(self) -> str:
+        """`risk:fake-green` 这种全限定名，报表和日志里用。"""
+        return f"{self.role}:{self.gate}"
+
+    @property
+    def adjudicated(self) -> int:
+        return self.true_positives + self.false_positives
+
+    @property
+    def hit_rate(self) -> float | None:
+        if self.adjudicated == 0:
+            return None
+        return self.true_positives / self.adjudicated
+
+    def verdict_line(self) -> str:
+        """这一道闸门该留、该修、还是该删。"""
+        if self.fired == 0:
+            # 从不触发有两种成因，数据分不开，所以只说事实和该干什么。
+            return "从未触发 → 要么判据写错了，要么它防的问题不存在；查一次"
+        if self.adjudicated == 0:
+            return "触发过但无定案 → 先把这些 attempt 判了"
+        if self.hit_rate is not None and self.hit_rate < 0.3:
+            return "多数是误报 → 收紧判据，否则它在训练大家忽略告警"
+        return "保留"
+
+
+#: 硬闸门都挂在这个 role 下（dispatcher 的 _blocked() 全部走 RISK）。
+#: gate_metrics 补零时需要它来拼 key。
+RISK_ROLE = "risk"
+
+
+def gate_metrics(
+    store, *, task_id: str | None = None, known_gates: dict[str, str] | None = None
+) -> dict[str, GateMetrics]:
+    """按 (role, claim 的 check 名) 二级聚合，键是 `role:gate`（§9.2）。
+
+    `known_gates` 传闸门名清单（gate_claims.GATE_CLAIMS）时，**没触发过的闸门
+    也会出现在结果里**，fired=0。这是这个函数存在的主要理由：一道从不触发的
+    闸门只有在报表上占一行、写着「从未触发」，才会有人去查它是不是写坏了。
+    只统计出现过的 claim 等于让坏掉的闸门继续隐身。
+
+    只数 FAIL：PASS 的裁决没有 claims（一道没触发的闸门不写 claim），
+    passed / false_negatives 那两列在闸门粒度上没有对应数据，硬凑会得出
+    「每道闸门都漏报了 N 次」这种假账。漏报是 role 层的指标。
+    """
+    acc: dict[tuple[str, str], dict] = {}
+
+    def bucket(role: str, gate: str) -> dict:
+        return acc.setdefault(
+            (role, gate),
+            dict(fired=0, true_positives=0, false_positives=0,
+                 unadjudicated=0, cost_usd=0.0),
+        )
+
+    for row in store.all_attempts(task_id=task_id):
+        resolution = row.resolution
+        for v in row.supervisors:
+            if v.verdict != Verdict.FAIL:
+                continue
+            role = str(v.role)
+            for c in v.claims:
+                gate = str(c.get("check", "")) or "(未命名)"
+                b = bucket(role, gate)
+                b["fired"] += 1
+                if resolution in _TRUE_POSITIVE:
+                    b["true_positives"] += 1
+                elif resolution in _FALSE_POSITIVE:
+                    b["false_positives"] += 1
+                elif resolution in _UNADJUDICATED:
+                    b["unadjudicated"] += 1
+            # 成本记在裁决上而不是逐条 claim 上：一次监工调用出 3 条 claim 时
+            # 逐条累加会把成本算成 3 倍。挂在第一条 claim 的闸门上也不对
+            # （它没多花钱），所以按 role 平摊由调用方决定，这里不摊。
+
+    out = {
+        f"{role}:{gate}": GateMetrics(role=role, gate=gate, **vals)
+        for (role, gate), vals in acc.items()
+    }
+    # 补零：没触发过的闸门也要占一行
+    for gate in known_gates or {}:
+        key = f"{RISK_ROLE}:{gate}"
+        out.setdefault(key, GateMetrics(role=RISK_ROLE, gate=gate))
+    return out
+
+
+@dataclass(frozen=True)
 class Gate3Rework:
     """spec §9 的 P1 判据：闸门 3 上人平均要打回几次才能验收通过。
 

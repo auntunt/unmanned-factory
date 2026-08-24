@@ -1,0 +1,30 @@
+[Unit]
+Description=Unmanned Factory Worker Loop
+After=network.target factory-dashboard.service
+# worker 依赖 dashboard 的审计库，但不强制 —— dashboard 挂了 worker 可以继续跑
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/unmanned-factory
+
+# claude CLI 的中转站配置
+Environment="ANTHROPIC_BASE_URL=https://zjz-ai.webtrn.cn"
+Environment="ANTHROPIC_AUTH_TOKEN=PLACEHOLDER"
+Environment="PATH=/home/ubuntu/.npm-global/bin:/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+ExecStart=/home/ubuntu/workspace/unmanned-factory/.venv/bin/python -m factory.cli loop \
+    --queue /home/ubuntu/factory-data/queue \
+    --workspace /home/ubuntu/workspace/unmanned-factory \
+    --db /home/ubuntu/factory-data/audit.db \
+    --binary /home/ubuntu/.npm-global/bin/claude \
+    --budget-usd 2 \
+    --idle watch
+
+# 费用超 $2 自动停，需要手动 systemctl start 才能重开
+# 每次任务超时/崩了等 10 秒再重试，不要 hammer API
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

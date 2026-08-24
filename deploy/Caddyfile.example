@@ -1,0 +1,29 @@
+# 看板的公网入口示例。把 HOST 换成你的 IP 或域名。
+#
+# 为什么认证在这一层：dashboard 进程自带的 token + Origin 检查只防 CSRF，
+# 不防未授权读取 —— GET 全部无认证。审计库里有 diff 和模型原始输出，
+# 直接裸在公网上等于把代码和成本数据都公开。所以 basic_auth 是必需的，
+# 不是可选项。生成哈希：caddy hash-password
+#
+# dashboard 固定绑 127.0.0.1（它刻意不提供 --host），只能从本机连上，
+# 全部暴露面都由这份配置决定。
+
+http://HOST {
+	basic_auth {
+		# caddy hash-password --plaintext '你的密码'
+		admin PASTE_BCRYPT_HASH_HERE
+	}
+
+	# 如果你曾经把看板挂在某个前缀下（如 /factory），保留这两行让旧书签不 404。
+	# 308 而不是 302 —— 保留请求方法，否则老书签发的 POST 会被降级成 GET，
+	# 表单静默失效。
+	#
+	# 别用 `uri strip_prefix /factory` + `redir * {uri}`：strip_prefix 改的是
+	# 内部 URI，而 redir 的 {uri} 仍求值成改写前的原值，结果 /factory/ 重定向
+	# 到自己，浏览器判定重定向循环。用正则捕获组。
+	redir /factory / 308
+	@factory path_regexp fx ^/factory(/.*)$
+	redir @factory {http.regexp.fx.1} 308
+
+	reverse_proxy localhost:8788
+}

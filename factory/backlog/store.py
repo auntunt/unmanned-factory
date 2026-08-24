@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -42,6 +43,15 @@ STATES = (INBOX, RUNNING, DONE, NEEDS_HUMAN, BLOCKED)
 
 CLAIM_SUFFIX = ".claim"
 RESULT_SUFFIX = ".result.json"
+
+# _park() 同名归档最多加到 .200。撞满说明有人在拿同一个任务反复喂，
+# 或者归档目录该清了 —— 那时候报错比继续堆到 .10000 更有用。
+_PARK_MAX_SUFFIX = 200
+
+#: 任务 YAML 体积上限（M-2）。`add()` 原来全量 read_bytes()，一个几百 MB 的
+#: 文件（误指到日志/构建产物）会让入队直接吃满内存。真实任务 YAML 是几 KB，
+#: 1 MB 已经宽到离谱 —— 撞上限说明指错文件了，报错比 OOM 有用。
+MAX_TASK_BYTES = 1 << 20
 
 #: `_park` 撞名时加的数字后缀（T-foo.2.yaml）。判依赖满足要剥掉它，
 #: 否则「跑了第二遍才合并」的前置永远满足不了后继。
@@ -123,6 +133,54 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """写字节，要么全到要么没到（M-3）。
+
+    直接 write_bytes 的问题：写到一半崩了（Ctrl-C、OOM、断电）留下一个
+    **截断但存在**的文件。对 `.result.json` 来说那是一份 json.load 会抛
+    JSONDecodeError 的残骸，而读它的地方（report/metrics/下一轮 recover）
+    只准备好了「文件不存在」和「文件完整」两种情况。
+
+    做法：写同目录的临时文件 → fsync → os.replace。同目录是必须的 ——
+    os.replace 跨文件系统会抛 OSError。
+    """
+    tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())   # 元数据落地前 replace 也可能丢内容
+        os.replace(tmp, path)       # 同一 FS 上原子
+    except BaseException:
+        # 包括 KeyboardInterrupt —— 中断时也不该留一地 .tmp 文件
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """`_atomic_write_bytes` 的文本版。"""
+    _atomic_write_bytes(path, text.encode(encoding))
+
+
+def _park_fallback(base: Path, stem: str, suffix: str) -> Path | None:
+    """_park() 的非原子后备：os.link() 报 OSError 时用。
+
+    什么时候走到：归档目录和 running/ 跨文件系统（硬链接不能跨设备），
+    或者 FS 根本不支持硬链接（某些网络挂载、FAT）。
+
+    有 TOCTOU 窗口 —— 但那正是原实现的行为，单机单线程下没有区别。
+    比直接放弃归档好：归档失败意味着任务卡在 running/ 里，下一轮 recover
+    还会再捞一次。
+    """
+    target = base
+    n = 2
+    while target.exists() and n <= _PARK_MAX_SUFFIX:
+        target = base.with_name(f"{stem}.{n}{suffix}")
+        n += 1
+    return None if target.exists() else target
+
+
 class Backlog:
     """一个队列根目录上的全部操作。无状态：每次调用都看真实文件系统。"""
 
@@ -159,7 +217,16 @@ class Backlog:
                 f"inbox 里已有同名条目：{dst.name}。"
                 "改名再入队 —— 直接覆盖会让先排的那个静默消失"
             )
-        dst.write_bytes(src.read_bytes())
+        # 先看大小再读（M-2）：read_bytes() 会把整个文件吃进内存，
+        # 指错文件（日志、tarball、构建产物）时那是几百 MB。
+        size = src.stat().st_size
+        if size > MAX_TASK_BYTES:
+            raise BacklogError(
+                f"任务文件太大：{size / 1048576:.1f} MB > "
+                f"{MAX_TASK_BYTES / 1048576:.0f} MB 上限（{src}）。"
+                "任务 YAML 正常是几 KB —— 检查是不是指错了文件"
+            )
+        _atomic_write_bytes(dst, src.read_bytes())
         return dst
 
     def pending(self) -> tuple[Path, ...]:
@@ -344,6 +411,32 @@ class Backlog:
         self._write_claim(claim)
         return claim
 
+    def heartbeat(self, claim: Claim) -> bool:
+        """刷新认领的 mtime，告诉别的机器"这个任务还在跑"。
+
+        为什么需要（H-2）：`_stale_reason` 判跨主机认领时只能看时间 —— 别的
+        机器上的 pid 无法验活。一个合法运行超过 `stale_after_s`（默认 6h）的
+        任务，mtime 不刷新就会被另一台机器判成僵尸捞走，同一个任务被派发两遍：
+        重复计费、两份 diff、两个 PR。
+
+        刷两个文件：`_stale_reason` 读的是**任务文件**的 mtime（不是 claim 的），
+        但 claim 也一起刷，免得以后有人改判据时踩坑。
+
+        返回 False = 认领已经不在了（被别人捞走或归档了）。调用方据此停止心跳。
+        """
+        ok = False
+        for target in (claim.path, self._claim_file(claim.path)):
+            try:
+                os.utime(target, None)
+                ok = True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # 权限/只读挂载。心跳失败不该把任务带崩 —— 最坏结果是被误判僵尸，
+                # 而那正是没有心跳时的现状。
+                continue
+        return ok
+
     def claim_next(self) -> Claim | None:
         """认领 inbox 里第一个能抢到的条目。全被抢走则返回 None。
 
@@ -367,10 +460,10 @@ class Backlog:
         return task_path.with_name(task_path.name + CLAIM_SUFFIX)
 
     def _write_claim(self, claim: Claim) -> None:
-        self._claim_file(claim.path).write_text(
+        _atomic_write_text(
+            self._claim_file(claim.path),
             json.dumps({"pid": claim.pid, "host": claim.host,
                         "claimed_at": claim.claimed_at}, ensure_ascii=False),
-            encoding="utf-8",
         )
 
     def read_claim(self, task_path: Path) -> dict:
@@ -401,7 +494,8 @@ class Backlog:
             raise BacklogError(
                 f"未知 outcome {outcome!r}，只能是 {sorted(OUTCOME_DIR)}")
         dst = self._park(claim.path, state)
-        dst.with_name(dst.name + RESULT_SUFFIX).write_text(
+        _atomic_write_text(
+            dst.with_name(dst.name + RESULT_SUFFIX),
             json.dumps(
                 {
                     "outcome": outcome,
@@ -416,7 +510,6 @@ class Backlog:
                 ensure_ascii=False,
                 indent=2,
             ),
-            encoding="utf-8",
         )
         return dst
 
@@ -435,34 +528,77 @@ class Backlog:
             moved = self._park(entry.path, NEEDS_HUMAN)
             # 返回的 path 指向**搬完之后**的位置。返回 inbox 里那个已经不存在的
             # 路径，会让调用方（循环、看板）拿着它去读文件时报「文件不存在」，
-            # 而真正的原因是死锁 —— 诊断方向立刻被引偏。
             out.append(Deadlock(path=moved, task_id=entry.task_id,
                                 missing=entry.missing, reason=entry.reason))
-            moved.with_name(moved.name + RESULT_SUFFIX).write_text(
-                json.dumps({"outcome": "error", "state": NEEDS_HUMAN,
-                            "note": f"前置永远等不到：{entry.reason}",
-                            "missing_deps": list(entry.missing),
-                            "finished_at": time.time()},
-                           ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            _atomic_write_text(
+                moved.with_name(moved.name + RESULT_SUFFIX),
+                json.dumps({
+                    "outcome": "error", "state": NEEDS_HUMAN,
+                    "note": f"前置永远等不到：{entry.reason}",
+                    "missing_deps": list(entry.missing),
+                    "finished_at": time.time()},
+                    ensure_ascii=False, indent=2),
             )
         return tuple(out)
 
-    def _park(self, task_path: Path, state: str) -> Path:
+    def _park(self, task_path: Path, state: str, *, name: str | None = None) -> Path:
         """把条目搬到终态目录，同名时加数字后缀。
 
         同名会真的发生：同一个任务 YAML 跑第二遍（人改完 needs-human 里的
         判据后重新 add）时 basename 一样。覆盖掉的话第一次的失败证据就没了。
+
+        `name` 覆盖归档用的文件名，默认沿用源文件名。测试用它构造同名竞争。
         """
         self.ensure()
-        target = self.dir(state) / task_path.name
-        if target.exists():
-            stem, suffix = target.stem, target.suffix
-            n = 2
-            while target.exists():
-                target = target.with_name(f"{stem}.{n}{suffix}")
-                n += 1
-        os.replace(task_path, target)
+        target_dir = self.dir(state)
+        base = target_dir / (name or task_path.name)
+        stem, suffix = base.stem, base.suffix
+
+        # `if not exists: replace` 是 TOCTOU：两个线程都看到"不存在"，都算出
+        # 同一个 target，后者的 os.replace 静默盖掉前者 —— 失败证据丢一份。
+        # 实测 8 线程并发 park 同名任务，2 个线程拿到同一个 T-x.5，
+        # 磁盘只剩 8 个文件（应该 9 个）。
+        #
+        # 改用 os.link() 占位：同名时抛 FileExistsError，是内核级的原子判决，
+        # 没有检查与创建之间的窗口。占位成功后再 os.replace 落到同一个名字上，
+        # 此时那个名字已经被我们独占，不可能被别人抢走。
+        target: Path | None = None
+        for n in range(1, _PARK_MAX_SUFFIX + 1):
+            candidate = base if n == 1 else base.with_name(f"{stem}.{n}{suffix}")
+            try:
+                os.link(task_path, candidate)
+            except FileExistsError:
+                continue          # 这个名字被别人占了，试下一个
+            except OSError:
+                # 跨文件系统或 FS 不支持硬链接。退回非原子路径 —— 有窗口，
+                # 但比直接放弃归档好：单机单线程下行为不变。
+                target = _park_fallback(base, stem, suffix)
+                break
+            target = candidate
+            break
+
+        if target is None:
+            # 后缀撑满。不静默覆盖（那是 C-3 的原始症状），也不无限自旋（M-1）。
+            raise BacklogError(
+                f"归档 {task_path.name} 到 {state}/ 失败："
+                f"同名条目已有 {_PARK_MAX_SUFFIX} 个。"
+                f"先清理 {target_dir} 再重试。"
+            )
+
+        # 这里**不能**用 os.replace(task_path, target)。os.link 成功时 target
+        # 已经是 task_path 的硬链接 —— 同一个 inode 两个名字。POSIX 规定
+        # rename(2) 在源与目标指向同一 inode 时是 no-op：直接返回成功、什么都
+        # 不做，源文件留在原地。结果是任务被"归档"了却还躺在 running/，
+        # 下一轮 recover 再把它当残留捞一遍。
+        #
+        # 硬链接已经把内容放到 target 了，剩下的只是删掉旧名字。
+        if target.samefile(task_path):
+            task_path.unlink()
+        else:
+            # fallback 路径返回的 target 是新建的独立文件，不是硬链接，
+            # 这时才需要真的搬。
+            os.replace(task_path, target)
+
         claim_file = self._claim_file(task_path)
         if claim_file.is_file():
             claim_file.unlink()
@@ -485,24 +621,40 @@ class Backlog:
         """
         out: list[Recovered] = []
         for path in self.running():
-            reason = self._stale_reason(path, stale_after_s)
-            if not reason:
+            # 整个循环体都要能容忍"条目突然不在了"。recover() 是 run() 的第一行，
+            # 从这里穿出任何异常 = 无人循环整夜不启动（H-1）。一个捞不动的残留
+            # 不值得让整晚停摆；跳过它，下一轮再看。
+            try:
+                reason = self._stale_reason(path, stale_after_s)
+                if not reason:
+                    continue
+                task_id = path.stem
+                moved = self._park(path, NEEDS_HUMAN)
+                _atomic_write_text(
+                    moved.with_name(moved.name + RESULT_SUFFIX),
+                    json.dumps({
+                        "outcome": "error", "state": NEEDS_HUMAN,
+                        "note": f"崩溃残留：{reason}",
+                        "finished_at": time.time()},
+                        ensure_ascii=False, indent=2),
+                )
+            except FileNotFoundError:
+                continue          # 条目在我们动手的过程中消失了
+            except (OSError, BacklogError):
+                # 权限、磁盘满、后缀撑满……都不该拦住启动。留在 running/ 里，
+                # 下一轮 recover 会再捞一次。
                 continue
-            task_id = path.stem
-            moved = self._park(path, NEEDS_HUMAN)
-            moved.with_name(moved.name + RESULT_SUFFIX).write_text(
-                json.dumps({"outcome": "error", "state": NEEDS_HUMAN,
-                            "note": f"崩溃残留：{reason}",
-                            "finished_at": time.time()},
-                           ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
             out.append(Recovered(path=moved, task_id=task_id, reason=reason))
         return tuple(out)
 
     def _stale_reason(self, path: Path, stale_after_s: float) -> str:
         claim = self._claim_file(path)
-        age = time.time() - path.stat().st_mtime
+        # H-1: path.stat() 必须防 FileNotFoundError。`recover()` 在 `run()` 第一行，
+        # 异常穿出的话整夜没跑任何东西 —— 只因为列出目录到 stat 之间条目被删了。
+        try:
+            age = time.time() - path.stat().st_mtime
+        except FileNotFoundError:
+            return ""  # 已经不在了，别管它
         if not claim.is_file():
             return "running/ 里没有 .claim 文件，无法判断归属"
         try:

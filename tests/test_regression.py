@@ -112,3 +112,71 @@ def test_review_with_no_checks_fails(ws):
     report = RegressionSupervisor().review(ws, [])
     assert report.verdict == Verdict.FAIL
     assert report.claims[0]["check"] == "no-checks-defined"
+
+
+def test_exit_zero_captures_both_stdout_and_stderr(ws):
+    """stderr 有噪声警告、stdout 有真失败摘要时，got 必须同时包含两路。
+
+    这是 regression claim 诊断消失的根因：`proc.stderr or proc.stdout`
+    只要 stderr 非空就完全不看 stdout，而 pytest 把失败摘要写在 stdout。
+    """
+    # 模拟 pytest 场景：stderr 打一行 uv 警告，stdout 打真正的失败摘要
+    cmd = (
+        'echo "warning: VIRTUAL_ENV does not match" >&2; '
+        'echo "FAILED test_foo.py::test_bar - assert 1 == 2"; '
+        'exit 1'
+    )
+    claim = run_check(CheckSpec("mixed", cmd), ws)
+    assert claim is not None
+    assert claim["check"] == "mixed"
+    # got 里必须能看到 stdout 的失败摘要，不能被 stderr 噪声挤掉
+    assert "FAILED" in claim["got"]
+    assert "assert 1 == 2" in claim["got"]
+    # 同时 stderr 的警告也在（为了完整性）
+    assert "VIRTUAL_ENV" in claim["got"]
+    # 标清了来源
+    assert "[stderr]" in claim["got"]
+    assert "[stdout]" in claim["got"]
+
+
+def test_exit_zero_preserves_tail_for_pytest_summary(ws):
+    """失败摘要在尾部时，截断要优先保留尾部，不能掐头去尾。
+
+    pytest 的 FAILED / assert 行在末尾，头部截断会把它切掉。
+    """
+    # 构造一个长输出：头部是噪声，尾部是失败摘要
+    head_noise = "x" * 3000
+    tail_summary = "FAILED test.py - AssertionError: expected 42"
+    cmd = f'echo "{head_noise}"; echo "{tail_summary}"; exit 1'
+    claim = run_check(CheckSpec("long", cmd), ws)
+    assert claim is not None
+    # 核心要求：尾部的失败摘要必须保留
+    assert "FAILED test.py" in claim["got"]
+    assert "AssertionError" in claim["got"]
+
+
+def test_stdout_contains_captures_stderr_context(ws):
+    """stdout_contains 失败时，stderr 的上下文也要进 got。"""
+    cmd = 'echo "some error context" >&2; echo "actual output"'
+    spec = CheckSpec("missing", cmd, expect="stdout_contains", value="expected text")
+    claim = run_check(spec, ws)
+    assert claim is not None
+    # got 里应该同时有 stdout 和 stderr
+    assert "actual output" in claim["got"]
+    assert "error context" in claim["got"]
+
+
+def test_commands_agree_shows_both_outputs_with_stderr(ws):
+    """commands_agree 不匹配时，两边的 stderr 也要显示。"""
+    cmd1 = 'echo "warn1" >&2; echo "out1"'
+    cmd2 = 'echo "warn2" >&2; echo "out2"'
+    spec = CheckSpec("mismatch", cmd1, expect="commands_agree", value=cmd2)
+    claim = run_check(spec, ws)
+    assert claim is not None
+    # expected 和 got 都应该包含各自的 stdout 和 stderr
+    assert "out1" in claim["got"]
+    assert "out2" in claim["expected"]
+    # stderr 警告也在
+    assert "warn1" in claim["got"]
+    assert "warn2" in claim["expected"]
+
