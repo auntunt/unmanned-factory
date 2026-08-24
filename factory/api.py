@@ -1,14 +1,36 @@
-"""只读 JSON API：把队列目录和审计库喂给前端。
+"""看板 JSON API：把队列目录和审计库喂给前端，并收投递。
 
-旧 `dashboard.py` 是「读库 + 渲染 HTML」一体的。前端拆出去之后这一层只剩
-前半截：读队列、读 audit.db、序列化成 JSON。**一个字节都不往两个数据源里写**
-（POST/PUT/DELETE 根本没实现，见文件末尾的 `Handler`）。
+旧 `dashboard.py` 是「读库 + 渲染 HTML」一体的。前端拆出去之后这一层剩下
+读侧（读队列、读 audit.db、序列化成 JSON），后来又加回了**一条**写路径：
+`POST /api/submit`。
+
+## 写权限的确切边界
+
+这一层曾经宣称自己「一个字节都不写」。那句话在 `do_POST` 落地之后就成了
+谎，而一份说自己只读的模块 docstring 是最坏的一种文档：读它的人会跳过
+「这里能不能写」这个问题，于是没人去问那条写路径有没有校验。实测的结果
+就是没有 —— 原来的 `submit_task` 只验 task_id 命名，YAML 原文直落 inbox。
+
+所以边界写清楚，而不是删掉那句话：
+
+  **写**：只有 `POST /api/submit`，只写 `queue/inbox/<task_id>.yaml`
+          和 `queue/log/<date>.jsonl`（投递流水）。
+  **不写**：audit.db 全程只读打开。没有任何端点能改任务状态、改判决、
+          删条目、重跑一轮 —— 状态迁移只由 dispatcher 和 `factory` CLI 做。
+          看板上想「重跑」得回到命令行，这是刻意的：一个能从浏览器
+          触发派发的按钮，配上 CORS `*` 和无认证的 bind，等于把烧钱的
+          开关放在任何一个能打开 localhost 的页面上。
+
+`/api/submit` 的校验不是自己写的一套：它走 `screen_yaml`，里面是
+`yaml.safe_load` + `Task.from_mapping` + `intake.gate.admit` —— 和 CLI
+入队完全同一套规则。投递闸门和派发时的解析器分叉过一次，代价是坏任务在
+凌晨认领时才炸，所以这里刻意不留第二份实现。
 
 ## 为什么不引 flask/fastapi
 
-和旧 dashboard 同一个取舍：项目生产依赖只有 SQLAlchemy 和 PyYAML。三个只读
-GET 端点、单人看、无并发压力，标准库 `http.server` 够用。为这个把 web 框架
-拖进生产依赖，代价不划算。
+和旧 dashboard 同一个取舍：项目生产依赖只有 SQLAlchemy 和 PyYAML。四个
+GET 端点加一个 POST、单人看、无并发压力，标准库 `http.server` 够用。为这个
+把 web 框架拖进生产依赖，代价不划算。
 
 ## 为什么数据组装是纯函数
 
@@ -411,7 +433,15 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
 
 
 def route_post(path: str, data: dict, *, queue: str | Path) -> tuple[int, dict]:
-    """处理 POST 请求路由"""
+    """POST 路由。**表里只有一条，加第二条要先想清楚写权限。**
+
+    只吃 `queue`，拿不到 `db` —— 这不是漏传参数，是让「POST 不碰审计库」
+    在签名上就成立。哪天真要加一个写 audit.db 的端点，得先改这个签名，
+    而那次改动会逼人重读上面那段写权限边界。
+
+    异常一律 500 且带类型名：投递路径上的意外（磁盘满、队列目录被删）
+    要能从响应里认出来，不然只能去翻服务端日志。
+    """
     clean = urlparse(path).path.rstrip("/") or "/"
     try:
         if clean == "/api/submit":
@@ -519,6 +549,8 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
     for state_dir in STATES:
         task_file = queue_path / state_dir / f"{task_id}.yaml"
         if task_file.exists():
+            _log_submit(queue_path, task_id, "rejected",
+                        why=(f"任务已存在于 {state_dir}/",))
             return 409, {
                 "error": f"任务已存在于 {state_dir}/",
                 "why": [f"队列里已有 {task_id}.yaml，在 {state_dir}/ 下"],
@@ -528,6 +560,7 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
 
     # 闸门：语法、必填字段、语义三道关全过才允许写盘。
     if why := screen_yaml(yaml_content):
+        _log_submit(queue_path, task_id, "rejected", why=why)
         return 400, {
             "error": f"任务没过投递闸门（{len(why)} 条）",
             "why": list(why),
@@ -540,16 +573,49 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
         with open(inbox_file, "w", encoding="utf-8") as f:
             f.write(yaml_content)
     except Exception as exc:
+        _log_submit(queue_path, task_id, "error", why=(str(exc),))
         return 500, {"error": f"写入失败: {exc}"}
+    _log_submit(queue_path, task_id, "accepted")
     return 200, {"ok": True, "task_id": task_id, "file": str(inbox_file)}
 
 
-def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
-    """起一个只读 JSON API。每次请求重新读库，所以刷新就能看到新数据。
+def _log_submit(queue: Path, task_id: str, outcome: str,
+                *, why: tuple[str, ...] = ()) -> None:
+    """把一次投递的结论写进队列 log/。
 
-    只绑 127.0.0.1，没有认证 —— 理由见模块 docstring。只实现 GET 和
-    OPTIONS（CORS 预检），POST/PUT/DELETE 根本没有对应方法，stdlib 会自动
-    回 501。
+    走 Journal（和无人循环同一条 JSONL 通道）而不是新开一个文件：
+    「昨晚发生了什么」必须只有一个地方要看。Journal.event 自己吞
+    OSError —— 日志写不进去不该让一次合法投递失败。
+
+    被拒的也记，而且记的是 why 全文：没有它，「那条任务我投过啊」
+    和「我以为我投过」在事后完全同形。
+    """
+    from factory.backlog.journal import Journal
+
+    # Journal.event 自己吞 OSError，但只吞 OSError，而且构造 Journal 本身
+    # 也能失败（gethostname 在某些容器里抛）。这里再兜一层广的：
+    # **记日志失败绝不能让一次合法投递变成 500**。反向的降级（投递成功但
+    # 没留痕）是可接受的，Journal 会往 stderr 抱怨一声。
+    try:
+        Journal(queue / LOG).event(
+            "submit",
+            task_id=task_id,
+            source="api",
+            outcome=outcome,
+            why=list(why),
+        )
+    except Exception as exc:  # noqa: BLE001 - 见上
+        import sys
+
+        print(f"[api] 投递流水没记上（不影响投递）：{exc}", file=sys.stderr)
+
+
+def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
+    """起看板 API。每次请求重新读库，所以刷新就能看到新数据。
+
+    只绑 127.0.0.1，没有认证 —— 理由见模块 docstring。实现 GET、
+    POST（只有 `/api/submit`）、OPTIONS（CORS 预检）；PUT/DELETE 没有对应
+    方法，stdlib 自动回 501。
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -608,7 +674,8 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
         print(f"api: http://{HOST}:{port}/api/tasks   (Ctrl-C 停)")
         print(f"  数据源 : {db}")
         print(f"  队列   : {queue}")
-        print("  只读、只绑环回地址、没有认证 —— 外部访问走 Caddy 反代")
+        print("  写权限 : 只有 POST /api/submit → inbox/（audit.db 只读）")
+        print("  只绑环回地址、没有认证 —— 外部访问走 Caddy 反代")
         try:
             srv.serve_forever()
         except KeyboardInterrupt:

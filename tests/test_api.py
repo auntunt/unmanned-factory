@@ -24,6 +24,7 @@ from factory.api import (
     global_stats,
     list_tasks,
     route,
+    route_post,
     screen_yaml,
     submit_task,
     task_detail,
@@ -451,3 +452,100 @@ def test_submit_yaml_goes_through_safe_load(empty_queue):
 
     assert code == 400
     assert list((empty_queue / "inbox").iterdir()) == []
+
+
+# ---------- F2 契约文档 + 投递流水 ----------
+
+
+def test_module_docstring_does_not_claim_read_only():
+    """模块 docstring 不许再自称「只读」。
+
+    这是个元测试，守的是一类特定的腐烂：`do_POST` 落地时没人回头改文档，
+    于是文件开头写着「一个字节都不往数据源里写」，而底下有一条无校验的
+    写路径。一份说自己只读的文档比没有文档坏 —— 它让读者跳过「这里能不能
+    写」这个问题。
+
+    断言的不是措辞，是「声称只读」和「实际有 do_POST」不能同时成立。
+    """
+    import factory.api as mod
+
+    doc = mod.__doc__ or ""
+    assert "POST /api/submit" in doc, "有写路径就必须在 docstring 里点名"
+    # 「只读 JSON API」这类整体性声称。允许出现「audit.db 全程只读打开」
+    # 这种**限定到具体数据源**的说法 —— 那句是真的。
+    assert "只读 JSON API" not in doc
+    assert "一个字节都不往" not in doc
+
+
+def test_route_post_has_exactly_one_write_endpoint():
+    """POST 表里只有 /api/submit。
+
+    加第二条写端点时这个测试会红 —— 那是刻意的提醒：新的写路径要先回答
+    「它写什么、有没有过闸门」，而不是顺手加上去。
+    """
+    assert route_post("/api/nope", {}, queue="/tmp")[0] == 404
+    # 签名里没有 db：POST 拿不到审计库句柄，「不写 audit.db」在类型上成立。
+    import inspect
+
+    assert "db" not in inspect.signature(route_post).parameters
+
+
+def test_submit_writes_journal_line(empty_queue):
+    """收下的投递在 log/ 里留一行 JSONL，字段够回答「谁投的、什么时候」。"""
+    import json
+
+    submit_task({"task_id": "T-good-one", "yaml": GOOD_SUBMIT}, empty_queue)
+
+    lines = [
+        json.loads(line)
+        for p in (empty_queue / "log").glob("*.jsonl")
+        for line in p.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(lines) == 1
+    rec = lines[0]
+    assert rec["kind"] == "submit"
+    assert rec["outcome"] == "accepted"
+    assert rec["task_id"] == "T-good-one"
+    assert rec["source"] == "api"
+    assert rec["ts"] > 0
+
+
+def test_rejected_submit_is_also_logged_with_reasons(empty_queue):
+    """被拒的也留痕，且带 why 全文。
+
+    没有这条，「我明明投过那个任务」和「我以为我投过」事后完全同形 ——
+    inbox 里都没有，日志里都没有。
+    """
+    import json
+
+    task_id, body = BAD_SUBMITS["no-acceptance"]
+    submit_task({"task_id": task_id, "yaml": body}, empty_queue)
+
+    recs = [
+        json.loads(line)
+        for p in (empty_queue / "log").glob("*.jsonl")
+        for line in p.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [r["outcome"] for r in recs] == ["rejected"]
+    assert recs[0]["why"], "拒了但没记原因"
+    assert any("no-acceptance" in w for w in recs[0]["why"])
+
+
+def test_journal_failure_does_not_break_a_valid_submit(empty_queue, monkeypatch):
+    """日志写不进去时投递照常成功。
+
+    日志是观测手段，不是任务的一部分。磁盘满了不该让一次合法投递失败 ——
+    反过来（投递成功但没日志）是可接受的降级，Journal 自己往 stderr 抱怨。
+    """
+    import factory.backlog.journal as journal_mod
+
+    def boom(self, kind, **fields):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(journal_mod.Journal, "event", boom)
+    # _log_submit 里 import 的是模块属性，patch 到类上就够。
+    code, payload = submit_task(
+        {"task_id": "T-good-one", "yaml": GOOD_SUBMIT}, empty_queue)
+
+    assert code == 200, payload
+    assert (empty_queue / "inbox" / "T-good-one.yaml").is_file()
