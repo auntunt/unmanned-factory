@@ -483,3 +483,118 @@ def test_a_tie_goes_to_the_first_test_dir(tmp_path):
     assert target is not None
     assert target.parent.name == "tests", (
         f"平票没按 _TEST_DIRS 顺序取：{target}")
+
+
+# ---------- F3 worker 自写 checks 全量过金丝雀 ----------
+#
+# 语法层的 vacuous_checks 看命令长什么样，拦得住 `echo ok`、`true`。
+# 拦不住的是「命令完全正常、被测的东西是假的」：worker 新写一个
+# `def test_ok(): assert True`，check 命令就是老老实实的 `pytest tests/`。
+# 判决文件一个没动，所以按原来的抽样条件探针根本不跑，恒真自测一路绿到 merge。
+
+def _dispatch_worker_checks(tmp_path, root, *, changed, check_cmd=CMD,
+                            probes=None):
+    """跑一轮真 dispatcher，check 走 **worker 自写**（.checks.json）那条路。
+
+    和 `_dispatch` 的唯一区别是 task.checks 留空 —— 那是 dispatcher 判定
+    「这组 check 是谁定的」的依据（`worker_authored = not task.checks`）。
+    """
+    import json
+
+    from factory.audit.store import AuditStore
+    from factory.dispatcher import Dispatcher
+    from factory.task import Task
+    from tests.test_dispatcher import FakeAdapter, _result
+
+    # worker 在 workspace 里留下的判据文件，契约见 factory/checks_contract.py
+    (root / ".checks.json").write_text(
+        json.dumps({"checks": [{"name": "unit", "command": check_cmd}]}),
+        encoding="utf-8")
+
+    task = Task(task_id="T-fg-worker", prompt="改点东西")  # 注意：不传 checks
+    d = Dispatcher(adapter=FakeAdapter([_result(paths=changed)]),
+                   store=AuditStore(tmp_path / "aw.db"))
+    if probes is not None:
+        import factory.dispatcher as dm
+        real = dm.probe
+
+        def spy(root_, command, **kw):
+            probes.append(command)
+            return real(root_, command, **kw)
+
+        dm.probe = spy
+        try:
+            return d.run(task, root)
+        finally:
+            dm.probe = real
+    return d.run(task, root)
+
+
+def test_worker_written_checks_are_always_probed(tmp_path):
+    """worker 自写的 check 必跑探针，哪怕这轮没碰任何裁判权文件。
+
+    这条是 F3 的核心：抽样条件（改了 conftest/pyproject 才验）对人写的
+    check 成立，对 worker 自写的不成立 —— 它不需要动裁决装置就能造出假绿。
+    """
+    root = _repo(tmp_path)
+    (root / "tests" / "test_b.py").write_text("def test_y(): pass\n",
+                                              encoding="utf-8")
+    seen: list[str] = []
+    _dispatch_worker_checks(tmp_path, root, changed=("tests/test_b.py",),
+                            probes=seen)
+    assert seen, "worker 自写的 check 没过探针 —— 恒真自测能一路绿到 merge"
+
+
+def test_a_worker_written_always_true_test_is_sent_back(tmp_path):
+    """判据用例：worker 写一条恒真自测 → 被打回，不许 merge。
+
+    构造的是真实的偷懒路径：改动本身什么都没修好（被测函数照旧是坏的），
+    worker 新加一个自己一定过的测试，然后把 check 指向**只跑那个测试**。
+    命令是正常的 pytest 调用，vacuous_checks 在语法层看不出问题。
+    """
+    root = _repo(tmp_path, passing=False)  # 真测试是红的
+    (root / "tests" / "test_selfmade.py").write_text(
+        "def test_worker_says_ok():\n    assert True\n", encoding="utf-8")
+    cmd = "python -m pytest tests/test_selfmade.py -q"
+    assert _sh(root, cmd) == 0, "前提：这条恒真自测自己是绿的"
+
+    rep = _dispatch_worker_checks(tmp_path, root,
+                                 changed=("tests/test_selfmade.py", "src/a.py"),
+                                 check_cmd=cmd)
+    assert rep.outcome.value != "merged", f"恒真自测合并了：{rep}"
+
+
+def test_the_send_back_reason_says_the_check_was_worker_written(tmp_path):
+    """打回理由要说清「这条是你自己写的所以全量验」。
+
+    原来的文案固定拼「这一轮改过：<裁判权文件>」，worker 来源时那个列表是
+    空的，会打出「这一轮改过：」后跟一片空白 —— 那种提示比不给更糟，
+    worker 下一轮不知道该改什么。
+    """
+    root = _repo(tmp_path, passing=False)
+    (root / "tests" / "test_selfmade.py").write_text(
+        "def test_worker_says_ok():\n    assert True\n", encoding="utf-8")
+    cmd = "python -m pytest tests/test_selfmade.py -q"
+
+    rep = _dispatch_worker_checks(tmp_path, root,
+                                 changed=("tests/test_selfmade.py",),
+                                 check_cmd=cmd)
+    assert "worker" in rep.escalation_reason, rep.escalation_reason
+    assert "这一轮改过：\n" not in rep.escalation_reason
+    assert not rep.escalation_reason.rstrip().endswith("这一轮改过："), \
+        f"空列表拼进了理由：{rep.escalation_reason!r}"
+
+
+def test_human_written_checks_keep_the_sampling(tmp_path):
+    """反向守边界：人写的 check 仍然抽样，没被这次改动顺手变成全量。
+
+    人有权写一条看起来无聊的命令，而且全量验会给每一轮都加一次 pytest
+    的开销。这条和 test_the_probe_does_not_run_when_no_judge_file_changed
+    是同一个约束的两面，留在这里是为了让 F3 的改动范围一眼可见。
+    """
+    root = _repo(tmp_path)
+    (root / "tests" / "test_b.py").write_text("def test_y(): pass\n",
+                                              encoding="utf-8")
+    seen: list[str] = []
+    _dispatch(tmp_path, root, changed=("tests/test_b.py",), probes=seen)
+    assert seen == [], f"人写的 check 被改成全量探针了：{seen}"

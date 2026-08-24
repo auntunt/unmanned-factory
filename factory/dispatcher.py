@@ -624,8 +624,11 @@ class Dispatcher:
         checks = checks + self._runbook_checks(workspace, result)
         regression = self._supervisor.review(workspace, checks)
 
-        # 金丝雀：这一轮动了「能改变裁决」的文件（conftest.py / pyproject.toml
-        # 之类）时，验一次那份绿还能不能被推翻。
+        # 金丝雀：验一次那份绿还能不能被推翻（塞一条必然失败的测试进去，
+        # check 应该变红）。触发条件有两条，任一命中就跑。
+        #
+        # 【条件二·人写来源】这一轮动了「能改变裁决」的文件
+        # （conftest.py / pyproject.toml 之类）。以下这段讲的是这一支：
         #
         # 为什么另立一条而不是扩 runner_hooks：那条判的是「**新增**了 runner
         # 自动加载的文件」，而伪造绿不需要新增。实测三条都拿到退出码 0 ——
@@ -639,9 +642,24 @@ class Dispatcher:
         # pyproject.toml 各改过 2 次（约 7%），所以绝大多数轮次不多花这一次。
         # 而合法改动的金丝雀是红的（实测：加夹具、加 marker 都是非 0），
         # 所以这 7% 也不会变成误拒。
+        # 【条件一·worker 来源】worker 自写的 check 无条件全验，
+        # 不看改了哪些文件、不抽样。
+        #
+        # 上面那段抽样逻辑（7% 的轮次）成立的前提是「伪造绿需要改判决文件」。
+        # 对人写的 check 是对的：命令是人定的，worker 只能从裁决装置下手。
+        # 但 worker 自己写 check 时根本不用碰 conftest —— 新加一个
+        # `def test_ok(): assert True` 就够了，语法层的 vacuous_checks 看
+        # 命令（`pytest tests/`）完全正常，判决文件一个没动，于是探针不跑，
+        # 恒真自测一路绿到 merge。
+        #
+        # 所以触发条件按 check 的来源分岔：worker 来源全跑（这一组本来就是
+        # 它自己定的判据，可信度最低，且只有一两条，成本可接受），
+        # 人写来源保持原来的判决文件抽样。
+        worker_authored = not task.checks
         beacon: SupervisorReport | None = None
+        touched_judges = judge_files_touched(result.changed_paths)
         if regression.verdict is Verdict.PASS and (
-            touched_judges := judge_files_touched(result.changed_paths)
+            worker_authored or touched_judges
         ):
             probe_skips: list[tuple[str, str]] = []
             for spec in checks:
@@ -653,8 +671,15 @@ class Dispatcher:
                             "fake-green",
                             spec.command,
                             "塞进一条必然失败的测试之后 check 变红",
-                            f"{res.reason}。这一轮改过："
-                            f"{_listed(touched_judges)}",
+                            # 触发原因决定这句怎么说。worker 来源时
+                            # touched_judges 是空的，照原样拼会打出「这一轮
+                            # 改过：」后面跟一片空白 —— 那种提示比不给更糟。
+                            f"{res.reason}。"
+                            + (
+                                "这条 check 是 worker 自己写的，所以全量验"
+                                if worker_authored
+                                else f"这一轮改过：{_listed(touched_judges)}"
+                            ),
                         ),
                     )
                 if res.skipped:
