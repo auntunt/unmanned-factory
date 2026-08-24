@@ -24,6 +24,8 @@ from factory.api import (
     global_stats,
     list_tasks,
     route,
+    screen_yaml,
+    submit_task,
     task_detail,
 )
 from factory.audit.models import NOT_DISPATCHED, OracleClass, Resolution, SupervisorRole, Verdict
@@ -334,3 +336,118 @@ def test_route_decodes_task_id(audit_db, queue):
     code, payload = route("/api/task/T-nope%20x", db=audit_db, queue=queue)
     assert code == 404
     assert payload["error"] == "task not found: T-nope x"
+
+
+# ---------- F1 投递闸门 ----------
+#
+# 这些测试守的是「坏任务不入队」这条判据。它比响应形状更重要一层：形状错了前端
+# 炸，闸门漏了是凌晨三点的队列熔断（坏任务在认领时才炸，且计入 unpriced streak，
+# 连续两条足够停掉一整夜）。
+#
+# 每个用例都断言 **inbox 无残留** 而不只是状态码：返回 400 但已经写了盘，是这
+# 类缺陷最可能的形态 —— 校验加在了写盘之后。
+
+GOOD_SUBMIT = """\
+task_id: T-good-one
+prompt: 把 foo() 的返回值改成 tuple
+acceptance:
+  - foo() 返回 (a, b) 而不是 list
+checks:
+  - name: unit
+    command: pytest tests/test_foo.py
+"""
+
+#: 六类坏 YAML。键是标签（断言失败时能一眼看出是哪类漏了），
+#: 值是 (task_id, YAML 正文)。
+BAD_SUBMITS = {
+    "syntax": ("T-bad-syntax", "task_id: T-bad-syntax\nprompt: [unclosed\n"),
+    "dangling-spec-ref": (
+        "T-bad-dangling",
+        "task_id: T-bad-dangling\nprompt: 改点东西\nspec_ref:\n  - AC-1\n",
+    ),
+    "check-missing-command": (
+        "T-bad-nocmd",
+        "task_id: T-bad-nocmd\nprompt: 改点东西\nacceptance:\n  - 能跑\n"
+        "checks:\n  - name: unit\n",
+    ),
+    "missing-prompt": (
+        "T-bad-noprompt",
+        "task_id: T-bad-noprompt\nacceptance:\n  - 能跑\n",
+    ),
+    "no-acceptance": ("T-bad-noacc", "task_id: T-bad-noacc\nprompt: 随便改改\n"),
+    "top-level-not-mapping": (
+        "T-bad-list",
+        "- task_id: T-bad-list\n- prompt: x\n",
+    ),
+}
+
+
+@pytest.fixture
+def empty_queue(tmp_path):
+    """一个空的真队列。投递测试要的是「inbox 本来没东西」这个前提。"""
+    root = tmp_path / "q"
+    Backlog(root).ensure()
+    return root
+
+
+@pytest.mark.parametrize("label", sorted(BAD_SUBMITS))
+def test_bad_yaml_is_rejected_and_leaves_no_trace(empty_queue, label):
+    task_id, body = BAD_SUBMITS[label]
+    code, payload = submit_task({"task_id": task_id, "yaml": body}, empty_queue)
+
+    assert code == 400, f"{label} 应该被拦，实际 {code}：{payload}"
+    # 判据的另一半：不许留残骸。校验写在写盘之后的话这里会红。
+    assert list((empty_queue / "inbox").iterdir()) == [], \
+        f"{label} 被拒了但 inbox 里有残留"
+
+
+@pytest.mark.parametrize("label", sorted(BAD_SUBMITS))
+def test_rejection_body_is_three_part(empty_queue, label):
+    """`{error, why, how}` 三段式。前端把 why 逐条列出来、how 贴在表单下面。
+
+    单独一个测试而不是并进上面：状态码对但 body 少一段，前端拿到 undefined
+    渲染成空白 —— 那是「投递失败了但没说为什么」，比 500 更难排。
+    """
+    task_id, body = BAD_SUBMITS[label]
+    _, payload = submit_task({"task_id": task_id, "yaml": body}, empty_queue)
+
+    assert set(payload) >= {"error", "why", "how"}, f"{label} 的 body 不是三段式"
+    assert payload["why"], f"{label} 的 why 是空的，等于没说原因"
+    assert isinstance(payload["why"], list)   # JSON 数组，不是元组也不是字符串
+    assert payload["how"].strip()
+
+
+def test_good_yaml_still_gets_in(empty_queue):
+    """闸门收紧之后合法投递照常。没有这条，「全拦住」也算判据通过。"""
+    code, payload = submit_task(
+        {"task_id": "T-good-one", "yaml": GOOD_SUBMIT}, empty_queue)
+
+    assert code == 200, payload
+    assert payload["ok"] is True
+    assert (empty_queue / "inbox" / "T-good-one.yaml").is_file()
+
+
+def test_duplicate_task_id_is_409_not_overwritten(empty_queue):
+    submit_task({"task_id": "T-good-one", "yaml": GOOD_SUBMIT}, empty_queue)
+    code, payload = submit_task(
+        {"task_id": "T-good-one", "yaml": GOOD_SUBMIT}, empty_queue)
+
+    assert code == 409
+    assert set(payload) >= {"error", "why", "how"}
+
+
+def test_submit_yaml_goes_through_safe_load(empty_queue):
+    """`!!python/object` 这类标签必须在解析阶段就死掉。
+
+    请求体来自网络。用 `yaml.load` 的话这一行能实例化任意类 —— 而原来的
+    实现根本不解析，原始文本直落 inbox，然后由认领方去 load。
+    """
+    body = (
+        "task_id: T-bad-tag\n"
+        "prompt: !!python/object/apply:os.system ['echo pwned']\n"
+        "acceptance:\n  - x\n"
+    )
+    code, _ = submit_task({"task_id": "T-bad-tag", "yaml": body}, empty_queue)
+
+    assert code == 400
+    assert list((empty_queue / "inbox").iterdir()) == []

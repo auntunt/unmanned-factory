@@ -83,6 +83,24 @@ class Task:
     @classmethod
     def from_yaml(cls, path: str | Path) -> Task:
         doc = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.from_mapping(doc)
+
+    @classmethod
+    def from_mapping(cls, doc: dict) -> Task:
+        """从一个已经 safe_load 过的 mapping 构造 Task。
+
+        从 `from_yaml` 里抽出来，为的是让「不落盘的 YAML」（`/api/submit`
+        收到的请求体）能走**完全同一套**字段规则。分成两份实现的代价是
+        实测过的：投递闸门放行的形状和派发时实际解析的形状一旦分叉，
+        坏任务就在凌晨认领时才炸。
+
+        字段缺失/类型不对时**照常抛**（KeyError / TypeError / ValueError）——
+        调用方决定那是 400 还是崩，这一层不替它判。
+        """
+        if not isinstance(doc, dict):
+            raise TypeError(
+                f"任务 YAML 顶层必须是键值对，当前是 {type(doc).__name__}"
+            )
         return cls(
             task_id=doc["task_id"],
             prompt=doc["prompt"],

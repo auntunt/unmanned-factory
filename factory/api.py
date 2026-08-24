@@ -42,7 +42,8 @@ import yaml
 
 from factory.audit.models import NOT_DISPATCHED
 from factory.audit.store import AuditStore
-from factory.backlog.store import BLOCKED, DONE, INBOX, NEEDS_HUMAN, RUNNING, STATES
+from factory.backlog.store import BLOCKED, DONE, INBOX, LOG, NEEDS_HUMAN, RUNNING, STATES
+from factory.task import Task
 
 #: 只绑环回。刻意没有 host 参数，理由见模块 docstring。
 HOST = "127.0.0.1"
@@ -420,16 +421,76 @@ def route_post(path: str, data: dict, *, queue: str | Path) -> tuple[int, dict]:
     return 404, {"error": f"no such endpoint: {clean}"}
 
 
+#: 三段式错误的 `how` 缺省文案。前端把它直接贴在表单下面。
+_HOW_FIX_YAML = "改完 YAML 再投一次；坏任务不入队，队列里不会留残骸"
+
+
+def screen_yaml(yaml_content: str) -> tuple[str, ...]:
+    """把一份任务 YAML 过一遍入队前该过的三道关，返回拦截理由。
+
+    空元组 = 放行。三道关的顺序是刻意的，每道关的失败都会让下一道关的
+    报错变得没意义：
+
+      1. `yaml.safe_load` —— 语法错。不是 safe_load 就意味着 `!!python/object`
+         能实例化任意类，而这个请求体来自网络。
+      2. `Task.from_mapping` —— 必填字段、类型。走 CLI 派发时用的**同一个**
+         构造器，不重写规则（分叉过一次就够了）。
+      3. `intake.gate.admit` —— 语义闸门。悬空 spec_ref、没有验收标准、
+         声明了不可逆操作。复用既有函数，一条规则都不新加。
+
+    为什么在写盘**之前**全跑完：原来的实现只验 task_id 命名，原始 YAML
+    直落 inbox。坏任务要等到凌晨认领时才炸，而且那次失败计入 unpriced
+    streak —— 连续两条坏投递足够熔断一整夜的队列。这是把「凌晨三点的
+    熔断」换成「投递时的一个 400」。
+    """
+    from factory.intake.gate import admit
+
+    try:
+        doc = yaml.safe_load(yaml_content)
+    except yaml.YAMLError as exc:
+        # mark 带行列号。没有它，报错就只有「语法错」三个字，
+        # 而人正盯着一个 80 行的 YAML。
+        where = ""
+        if (mark := getattr(exc, "problem_mark", None)) is not None:
+            where = f"（第 {mark.line + 1} 行第 {mark.column + 1} 列）"
+        problem = getattr(exc, "problem", None) or str(exc).split("\n")[0]
+        return (f"YAML 语法错{where}：{problem}",)
+
+    if doc is None:
+        return ("YAML 解析出来是空的（只有注释或空白）",)
+
+    try:
+        task = Task.from_mapping(doc)
+    except KeyError as exc:
+        # KeyError 的 str() 带引号（'task_id'），直接拼进句子很难看。
+        return (f"缺少必填字段 {exc.args[0]!r}",)
+    except (TypeError, ValueError) as exc:
+        return (f"字段类型不对：{exc}",)
+
+    # checks 缺 command 在 from_mapping 里已经是 KeyError，
+    # 但 checks 不是 list（写成 mapping）时抛的是 TypeError，同样被上面兜住。
+    return admit(task).reasons
+
+
 def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
-    """投递任务到 inbox"""
+    """投递任务到 inbox。**唯一的写路径**，且只写 inbox。
+
+    校验顺序：task_id 形状 → 重名 → YAML 闸门（`screen_yaml`）→ 写盘。
+    闸门放在重名检查之后：一份和 running/ 里同名的任务，「已存在」比
+    「acceptance 为空」更接近人想知道的那件事。
+    """
     task_id = data.get("task_id", "").strip()
     yaml_content = data.get("yaml", "").strip()
 
     # 验证
     if not task_id:
-        return 400, {"error": "task_id 不能为空"}
+        return 400, {"error": "task_id 不能为空",
+                     "why": ["请求体里 task_id 缺失或全是空白"],
+                     "how": "带上 task_id，如 T-fix-bug-123"}
     if not yaml_content:
-        return 400, {"error": "yaml 内容不能为空"}
+        return 400, {"error": "yaml 内容不能为空",
+                     "why": ["请求体里 yaml 缺失或全是空白"],
+                     "how": "带上任务 YAML 正文（至少要有 task_id 和 prompt）"}
     # 报错指名道姓。含糊的「必须是 kebab-case」会让人对着
     # T-FED-updata-001 找不出问题在大写字母上。前端有同样的分级校验，
     # 这里是绕过前端直接 POST 时的同等待遇。
@@ -458,16 +519,29 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
     for state_dir in STATES:
         task_file = queue_path / state_dir / f"{task_id}.yaml"
         if task_file.exists():
-            return 409, {"error": f"任务已存在于 {state_dir}/"}
+            return 409, {
+                "error": f"任务已存在于 {state_dir}/",
+                "why": [f"队列里已有 {task_id}.yaml，在 {state_dir}/ 下"],
+                "how": "换个 task_id，或先把队列里那个处理掉"
+                       "（覆盖会让先排的那个静默消失）",
+            }
+
+    # 闸门：语法、必填字段、语义三道关全过才允许写盘。
+    if why := screen_yaml(yaml_content):
+        return 400, {
+            "error": f"任务没过投递闸门（{len(why)} 条）",
+            "why": list(why),
+            "how": _HOW_FIX_YAML,
+        }
 
     # 写入 inbox（用 open 而不是 write_text，避免某些环境下的权限问题）
     inbox_file = queue_path / INBOX / f"{task_id}.yaml"
     try:
         with open(inbox_file, "w", encoding="utf-8") as f:
             f.write(yaml_content)
-        return 200, {"ok": True, "task_id": task_id, "file": str(inbox_file)}
     except Exception as exc:
         return 500, {"error": f"写入失败: {exc}"}
+    return 200, {"ok": True, "task_id": task_id, "file": str(inbox_file)}
 
 
 def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
