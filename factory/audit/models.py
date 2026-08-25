@@ -95,6 +95,10 @@ class TaskAttempt(Base):
     wall_clock_ms: Mapped[int] = mapped_column(Integer, default=0)
 
     resolution: Mapped[Resolution] = mapped_column(String(16), default=Resolution.PENDING)
+    # 人工定案时的理由（`factory resolve --why`）。resolution 只说了「最后怎么算」，
+    # 说不出「为什么这么算」—— 两周后看 metrics 发现某个监工假阳性一堆，唯一能
+    # 判断「是监工不行还是人图省事直接放行」的东西就是这一列。空串=没人工干预过。
+    resolution_note: Mapped[str] = mapped_column(String(512), default="")
     linked_defects: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

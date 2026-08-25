@@ -33,7 +33,7 @@ from factory.audit.models import (
     TaskAttempt,
     Verdict,
 )
-from factory.redact import redact
+from factory.redact import redact, redact_text
 
 # 建表跨实例串行化。同一进程内多个 AuditStore 指向同一文件是并行派发的常态。
 _SCHEMA_LOCK = threading.Lock()
@@ -61,6 +61,32 @@ class AuditStore:
 
         with _SCHEMA_LOCK:
             Base.metadata.create_all(self._engine)
+            self._add_missing_columns()
+
+    #: 后加的列 → SQLite 的 ADD COLUMN 定义。create_all 只建**不存在的表**，
+    #: 对已存在的表一个字段都不会补 —— 于是老库升级后第一次 SELECT 就
+    #: "no such column"，而那时候队列已经在跑，报错点离原因很远。
+    _LATE_COLUMNS = (
+        ("task_attempt", "resolution_note", "VARCHAR(512) DEFAULT '' NOT NULL"),
+    )
+
+    def _add_missing_columns(self) -> None:
+        """给已存在的老库补后加的列。只加不删不改类型。
+
+        故意不引 alembic：这个项目的迁移需求就是「偶尔加一个可空列」，
+        为此背一套迁移框架 + versions 目录的代价远大于收益。反过来说，
+        一旦出现改类型/拆表的需求，这个函数就该换掉而不是往里塞分支。
+        """
+        with self._engine.begin() as conn:
+            for table, column, ddl in self._LATE_COLUMNS:
+                cols = {
+                    r[1] for r in conn.exec_driver_sql(
+                        f"PRAGMA table_info({table})").fetchall()
+                }
+                if not cols or column in cols:
+                    continue
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def _session(self) -> Session:
         return Session(self._engine)
@@ -195,10 +221,33 @@ class AuditStore:
             s.get(TaskAttempt, attempt_id).commit = commit
             s.commit()
 
-    def finalize(self, attempt_id: int, resolution: Resolution) -> None:
+    def finalize(self, attempt_id: int, resolution: Resolution,
+                 *, note: str = "") -> None:
+        """定案。note 非空时一并落库（`factory resolve --why` 的落点）。
+
+        note 默认空串而不是覆盖成空：override 不带理由时不该把上一次
+        resolve 写的理由擦掉 —— 审计字段被静默清空比没写更糟。
+        """
         with self._session() as s:
-            s.get(TaskAttempt, attempt_id).resolution = resolution
+            row = s.get(TaskAttempt, attempt_id)
+            if row is None:
+                raise KeyError(f"没有 attempt id={attempt_id}")
+            row.resolution = resolution
+            if note:
+                # 理由可能贴了报错原文，里面带路径/token。走 redact 和其他
+                # 自由文本字段（class_reason、permission reason）一个规格。
+                row.resolution_note = redact_text(note)[:512]
             s.commit()
+
+    def latest_attempt(self, task_id: str) -> TaskAttempt | None:
+        """某任务最后一轮 attempt。`factory resolve` 免查 attempt_id 靠它。
+
+        取 attempt_no 最大的那条，而不是 id 最大：并行派发下 id 顺序和轮次
+        顺序会错开（attempt_no 是「读 max 再插」+ 重试），按 id 挑可能定案到
+        上一轮身上，于是 metrics 里这一轮永远挂着 pending。
+        """
+        rows = self.attempts_for(task_id)
+        return rows[-1] if rows else None
 
     def link_defect(self, attempt_id: int, defect_id: str) -> None:
         """幂等：同一个 defect 重复挂只留一条。

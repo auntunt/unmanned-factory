@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
@@ -32,12 +34,14 @@ from factory.backlog.loop import (
     TaskRun,
 )
 from factory.backlog.store import (
+    BLOCKED,
     INBOX,
     LOG,
     NEEDS_HUMAN,
     STATES,
     Backlog,
     BacklogError,
+    base_task_id,
 )
 from factory.config import (
     CONFIG_NAME,
@@ -883,7 +887,8 @@ def _cmd_show(ns: argparse.Namespace) -> int:
         print(f"   tokens     : in={row.tokens_in} out={row.tokens_out}"
               f"  cost=${row.cost_usd:.4f}  {row.wall_clock_ms}ms")
         print(f"   created_at : {row.created_at}")
-        print(f"   resolution : {row.resolution}")
+        print(f"   resolution : {row.resolution}"
+              + (f"  ({row.resolution_note})" if row.resolution_note else ""))
         print(f"   defects    : {list(row.linked_defects)}")
         for v in row.supervisors:
             print(f"   [{v.role}] {v.verdict}"
@@ -899,7 +904,8 @@ def _cmd_override(ns: argparse.Namespace) -> int:
     if not store.exists(ns.attempt_id):
         print(f"没有 attempt id={ns.attempt_id}")
         return 1
-    store.finalize(ns.attempt_id, Resolution(ns.resolution))
+    store.finalize(ns.attempt_id, Resolution(ns.resolution),
+                   note=getattr(ns, "why", None) or "")
     print(f"attempt {ns.attempt_id} → resolution={ns.resolution}")
     return 0
 
@@ -942,6 +948,196 @@ def _cmd_defect(ns: argparse.Namespace) -> int:
     # 不打的话人还得再敲一次 show 才知道该改哪个监工。
     for v in row.supervisors:
         print(f"  当时 [{v.role}] 判了 {v.verdict}")
+    return 0
+
+
+def _age(seconds: float) -> str:
+    """把时间戳变成「多久以前」。
+
+    绝对时间（2026-08-24T03:11:22）要人自己算差值，而这张表要回答的是
+    「这个任务卡了多久」—— 卡 20 分钟和卡 3 天是完全不同的两件事。
+    """
+    if seconds <= 0:
+        return "?"
+    d = max(0.0, time.time() - seconds)
+    if d < 90:
+        return f"{int(d)}s"
+    if d < 90 * 60:
+        return f"{int(d / 60)}m"
+    if d < 36 * 3600:
+        return f"{int(d / 3600)}h"
+    return f"{int(d / 86400)}d"
+
+
+def _inbox_rows(b: Backlog, states: list[str]) -> list:
+    """收件箱的行序，inbox 和 resolve 必须共用同一个。
+
+    短序号（`factory resolve 1`）就是这个列表的下标，所以两处的排序规则必须
+    是同一份代码。各排一次的话，人看到的 #1 和 resolve 认定的 #1 迟早会错开
+    —— 而那意味着放回去的是另一个任务，没有任何提示。
+    """
+    rows: list = []
+    for st in states:
+        rows.extend(b.parked(st))
+    # 最近卡住的排前面：人处理积压时先看新出现的，老的往往已经知道了。
+    # finished_at 相同（同一批 park）时按路径兜底，否则序号会随文件系统
+    # 的遍历顺序抖动。
+    rows.sort(key=lambda r: (-r.finished_at, str(r.path)))
+    return rows
+
+
+def _cmd_inbox(ns: argparse.Namespace) -> int:
+    """列出卡在 needs-human / blocked 的任务，带上为什么卡。
+
+    `queue` 给的是计数（needs-human 5），而计数回答不了人接下来唯一想问的
+    问题：哪 5 个、分别为什么。在这之前答案要靠 ls 目录 + 逐个 cat
+    .result.json + 对着 note 猜，每次有任务卡住都重复一遍。
+    """
+    b = Backlog(ns.queue)
+    states = [ns.state] if ns.state else [NEEDS_HUMAN, BLOCKED]
+    rows = _inbox_rows(b, states)
+    if not rows:
+        where = "/".join(states)
+        print(f"{where} 是空的 —— 没有等人处理的任务")
+        return 0
+
+    if ns.json:
+        print(json.dumps([{
+            "n": i, "task_id": r.task_id, "state": r.state, "outcome": r.outcome,
+            "note": r.note, "age_s": round(max(0.0, time.time() - r.finished_at), 1)
+            if r.finished_at else None,
+            "wall_clock_s": r.wall_clock_s, "path": str(r.path),
+            "result_ok": r.result_ok,
+        } for i, r in enumerate(rows, 1)], ensure_ascii=False, indent=2))
+        return 0
+
+    idw = max(len(r.task_id) for r in rows)
+    idw = max(idw, len("TASK"))
+    stw = max(len(r.state) for r in rows)
+    ocw = max((len(r.outcome) for r in rows if r.outcome), default=0)
+    ocw = max(ocw, len("OUTCOME"))
+    print(f"{'#':>2}  {'TASK'.ljust(idw)}  {'STATE'.ljust(stw)}  "
+          f"{'OUTCOME'.ljust(ocw)}  AGE   WHY")
+    for i, r in enumerate(rows, 1):
+        # note 可能很长（监工的完整意见）。截断到能看出是哪类问题为止，
+        # 全文在 .result.json 里 —— 表格一旦换行就没法竖着扫了。
+        why = r.note.replace("\n", " ⏎ ") if r.result_ok else "（.result.json 缺失或坏了）"
+        if len(why) > 64:
+            why = why[:61] + "..."
+        print(f"{i:>2}  {r.task_id.ljust(idw)}  {r.state.ljust(stw)}  "
+              f"{(r.outcome or '-').ljust(ocw)}  {_age(r.finished_at).rjust(4)}  {why}")
+
+    print(f"\n{len(rows)} 个等人处理。看全文：factory show <task-id>")
+    print("定案：factory resolve 1 merged --why '人工核过，判据写窄了'")
+    print("重跑：factory resolve 1 reworked --why '改了 checks' --requeue")
+    return 0
+
+
+#: `factory resolve <target> <resolution>` 允许的定案词 → 审计里的 Resolution。
+#: 只开放这两个：merged（人核过，算通过）和 reworked（判据/代码要改，这一轮
+#: 算真阳性）。pending 和 escalated 是系统自己写的中间态，让人手填会把
+#: metrics 的「未定案」搅成噪声；human_override 由 merged 隐含表达。
+_RESOLVE_WORDS = {
+    "merged": Resolution.MERGED,
+    "reworked": Resolution.REWORKED,
+}
+
+
+def _resolve_target(pool: list, target: str) -> tuple[list, str | None]:
+    """把 `<短序号|task_id|文件名>` 解析成命中列表。
+
+    短序号存在的理由：needs-human 里的名字是 `T-auth-refresh-token.3` 这种，
+    照抄一次要么复制粘贴要么打错。inbox 已经把序号打出来了，直接用它。
+    纯数字一律当序号解释 —— 任务 ID 命名规则（intake 那边校验）不允许纯数字，
+    所以这里不存在歧义。
+    """
+    if target.isdigit():
+        i = int(target)
+        if not 1 <= i <= len(pool):
+            return [], (f"序号 {i} 超出范围 —— 现在只有 {len(pool)} 个等人处理"
+                        if pool else "这两个目录都是空的 —— 没有等人处理的任务")
+        return [pool[i - 1]], None
+    hits = [r for r in pool if r.task_id == target or r.path.name == target]
+    return hits, None
+
+
+def _cmd_resolve(ns: argparse.Namespace) -> int:
+    """给卡住的任务人工定案，落审计；--requeue 时顺带放回 inbox。
+
+    全程不需要 attempt_id：人手上只有 inbox 打出来的序号或任务名，逼他先
+    `factory show` 翻出 attempt_id 再 `factory override` 等于给「人工定案」
+    加一道摩擦，而需要额外动作的度量等于没有度量 —— metrics 里会永远躺着
+    一片 pending，看起来像监工从没被验证过。
+
+    定案（审计）和放回队列（文件）是两件事，故意分开：多数情况人是核过之后
+    认可这一轮（merged，任务不该再跑），只有改了判据才要重跑（--requeue）。
+    """
+    b = Backlog(ns.queue)
+    pool = _inbox_rows(b, [NEEDS_HUMAN, BLOCKED])
+    hits, err = _resolve_target(pool, ns.task_id)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+
+    if not hits:
+        # 报错要给出可选项。人打错任务 ID 时，「找不到」和「你是不是想说这个」
+        # 之间差的是一次 ls。
+        print(f"needs-human / blocked 里没有 {ns.task_id}", file=sys.stderr)
+        if pool:
+            print(f"现有的：{', '.join(sorted(r.task_id for r in pool))}",
+                  file=sys.stderr)
+        else:
+            print("这两个目录都是空的 —— 没有等人处理的任务", file=sys.stderr)
+        return 2
+    if len(hits) > 1:
+        # 同名归档（T-x.2、T-x.3）会让 stem 撞车。让人指全名，不替他猜：
+        # 猜错的话放回去的是另一次失败的证据。
+        print(f"{ns.task_id} 对上了 {len(hits)} 个，指明文件名：", file=sys.stderr)
+        for r in hits:
+            print(f"  {r.path.name}", file=sys.stderr)
+        return 2
+
+    item = hits[0]
+    if not ns.force and not item.result_ok:
+        print(f"{item.task_id} 的 .result.json 缺失或坏了，看不到它当初为什么卡住。"
+              f"确认要定案加 --force", file=sys.stderr)
+        return 2
+
+    # 审计先落，队列后搬。反序的话中途失败会留下一个已经回到 inbox、下一轮
+    # 就被重新认领的任务，而审计里这一轮还挂着 pending —— 于是同一个任务
+    # 出现两条都没定案的 attempt，命中率的分母就再也对不上了。
+    resolution = _RESOLVE_WORDS[ns.resolution]
+    # 队列里的名字带 park 后缀（T-x.3），审计里的 task_id 是 YAML 里那个。
+    # 剥掉后缀才能对上，否则「第二次跑的那一轮」永远查不到 attempt。
+    audit_id = base_task_id(item.task_id)
+    store = AuditStore(ns.db)
+    row = store.latest_attempt(audit_id)
+    if row is None:
+        # 没有 attempt 是正常情况：死锁 park、手动扔进来的任务从没派发过。
+        # 这时候只有队列动作可做，审计无处可落 —— 但必须说出来，不然人会
+        # 以为 metrics 里该出现这条定案。
+        print(f"⚠ 审计库里没有 {audit_id} 的 attempt（没派发过就卡住了？）"
+              f"，这次定案只动队列", file=sys.stderr)
+    else:
+        store.finalize(row.id, resolution, note=ns.why or "")
+        print(f"✓ {audit_id} attempt #{row.attempt_no} (id={row.id}) "
+              f"→ resolution={resolution.value}")
+        if ns.why:
+            print(f"  理由已落审计：{ns.why}")
+
+    if not ns.requeue:
+        print(f"  任务留在 {item.state}/。要它重跑加 --requeue")
+        return 0
+
+    try:
+        b.revive(item.path, note=ns.why or "")
+    except BacklogError as exc:
+        # 审计已经落了，队列没搬动。这不是需要回滚的状态：定案本身是对的，
+        # 人重试 --requeue 时 finalize 会幂等地写同一个值。
+        print(f"定案已落，但放不回去：{exc}", file=sys.stderr)
+        return 2
+
+    print(f"✓ {item.task_id}: {item.state}/ → inbox/，下一轮 factory loop 会重新认领")
     return 0
 
 
@@ -1246,6 +1442,8 @@ def main(argv: list[str] | None = None) -> int:
     ov = sub.add_parser("override", help="人工定案 resolution（事后回填）")
     ov.add_argument("attempt_id", type=int)
     ov.add_argument("resolution", choices=[r.value for r in Resolution])
+    ov.add_argument("--why", default=None, metavar="TEXT",
+                    help="定案理由，落审计（和 resolve --why 同一列）")
     ov.add_argument("--db", default="audit.db")
     ov.set_defaults(func=_cmd_override)
 
@@ -1272,6 +1470,28 @@ def main(argv: list[str] | None = None) -> int:
     # API 本身没有任何认证，直接暴露到公网等于把审计库敞开。
     ap.add_argument("--port", type=int, default=8788, help="监听端口")
     ap.set_defaults(func=_cmd_api)
+
+    ib = sub.add_parser("inbox", help="看卡在 needs-human / blocked 的任务和原因")
+    ib.add_argument("--queue", default="backlog", help="队列根目录")
+    ib.add_argument("--state", default=None, choices=(NEEDS_HUMAN, BLOCKED),
+                    help="只看一个目录，默认两个都看")
+    ib.add_argument("--json", action="store_true", help="给脚本用")
+    ib.set_defaults(func=_cmd_inbox)
+
+    rs = sub.add_parser("resolve", help="人工定案卡住的任务（免查 attempt_id）")
+    rs.add_argument("task_id", metavar="TARGET",
+                    help="inbox 里的短序号，或 task_id（同名归档撞车时给全文件名）")
+    rs.add_argument("resolution", choices=sorted(_RESOLVE_WORDS),
+                    help="merged=人核过算通过；reworked=判据/代码要改")
+    rs.add_argument("--why", default=None, metavar="TEXT",
+                    help="定案理由，落审计（两周后看 metrics 时唯一的上下文）")
+    rs.add_argument("--requeue", action="store_true",
+                    help="同时放回 inbox 让下一轮重跑（默认只定案不动队列）")
+    rs.add_argument("--queue", default="backlog", help="队列根目录")
+    rs.add_argument("--db", default="audit.db", help="审计库路径")
+    rs.add_argument("--force", action="store_true",
+                    help="连 .result.json 缺失/坏掉的也定案")
+    rs.set_defaults(func=_cmd_resolve)
 
     cf = sub.add_parser("config", help="打印配置从哪来（排查「为什么沙箱没开」）")
     cf.add_argument("--config", default=None, metavar="FILE",

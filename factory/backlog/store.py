@@ -106,6 +106,40 @@ class Deadlock:
     reason: str
 
 
+def _as_float(raw: object) -> float:
+    """.result.json 里的数字字段，读不出来当 0。
+
+    这些值只用来排序和显示「多久以前」。一个坏掉的时间戳不该让整个列表
+    列不出来 —— 人正是因为任务卡住了才来看这个列表的。
+    """
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@dataclass(frozen=True)
+class ParkedItem:
+    """一个停在终态目录里的条目 + 它当初为什么停在这儿。
+
+    `result_ok=False` 表示 .result.json 缺失或坏了。这个条目照样要列出来：
+    「目录里有 5 个但只列出 3 个」这种状态没人能发现，而缺 result 恰恰是
+    最常见的情况（手动扔进去的任务、park 中途被打断的条目）。
+    """
+
+    path: Path
+    state: str
+    outcome: str
+    note: str
+    finished_at: float
+    wall_clock_s: float
+    result_ok: bool
+
+    @property
+    def task_id(self) -> str:
+        return self.path.stem
+
+
 @dataclass(frozen=True)
 class Recovered:
     """一个从 running/ 里捞出来的崩溃残留。path 指向它现在的位置。"""
@@ -113,6 +147,16 @@ class Recovered:
     path: Path
     task_id: str
     reason: str
+
+
+def base_task_id(name: str) -> str:
+    """剥掉 park 加的 `.N` 后缀，还原 YAML 里那个 task_id。
+
+    队列里的文件名和审计里的 task_id 会分叉：同一个任务跑第二遍归档成
+    `T-x.2.yaml`，而审计里两轮都记在 `T-x` 名下。不剥后缀去查审计，
+    「第二次跑的那一轮」永远查不到 attempt —— 定案就悄悄落空了。
+    """
+    return _PARK_SUFFIX.sub("", name)
 
 
 def _is_task(path: Path) -> bool:
@@ -511,6 +555,110 @@ class Backlog:
                 indent=2,
             ),
         )
+        return dst
+
+
+    def parked(self, state: str) -> tuple[ParkedItem, ...]:
+        """列出某个终态目录里的条目，带上当初为什么停在这儿。
+
+        `queue` 只给计数（needs-human 5），而计数回答不了人接下来唯一想问的
+        问题：哪 5 个、分别为什么。没有这个方法的话，人得自己 ls 目录、
+        逐个 cat .result.json、再对着 note 猜 —— 每次有任务卡住都重复一遍。
+
+        读不到或读坏 .result.json 不跳过条目，而是照样列出、note 留空并标
+        `result_ok=False`。跳过的话「目录里有 5 个但只列出 3 个」这种状态
+        没人能发现；而 .result.json 恰恰是最可能缺的东西（手动扔进去的任务、
+        park 过程中被打断的条目）。
+        """
+        self.ensure()
+        out: list[ParkedItem] = []
+        for p in sorted(self.dir(state).iterdir()):
+            if p.is_dir() or p.name.endswith(RESULT_SUFFIX) or p.name.endswith(CLAIM_SUFFIX):
+                continue
+            meta: dict = {}
+            ok = False
+            rp = p.with_name(p.name + RESULT_SUFFIX)
+            if rp.exists():
+                try:
+                    meta = json.loads(rp.read_text(encoding="utf-8"))
+                    ok = isinstance(meta, dict)
+                except (OSError, ValueError, UnicodeDecodeError):
+                    ok = False
+            if not isinstance(meta, dict):
+                meta, ok = {}, False
+            out.append(ParkedItem(
+                path=p,
+                state=state,
+                outcome=str(meta.get("outcome", "") or ""),
+                note=str(meta.get("note", "") or ""),
+                finished_at=_as_float(meta.get("finished_at")),
+                wall_clock_s=_as_float(meta.get("wall_clock_s")),
+                result_ok=ok,
+            ))
+        return tuple(out)
+
+    def _archive_result(self, path: Path) -> Path | None:
+        """把条目的 .result.json 改名成 .result.json.<n>，返回归档后的路径。
+
+        归档而不是删除：下次同一个任务再卡住，唯一能判断「是不是同一个原因」
+        的东西就是上一次的 note。也不能原地留着 —— 跟着任务回 inbox 的话，
+        下一轮 park 会撞上一个已经存在的 result，看起来像归档失败。
+        """
+        rp = path.with_name(path.name + RESULT_SUFFIX)
+        if not rp.exists():
+            return None
+        n = 1
+        while (keep := rp.with_name(f"{rp.name}.{n}")).exists():
+            n += 1
+            if n > _PARK_MAX_SUFFIX:
+                raise BacklogError(
+                    f"{rp} 的历史归档已堆到 {_PARK_MAX_SUFFIX} 份，"
+                    f"这个任务反复卡在同一处 —— 先看看是不是判据本身有问题")
+        rp.replace(keep)
+        return keep
+
+    def revive(self, path: Path, *, note: str = "") -> Path:
+        """把 needs-human / blocked 里的条目搬回 inbox，让下一轮跑批重新认领。
+
+        这是 `finish()` 那条「没有回 inbox 的路径」的**人工**对应物。两者不
+        矛盾：finish 拒绝的是**自动**回流（一个必然失败的任务会无限烧钱，
+        而且每一轮在审计里都长得像新任务）。人已经看过 note、改过判据之后
+        再放回去，是一次有人负责的决定，也是这条队列唯一的出口 —— 没有它，
+        needs-human 只能靠 `cp` 手搬，而手搬会把 .result.json 一起带回 inbox，
+        下一轮 park 时撞名。
+
+        搬走时把旧的 .result.json 改名成 .result.json.<序号>：既留下失败证据
+        （下次再卡住要对比是不是同一个原因），又不让它跟着任务回 inbox。
+        """
+        self.ensure()
+        if not path.exists():
+            raise BacklogError(f"{path} 不在了 —— 可能已经被别的进程搬走")
+        if path.parent.name not in (NEEDS_HUMAN, BLOCKED):
+            raise BacklogError(
+                f"只能从 {NEEDS_HUMAN}/ 或 {BLOCKED}/ 放回，"
+                f"这个在 {path.parent.name}/。"
+                f"running 里的活条目要等它自己结束或超时回收，"
+                f"硬搬会让跑批和你抢同一个任务"
+            )
+
+        # 先归档 .result.json 再搬任务：反过来的话中途失败会留下一个
+        # inbox 里的任务 + needs-human 里的孤儿 result，而那个 result
+        # 看起来像「这个任务还卡着」。
+        self._archive_result(path)
+
+        dst = self.dir(INBOX) / path.name
+        if dst.exists():
+            raise BacklogError(
+                f"inbox 里已经有 {path.name} 了。"
+                f"同名会让跑批认领到哪一个变成运气 —— 先处理掉那个再放回")
+        path.replace(dst)
+
+        if note:
+            _atomic_write_text(
+                dst.with_name(dst.name + ".revived.json"),
+                json.dumps({"revived_at": time.time(), "from": path.parent.name,
+                            "note": note}, ensure_ascii=False, indent=2),
+            )
         return dst
 
     def park_deadlocked(self) -> tuple[Deadlock, ...]:
