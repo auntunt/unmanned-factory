@@ -1,20 +1,32 @@
 import { createBrowserRouter, Link, RouterProvider, useRouteError } from 'react-router-dom'
+import Console from './pages/Console'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import Stats from './pages/Stats'
 import Submit from './pages/Submit'
 
-/** 顶部导航 + 内容区。三个页面共用，所以放在路由的 element 外层。 */
-function Shell({ children }: { children: React.ReactNode }) {
+/**
+ * 顶部导航 + 内容区。所有页面共用，所以放在路由的 element 外层。
+ *
+ * `wide`：看板要一屏放完五个桶 + 两张表，6xl 会把表格挤到换行。查询类页面
+ * 仍然用 6xl —— 正文行太长反而难读。
+ */
+function Shell({ children, wide = false }: { children: React.ReactNode; wide?: boolean }) {
+  const width = wide ? 'max-w-[1600px]' : 'max-w-6xl'
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
+    // 看板页整站切等宽：外壳和内容用两种字体时，导航栏和表格看起来像两个
+    // 不同的应用拼在一起。查询页保持默认比例字体（那里有整段正文要读）。
+    <div className={`min-h-screen bg-slate-50 text-slate-900 ${wide ? 'font-mono' : ''}`}>
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4">
+        <div className={`mx-auto flex ${width} items-center gap-6 px-6 py-4`}>
           <Link to="/" className="text-lg font-semibold tracking-tight">
             自动化无人工厂
           </Link>
           <nav className="flex gap-4 text-sm">
             <Link to="/" className="text-slate-600 hover:text-slate-900">
+              看板
+            </Link>
+            <Link to="/tasks" className="text-slate-600 hover:text-slate-900">
               任务
             </Link>
             <Link to="/submit" className="text-slate-600 hover:text-slate-900">
@@ -26,7 +38,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
+      <main className={`mx-auto ${width} px-6 py-6`}>{children}</main>
     </div>
   )
 }
@@ -57,7 +69,18 @@ function ErrorPage() {
 // 路由参数名必须是 taskId：TaskDetail 里用 useParams<{ taskId: string }>() 读。
 const router = createBrowserRouter([
   {
+    // 首页给看板而不是任务列表：抬头就该知道现在是否健康，而不是先读一屏
+    // 任务名。任务列表移到 /tasks，导航里还在。
     path: '/',
+    element: (
+      <Shell wide>
+        <Console />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/tasks',
     element: (
       <Shell>
         <TaskList />

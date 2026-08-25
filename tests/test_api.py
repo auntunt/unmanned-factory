@@ -27,6 +27,7 @@ from factory.api import (
     route_post,
     screen_yaml,
     submit_task,
+    supervisor_stats,
     task_detail,
 )
 from factory.audit.models import NOT_DISPATCHED, OracleClass, Resolution, SupervisorRole, Verdict
@@ -549,3 +550,80 @@ def test_journal_failure_does_not_break_a_valid_submit(empty_queue, monkeypatch)
 
     assert code == 200, payload
     assert (empty_queue / "inbox" / "T-good-one.yaml").is_file()
+
+
+# ---------- /api/supervisors：监工命中率两层 ----------
+#
+# 这一层的测试重点不是「数字对不对」（metrics 自己的测试管那个），而是
+# 「API 有没有把 metrics 的语义翻错」。翻错一次的代价是拿着看板做反向决策：
+# 把一个从没误报的监工当成每次都误报的删掉。
+
+
+def test_supervisor_stats_gives_both_layers(audit_db):
+    """两层都在，且 role 层按 fired 倒序 —— 最吵的监工排最前面。"""
+    out = supervisor_stats(audit_db)
+    assert set(out) == {"roles", "gates"}
+    fired = [r["fired"] for r in out["roles"]]
+    assert fired == sorted(fired, reverse=True)
+
+
+def test_supervisor_precision_counts_only_adjudicated(audit_db):
+    """precision 的分母是 TP+FP，不是 fired。
+
+    fixture 里 regression 触发 8 次（前 8 轮 FAIL）且全部 reworked，
+    也就是 8 个真阳 0 个误报 —— precision 必须是 1.0。若分母误用 fired，
+    未定案的轮次会把它稀释成小于 1 的数，看板上就成了「这监工不太准」。
+    """
+    roles = {r["role"]: r for r in supervisor_stats(audit_db)["roles"]}
+    reg = roles["regression"]
+    assert reg["fired"] == 8
+    assert reg["true_positives"] == 8
+    assert reg["false_positives"] == 0
+    assert reg["precision"] == 1.0
+
+
+def test_never_fired_supervisor_has_null_precision(audit_db):
+    """一次都没触发 → precision 是 None，不是 0。
+
+    0 在前端会渲染成 0%，读起来是「每次都误报」。这两个结论相反：
+    前者该考虑这道判据是否多余，后者该马上关掉它。所以必须区分。
+
+    这里显式补一个只 PASS 过的角色（scope）而不是指望 fixture 里有 ——
+    supervisor_metrics 只统计审计里出现过的 role，没记过的角色根本不会
+    出现在结果里，那样断言到的是空列表，测试永远为真却什么都没验。
+    """
+    store = AuditStore(audit_db)
+    attempt_id = store.open_attempt(
+        task_id=TASK, spec_ref=[], oracle_class=OracleClass.A,
+        class_reason="no rule matched -> default A",
+        harness="claude_code", harness_version="2.1.234", model="haiku",
+    )
+    store.record_verdict(attempt_id, role=SupervisorRole.SCOPE,
+                         verdict=Verdict.PASS, claims=[])
+    store.finalize(attempt_id, Resolution.MERGED)
+
+    roles = {r["role"]: r for r in supervisor_stats(audit_db)["roles"]}
+    scope = roles["scope"]
+    assert scope["fired"] == 0
+    assert scope["passed"] == 1
+    assert scope["precision"] is None
+
+
+def test_supervisors_route_is_200_and_json_shaped(audit_db, queue):
+    """路由层也要通：契约里 /api/supervisors 回 200 且没有 error 键。"""
+    code, payload = route("/api/supervisors", db=audit_db, queue=queue)
+    assert code == 200
+    assert "error" not in payload
+    assert isinstance(payload["roles"], list)
+    assert isinstance(payload["gates"], list)
+
+
+def test_supervisors_survives_empty_audit_db(tmp_path, queue):
+    """空审计库不该抛，回两个空列表。
+
+    演示环境刚建库时就是这个状态。抛异常会让整个看板 500，
+    而正确表现是「还没有数据」。
+    """
+    code, payload = route("/api/supervisors", db=tmp_path / "fresh.db", queue=queue)
+    assert code == 200
+    assert payload == {"roles": [], "gates": []}

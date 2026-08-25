@@ -393,6 +393,54 @@ def global_stats(db: str | Path, queue: str | Path) -> dict:
     }
 
 
+def supervisor_stats(db: str | Path) -> dict:
+    """监工命中率，按 role 和按闸门两层。
+
+    两层都给，因为它们回答的是不同问题：role 层回答「哪个监工值得留」，
+    闸门层回答「哪一条判据该删」。13 道硬闸门全报 role='risk'，只看 role
+    的话一道从不触发的闸门会被另外 12 道的命中稀释掉，完全看不出来。
+
+    precision 在 fired=0 时返回 None 而不是 0：一个从没触发的监工的命中率
+    是「不知道」，而 0 会显示成「它每次都误报」—— 那正好是反的结论，
+    照着裁剪会把好监工删掉。
+    """
+    from factory.metrics import gate_metrics, supervisor_metrics
+
+    store = AuditStore(db)
+
+    def precision(tp: int, fp: int) -> float | None:
+        judged = tp + fp
+        return round(tp / judged, 4) if judged else None
+
+    roles = [
+        {
+            "role": m.role, "fired": m.fired, "passed": m.passed,
+            "true_positives": m.true_positives,
+            "false_positives": m.false_positives,
+            "unadjudicated": m.unadjudicated,
+            "false_negatives": m.false_negatives,
+            "faults": m.faults, "harness_faults": m.harness_faults,
+            "cost_usd": round(m.cost_usd, 6), "tokens": m.tokens,
+            "precision": precision(m.true_positives, m.false_positives),
+        }
+        for m in sorted(supervisor_metrics(store).values(),
+                        key=lambda x: -x.fired)
+    ]
+    gates = [
+        {
+            "role": g.role, "gate": g.gate, "fired": g.fired,
+            "true_positives": g.true_positives,
+            "false_positives": g.false_positives,
+            "unadjudicated": g.unadjudicated,
+            "cost_usd": round(g.cost_usd, 6),
+            "precision": precision(g.true_positives, g.false_positives),
+        }
+        for g in sorted(gate_metrics(store).values(),
+                        key=lambda x: (-x.fired, x.role, x.gate))
+    ]
+    return {"roles": roles, "gates": gates}
+
+
 # ---------- HTTP 层 ----------
 #
 # 这一层只做三件事：解析路径、调上面那三个纯函数、序列化。没有任何业务判断 ——
@@ -420,6 +468,8 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
             if detail is None:
                 return 404, {"error": f"task not found: {task_id}"}
             return 200, detail
+        if clean == "/api/supervisors":
+            return 200, supervisor_stats(db)
         if clean == "/api/health":
             return 200, {"ok": True}
     except QueueUnreadable as exc:
