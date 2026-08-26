@@ -13,6 +13,8 @@ import {
 } from '../lib/attemptFormat'
 import { KeyBar, Panel } from './ConsoleChrome'
 import PermissionPanel from './PermissionPanel'
+import ArtifactViewer from './ArtifactViewer'
+import InterveneBar from './InterveneBar'
 
 /** 六列网格。表头和数据行必须共用，否则列会错位。 */
 const COLS =
@@ -20,9 +22,17 @@ const COLS =
 
 interface AttemptTimelineProps {
   attempts: Attempt[]
+  /** 取现场正文和提交人工介入都要它。 */
+  taskId: string
+  /** 介入成功后让详情页重新拉数据。 */
+  onIntervened: () => void
 }
 
-export default function AttemptTimeline({ attempts }: AttemptTimelineProps) {
+export default function AttemptTimeline({
+  attempts,
+  taskId,
+  onIntervened,
+}: AttemptTimelineProps) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [failOnly, setFailOnly] = useState(false)
 
@@ -115,6 +125,8 @@ export default function AttemptTimeline({ attempts }: AttemptTimelineProps) {
             <AttemptRow
               key={attempt.attempt_no}
               attempt={attempt}
+              taskId={taskId}
+              onIntervened={onIntervened}
               open={expanded.has(attempt.attempt_no)}
               onToggle={() => toggle(attempt.attempt_no)}
             />
@@ -127,13 +139,21 @@ export default function AttemptTimeline({ attempts }: AttemptTimelineProps) {
 
 function AttemptRow({
   attempt,
+  taskId,
+  onIntervened,
   open,
   onToggle,
 }: {
   attempt: Attempt
+  taskId: string
+  onIntervened: () => void
   open: boolean
   onToggle: () => void
 }) {
+  // 现场正文按需加载：选了哪个标签才发请求。默认 null = 都不展开，
+  // 因为大多数时候人只想看判词，150KB 的 transcript 不该无条件拉下来。
+  const [tab, setTab] = useState<'transcript' | 'diff' | null>(null)
+
   const res = resolutionText(attempt.resolution)
   const notDispatched = attempt.resolution === 'not_dispatched'
 
@@ -196,7 +216,118 @@ function AttemptRow({
           </div>
 
           <PermissionPanel events={attempt.permission_events} />
+
+          <HumanRecord attempt={attempt} />
+
+          <ArtifactTabs
+            attempt={attempt}
+            taskId={taskId}
+            tab={tab}
+            onPick={setTab}
+          />
         </div>
+      )}
+
+      {open && !notDispatched && (
+        <InterveneBar
+          taskId={taskId}
+          attemptNo={attempt.attempt_no}
+          onDone={onIntervened}
+        />
+      )}
+    </div>
+  )
+}
+
+/** 定案理由 + 人工验收结果。都没有时整块不渲染。 */
+function HumanRecord({ attempt }: { attempt: Attempt }) {
+  const hv = attempt.human_verdict ?? ''
+  const note = attempt.resolution_note ?? ''
+  if (!hv && !note) return null
+
+  return (
+    <div className="mt-2 space-y-1 rounded border border-slate-200 bg-white px-2 py-1.5 text-[11px]">
+      {note && (
+        <div>
+          <span className="text-slate-400">定案理由 </span>
+          <span className="text-slate-700">{note}</span>
+        </div>
+      )}
+      {hv && (
+        <div>
+          <span className="text-slate-400">人工验收 </span>
+          <span
+            className={
+              hv === 'pass'
+                ? 'font-semibold text-emerald-700'
+                : 'font-semibold text-rose-700'
+            }
+          >
+            {hv === 'pass' ? '✓ 通过' : '✗ 不通过'}
+          </span>
+          {attempt.human_at && (
+            <span className="ml-1 text-slate-400">{fmtTime(attempt.human_at)}</span>
+          )}
+          {attempt.human_note && (
+            <div className="mt-0.5 text-slate-700">{attempt.human_note}</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 执行日志 / 代码改动的标签切换。
+ *
+ * `has_transcript` 是 undefined 时（老后端不返回这字段）按「可能有」处理并
+ * 让人点 —— 端点会告诉他到底有没有。按 false 处理会把按钮藏掉，那样人
+ * 永远不知道这里能看正文。
+ */
+function ArtifactTabs({
+  attempt,
+  taskId,
+  tab,
+  onPick,
+}: {
+  attempt: Attempt
+  taskId: string
+  tab: 'transcript' | 'diff' | null
+  onPick: (t: 'transcript' | 'diff' | null) => void
+}) {
+  const maybe = (v: boolean | undefined) => v !== false
+
+  return (
+    <div className="mt-2 overflow-hidden rounded border border-slate-200">
+      <div className="flex items-center gap-1 bg-slate-100 px-1.5 py-1">
+        <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+          执行现场
+        </span>
+        {(['transcript', 'diff'] as const).map((k) => {
+          const has = maybe(k === 'transcript' ? attempt.has_transcript : attempt.has_diff)
+          const active = tab === k
+          return (
+            <button
+              key={k}
+              type="button"
+              disabled={!has}
+              onClick={() => onPick(active ? null : k)}
+              aria-pressed={active}
+              className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                active
+                  ? 'border-sky-400 bg-white text-sky-800'
+                  : 'border-slate-300 bg-white text-slate-600 hover:bg-sky-50'
+              } disabled:opacity-40`}
+              title={has ? undefined : '这一轮没有归档这项'}
+            >
+              {k === 'transcript' ? '执行日志' : '代码改动'}
+              {!has && ' (无)'}
+            </button>
+          )
+        })}
+      </div>
+      {tab && (
+        <ArtifactViewer taskId={taskId} attemptNo={attempt.attempt_no} kind={tab} />
       )}
     </div>
   )

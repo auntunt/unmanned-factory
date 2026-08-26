@@ -478,17 +478,47 @@ def test_module_docstring_does_not_claim_read_only():
     assert "一个字节都不往" not in doc
 
 
-def test_route_post_has_exactly_one_write_endpoint():
-    """POST 表里只有 /api/submit。
+def test_route_post_写端点是一份可数清单():
+    """POST 表的内容本身是契约。
 
-    加第二条写端点时这个测试会红 —— 那是刻意的提醒：新的写路径要先回答
-    「它写什么、有没有过闸门」，而不是顺手加上去。
+    ## 这个测试原来断言的是相反的事
+
+    2026-08-26 之前它叫 `test_route_post_has_exactly_one_write_endpoint`，
+    断言 `route_post` 签名里**没有** db —— 让「POST 不碰审计库」在类型上成立。
+
+    那条约束被显式推翻了：人工定案和验收必须落审计，否则 metrics 里永远躺着
+    一片 pending，监工命中率算不出来，而让人能介入正是这个界面存在的理由。
+
+    守卫没有取消，只是换了位置：写审计库的逻辑全部关在 `factory/api_write.py`，
+    这里断言动作表就是那三个。加第四个动作时这个测试会红 —— 仍然是刻意的
+    提醒，新的写路径要先回答「它写什么、幂等吗、失败留下什么状态」。
     """
-    assert route_post("/api/nope", {}, queue="/tmp")[0] == 404
-    # 签名里没有 db：POST 拿不到审计库句柄，「不写 audit.db」在类型上成立。
-    import inspect
+    from factory.api import _TASK_ACTIONS
 
-    assert "db" not in inspect.signature(route_post).parameters
+    assert set(_TASK_ACTIONS) == {"resolve", "accept", "rerun"}
+
+    # 不认的路径仍然 404，不是 500
+    assert route_post("/api/nope", {}, queue="/tmp")[0] == 404
+    # 动作段拼错也是 404，且要给出可选项
+    code, body = route_post("/api/task/T-x/frobnicate", {}, queue="/tmp", db=":memory:")
+    assert code == 404
+    assert "allowed" in body
+
+
+def test_route_post_没配db时说清是部署问题():
+    """db=None 时人工动作报 500 且指向配置，不是让人以为自己参数写错了。"""
+    code, body = route_post("/api/task/T-x/resolve", {}, queue="/tmp")
+    assert code == 500
+    assert "审计库" in body["error"]
+    # 提示要指向服务端，否则运维会去查前端
+    assert "serve_api" in body["hint"]
+
+
+def test_route_post_不带动作段的路径不当成动作():
+    """`POST /api/task/T-x`（GET 详情的形状）不该被 rpartition 拆出空 task_id。"""
+    code, body = route_post("/api/task/T-x", {}, queue="/tmp", db=":memory:")
+    assert code == 404
+    assert "没有动作段" in body["error"]
 
 
 def test_submit_writes_journal_line(empty_queue):

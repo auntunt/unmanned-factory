@@ -22,6 +22,7 @@ from factory.audit.models import (
     SupervisorRole,
     Verdict,
 )
+from factory.audit.archive import ArchiveResult, archive_attempt
 from factory.audit.store import AuditStore
 from factory.checks_contract import (
     contract_text,
@@ -29,7 +30,7 @@ from factory.checks_contract import (
     vacuous_checks,
 )
 from factory.grading.rules import Grade, GradingEngine
-from factory.harness.base import HarnessAdapter, Limits
+from factory.harness.base import AttemptResult, HarnessAdapter, Limits
 from factory.harness.landing import land
 from factory.routing import Router
 from factory.harness.verdict_probe import judge_files_touched, probe
@@ -138,6 +139,25 @@ class Dispatcher:
         # 突然多出来的打回没人能对上原因。要继承得显式说。
         self._runbook = runbook
         self._limits = limits or Limits()
+
+    def _archive(
+        self, task_id: str, round_no: int, result: "AttemptResult"
+    ) -> ArchiveResult:
+        """归档这一轮的执行现场。归档不了就照旧，绝不让整轮失败。
+
+        store.data_root 为 None 是 `:memory:` 库（测试）—— 没有落盘位置，
+        直接返回空结果，调用方会退回 adapter 给的原路径。
+        """
+        root = getattr(self._store, "data_root", None)
+        if root is None:
+            return ArchiveResult()
+        return archive_attempt(
+            root,
+            task_id,
+            round_no,
+            transcript_src=result.transcript_path,
+            diff=result.diff,
+        )
 
     # ---------- 预分级：不通过就一次都不派发 ----------
 
@@ -314,11 +334,17 @@ class Dispatcher:
                 self._limits,
                 model=model,
             )
+            # 归档执行现场，**在落库之前**：库里要存的是归档后的稳定路径，
+            # 不是 adapter 给的 /tmp 路径。顺序反了就等于没修 —— 字段指着
+            # 一个随时会被 systemd-tmpfiles 清掉的目录。
+            archived = self._archive(task.task_id, round_no, result)
+
             self._store.record_result(
                 aid,
                 diff_hash=result.diff_hash,
                 commit=None,
-                transcript_path=result.transcript_path,
+                transcript_path=archived.transcript_path or result.transcript_path,
+                diff_path=archived.diff_path,
                 tokens_in=result.tokens_in,
                 tokens_out=result.tokens_out,
                 cost_usd=result.cost_usd,

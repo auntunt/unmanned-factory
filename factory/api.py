@@ -62,6 +62,8 @@ from urllib.parse import unquote, urlparse
 
 import yaml
 
+from factory.api_write import do_accept, do_resolve, do_rerun
+from factory.audit.archive import read_archived
 from factory.audit.models import NOT_DISPATCHED
 from factory.audit.store import AuditStore
 from factory.backlog.store import BLOCKED, DONE, INBOX, LOG, NEEDS_HUMAN, RUNNING, STATES
@@ -227,6 +229,21 @@ def _attempt_json(attempt, permission_events: tuple = ()) -> dict:
         "tokens_out": attempt.tokens_out,
         "wall_clock_s": round(attempt.wall_clock_ms / 1000, 1),
         "created_at": attempt.created_at.isoformat(timespec="seconds"),
+        # 定案理由。CLI 的 `resolve --why` 和 Web 的定案框写的是同一列，
+        # 前端要显示出来 —— 否则「这一轮为什么被人放行」只有查库才知道。
+        "resolution_note": attempt.resolution_note or "",
+        # 人工验收。空串 = 没人验过（前端显示「待验收」而不是「不通过」）。
+        "human_verdict": attempt.human_verdict or "",
+        "human_note": attempt.human_note or "",
+        "human_at": (
+            attempt.human_at.isoformat(timespec="seconds")
+            if attempt.human_at else None
+        ),
+        # 现场正文**不**放在这里，只放「有没有」。一份 transcript 150KB 上下，
+        # 三轮半兆，详情页首屏拖着它走等于每次刷新都下载一遍没人看的东西。
+        # 正文走 /api/task/<id>/attempt/<no>/transcript 按需取。
+        "has_transcript": bool(attempt.transcript_path),
+        "has_diff": bool(attempt.diff_path),
         "verdicts": [
             {
                 "role": str(v.role),
@@ -377,6 +394,30 @@ def global_stats(db: str | Path, queue: str | Path) -> dict:
         # 「队列是空的」。给 None，前端渲染成 `—`。
         counts = dict.fromkeys(BUCKETS.values(), None)
 
+    avg_cost = round(total_cost / total_tasks, 6) if total_tasks else 0
+
+    # 人工验收计数。空串 = 没验过，不进分母 —— 和监工的 unadjudicated
+    # 同一个道理：没人验过的轮次算成不通过，会让通过率虚低。
+    human_passed = sum(1 for a in attempts if a.human_verdict == "pass")
+    human_failed = sum(1 for a in attempts if a.human_verdict == "fail")
+
+    # 综合评分。缺数据时 total 为 None，前端显示「缺 X」而不是编个 0 分。
+    # 这两个 import 放函数内：scoring/metrics 都要 import audit.models，
+    # 放模块顶会和 api 的既有 import 顺序绕成环。
+    from factory.metrics import supervisor_metrics
+    from factory.scoring import W_COST, W_HUMAN, W_PRECISION, ScoreInput, compute_score
+
+    # 只扫一次全库。原来写成两次 supervisor_metrics(...) 各求一个和，
+    # 等于把 all_attempts 连同 selectinload 跑两遍。
+    sup_metrics = supervisor_metrics(AuditStore(db)).values()
+    score = compute_score(ScoreInput(
+        human_passed=human_passed,
+        human_failed=human_failed,
+        true_positives=sum(m.true_positives for m in sup_metrics),
+        false_positives=sum(m.false_positives for m in sup_metrics),
+        avg_cost_per_task_usd=avg_cost if total_tasks else None,
+    ))
+
     return {
         "total_tasks": total_tasks,
         "total_attempts": len(attempts),
@@ -386,10 +427,24 @@ def global_stats(db: str | Path, queue: str | Path) -> dict:
         # 一次都没跑过时返回 0 而不是 None：这两个数是「平均」，而 0 个任务的
         # 平均花费确实是 0，没有歧义（合并率那种「0% 像是全失败」的问题在这里
         # 不存在）。除零仍然要防。
-        "avg_cost_per_task_usd": (round(total_cost / total_tasks, 6)
-                                  if total_tasks else 0),
+        "avg_cost_per_task_usd": avg_cost,
         "avg_attempts_per_task": (round(len(attempts) / total_tasks, 2)
                                   if total_tasks else 0),
+        # 人工验收：待验收单独给，它是「这批数字能不能用」的信号
+        "human_review": {
+            "passed": human_passed,
+            "failed": human_failed,
+            "pending": len(attempts) - human_passed - human_failed,
+        },
+        "score": {
+            "total": round(score.total, 1) if score.total is not None else None,
+            "grade": score.grade,
+            "sub": {k: round(v, 4) for k, v in score.sub.items()},
+            "missing": score.missing,
+            "explain": score.explain(),
+            "weights": {"人工验收": W_HUMAN, "监工精度": W_PRECISION,
+                        "成本效率": W_COST},
+        },
     }
 
 
@@ -441,6 +496,40 @@ def supervisor_stats(db: str | Path) -> dict:
     return {"roles": roles, "gates": gates}
 
 
+def attempt_artifact(
+    db: str | Path, task_id: str, attempt_no: int, kind: str
+) -> dict | None:
+    """一轮 attempt 的执行现场正文（transcript 或 diff）。
+
+    返回 None = 没有这个任务/轮次（路由翻 404）。**找不到文件不算 404** ——
+    那是 200 + `note` 说明为什么空。这两种情况在界面上要长得不一样：
+    「没有第 5 轮」是操作错误，「第 5 轮的日志随 /tmp 丢了」是数据事故，
+    后者必须让人看到而不是显示成一片空白。
+
+    正文原样返回，不做解析。transcript 是 JSONL，怎么渲染（按工具调用折叠、
+    还是当日志滚）是前端的事 —— 后端一旦开始解析格式，claude 换一版输出
+    就得跟着改，而原始正文永远读得出来。
+    """
+    store = AuditStore(db)
+    rows = [r for r in store.attempts_for(task_id) if r.attempt_no == attempt_no]
+    if not rows:
+        return None
+    row = rows[0]
+
+    path = row.transcript_path if kind == "transcript" else row.diff_path
+    body, note = read_archived(path)
+    return {
+        "task_id": task_id,
+        "attempt_no": attempt_no,
+        "kind": kind,
+        "path": path,
+        "body": body,
+        "bytes": len(body.encode("utf-8")),
+        # 空 note 时前端不显示提示条。非空一定要显示 —— 见上面那段。
+        "note": note,
+    }
+
+
 # ---------- HTTP 层 ----------
 #
 # 这一层只做三件事：解析路径、调上面那三个纯函数、序列化。没有任何业务判断 ——
@@ -461,7 +550,25 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
             return 200, global_stats(db, queue)
         if clean.startswith("/api/task/"):
             # unquote：task_id 里出现 `/` 或中文时地址栏里是百分号编码的。
-            task_id = unquote(clean[len("/api/task/") :])
+            rest = clean[len("/api/task/") :]
+
+            # /api/task/<id>/attempt/<no>/<transcript|diff>
+            #
+            # 现场正文单独开端点而不是塞进任务详情：一个 transcript 150KB 上下，
+            # 三轮就是半兆。详情页首屏要它干什么 —— 人点开某一轮才需要看。
+            # 塞进详情会让每次刷新看板都拖着几兆走。
+            m = re.match(r"^(?P<tid>.+)/attempt/(?P<no>\d+)/(?P<kind>transcript|diff)$", rest)
+            if m:
+                got = attempt_artifact(
+                    db, unquote(m["tid"]), int(m["no"]), m["kind"]
+                )
+                if got is None:
+                    return 404, {
+                        "error": f"{unquote(m['tid'])} 没有第 {m['no']} 轮",
+                    }
+                return 200, got
+
+            task_id = unquote(rest)
             if not task_id:
                 return 404, {"error": "缺少 task_id"}
             detail = task_detail(db, queue, task_id)
@@ -482,12 +589,36 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
     return 404, {"error": f"no such endpoint: {clean}"}
 
 
-def route_post(path: str, data: dict, *, queue: str | Path) -> tuple[int, dict]:
-    """POST 路由。**表里只有一条，加第二条要先想清楚写权限。**
+#: `/api/task/<id>/<动作>` 的动作表 → factory/api_write.py 里的处理函数。
+#:
+#: 签名统一成 `(task_id, data, *, db, queue)`，这样路由这里不需要知道哪个动作
+#: 用得上 db、哪个只动队列 —— 加一个动作就是加一行，不用碰路由逻辑。
+_TASK_ACTIONS = {
+    "resolve": do_resolve,
+    "accept": do_accept,
+    "rerun": do_rerun,
+}
 
-    只吃 `queue`，拿不到 `db` —— 这不是漏传参数，是让「POST 不碰审计库」
-    在签名上就成立。哪天真要加一个写 audit.db 的端点，得先改这个签名，
-    而那次改动会逼人重读上面那段写权限边界。
+
+def route_post(
+    path: str, data: dict, *, queue: str | Path, db: str | Path | None = None
+) -> tuple[int, dict]:
+    """POST 路由。
+
+    ## 写权限边界（2026-08-26 修订）
+
+    这个函数原来**刻意不收 `db`**，为的是让「POST 不碰审计库」在签名上就成立。
+    那条约束现在被显式推翻了：人工定案和人工验收的结果必须落审计，否则
+    metrics 里永远躺着一片 pending，监工命中率算不出来 —— 而「让人能介入」
+    正是这个 Web 界面存在的理由。
+
+    推翻的代价被限制住了：所有写审计库的逻辑关在 `factory/api_write.py`，
+    这里只做路径解析和转发。「哪些代码能写 audit.db」仍然是一个能一眼看完
+    的清单。
+
+    `db` 保留默认 None 是为了不破既有调用（只投递、不需要审计的场景，以及
+    一堆只传 queue 的测试）。收到需要 db 的动作而 db 是 None 时报 500 并
+    说清楚是服务端配置问题，不是调用方的错。
 
     异常一律 500 且带类型名：投递路径上的意外（磁盘满、队列目录被删）
     要能从响应里认出来，不然只能去翻服务端日志。
@@ -496,6 +627,34 @@ def route_post(path: str, data: dict, *, queue: str | Path) -> tuple[int, dict]:
     try:
         if clean == "/api/submit":
             return submit_task(data, queue)
+
+        # /api/task/<id>/<动作>
+        if clean.startswith("/api/task/"):
+            rest = clean[len("/api/task/") :]
+            task_id, _, action = rest.rpartition("/")
+            # rpartition 在没有 `/` 时把整串放在最后一段，那种形状
+            # （/api/task/T-x）是 GET 的详情路径，POST 过来是调用方搞错了。
+            if not task_id:
+                return 404, {
+                    "error": f"POST 到 /api/task/{rest} 没有动作段",
+                    "hint": f"要 /api/task/<id>/<{'|'.join(_TASK_ACTIONS)}>",
+                }
+            task_id = unquote(task_id)
+            handler = _TASK_ACTIONS.get(action)
+            if handler is None:
+                return 404, {
+                    "error": f"没有这个动作：{action}",
+                    "allowed": sorted(_TASK_ACTIONS),
+                }
+            if db is None:
+                return 500, {
+                    "error": "服务端没配审计库路径，人工介入动作无法落审计",
+                    "hint": "serve_api 要把 db 传进 route_post —— 这是部署配置问题",
+                }
+            outcome = handler(task_id, data, db=db, queue=queue)
+            return outcome.code, outcome.payload
+    except QueueUnreadable as exc:
+        return 500, {"error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return 500, {"error": f"{type(exc).__name__}: {exc}"}
     return 404, {"error": f"no such endpoint: {clean}"}
@@ -703,7 +862,7 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
                 data = json.loads(body)
                 
                 # 路由到 submit 处理函数
-                code, payload = route_post(self.path, data, queue=queue)
+                code, payload = route_post(self.path, data, queue=queue, db=db)
                 self._json(code, payload)
             except json.JSONDecodeError:
                 self._json(400, {"error": "Invalid JSON"})

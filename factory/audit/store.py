@@ -32,6 +32,7 @@ from factory.audit.models import (
     SupervisorVerdict,
     TaskAttempt,
     Verdict,
+    utc_now,
 )
 from factory.redact import redact, redact_text
 
@@ -59,6 +60,16 @@ class AuditStore:
                 cur.execute("PRAGMA journal_mode=WAL")
             cur.close()
 
+        # 归档根目录。audit.db 按约定放在 data_root 下（`~/factory-data/audit.db`），
+        # 所以它的父目录就是 data_root —— 执行现场（transcript/diff）归到那儿的
+        # attempts/ 子目录，和审计库同生共死。
+        #
+        # 不新增一个 --archive-root 参数：多一个路径就多一种「库和现场分家」的
+        # 配错方式，而这两样东西分开毫无意义 —— 现场是审计记录的附件。
+        #
+        # :memory: 没有父目录（测试用）。给 None，archive_attempt 不会被调用。
+        self.data_root: Path | None = None if memory else Path(db_path).resolve().parent
+
         with _SCHEMA_LOCK:
             Base.metadata.create_all(self._engine)
             self._add_missing_columns()
@@ -68,6 +79,15 @@ class AuditStore:
     #: "no such column"，而那时候队列已经在跑，报错点离原因很远。
     _LATE_COLUMNS = (
         ("task_attempt", "resolution_note", "VARCHAR(512) DEFAULT '' NOT NULL"),
+        # 可空：归档失败、非 claude harness、以及本次改动之前的所有老 attempt
+        # 都合法地没有 diff 路径。给 NOT NULL 会让老库升级时 ADD COLUMN 直接失败。
+        ("task_attempt", "diff_path", "VARCHAR(1024)"),
+        # 人工验收三件套。给 DEFAULT '' NOT NULL 的两列是因为读的时候一律
+        # 当字符串用（空串=没验收），可空会让每个读点都要判 None。
+        ("task_attempt", "human_verdict", "VARCHAR(16) DEFAULT '' NOT NULL"),
+        ("task_attempt", "human_note", "VARCHAR(1024) DEFAULT '' NOT NULL"),
+        # 时间戳可空：没验收过就该是 NULL，不是 1970。
+        ("task_attempt", "human_at", "DATETIME"),
     )
 
     def _add_missing_columns(self) -> None:
@@ -155,6 +175,7 @@ class AuditStore:
         cost_usd: float,
         wall_clock_ms: int,
         harness_version: str | None = None,
+        diff_path: str | None = None,
     ) -> None:
         """落一次 attempt 的执行结果。
 
@@ -166,6 +187,11 @@ class AuditStore:
             row.diff_hash = diff_hash
             row.commit = commit
             row.transcript_path = transcript_path
+            # 只在有值时写：归档失败时传 None，那时候不该把上一次（如果有）
+            # 的有效路径抹成空。transcript_path 上面那行没这个待遇是因为它
+            # 每轮都由 adapter 重新给出，覆盖是对的。
+            if diff_path is not None:
+                row.diff_path = diff_path
             row.tokens_in = tokens_in
             row.tokens_out = tokens_out
             row.cost_usd = cost_usd
@@ -237,6 +263,30 @@ class AuditStore:
                 # 理由可能贴了报错原文，里面带路径/token。走 redact 和其他
                 # 自由文本字段（class_reason、permission reason）一个规格。
                 row.resolution_note = redact_text(note)[:512]
+            s.commit()
+
+    def accept(self, attempt_id: int, verdict: str, *, note: str) -> None:
+        """人工验收。`verdict` 只能是 'pass' / 'fail'。
+
+        和 `finalize` 分开是因为问的是两个正交的问题 —— resolution 说「监工那条
+        红算不算真问题」，验收说「产出的东西人认不认」。一轮可以 merged 但验收
+        不通过（代码过了检查但方案不对），合成一列就分不开了。
+
+        note 强制要求（不像 finalize 的 note 有默认值）：验收结论没有理由的话，
+        下一个人看到一个「不通过」除了重新读一遍全部 diff 什么信息都没得到。
+        """
+        if verdict not in ("pass", "fail"):
+            raise ValueError(f"验收结论只能是 pass / fail，收到 {verdict!r}")
+        if not note.strip():
+            raise ValueError("验收必须写说明")
+        with self._session() as s:
+            row = s.get(TaskAttempt, attempt_id)
+            if row is None:
+                raise KeyError(f"没有 attempt id={attempt_id}")
+            row.human_verdict = verdict
+            # 和 resolution_note 同一个规格：可能贴了报错原文，里面带路径/token。
+            row.human_note = redact_text(note)[:1024]
+            row.human_at = utc_now()
             s.commit()
 
     def latest_attempt(self, task_id: str) -> TaskAttempt | None:

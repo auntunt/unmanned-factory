@@ -88,6 +88,11 @@ class TaskAttempt(Base):
     diff_hash: Mapped[str | None] = mapped_column(String(64), default=None)
     commit: Mapped[str | None] = mapped_column(String(64), default=None)
     transcript_path: Mapped[str | None] = mapped_column(String(1024), default=None)
+    # 归档后的 diff 正文路径。diff_hash 只能回答「两轮改动是否相同」，
+    # 回答不了「改了什么」—— 而后者是人工介入时唯一真正要看的东西。
+    # 正文不入库（diff 能有几 MB，塞进 SQLite 会让每次列表查询都拖着它走），
+    # 落盘 + 存路径，由 audit/archive.py 负责搬运。
+    diff_path: Mapped[str | None] = mapped_column(String(1024), default=None)
 
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
@@ -100,6 +105,22 @@ class TaskAttempt(Base):
     # 判断「是监工不行还是人图省事直接放行」的东西就是这一列。空串=没人工干预过。
     resolution_note: Mapped[str] = mapped_column(String(512), default="")
     linked_defects: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    # ---------- 人工验收（Web 独有，CLI 没有对应命令）----------
+    #
+    # 和 resolution 是两个正交的问题，所以不复用那一列：
+    #   resolution  = 「这一轮的红算不算真问题」（监工准不准）
+    #   human_verdict = 「产出的东西人认不认」（活干得好不好）
+    # 一轮可以 merged（监工的红是假阳性）但验收不通过（代码能过但写得不对），
+    # 挤进同一列就再也分不开这两件事。
+    #
+    # 空串 = 没人验收过。'pass' / 'fail' 是唯二的有效值。
+    human_verdict: Mapped[str] = mapped_column(String(16), default="")
+    # 验收说明。前端必填 —— 「不通过」不写原因等于把问题丢回给下一个人。
+    human_note: Mapped[str] = mapped_column(String(1024), default="")
+    # 验收时刻。可空：没验收过就是 None，用空串区分不了「没验收」和「验收时
+    # 时钟坏了」。
+    human_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 

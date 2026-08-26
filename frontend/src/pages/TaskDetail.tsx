@@ -225,7 +225,13 @@ export default function TaskDetail() {
           </div>
         </section>
 
-        <AttemptTimeline attempts={data.attempts} />
+        <AttemptTimeline
+          attempts={data.attempts}
+          taskId={data.task_id}
+          // 介入成功后立刻拉一次，不等下一个轮询周期 —— 人点完「定案」
+          // 要马上看到那一行变成 merged，否则会怀疑没生效再点一次。
+          onIntervened={refresh}
+        />
       </div>
     </Shell>
   )

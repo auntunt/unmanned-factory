@@ -10,7 +10,7 @@
  * 浅色而不是暗色 —— 投影和会议室灯光下暗色底看不清。
  */
 import axios from 'axios'
-import { useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import usePolling from '../hooks/usePolling'
 import type { QueueState, Stats, TaskBuckets, TaskSummary } from '../types'
@@ -101,6 +101,101 @@ function Panel({
 }
 
 /**
+ * 综合评分 + 人工验收。
+ *
+ * 为什么要有这一块：看板上原本有两组互不相干的数 —— 监工命中率说判据质量，
+ * 花费说成本。演示时被问「所以这套东西到底行不行」，指着两张表说
+ * 「命中率 60%、平均 9 美元」不构成回答。这一块给一个数，并且把权重写在
+ * 旁边，让人知道这个数是怎么合出来的。
+ *
+ * 缺数据时**不给总分**，显示「缺人工验收」。后端已经保证了这一点，前端
+ * 这里只需要不把 null 渲染成 0 —— 编一个 0 分看起来像结论，实际是没数据。
+ */
+function Score({ stats }: { stats: Stats | null }) {
+  const s = stats?.score
+  const hr = stats?.human_review
+  const has = s?.total !== null && s?.total !== undefined
+
+  // 等级配色：A 绿 B 青 C 黄 D 红。和五桶的状态色同一套语义。
+  const gradeTone =
+    s?.grade === 'A'
+      ? 'text-emerald-700'
+      : s?.grade === 'B'
+        ? 'text-cyan-700'
+        : s?.grade === 'C'
+          ? 'text-amber-700'
+          : s?.grade === 'D'
+            ? 'text-rose-700'
+            : 'text-slate-400'
+
+  return (
+    <Panel
+      title="综合评分"
+      right={
+        s?.weights
+          ? Object.entries(s.weights)
+              .map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`)
+              .join(' · ')
+          : undefined
+      }
+    >
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div className="flex items-baseline gap-1.5">
+          <span className={`text-3xl font-bold leading-none ${gradeTone}`}>
+            {has ? s!.total!.toFixed(0) : '—'}
+          </span>
+          <span className={`text-sm font-bold ${gradeTone}`}>{s?.grade ?? 'n/a'}</span>
+        </div>
+
+        {/* 各项得分。缺的项不出现在 sub 里，所以这里遍历到的都是有数据的。 */}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          {Object.entries(s?.sub ?? {}).map(([k, v]) => (
+            <span key={k}>
+              <span className="text-slate-500">{k} </span>
+              <span className="font-bold text-slate-900">{(v * 100).toFixed(0)}</span>
+            </span>
+          ))}
+        </div>
+
+        {/* 人工验收三个数。pending 高说明这批分数还不能用 —— 它是
+            「总分为什么没有」的直接答案，所以和总分放在同一行。 */}
+        {hr ? (
+          <div className="ml-auto flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            <span>
+              <span className="text-slate-500">验收通过 </span>
+              <span className="font-bold text-emerald-700">{hr.passed}</span>
+            </span>
+            <span>
+              <span className="text-slate-500">不通过 </span>
+              <span className="font-bold text-rose-700">{hr.failed}</span>
+            </span>
+            <span>
+              <span className="text-slate-500">待验收 </span>
+              <span className="font-bold text-amber-700">{hr.pending}</span>
+            </span>
+          </div>
+        ) : null}
+      </div>
+
+      {/* 一行说明这个分怎么来的 / 为什么没有 */}
+      {s?.explain ? (
+        <p className="mt-1.5 border-t border-slate-100 pt-1.5 text-[11px] text-slate-500">
+          {s.explain}
+          {!has && hr && hr.pending > 0 ? (
+            <>
+              {' '}
+              <span className="text-slate-400">
+                （去任务详情页展开轮次做验收）
+              </span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+    </Panel>
+  )
+}
+
+/**
  * 顶栏：健康灯 + 三个总量 + 数据新鲜度。
  *
  * 新鲜度必须显示：轮询失败时 usePolling 保留上一次数据（这是对的，屏幕
@@ -184,31 +279,147 @@ function TopBar({
  * 条形按最大桶归一化而不是按总数：演示时 done=4 / inbox=1 这种量级，
  * 按总数算每根条都只有几个像素宽，等于没画。
  */
-function Pipeline({ buckets }: { buckets: TaskBuckets | null }) {
+function Pipeline({
+  buckets,
+  selected,
+  onSelect,
+}: {
+  buckets: TaskBuckets | null
+  /** 当前筛选的桶，null = 未筛选 */
+  selected: QueueState | null
+  onSelect: (s: QueueState | null) => void
+}) {
   const counts = FLOW.map((f) => buckets?.[f.key]?.length ?? 0)
   const max = Math.max(1, ...counts)
   return (
-    <Panel title="pipeline" right="任务流动方向 →">
+    <Panel
+      title="pipeline"
+      right={
+        selected ? (
+          <button
+            type="button"
+            onClick={() => onSelect(null)}
+            className="border border-slate-300 px-1.5 text-[11px] text-slate-600 hover:bg-slate-100"
+          >
+            [esc] 清除筛选
+          </button>
+        ) : (
+          '点桶看里面的任务 →'
+        )
+      }
+    >
       <div className="grid grid-cols-5 gap-3">
-        {FLOW.map((f, i) => (
-          <div key={f.key} className="min-w-0">
-            <div className="flex items-baseline justify-between">
-              <span className={`text-[10px] font-bold tracking-wider ${f.tone}`}>
-                {f.label}
-              </span>
-              <span className="text-base font-bold leading-none text-slate-900">
-                {counts[i]}
-              </span>
-            </div>
-            <div className="mt-1 h-1.5 w-full bg-slate-100">
-              <div
-                className={`h-full ${f.bar}`}
-                style={{ width: `${(counts[i] / max) * 100}%` }}
-              />
-            </div>
-          </div>
-        ))}
+        {FLOW.map((f, i) => {
+          const active = selected === f.key
+          // 空桶不给点：点进去只会看到一句「没有任务」，白跑一趟。
+          const empty = counts[i] === 0
+          return (
+            <button
+              key={f.key}
+              type="button"
+              disabled={empty}
+              // 再点一次取消选中 —— 人点错桶时的第一反应是再点一下，
+              // 而不是去找「清除筛选」在哪。
+              onClick={() => onSelect(active ? null : f.key)}
+              aria-pressed={active}
+              className={`min-w-0 border px-1.5 py-1 text-left transition ${
+                active
+                  ? 'border-cyan-600 bg-cyan-50'
+                  : empty
+                    ? 'cursor-default border-transparent opacity-50'
+                    : 'border-transparent hover:border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-baseline justify-between">
+                <span className={`text-[10px] font-bold tracking-wider ${f.tone}`}>
+                  {f.label}
+                </span>
+                <span className="text-base font-bold leading-none text-slate-900">
+                  {counts[i]}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 w-full bg-slate-100">
+                <div
+                  className={`h-full ${f.bar}`}
+                  style={{ width: `${(counts[i] / max) * 100}%` }}
+                />
+              </div>
+            </button>
+          )
+        })}
       </div>
+    </Panel>
+  )
+}
+
+/**
+ * 点桶之后出现的任务列表。
+ *
+ * 为什么不跳到 /tasks：那一页是五桶并排，点 BLOCKED 跳过去还得在五列里
+ * 找哪一列是 blocked。人点桶想的是「让我看看这 3 个是什么」，答案应该
+ * 就地展开。
+ */
+function BucketTasks({
+  state,
+  tasks,
+  onClose,
+}: {
+  state: QueueState
+  tasks: TaskSummary[]
+  onClose: () => void
+}) {
+  const meta = FLOW.find((f) => f.key === state)
+  return (
+    <Panel
+      title={`${meta?.label ?? state} · ${tasks.length} 个`}
+      right={
+        <button
+          type="button"
+          onClick={onClose}
+          className="border border-slate-300 px-1.5 text-[11px] text-slate-600 hover:bg-slate-100"
+        >
+          收起
+        </button>
+      }
+    >
+      {tasks.length === 0 ? (
+        <p className="text-xs text-slate-500">这个桶是空的</p>
+      ) : (
+        <ul className="divide-y divide-slate-100">
+          {tasks.map((t, i) => (
+            <li
+              key={`${t.task_id}:${t.mtime}:${i}`}
+              className="flex items-baseline gap-2 py-1"
+            >
+              <span className="w-5 shrink-0 text-right text-[11px] text-slate-400">
+                {i + 1}
+              </span>
+              <Link
+                to={`/task/${encodeURIComponent(t.task_id)}`}
+                className="shrink-0 truncate text-xs font-semibold text-cyan-800 hover:underline"
+              >
+                {t.task_id}
+              </Link>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-slate-500">
+                {t.prompt_preview}
+              </span>
+              <span className="shrink-0 text-[10px] text-slate-400">
+                {ago(t.mtime)} 前
+              </span>
+              {t.attempts_count ? (
+                <span className="shrink-0 text-[10px] text-slate-500">
+                  {t.attempts_count} 轮
+                </span>
+              ) : null}
+              {t.total_cost_usd !== undefined ? (
+                <span className="shrink-0 text-[10px] text-amber-700">
+                  {money(t.total_cost_usd)}
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
     </Panel>
   )
 }
@@ -483,11 +694,29 @@ export default function Console() {
   const tasks = usePolling(fetchTasks, POLL_MS)
   const sup = usePolling(fetchSup, POLL_MS)
 
+  // 点桶筛选状态：null = 不筛选，显示全部面板
+  const [selectedBucket, setSelectedBucket] = useState<QueueState | null>(null)
+
   const refreshAll = () => {
     stats.refresh()
     tasks.refresh()
     sup.refresh()
   }
+
+  // ESC 清除筛选。和 TaskList 页的 r 刷新一样，避开输入框。
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape' || e.metaKey || e.ctrlKey || e.altKey) return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable) return
+      if (selectedBucket === null) return
+      e.preventDefault()
+      setSelectedBucket(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectedBucket])
 
   // 首屏还没有任何数据时给一行提示。三份数据都可能是 null，但只要有一份
   // 到了就开始渲染 —— 让屏幕分块出现比整屏等最慢的那个请求好。
@@ -511,34 +740,65 @@ export default function Console() {
         </p>
       ) : null}
 
-      <Pipeline buckets={tasks.data} />
+      {/* 综合评分：插在顶栏和五桶之间，演示时是第一眼看到的结论 */}
+      <Score stats={stats.data} />
 
-      <div className="grid gap-2 lg:grid-cols-2">
-        <div className="space-y-2">
-          <Supervisors data={sup.data} />
-          <Resolutions stats={stats.data} />
-        </div>
-        <div className="space-y-2">
-          <Inbox buckets={tasks.data} />
-          <Gates data={sup.data} />
-        </div>
-      </div>
+      <Pipeline buckets={tasks.data} selected={selectedBucket} onSelect={setSelectedBucket} />
 
-      {/* 底部快捷键栏：k9s 的做法。这里列的是 CLI 命令而不是页面快捷键 ——
-          屏幕上看到问题之后，下一步动作发生在终端里。 */}
-      <footer className="flex flex-wrap items-center gap-x-4 gap-y-1 border border-slate-300 bg-slate-100 px-3 py-1 text-[11px]">
-        {[
-          ['factory inbox', '看谁卡住'],
-          ['factory resolve N merged --why …', '人工定案'],
-          ['factory loop --idle watch', '起跑批'],
-        ].map(([cmd, what]) => (
-          <span key={cmd}>
-            <span className="bg-cyan-800 px-1 font-bold text-white">{cmd}</span>
-            <span className="ml-1.5 text-slate-600">{what}</span>
-          </span>
-        ))}
-        <span className="ml-auto text-slate-400">每 {POLL_MS / 1000}s 自动刷新</span>
-      </footer>
+      {/* 点桶之后就地展开任务列表，不跳页 */}
+      {selectedBucket && tasks.data?.[selectedBucket] ? (
+        <BucketTasks
+          state={selectedBucket}
+          tasks={tasks.data[selectedBucket]}
+          onClose={() => setSelectedBucket(null)}
+        />
+      ) : null}
+
+      {/* 筛选桶时隐藏其他面板 —— 点 BLOCKED 想看的是那 2 个任务是什么，
+          不是看着监工表发呆。清除筛选之后全部面板回来。 */}
+      {!selectedBucket ? (
+        <>
+          <div className="grid gap-2 lg:grid-cols-2">
+            <div className="space-y-2">
+              <Supervisors data={sup.data} />
+              <Resolutions stats={stats.data} />
+            </div>
+            <div className="space-y-2">
+              <Inbox buckets={tasks.data} />
+              <Gates data={sup.data} />
+            </div>
+          </div>
+
+          {/* 底部操作按钮栏。原来是假的 CLI 命令提示，现在是真按钮：
+              点进去的页面有真实操作能力，而不是让人抄命令回终端敲。 */}
+          <footer className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border border-slate-300 bg-slate-100 px-3 py-2 text-[11px]">
+            <Link
+              to="/tasks"
+              className="flex items-center gap-1.5 border border-slate-300 bg-white px-2 py-1 text-slate-700 transition hover:bg-slate-50"
+            >
+              <span className="font-bold text-cyan-700">/tasks</span>
+              <span className="text-slate-500">五桶看板</span>
+            </Link>
+            <Link
+              to="/submit"
+              className="flex items-center gap-1.5 border border-slate-300 bg-white px-2 py-1 text-slate-700 transition hover:bg-slate-50"
+            >
+              <span className="font-bold text-cyan-700">/submit</span>
+              <span className="text-slate-500">投递任务</span>
+            </Link>
+            <Link
+              to="/stats"
+              className="flex items-center gap-1.5 border border-slate-300 bg-white px-2 py-1 text-slate-700 transition hover:bg-slate-50"
+            >
+              <span className="font-bold text-cyan-700">/stats</span>
+              <span className="text-slate-500">统计报表</span>
+            </Link>
+            <span className="ml-auto text-slate-400">
+              每 {POLL_MS / 1000}s 自动刷新
+            </span>
+          </footer>
+        </>
+      ) : null}
     </div>
   )
 }
