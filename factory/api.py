@@ -577,6 +577,31 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
             return 200, detail
         if clean == "/api/supervisors":
             return 200, supervisor_stats(db)
+        if clean == "/api/analytics":
+            # 总览页的八个模块一次给完。放在这里而不是拆成八个端点：见
+            # api_analytics 的模块 docstring（一次扫库 vs N 次）。
+            #
+            # import 放函数内：api_analytics 反向 import 了本模块的
+            # list_tasks / QueueUnreadable，放模块顶会成环。
+            from factory.api_analytics import analytics
+
+            # window_days 用查询串控制，只接 7/14/30/90 —— 任意天数会让
+            # 「近 N 天」这个口径变成一个每人不同的数，两个人对着同一个页面
+            # 读出不同的率，那正是 OA 那套监控台踩过的坑。
+            qs = urlparse(path).query
+            window = 30
+            if qs:
+                raw = dict(
+                    kv.split("=", 1) for kv in qs.split("&") if "=" in kv
+                ).get("days")
+                if raw in {"7", "14", "30", "90"}:
+                    window = int(raw)
+                elif raw is not None:
+                    return 400, {
+                        "error": f"days 只支持 7/14/30/90，收到 {raw!r}",
+                        "allowed": ["7", "14", "30", "90"],
+                    }
+            return 200, analytics(db, queue, window_days=window)
         if clean == "/api/health":
             return 200, {"ok": True}
     except QueueUnreadable as exc:

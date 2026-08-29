@@ -1,5 +1,6 @@
 import { createBrowserRouter, Link, RouterProvider, useRouteError } from 'react-router-dom'
 import Console from './pages/Console'
+import Overview from './pages/Overview'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import Stats from './pages/Stats'
@@ -25,6 +26,9 @@ function Shell({ children, wide = false }: { children: React.ReactNode; wide?: b
           <nav className="flex gap-4 text-sm">
             <Link to="/" className="text-slate-600 hover:text-slate-900">
               看板
+            </Link>
+            <Link to="/overview" className="text-slate-600 hover:text-slate-900">
+              闭环总览
             </Link>
             <Link to="/tasks" className="text-slate-600 hover:text-slate-900">
               任务
@@ -75,6 +79,16 @@ const router = createBrowserRouter([
     element: (
       <Shell wide>
         <Console />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    // 闭环总览也走 wide + 等宽：它是看板类页面（环形图 + 判据表要横向空间）。
+    path: '/overview',
+    element: (
+      <Shell wide>
+        <Overview />
       </Shell>
     ),
     errorElement: <ErrorPage />,

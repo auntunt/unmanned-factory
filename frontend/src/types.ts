@@ -142,3 +142,124 @@ export interface Stats {
     weights: Record<string, number>;
   };
 }
+
+// ---------------------------------------------------------------------------
+// /api/analytics —— 总览页的聚合响应。后端：factory/api_analytics.py
+// ---------------------------------------------------------------------------
+
+/**
+ * 一个带口径的指标。
+ *
+ * 为什么不直接给 number：同一个「自动化率」在不同分母下能差一倍。分母和
+ * 口径文字跟值绑在同一个对象里，渲染时无法只显示百分比而漏掉口径 ——
+ * 类型层面就把「裸百分比」这条路堵掉。
+ */
+export interface Metric {
+  /** null = 分母为 0，算不出来。渲染成 —，不是 0%。 */
+  value: number | null
+  /** 分母。 */
+  of: number
+  /** 分子。 */
+  hit: number
+  /** 口径的一句话说明，必须显示在值旁边。 */
+  basis: string
+  label: string
+  /** 有 unit 表示这是个绝对量（如「轮」），不加 %。 */
+  unit?: string
+}
+
+export type StageSource = 'real' | 'derived'
+
+export interface Stage {
+  key: string
+  name: string
+  /** real = 队列里数出来的事实；derived = 从 attempt 推的瞬时态。 */
+  source: StageSource
+  /** derived 节点专有：这个数是怎么推出来的。 */
+  derived_from?: string
+  desc: string
+  terminal?: boolean
+  /** null = 队列读不到。渲染 —。 */
+  count: number | null
+}
+
+export interface TrendPoint {
+  date: string
+  runs: number
+  merged: number
+  cost_usd: number
+}
+
+export interface ModelCost {
+  model: string
+  runs: number
+  cost_usd: number
+  tokens_in: number
+  tokens_out: number
+  share: number | null
+}
+
+export interface GateRow {
+  gate_id: string
+  role: string
+  gate: string
+  fired: number
+  true_positives: number
+  false_positives: number
+  unadjudicated: number
+  /** null = 没定案过，命中率「不知道」。不是 0。 */
+  precision: number | null
+  verdict: string
+}
+
+export interface StuckTask {
+  task_id: string
+  state: string
+  preview: string
+  stuck_days: number | null
+  attempts: number
+  cost_usd: number
+}
+
+export interface Analytics {
+  generated_at: string
+  window_days: number
+  core: Record<string, Metric>
+  stages: Stage[]
+  trend: TrendPoint[]
+  cost: {
+    total_usd: number
+    per_task_usd: number | null
+    tokens_in: number
+    tokens_out: number
+    by_model: ModelCost[]
+    wasted_usd: number
+  }
+  gates: {
+    rows: GateRow[]
+    never_fired: number
+    roles: {
+      role: string
+      fired: number
+      passed: number
+      true_positives: number
+      false_positives: number
+      unadjudicated: number
+      precision: number | null
+      verdict: string
+    }[]
+    /** 这张表能不能用来做裁剪决策，以及为什么。必须显示。 */
+    caveat: {
+      unadjudicated: number
+      adjudicated: number
+      reliable: boolean
+      text: string
+    }
+  }
+  stuck: StuckTask[]
+  resolutions: Record<string, number>
+  /** true = 确实一轮都没跑过（区别于 degraded 的「读不到」）。 */
+  empty: boolean
+  /** 非空 = 有部分数据源挂了，逐条点名。 */
+  degraded: string[]
+}
