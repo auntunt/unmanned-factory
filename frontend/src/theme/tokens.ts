@@ -64,3 +64,25 @@ export const FONT =
 // 等宽字体：任务 id、commit、金额、token 数都该对齐
 export const MONO =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace'
+
+/**
+ * 终端视图配色 —— 浅底 geek 风（k9s/lazydocker 的 TUI 语义搬到浅色主题）。
+ *
+ * 不是暗色终端：老板看的是环形图那套 SaaS 配色，这套「终端」是给运维自己
+ * 排查用的第二视图。约束：白底上仍要有终端的信息密度和状态语义映射 ——
+ *   青色表头（列名）· 数据用深色高对比 · 数值用琥珀 · 状态严格三色。
+ * 色值都挑过对比度，保证在 #fff 上可读（不像暗色终端那些荧光色一到白底就糊）。
+ */
+export const TERM = {
+  header: '#0E7490',   // 青·列头
+  data: '#1E293B',     // 深板岩·正文数据
+  accent: '#B45309',   // 琥珀·数值（成本/轮次/token）
+  ok: '#15803D',       // 绿·通过/健康
+  fail: '#DC2626',     // 红·失败/滞留
+  warn: '#D97706',     // 橙·警告/待人
+  muted: '#64748B',    // 灰·次要/派生态
+  border: '#CBD5E1',   // 表格线
+  headBg: '#ECFEFF',   // 表头浅青底
+  rowAlt: '#F8FAFC',   // 斑马纹
+  bg: '#FFFFFF',
+} as const

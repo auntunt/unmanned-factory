@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Alert, Card, Radio, Space, Spin, Tag } from 'antd'
 import ClosureRingView, { type RingCenter } from '../components/ClosureRingView'
 import KanbanView from '../components/KanbanView'
+import TerminalView from '../components/TerminalView'
 import NodeDrawer from '../components/NodeDrawer'
 import KpiHeader, { type KpiCounter, type KpiRing } from '../components/KpiHeader'
 import type { ClosureNode } from '../theme/nodes'
@@ -26,7 +27,7 @@ interface Props {
 }
 
 export default function ClosurePage({ tasks, analytics, loading, onTaskClick }: Props) {
-  const [view, setView] = useState<'ring' | 'kanban'>('ring')
+  const [view, setView] = useState<'ring' | 'kanban' | 'terminal'>('ring')
   const [openNode, setOpenNode] = useState<ClosureNode | null>(null)
 
   const buckets = useMemo(() => bucketTasks(tasks ?? {}), [tasks])
@@ -173,14 +174,23 @@ export default function ClosurePage({ tasks, analytics, loading, onTaskClick }: 
             >
               <Radio.Button value="ring">环形</Radio.Button>
               <Radio.Button value="kanban">看板</Radio.Button>
+              <Radio.Button value="terminal">终端</Radio.Button>
             </Radio.Group>
           </Space>
         }
       >
         {view === 'ring' ? (
           <ClosureRingView counts={counts} center={center} onNodeClick={setOpenNode} />
-        ) : (
+        ) : view === 'kanban' ? (
           <KanbanView buckets={buckets} onTaskClick={onTaskClick} />
+        ) : (
+          <TerminalView
+            buckets={buckets}
+            counts={counts}
+            analytics={analytics}
+            onTaskClick={onTaskClick}
+            onNodeClick={setOpenNode}
+          />
         )}
       </Card>
 
