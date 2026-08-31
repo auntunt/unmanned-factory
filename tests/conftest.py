@@ -12,6 +12,8 @@ subprocess 路（两个 harness、回归监工、模型监工、check 探针、�
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +128,68 @@ def _prd_for_shared_task(request, tmp_path):
     if request.module.__name__.rpartition(".")[2] in _NEEDS_PRD:
         (tmp_path / "prd.md").write_text(
             "# PRD\n\n## 验收标准\n\n- AC-1: 必须返回 str\n", encoding="utf-8")
+
+
+#: 起 pytest 子进程时必须用的解释器。
+#:
+#: 不能写裸 "python"：那会走 PATH，解析到的很可能不是正在跑这套测试的解释器。
+#: 实测踩过——用 .venv/bin/python -m pytest 跑全套时，子进程里的 "python"
+#: 落到了另一个 venv 上，报 "No module named pytest"，于是一批「先证明洞存在」
+#: 的前置断言集体假红（基线红→打补丁→期待变绿，而它是因为 pytest 根本没起来
+#: 才一直红）。报错里只有 returncode，看不出是解释器问题，极难查。
+#:
+#: sys.executable 就是当前这个解释器，子进程于是和父进程同环境。
+PY = sys.executable
+
+#: 上面那条的 shell 串版本（有些测试把检查命令当字符串喂给 shell）。
+PYTEST_CMD = f"{PY} -m pytest"
+
+
+def git_setup(root: Path) -> None:
+    """在 root 建一个有首次提交的 git 仓库。
+
+    共用它是因为四个「假绿洞」测试模块（test_fake_green / test_index_skip /
+    test_runner_hooks / test_staged_gitlinks）各自抄了一遍建仓代码，而且抄的是
+    不看返回码的 lambda 版：git init 失败也静默继续，然后在后面某条断言上莫名
+    报红。这些模块专门在查「worker 自证的绿不可信」，自己却会因为环境抖动假红，
+    讽刺得刚好。
+
+    两条规矩：
+      1. 每条 git 都有 timeout —— 机器上并行有活时 git 会卡在 index.lock 上，
+         不设上限会挂住整个会话。
+      2. 失败就带着 stderr 立刻停 —— 建仓是所有用例的前提，前提塌了要在这里报，
+         不能让它伪装成被测逻辑的问题。
+    """
+    # cwd 不存在时 subprocess 在 fork 前就抛 FileNotFoundError，那个报错只说
+    # 「没有这个文件」、不说是 cwd 还是 git 本身，而「忘了 mkdir」恰恰是这里
+    # 最常见的用错方式。先自己检查，给一句能直接照着改的话。
+    if not root.is_dir():
+        raise AssertionError(
+            f"建仓失败：{root} 不是已存在的目录 —— git_setup 不负责创建它，"
+            "调用方要先 mkdir(parents=True)"
+        )
+
+    steps = (
+        ("init", "-q"),
+        ("add", "-A"),
+        ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"),
+    )
+    for args in steps:
+        try:
+            p = subprocess.run(
+                ["git", *args], cwd=root, capture_output=True, text=True, timeout=60
+            )
+        except subprocess.TimeoutExpired:  # pragma: no cover - 只在机器过载时走到
+            raise AssertionError(
+                f"建仓卡住：git {' '.join(args)} 在 {root} 超过 60s —— 环境问题，非被测逻辑"
+            ) from None
+        except FileNotFoundError as exc:  # pragma: no cover - 没装 git 才会走到
+            raise AssertionError(f"建仓失败：起不了 git 进程（{exc}）") from None
+        if p.returncode != 0:
+            raise AssertionError(
+                f"建仓失败：git {' '.join(args)} 在 {root} (exit {p.returncode})\n"
+                f"stderr: {p.stderr.strip()}"
+            )
 
 
 @pytest.fixture

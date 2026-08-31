@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 from factory.harness.workspace import added_paths, runner_hooks
+from tests.conftest import PY, git_setup
 
 
 def _repo(tmp_path: Path, *, with_conftest: bool = False) -> Path:
@@ -27,10 +28,7 @@ def _repo(tmp_path: Path, *, with_conftest: bool = False) -> Path:
         "def test_important():\n    assert 1 == 2\n", encoding="utf-8")
     if with_conftest:
         (root / "tests" / "conftest.py").write_text("", encoding="utf-8")
-    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True)
-    g("init", "-q")
-    g("add", "-A")
-    g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    git_setup(root)
     return root
 
 
@@ -54,14 +52,16 @@ def test_the_hole_is_real_a_conftest_makes_a_failing_test_pass(tmp_path):
     没有这条，下面那些测试只是在测一个函数的返回值。
     """
     root = _repo(tmp_path)
-    red = subprocess.run(["python", "-m", "pytest", "-q"], cwd=root,
+    red = subprocess.run([PY, "-m", "pytest", "-q"], cwd=root,
                          capture_output=True, text=True)
-    assert red.returncode != 0, "基线该是红的"
+    assert red.returncode != 0, f"基线该是红的，stderr={red.stderr!r}"
 
     (root / "conftest.py").write_text(_FAKE_GREEN, encoding="utf-8")
-    green = subprocess.run(["python", "-m", "pytest", "-q"], cwd=root,
+    green = subprocess.run([PY, "-m", "pytest", "-q"], cwd=root,
                            capture_output=True, text=True)
-    assert green.returncode == 0, "洞不存在了？"
+    # 带上 stderr：这条断言最常见的假红原因是 pytest 压根没起来（解释器不对），
+    # 而不是洞真被堵了。光看 returncode 分不出这两种情况。
+    assert green.returncode == 0, f"洞不存在了？stderr={green.stderr!r}"
     assert "passed" in green.stdout
 
 

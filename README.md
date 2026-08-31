@@ -58,6 +58,27 @@ uv run factory queue --queue ~/.factory/q --history 50
 launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
 「←」的行按本机改，改完跑 `plutil -lint`。
 
+## 控制室（给人看的那一屏）
+
+```
+uv run factory api --db audit.db --queue ~/.factory/q     # 后端，含 SSE
+cd frontend && npm run dev                                 # 前端，/ 是控制室，/admin 是原看板
+```
+
+浏览器开 `http://localhost:5173/` 看 live；开
+`http://localhost:5173/?replay=T-142&speed=4` 按 4 倍速回放一个跑过的任务。
+两种模式前端**不区分**：`GET /api/events` 发的是同一种事件
+（形状见 `factory/events.py` 模块头），只是 replay 从 audit.db 展开，
+live 从「两次快照的差」推出来。
+
+回放的保险：`factory replay T-142 --db audit.db --speed 0 > rec.jsonl` 把
+整条时间线落盘，不依赖 demo 那台机器上的库和 transcript 目录还在。
+
+live 模式里**正在跑**的那一轮，现场文本来自 `~/.claude/projects` 下
+mtime 最新的 session 文件 —— 是猜的（transcript 路径要跑完才落库）。
+猜错只影响屏幕，不进审计。走 Caddy 时按 `deploy/Caddyfile.example`
+关掉 `/api/events` 的缓冲，否则现场行会一批批跳。
+
 ## 子命令
 
 | 命令 | 干什么 |

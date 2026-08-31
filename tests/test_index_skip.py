@@ -21,12 +21,31 @@ from factory.harness.workspace import (
     runner_hooks,
     shadow_code,
 )
+from tests.conftest import PY
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ("git", *args), cwd=root, capture_output=True, text=True, check=True
-    ).stdout
+    """跑 git 并在失败时说清是哪条命令、git 自己说了什么。
+
+    带 timeout：机器上有别的活时 git 可能卡在 index.lock 或 fsync 上，
+    不设上限就会挂住整个测试会话。check=True 的裸 CalledProcessError
+    只报退出码，看不到 stderr，负载下假红时根本没法判断是环境还是真 bug。
+    """
+    try:
+        p = subprocess.run(
+            ("git", *args), cwd=root, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:  # pragma: no cover - 只在机器过载时走到
+        raise AssertionError(
+            f"git {' '.join(args)} 在 {root} 超过 60s 没返回 —— "
+            "通常是并发占着 index.lock 或磁盘慢，不是被测逻辑的问题"
+        ) from None
+    if p.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} 在 {root} 失败 (exit {p.returncode})\n"
+            f"stdout: {p.stdout.strip()}\nstderr: {p.stderr.strip()}"
+        )
+    return p.stdout
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -68,10 +87,12 @@ def test_the_hole_hides_the_change_from_every_gate(tmp_path: Path) -> None:
     assert diff_suppressed(root, paths) == ()
 
     proc = subprocess.run(
-        ("python", "-m", "pytest", "-q", "--no-header"),
+        (PY, "-m", "pytest", "-q", "--no-header"),
         cwd=root, capture_output=True, text=True,
     )
-    assert proc.returncode == 0, "check 没绿？那这个洞的危害要重新写"
+    # 带 stderr：假红最常见的原因是 pytest 没起来（解释器不对），不是 check 真红了。
+    assert proc.returncode == 0, (
+        f"check 没绿？那这个洞的危害要重新写。stderr={proc.stderr!r}")
 
 
 def test_the_hole_cannot_ship_unreviewed_code(tmp_path: Path) -> None:

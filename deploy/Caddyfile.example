@@ -25,5 +25,16 @@ http://HOST {
 	@factory path_regexp fx ^/factory(/.*)$
 	redir @factory {http.regexp.fx.1} 308
 
+	# 控制室的事件流是 SSE（/api/events）。反代默认会攒够一块再往外吐，
+	# 屏幕上的现场行就会一批一批跳而不是一行一行滚 —— demo 的现场感全靠
+	# 这一条。flush_interval -1 = 每写一次就冲出去。
+	@sse path /api/events
+	reverse_proxy @sse localhost:8788 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+		}
+	}
+
 	reverse_proxy localhost:8788
 }

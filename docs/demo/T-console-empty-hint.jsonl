@@ -1,0 +1,51 @@
+{"type": "snapshot", "at": "2026-08-31T04:52:48.267561Z", "tasks": {"inbox": ["T-console-empty-hint"]}, "attempts": [], "replay": "T-console-empty-hint", "total": 49}
+{"type": "task.state", "t": 0.0, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "state": "running"}
+{"type": "attempt.open", "t": 0.0, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "attempt_no": 1, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "haiku"}
+{"type": "attempt.open", "t": 0.20003795623779297, "at": "2026-08-18T05:31:00.661493Z", "task_id": "T-console-empty-hint", "attempt_no": 2, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "sonnet"}
+{"type": "attempt.open", "t": 0.3954579830169678, "at": "2026-08-18T05:31:00.856913Z", "task_id": "T-console-empty-hint", "attempt_no": 3, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "opus"}
+{"type": "attempt.result", "t": 1.0, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "attempt_no": 1, "cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "wall_clock_ms": 9, "has_diff": false}
+{"type": "attempt.result", "t": 1.200037956237793, "at": "2026-08-18T05:31:00.661493Z", "task_id": "T-console-empty-hint", "attempt_no": 2, "cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "wall_clock_ms": 10, "has_diff": false}
+{"type": "attempt.result", "t": 1.3954579830169678, "at": "2026-08-18T05:31:00.856913Z", "task_id": "T-console-empty-hint", "attempt_no": 3, "cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0, "wall_clock_ms": 10, "has_diff": false}
+{"type": "gate.verdict", "t": 2.5, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "attempt_no": 1, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 2.700037956237793, "at": "2026-08-18T05:31:00.661493Z", "task_id": "T-console-empty-hint", "attempt_no": 2, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 2.8954579830169678, "at": "2026-08-18T05:31:00.856913Z", "task_id": "T-console-empty-hint", "attempt_no": 3, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 4.0, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "attempt_no": 1, "role": "regression", "verdict": "fail", "claims": 1}
+{"type": "gate.verdict", "t": 4.200037956237793, "at": "2026-08-18T05:31:00.661493Z", "task_id": "T-console-empty-hint", "attempt_no": 2, "role": "regression", "verdict": "fail", "claims": 1}
+{"type": "gate.verdict", "t": 4.395457983016968, "at": "2026-08-18T05:31:00.856913Z", "task_id": "T-console-empty-hint", "attempt_no": 3, "role": "regression", "verdict": "fail", "claims": 1}
+{"type": "attempt.final", "t": 5.5, "at": "2026-08-18T05:31:00.461455Z", "task_id": "T-console-empty-hint", "attempt_no": 1, "resolution": "reworked", "commit": null, "note": ""}
+{"type": "attempt.final", "t": 5.700037956237793, "at": "2026-08-18T05:31:00.661493Z", "task_id": "T-console-empty-hint", "attempt_no": 2, "resolution": "reworked", "commit": null, "note": ""}
+{"type": "attempt.final", "t": 5.895457983016968, "at": "2026-08-18T05:31:00.856913Z", "task_id": "T-console-empty-hint", "attempt_no": 3, "resolution": "escalated", "commit": null, "note": ""}
+{"type": "attempt.open", "t": 965.8636639118195, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "haiku"}
+{"type": "attempt.result", "t": 1094.6156639118194, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "cost_usd": 1.0659, "tokens_in": 760626, "tokens_out": 61049, "wall_clock_ms": 128752, "has_diff": true}
+{"type": "attempt.open", "t": 1095.574518918991, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "sonnet"}
+{"type": "gate.verdict", "t": 1096.1156639118194, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 1097.6156639118194, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "role": "regression", "verdict": "fail", "claims": 2}
+{"type": "gate.verdict", "t": 1099.1156639118194, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "role": "scope", "verdict": "pass", "claims": 0}
+{"type": "attempt.final", "t": 1100.6156639118194, "at": "2026-08-18T05:47:06.325119Z", "task_id": "T-console-empty-hint", "attempt_no": 4, "resolution": "reworked", "commit": null, "note": ""}
+{"type": "attempt.result", "t": 1380.8985189189912, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "cost_usd": 9.0726, "tokens_in": 1958964, "tokens_out": 213046, "wall_clock_ms": 285324, "has_diff": true}
+{"type": "attempt.open", "t": 1381.8120748996735, "at": "2026-08-18T05:54:02.273530Z", "task_id": "T-console-empty-hint", "attempt_no": 6, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "opus"}
+{"type": "gate.verdict", "t": 1382.3985189189912, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 1383.8985189189912, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "role": "regression", "verdict": "fail", "claims": 2}
+{"type": "gate.verdict", "t": 1385.3985189189912, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "role": "scope", "verdict": "pass", "claims": 0}
+{"type": "attempt.final", "t": 1386.8985189189912, "at": "2026-08-18T05:49:16.035974Z", "task_id": "T-console-empty-hint", "attempt_no": 5, "resolution": "reworked", "commit": null, "note": ""}
+{"type": "attempt.result", "t": 1868.1980748996734, "at": "2026-08-18T05:54:02.273530Z", "task_id": "T-console-empty-hint", "attempt_no": 6, "cost_usd": 15.5965, "tokens_in": 2684667, "tokens_out": 86927, "wall_clock_ms": 486386, "has_diff": true}
+{"type": "gate.verdict", "t": 1869.6980748996734, "at": "2026-08-18T05:54:02.273530Z", "task_id": "T-console-empty-hint", "attempt_no": 6, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 1871.1980748996734, "at": "2026-08-18T05:54:02.273530Z", "task_id": "T-console-empty-hint", "attempt_no": 6, "role": "regression", "verdict": "fail", "claims": 1}
+{"type": "attempt.final", "t": 1872.6980748996734, "at": "2026-08-18T05:54:02.273530Z", "task_id": "T-console-empty-hint", "attempt_no": 6, "resolution": "escalated", "commit": null, "note": ""}
+{"type": "attempt.open", "t": 2102.7960789203644, "at": "2026-08-18T06:06:03.257534Z", "task_id": "T-console-empty-hint", "attempt_no": 7, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "haiku"}
+{"type": "gate.verdict", "t": 2105.2960789203644, "at": "2026-08-18T06:06:03.257534Z", "task_id": "T-console-empty-hint", "attempt_no": 7, "role": "risk", "verdict": "fail", "claims": 1}
+{"type": "attempt.final", "t": 2106.7960789203644, "at": "2026-08-18T06:06:03.257534Z", "task_id": "T-console-empty-hint", "attempt_no": 7, "resolution": "escalated", "commit": null, "note": ""}
+{"type": "attempt.open", "t": 2174.6311979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "haiku"}
+{"type": "attempt.result", "t": 2265.2271979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "cost_usd": 0.4724, "tokens_in": 330673, "tokens_out": 28346, "wall_clock_ms": 90596, "has_diff": true}
+{"type": "gate.verdict", "t": 2266.7271979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 2268.2271979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "role": "regression", "verdict": "fail", "claims": 2}
+{"type": "gate.verdict", "t": 2269.7271979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "role": "scope", "verdict": "pass", "claims": 0}
+{"type": "attempt.final", "t": 2271.2271979293823, "at": "2026-08-18T06:07:15.092653Z", "task_id": "T-console-empty-hint", "attempt_no": 8, "resolution": "reworked", "commit": null, "note": ""}
+{"type": "attempt.open", "t": 2285.343225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "oracle_class": "A", "class_reason": "no rule matched -> default A", "model": "sonnet"}
+{"type": "attempt.result", "t": 2641.142225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "cost_usd": 2.9097, "tokens_in": 592799, "tokens_out": 75421, "wall_clock_ms": 355799, "has_diff": true}
+{"type": "gate.verdict", "t": 2642.642225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "role": "risk", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 2644.142225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "role": "regression", "verdict": "pass", "claims": 0}
+{"type": "gate.verdict", "t": 2645.642225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "role": "scope", "verdict": "pass", "claims": 0}
+{"type": "attempt.final", "t": 2647.142225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "attempt_no": 9, "resolution": "merged", "commit": "9f8aa24d13b82690b3c311f757b8b1b314d85993", "note": ""}
+{"type": "task.state", "t": 2647.642225955963, "at": "2026-08-18T06:09:05.804681Z", "task_id": "T-console-empty-hint", "state": "done"}
+{"type": "replay.end", "at": "2026-08-31T04:52:48.267979Z", "task_id": "T-console-empty-hint"}
