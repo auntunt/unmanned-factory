@@ -279,8 +279,9 @@ def list_tasks(queue: str | Path, db: str | Path | None = None) -> dict:
     """五个状态桶，每桶一串任务摘要。
 
     `db` 可选：给了就为 done / needs_human / blocked 桶补上审计侧的数字
-    （resolution / attempts_count / total_cost_usd）。不给就只有队列侧的信息 ——
-    契约里 inbox / running 桶本来就没有这三个字段（还没跑过）。
+    （resolution / attempts_count / total_cost_usd / oracle_class / class_reason）。
+    不给就只有队列侧的信息 —— 契约里 inbox / running 桶本来就没有这些字段
+    （还没跑过）。缺字段和「值为 0」是两件事，见下面赋值处的注释。
 
     队列读不出来时抛 `QueueUnreadable`，不返回五个空桶，理由见那个异常的文档。
     """
@@ -311,6 +312,15 @@ def list_tasks(queue: str | Path, db: str | Path | None = None) -> dict:
                 row["attempts_count"] = len(attempts)
                 row["total_cost_usd"] = round(
                     sum(a.cost_usd for a in attempts), 6)
+                # 预分级取末轮：同一任务的分级可能被 reclassify 改过
+                # （store.py 有 reclassify），末轮才是当前有效的判定。
+                # 带上 class_reason —— 光看 "C" 无法判断该不该信这个分级，
+                # 而理由是评级时写下的，比任何前端静态释义都准。
+                last = attempts[-1]
+                cls = getattr(last, "oracle_class", None)
+                if cls is not None:
+                    row["oracle_class"] = getattr(cls, "value", cls)
+                    row["class_reason"] = last.class_reason or ""
             rows.append(row)
         out[bucket] = rows
     return out

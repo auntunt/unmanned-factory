@@ -1,150 +1,215 @@
-import { createBrowserRouter, Link, RouterProvider, useRouteError } from 'react-router-dom'
-import Console from './pages/Console'
+import { useCallback, useEffect, useState } from 'react'
+import { BrowserRouter } from 'react-router-dom'
+import { Alert, Layout, Result, Select, Space, Tabs, Tag } from 'antd'
+import ClosurePage from './pages/ClosurePage'
 import Overview from './pages/Overview'
+import GatesPage from './pages/GatesPage'
 import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
-import Stats from './pages/Stats'
 import Submit from './pages/Submit'
+import Stats from './pages/Stats'
+import NotAvailable from './pages/NotAvailable'
+import type { TaskRow } from './components/FactoryTaskCard'
+import type { ApiTasks } from './lib/bucket'
+import { C, FONT } from './theme/tokens'
 
 /**
- * 顶部导航 + 内容区。所有页面共用，所以放在路由的 element 外层。
+ * 应用外壳 —— 移植自 OA 闭环监控页：卡片式页签 + 单页无路由跳转。
  *
- * `wide`：看板要一屏放完五个桶 + 两张表，6xl 会把表格挤到换行。查询类页面
- * 仍然用 6xl —— 正文行太长反而难读。
+ * 换掉原来的 react-router 多页结构：那套每切一次页面就整屏白一下，
+ * 而这是个要长期挂在屏幕上盯的看板，页签切换必须无闪烁。
+ * 任务详情是唯一的例外（要占满整屏），用状态而非路由驱动。
  */
-function Shell({ children, wide = false }: { children: React.ReactNode; wide?: boolean }) {
-  const width = wide ? 'max-w-[1600px]' : 'max-w-6xl'
-  return (
-    // 看板页整站切等宽：外壳和内容用两种字体时，导航栏和表格看起来像两个
-    // 不同的应用拼在一起。查询页保持默认比例字体（那里有整段正文要读）。
-    <div className={`min-h-screen bg-slate-50 text-slate-900 ${wide ? 'font-mono' : ''}`}>
-      <header className="border-b border-slate-200 bg-white">
-        <div className={`mx-auto flex ${width} items-center gap-6 px-6 py-4`}>
-          <Link to="/" className="text-lg font-semibold tracking-tight">
-            自动化无人工厂
-          </Link>
-          <nav className="flex gap-4 text-sm">
-            <Link to="/" className="text-slate-600 hover:text-slate-900">
-              看板
-            </Link>
-            <Link to="/overview" className="text-slate-600 hover:text-slate-900">
-              闭环总览
-            </Link>
-            <Link to="/tasks" className="text-slate-600 hover:text-slate-900">
-              任务
-            </Link>
-            <Link to="/submit" className="text-slate-600 hover:text-slate-900">
-              投递
-            </Link>
-            <Link to="/stats" className="text-slate-600 hover:text-slate-900">
-              统计
-            </Link>
-          </nav>
-        </div>
-      </header>
-      <main className={`mx-auto ${width} px-6 py-6`}>{children}</main>
-    </div>
-  )
-}
+
+const WINDOWS = [
+  { value: 7, label: '近 7 天' },
+  { value: 14, label: '近 14 天' },
+  { value: 30, label: '近 30 天' },
+  { value: 90, label: '近 90 天' },
+]
 
 /**
- * 路由级兜底。没有这个，页面组件里任何未捕获异常都会让 react-router
- * 渲染它自带的英文报错页 —— 对着演示屏幕看那个很难解释。
+ * BrowserRouter 仍然留着：TaskList / Submit / TaskDetail 里用了 Link 和
+ * useNavigate，没有 Router 祖先会直接抛「useNavigate() may be used only in
+ * the context of a Router」白屏。页签导航不走路由，但这些页面内部的跳转要。
  */
-function ErrorPage() {
-  const err = useRouteError()
-  const msg = err instanceof Error ? err.message : String(err)
+export default function App() {
   return (
-    <Shell>
-      <div className="rounded-lg border border-red-200 bg-red-50 p-6">
-        <h2 className="text-lg font-semibold text-red-800">页面出错了</h2>
-        <p className="mt-2 font-mono text-sm text-red-700">{msg}</p>
-        <Link
-          to="/"
-          className="mt-4 inline-block rounded border border-red-300 bg-white px-3 py-1.5 text-sm text-red-800 hover:bg-red-100"
-        >
-          返回任务列表
-        </Link>
-      </div>
-    </Shell>
+    <BrowserRouter>
+      <FactoryConsole />
+    </BrowserRouter>
   )
 }
 
-// 路由参数名必须是 taskId：TaskDetail 里用 useParams<{ taskId: string }>() 读。
-const router = createBrowserRouter([
-  {
-    // 首页给看板而不是任务列表：抬头就该知道现在是否健康，而不是先读一屏
-    // 任务名。任务列表移到 /tasks，导航里还在。
-    path: '/',
-    element: (
-      <Shell wide>
-        <Console />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    // 闭环总览也走 wide + 等宽：它是看板类页面（环形图 + 判据表要横向空间）。
-    path: '/overview',
-    element: (
-      <Shell wide>
-        <Overview />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    path: '/tasks',
-    element: (
-      <Shell>
-        <TaskList />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    path: '/submit',
-    element: (
-      <Shell>
-        <Submit />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    path: '/task/:taskId',
-    element: (
-      <Shell>
-        <TaskDetail />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    path: '/stats',
-    element: (
-      <Shell>
-        <Stats />
-      </Shell>
-    ),
-    errorElement: <ErrorPage />,
-  },
-  {
-    // 兜底 404。放最后，匹配所有未声明路径。
-    path: '*',
-    element: (
-      <Shell>
-        <div className="rounded-lg border border-slate-200 bg-white p-6">
-          <h2 className="text-lg font-semibold">页面不存在</h2>
-          <Link to="/" className="mt-3 inline-block text-sm text-sky-700 hover:underline">
-            返回任务列表
-          </Link>
-        </div>
-      </Shell>
-    ),
-  },
-])
+// 不叫 Console：和全局 console 混淆，也和旧的 pages/Console 看板页重名。
+function FactoryConsole() {
+  const [tab, setTab] = useState('closure')
+  const [days, setDays] = useState(30)
+  const [tasks, setTasks] = useState<ApiTasks | null>(null)
+  const [analytics, setAnalytics] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [openTask, setOpenTask] = useState<string | null>(null)
 
-export default function App() {
-  return <RouterProvider router={router} />
+  const load = useCallback(async () => {
+    setErr(null)
+    try {
+      const [t, a] = await Promise.all([
+        fetch('/api/tasks').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`/api/tasks ${r.status}`)))),
+        fetch(`/api/analytics?days=${days}`).then((r) =>
+          r.ok ? r.json() : Promise.reject(new Error(`/api/analytics ${r.status}`)),
+        ),
+      ])
+      setTasks(t)
+      setAnalytics(a)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [days])
+
+  useEffect(() => {
+    load()
+    // 30s 轮询：worker 一轮跑几分钟，再快没有新信息，只是白耗请求。
+    const id = setInterval(load, 30000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const onTaskClick = (t: TaskRow) => setOpenTask(t.task_id)
+
+  if (openTask) {
+    return (
+      <Layout style={{ minHeight: '100vh', background: C.bgPage, fontFamily: FONT }}>
+        <TaskDetail taskId={openTask} onBack={() => setOpenTask(null)} />
+      </Layout>
+    )
+  }
+
+  const items = [
+    {
+      key: 'closure',
+      label: '闭环链路',
+      children: (
+        <ClosurePage
+          tasks={tasks}
+          analytics={analytics}
+          loading={loading}
+          onTaskClick={onTaskClick}
+        />
+      ),
+    },
+    {
+      // Overview / TaskList / Submit / Stats 都是已在跑的自取数页面，
+      // 各自带 usePolling。外壳不给它们喂数据，避免同一份数据两条取数路径
+      // 打架（那会让两个页签显示不同的数，且很难查）。
+      key: 'overview',
+      label: '总览分析',
+      children: <Overview />,
+    },
+    {
+      key: 'gates',
+      label: '判据闸门',
+      children: <GatesPage analytics={analytics} loading={loading} />,
+    },
+    {
+      key: 'tasks',
+      label: '任务列表',
+      children: <TaskList />,
+    },
+    {
+      key: 'submit',
+      label: '投递任务',
+      children: <Submit />,
+    },
+    {
+      key: 'supervisors',
+      label: '监工统计',
+      children: <Stats />,
+    },
+    {
+      key: 'sla',
+      label: 'SLA 达成',
+      children: (
+        <NotAvailable
+          title="SLA 达成率"
+          why="工厂里没有 SLA 这个概念 —— 任务没有承诺完成时限，也没有紧急程度分级。"
+          instead="要看时效，用「总览分析」里的滞留任务表和平均轮次；要看卡点，看「闭环链路」的待人介入环。"
+        />
+      ),
+    },
+  ]
+
+  return (
+    <Layout style={{ minHeight: '100vh', background: C.bgPage, fontFamily: FONT }}>
+      <Layout.Header
+        style={{
+          background: '#fff',
+          borderBottom: `1px solid ${C.borderLight}`,
+          padding: '0 24px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 16,
+          height: 56,
+          lineHeight: 'normal',
+        }}
+      >
+        <span style={{ fontSize: 16, fontWeight: 600, color: C.text }}>自动化无人工厂</span>
+        <Tag bordered={false} color="blue" style={{ fontSize: 11 }}>
+          闭环监控
+        </Tag>
+        <div style={{ flex: 1 }} />
+        <Space>
+          {analytics?.generated_at && (
+            <span style={{ fontSize: 11, color: C.textDisabled }}>
+              数据时间 {analytics.generated_at.replace('T', ' ')}
+            </span>
+          )}
+          <Select
+            size="small"
+            value={days}
+            options={WINDOWS}
+            onChange={setDays}
+            style={{ width: 110 }}
+          />
+        </Space>
+      </Layout.Header>
+
+      <Layout.Content style={{ padding: '16px 24px 32px' }}>
+        {err ? (
+          <Result
+            status="error"
+            title="接口请求失败"
+            subTitle={
+              <div style={{ fontSize: 12, color: C.textSub }}>
+                <code>{err}</code>
+                <div style={{ marginTop: 8 }}>
+                  这是「请求失败」，不是「没有数据」—— 页面上任何 0 都不该按真实值解读。
+                </div>
+              </div>
+            }
+          />
+        ) : (
+          <>
+            {analytics?.empty && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="所选窗口内没有任何执行记录"
+                description="接口通了、库也读到了，确实是这段时间没跑任务。换个更长的时间窗看看。"
+              />
+            )}
+            <Tabs
+              type="card"
+              activeKey={tab}
+              onChange={setTab}
+              items={items}
+              destroyInactiveTabPane={false}
+            />
+          </>
+        )}
+      </Layout.Content>
+    </Layout>
+  )
 }

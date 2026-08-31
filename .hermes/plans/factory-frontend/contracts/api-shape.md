@@ -23,7 +23,9 @@
       "mtime": "2026-08-18T06:09:05",
       "resolution": "merged",
       "attempts_count": 9,
-      "total_cost_usd": 2.909712
+      "total_cost_usd": 2.909712,
+      "oracle_class": "C",
+      "class_reason": "无自动判据，靠人工复核"
     }
   ],
   "needs_human": [],
@@ -34,7 +36,12 @@
 要点：
 - 五个桶恒定存在，没任务就是空数组（不要 null）
 - `prompt_preview` 是前 60 字符 + `…`
-- done / needs_human 桶里的条目多带 `resolution` / `attempts_count` / `total_cost_usd`
+- done / needs_human / blocked 桶里的条目多带 `resolution` / `attempts_count` /
+  `total_cost_usd` / `oracle_class` / `class_reason`
+- `oracle_class` 取末轮 attempt 的值（`reclassify` 会改分级，末轮才有效），
+  取值 `A`/`B`/`C`/`D`；`class_reason` 是评级时写下的理由
+- **缺字段 ≠ 值为 0**：inbox / running 里的任务没跑过，这些键根本不出现。
+  前端不要用 `?? 0` 兜底后当数字显示 —— 「花了 $0」和「还没花钱」看起来一样
 - inbox / running 桶里的条目没有这三个字段（还没跑过）
 - `mtime` 是 ISO 8601 字符串
 

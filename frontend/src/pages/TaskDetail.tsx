@@ -48,8 +48,20 @@ function describeError(raw: string): { notFound: boolean; message: string } {
   return { notFound, message: raw }
 }
 
-export default function TaskDetail() {
-  const { taskId } = useParams<{ taskId: string }>()
+/**
+ * 既能当路由页用（从 URL 读 taskId），也能被外壳以 props 驱动当全屏详情用。
+ * props 优先：新外壳是单页页签结构，详情由状态而非 URL 驱动。
+ */
+export default function TaskDetail({
+  taskId: taskIdProp,
+  onBack,
+}: {
+  taskId?: string
+  onBack?: () => void
+} = {}) {
+  const params = useParams<{ taskId: string }>()
+  const taskId = taskIdProp ?? params.taskId
+  void onBack
 
   const fetcher = useCallback(() => {
     if (!taskId) return Promise.reject(new Error('URL 里没有 task_id'))
