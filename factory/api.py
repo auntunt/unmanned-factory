@@ -885,8 +885,63 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
             self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
+            if urlparse(self.path).path.rstrip("/") == "/api/events":
+                self._events()
+                return
             code, payload = route(self.path, db=db, queue=queue)
             self._json(code, payload)
+
+        def _events(self) -> None:
+            """SSE：`/api/events`（live）或 `/api/events?replay=<id>&speed=4`。
+
+            不走 `_json`：这条连接不关，没有 Content-Length，一条事件一个
+            `data:` 块。客户端断开时 wfile 抛 BrokenPipe/ConnectionReset，
+            捕获后让生成器的 stop() 返回真，poll 线程自然退出 —— 不能靠
+            异常冒泡，ThreadingHTTPServer 会把它打成 traceback 刷屏。
+
+            事件的形状和生成逻辑都在 factory/events.py，这里只做搬运。
+            """
+            from factory.events import live_stream, replay_stream
+
+            qs = dict(
+                kv.split("=", 1)
+                for kv in urlparse(self.path).query.split("&")
+                if "=" in kv
+            )
+            replay = unquote(qs.get("replay", "")).strip()
+            try:
+                speed = float(qs.get("speed", "1"))
+            except ValueError:
+                speed = 1.0
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "keep-alive")
+            self._cors()
+            self.end_headers()
+
+            gone = {"v": False}
+
+            def stop() -> bool:
+                return gone["v"]
+
+            stream = (
+                replay_stream(db, replay, speed=speed, stop=stop)
+                if replay
+                else live_stream(db, queue, stop=stop)
+            )
+            try:
+                for ev in stream:
+                    chunk = f"event: {ev.get('type', 'message')}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    self.wfile.write(chunk.encode("utf-8"))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                gone["v"] = True
+            finally:
+                # 1.0 的连接语义：流结束就关，不然 keep-alive 会让浏览器等下一条
+                self.close_connection = True
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib 要求这个名字
             """处理投递任务请求"""

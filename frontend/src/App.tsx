@@ -12,6 +12,7 @@ import NotAvailable from './pages/NotAvailable'
 import type { TaskRow } from './components/FactoryTaskCard'
 import type { ApiTasks } from './lib/bucket'
 import { C, FONT } from './theme/tokens'
+import ControlRoom from './controlroom/ControlRoom'
 
 /**
  * 应用外壳 —— 移植自 OA 闭环监控页：卡片式页签 + 单页无路由跳转。
@@ -33,10 +34,18 @@ const WINDOWS = [
  * useNavigate，没有 Router 祖先会直接抛「useNavigate() may be used only in
  * the context of a Router」白屏。页签导航不走路由，但这些页面内部的跳转要。
  */
+/**
+ * 两个入口：
+ *   /          控制室 —— 给客户看的单屏（controlroom/）
+ *   /admin/*   原来的多页签看板 —— 给自己用
+ * 用路径而不是页签切换：demo 时地址栏就是「模式」，`/?replay=T-142&speed=4`
+ * 一个链接发给谁都能放。
+ */
 export default function App() {
+  const admin = window.location.pathname.startsWith('/admin')
   return (
-    <BrowserRouter>
-      <FactoryConsole />
+    <BrowserRouter basename={admin ? '/admin' : undefined}>
+      {admin ? <FactoryConsole /> : <ControlRoom />}
     </BrowserRouter>
   )
 }

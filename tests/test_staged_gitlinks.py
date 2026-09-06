@@ -44,14 +44,29 @@ from factory.harness.workspace import (
     shadow_code,
     staged_gitlinks,
 )
+from tests.conftest import PY
 
 BACKDOOR = "import pdb; pdb.set_trace()\n"
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ("git", *args), cwd=root, capture_output=True, text=True, check=True
-    ).stdout
+    """带超时和可读报错的 git。理由同 test_index_skip._git：
+    负载高时 git 会卡 index.lock，裸 check=True 只给退出码，
+    假红时看不出是环境还是被测逻辑。"""
+    try:
+        p = subprocess.run(
+            ("git", *args), cwd=root, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:  # pragma: no cover - 只在机器过载时走到
+        raise AssertionError(
+            f"git {' '.join(args)} 在 {root} 超过 60s 没返回 —— 环境问题，非被测逻辑"
+        ) from None
+    if p.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} 在 {root} 失败 (exit {p.returncode})\n"
+            f"stdout: {p.stdout.strip()}\nstderr: {p.stderr.strip()}"
+        )
+    return p.stdout
 
 
 def _repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -158,7 +173,7 @@ def test_the_hole_the_inner_conftest_executes(tmp_path: Path) -> None:
 
     assert not sentinel.exists(), "前提：还没跑"
     subprocess.run(
-        ("python", "-m", "pytest", "--collect-only", "-q"),
+        (PY, "-m", "pytest", "--collect-only", "-q"),
         cwd=root, capture_output=True, text=True,
     )
     assert sentinel.read_text(encoding="utf-8") == "ran", "内层 conftest 没被执行？"

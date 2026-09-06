@@ -28,8 +28,12 @@ from factory.harness.verdict_probe import (
     judge_files_touched,
     probe,
 )
+from tests.conftest import PYTEST_CMD, git_setup
 
-CMD = "python -m pytest -q"
+#: 用 PYTEST_CMD（= sys.executable -m pytest）而不是裸 "python -m pytest"：
+#: 这些用例真的会把这串喂给 shell 跑，裸 python 会走 PATH 撞到别的 venv，
+#: 于是「基线该是红的」之类的前置断言因为 pytest 没起来而集体假红。
+CMD = f"{PYTEST_CMD} -q"
 
 # 把 failed 改判成 passed。和 test_runner_hooks 里的 _FAKE_GREEN 同一手 ——
 # 那边验的是「新增这个文件会被拦」，这边验的是「**改**已存在的文件也会被抓」。
@@ -60,15 +64,22 @@ def _repo(tmp_path: Path, *, passing: bool = True) -> Path:
     # conftest.py 一开始就存在 —— 这是这条洞的前提（改而不是新增）。
     (root / "tests" / "conftest.py").write_text(
         "import pytest\n", encoding="utf-8")
-    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True)
-    g("init", "-q")
-    g("add", "-A")
-    g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    git_setup(root)
     return root
 
 
 def _sh(root: Path, cmd: str) -> int:
-    return subprocess.run(cmd, cwd=root, shell=True, capture_output=True).returncode
+    """跑一条 shell 命令，只要退出码。
+
+    这里故意不检查返回码 —— 被测对象就是「命令失败/假绿」本身，
+    非零退出是数据不是异常。但要有 timeout，否则挂住的探针会拖死会话。
+    """
+    try:
+        return subprocess.run(
+            cmd, cwd=root, shell=True, capture_output=True, timeout=300
+        ).returncode
+    except subprocess.TimeoutExpired:  # pragma: no cover - 只在机器过载时走到
+        raise AssertionError(f"探针命令超过 300s 没返回，在 {root}: {cmd}") from None
 
 
 # ---------- 先证明洞存在 ----------
@@ -378,10 +389,7 @@ def _decoy_repo(tmp_path: Path) -> Path:
     (root / "test" / "test_a.py").write_text(
         "def test_x(): assert 0\n", encoding="utf-8")
     (root / "test" / "conftest.py").write_text(_MAKEREPORT, encoding="utf-8")
-    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True)
-    g("init", "-q")
-    g("add", "-A")
-    g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    git_setup(root)
     # 诱饵在提交之后造：git 不跟踪空目录，所以它不进任何一版 diff。
     (root / "tests").mkdir()
     return root
@@ -555,7 +563,7 @@ def test_a_worker_written_always_true_test_is_sent_back(tmp_path):
     root = _repo(tmp_path, passing=False)  # 真测试是红的
     (root / "tests" / "test_selfmade.py").write_text(
         "def test_worker_says_ok():\n    assert True\n", encoding="utf-8")
-    cmd = "python -m pytest tests/test_selfmade.py -q"
+    cmd = f"{PYTEST_CMD} tests/test_selfmade.py -q"
     assert _sh(root, cmd) == 0, "前提：这条恒真自测自己是绿的"
 
     rep = _dispatch_worker_checks(tmp_path, root,
@@ -574,7 +582,7 @@ def test_the_send_back_reason_says_the_check_was_worker_written(tmp_path):
     root = _repo(tmp_path, passing=False)
     (root / "tests" / "test_selfmade.py").write_text(
         "def test_worker_says_ok():\n    assert True\n", encoding="utf-8")
-    cmd = "python -m pytest tests/test_selfmade.py -q"
+    cmd = f"{PYTEST_CMD} tests/test_selfmade.py -q"
 
     rep = _dispatch_worker_checks(tmp_path, root,
                                  changed=("tests/test_selfmade.py",),

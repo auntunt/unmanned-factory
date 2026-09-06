@@ -1,0 +1,444 @@
+/*
+ * 控制室。受众是隔着桌子看屏幕的人，不是自己盯着改的人。
+ *
+ * 三条规矩：
+ *   1. 一个强调色（ice）只给「正在进行」和焦点；判决色只出现在闸门和终态。
+ *   2. 会动的只有三处：顶栏计时/花费、焦点任务的现场行、闸门翻转。
+ *   3. 字号整体比普通看板大两档。
+ */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+.cr {
+  /* 浅色。深色版留在注释里，是因为投屏演示时会议室灯光下浅色更清楚，
+   * 而不是因为深色不好看 —— 要换回去把下面每行的注释值贴回来即可。
+   * 语义名不变，组件层不用动。 */
+  --bg: #f4f6f8;          /* 深色: #0f1318 */
+  --panel: #ffffff;       /* 深色: #171c23 */
+  --panel-2: #eef1f5;     /* 深色: #1e242d */
+  --line: rgba(15, 19, 24, 0.10);
+  --line-2: rgba(15, 19, 24, 0.22);
+  --ink: #14181d;         /* 深色: #e9e6df */
+  --ink-2: #545c66;       /* 深色: #9aa0a8 */
+  /* 深色: #5e656e。「弱信息」色，但弱不等于看不见。
+   * 定值时要按最严苛的底算，不是按页底算：这个色还会落在
+   * .pill.dim 的 9% 墨底(#e9eaea)上，那里比页底更吃对比度。
+   * #626a75 = 页底 5.05:1 / 白面板 5.47:1 / dim 底 4.54:1，全过 AA，
+   * 且仍比 --ink-2 弱 1.3 档，层级没塌。别再往浅调。 */
+  --ink-3: #626a75;
+  --ice: #0f6fbf;         /* 深色: #8fb8e8，浅底要压暗到能过 4.5:1 */
+  --ice-bg: rgba(15, 111, 191, 0.10);
+  --pass: #1c7a3c;        /* 深色: #79c48a */
+  --pass-bg: rgba(28, 122, 60, 0.10);
+  --fail: #bf2f2a;        /* 深色: #e2716c */
+  --fail-bg: rgba(191, 47, 42, 0.10);
+  --hold: #9a6410;        /* 深色: #e4b45a */
+  --hold-bg: rgba(154, 100, 16, 0.12);
+  --sans: 'IBM Plex Sans', 'PingFang SC', 'Noto Sans SC', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.45;
+  padding: 28px 36px 40px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto auto;
+  gap: 20px;
+}
+
+.cr *,
+.cr *::before,
+.cr *::after {
+  box-sizing: border-box;
+}
+
+.cr .mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.cr-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 40px;
+}
+
+.cr-head .name {
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cr-head .name .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--pass);
+}
+
+.cr-head .name .dot.off {
+  background: var(--hold);
+}
+
+.cr-head .name .mode {
+  font-size: 13px;
+  color: var(--ink-2);
+  padding: 3px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+}
+
+.cr-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 120px;
+}
+
+.cr-stat .v {
+  font-size: 44px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.cr-stat .k {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin-top: 6px;
+}
+
+/* ---------- 工位 ---------- */
+
+.cr-workers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cr-worker {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-height: 78px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.cr-worker.focus {
+  border-color: var(--ice);
+  background: var(--panel-2);
+}
+
+.cr-worker.idle {
+  border-style: dashed;
+  color: var(--ink-3);
+  justify-content: center;
+  cursor: default;
+}
+
+.cr-worker .id {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.cr-worker .stage {
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.cr-worker.focus .stage {
+  color: var(--ice);
+}
+
+/* ---------- 主区 ---------- */
+
+.cr-main {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 20px;
+  min-height: 0;
+}
+
+.cr-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+
+.cr-panel > h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+/* 工单流 */
+
+.cr-feed {
+  display: flex;
+  flex-direction: column;
+}
+
+.cr-feed .row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.cr-feed .row:first-of-type {
+  border-top: 0;
+}
+
+.cr-feed .row .title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cr-feed .row.dim .title {
+  color: var(--ink-3);
+}
+
+.pill {
+  display: inline-block;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.pill.ice { background: var(--ice-bg); color: var(--ice); }
+.pill.pass { background: var(--pass-bg); color: var(--pass); }
+.pill.fail { background: var(--fail-bg); color: var(--fail); }
+.pill.hold { background: var(--hold-bg); color: var(--hold); }
+/* 浅底上白色底纹等于没有底纹，dim 得用墨色低透明度。
+ * 0.06 太淡，「已关」看着不像标签像散字，抬到 0.09。 */
+.pill.dim { background: rgba(15, 19, 24, 0.09); color: var(--ink-3); }
+
+/* 焦点任务 */
+
+.cr-focus {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 360px;
+}
+
+.cr-focus .title {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.cr-focus .title h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.2;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cr-focus .meta {
+  font-size: 14px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.cr-focus .reason {
+  color: var(--ink-2);
+  font-size: 14px;
+  margin-top: -6px;
+}
+
+.cr-steps {
+  display: flex;
+  gap: 6px;
+}
+
+.cr-steps .s {
+  flex: 1;
+  text-align: center;
+  font-size: 13px;
+  padding: 7px 0;
+  border-radius: 6px;
+  /* 未到达的阶段格：浅底上要看得出「有这一格但还没走到」，白色不行 */
+  background: rgba(15, 19, 24, 0.05);
+  color: var(--ink-3);
+}
+
+/* done 和 now 本来就是绿/蓝两个色相，但都用 10% 淡底、同样字重时，
+ * 隔着桌子看只是「一排差不多的彩色格子」，找不到当前走到哪。
+ * 所以给 now 加实底 + 白字 + 描边，让重量而不只是色相来区分。 */
+.cr-steps .s.done { background: var(--pass-bg); color: var(--pass); }
+
+.cr-steps .s.now {
+  background: var(--ice);
+  color: #fff;
+  font-weight: 500;
+  box-shadow: 0 0 0 2px var(--ice-bg);
+}
+
+.cr-steps .s.stop {
+  background: var(--hold);
+  color: #fff;
+  font-weight: 500;
+  box-shadow: 0 0 0 2px var(--hold-bg);
+}
+
+.cr-log {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink-2);
+  min-height: 200px;
+  max-height: 340px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.cr-log .ln {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cr-log .ln.text { color: var(--ink); }
+.cr-log .ln.error { color: var(--fail); }
+.cr-log .ln.tool::before {
+  content: '›';
+  color: var(--ink-3);
+  margin-right: 8px;
+}
+
+.cr-log .cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background: var(--ice);
+  vertical-align: -2px;
+  animation: cr-blink 1s steps(1) infinite;
+}
+
+.cr-log .empty {
+  color: var(--ink-3);
+}
+
+.cr-focus .foot {
+  display: flex;
+  gap: 24px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.cr-focus .foot .plus { color: var(--pass); }
+.cr-focus .foot .commit { color: var(--ink); }
+
+/* ---------- 闸门 ---------- */
+
+.cr-gates {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cr-gate {
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  transition: background 320ms ease, border-color 320ms ease;
+}
+
+.cr-gate .role {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin-bottom: 8px;
+}
+
+.cr-gate .verdict {
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.cr-gate.pass { background: var(--pass-bg); border-color: rgba(121, 196, 138, 0.35); }
+.cr-gate.pass .verdict, .cr-gate.pass .role { color: var(--pass); }
+.cr-gate.fail { background: var(--fail-bg); border-color: rgba(226, 113, 108, 0.35); }
+.cr-gate.fail .verdict, .cr-gate.fail .role { color: var(--fail); }
+.cr-gate.now { border-color: var(--ice); }
+.cr-gate.now .verdict { color: var(--ice); }
+
+/* ---------- 底部 ---------- */
+
+.cr-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-radius: 10px;
+  padding: 14px 18px;
+  font-size: 15px;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  background: var(--panel);
+}
+
+.cr-bar.hold {
+  background: var(--hold-bg);
+  border-color: rgba(228, 180, 90, 0.4);
+  color: var(--hold);
+}
+
+.cr-bar .bell {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.cr-bar .when {
+  margin-left: auto;
+}
+
+@keyframes cr-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cr-log .cursor { animation: none; }
+  .cr-gate { transition: none; }
+}
+
+@media (max-width: 1100px) {
+  .cr { padding: 20px; }
+  .cr-main { grid-template-columns: 1fr; }
+  .cr-workers, .cr-gates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cr-stat .v { font-size: 34px; }
+}

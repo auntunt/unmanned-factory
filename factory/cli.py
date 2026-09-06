@@ -899,6 +899,29 @@ def _cmd_show(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_replay(ns: argparse.Namespace) -> int:
+    """把一个任务的审计轨迹展开成控制室事件流。
+
+    两种用法：
+      factory replay T-x --db audit.db                # 按真实节奏逐条打 JSONL
+      factory replay T-x --db audit.db --speed 0 > rec.jsonl   # 一次全部导出
+
+    `--speed 0` 导出的文件是 demo 的保险：前端用 `?replay=<id>` 直连 API
+    时靠的是同一个函数，但一份落盘的录像不依赖当时那台机器上的 audit.db
+    和 transcript 目录还在不在。
+    """
+    from factory.events import replay_stream
+
+    n = 0
+    for ev in replay_stream(ns.db, ns.task_id, speed=ns.speed):
+        print(json.dumps(ev, ensure_ascii=False), flush=True)
+        n += 1
+    if n <= 1:
+        print(f"没有 task_id={ns.task_id} 的记录", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_override(ns: argparse.Namespace) -> int:
     store = AuditStore(ns.db)
     if not store.exists(ns.attempt_id):
@@ -1438,6 +1461,13 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("task_id")
     show.add_argument("--db", default="audit.db")
     show.set_defaults(func=_cmd_show)
+
+    rp = sub.add_parser("replay", help="把一个任务的审计轨迹回放成事件流（控制室 demo 用）")
+    rp.add_argument("task_id")
+    rp.add_argument("--db", default="audit.db")
+    rp.add_argument("--speed", type=float, default=1.0,
+                    help="回放倍速；0 = 不等待，一次全部输出")
+    rp.set_defaults(func=_cmd_replay)
 
     ov = sub.add_parser("override", help="人工定案 resolution（事后回填）")
     ov.add_argument("attempt_id", type=int)
