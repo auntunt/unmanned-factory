@@ -43,6 +43,26 @@ import yaml
 from factory.audit.models import NOT_DISPATCHED
 from factory.audit.store import AuditStore
 from factory.backlog.store import BLOCKED, DONE, INBOX, NEEDS_HUMAN, RUNNING, STATES
+from factory.intelligence_api import (
+    intelligence_analysis_detail,
+    intelligence_company_detail,
+    intelligence_dynamic_detail,
+    intelligence_list_analyses,
+    intelligence_list_companies,
+    intelligence_list_dynamics,
+    intelligence_list_personnel,
+    intelligence_personnel_detail,
+    intelligence_search,
+)
+from factory.intelligence.models import (
+    Analysis,
+    Company,
+    Evidence,
+    IndustryDynamic,
+    Personnel,
+    Publication,
+    init_db as init_intelligence_db,
+)
 
 #: 只绑环回。刻意没有 host 参数，理由见模块 docstring。
 HOST = "127.0.0.1"
@@ -360,7 +380,7 @@ def global_stats(db: str | Path, queue: str | Path) -> dict:
 # 「任务存不存在」由 `task_detail` 返 None 表达，这里只负责把它翻成 404。
 
 
-def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
+def route(path: str, *, db: str | Path, queue: str | Path, intelligence_db: str | Path | None = None) -> tuple[int, dict]:
     """把一个 URL 路径解析成 `(状态码, 响应体)`。
 
     单独抽出来而不是写在 `do_GET` 里：路由表本身值得被测（404 的形状、
@@ -383,6 +403,32 @@ def route(path: str, *, db: str | Path, queue: str | Path) -> tuple[int, dict]:
             return 200, detail
         if clean == "/api/health":
             return 200, {"ok": True}
+
+        # 商业情报 API
+        if intelligence_db:
+            if clean == "/api/intelligence/companies":
+                return intelligence_list_companies(intelligence_db, path)
+            if clean.startswith("/api/intelligence/company/"):
+                company_id = int(unquote(clean.split("/")[-1]))
+                return intelligence_company_detail(intelligence_db, company_id)
+            if clean == "/api/intelligence/personnel":
+                return intelligence_list_personnel(intelligence_db, path)
+            if clean.startswith("/api/intelligence/personnel/"):
+                personnel_id = int(unquote(clean.split("/")[-1]))
+                return intelligence_personnel_detail(intelligence_db, personnel_id)
+            if clean == "/api/intelligence/dynamics":
+                return intelligence_list_dynamics(intelligence_db, path)
+            if clean.startswith("/api/intelligence/dynamic/"):
+                dynamic_id = int(unquote(clean.split("/")[-1]))
+                return intelligence_dynamic_detail(intelligence_db, dynamic_id)
+            if clean == "/api/intelligence/search":
+                return intelligence_search(intelligence_db, path)
+            if clean == "/api/intelligence/analyses":
+                return intelligence_list_analyses(intelligence_db, path)
+            if clean.startswith("/api/intelligence/analysis/"):
+                analysis_id = int(unquote(clean.split("/")[-1]))
+                return intelligence_analysis_detail(intelligence_db, analysis_id)
+
     except QueueUnreadable as exc:
         # 500 而不是 200 + 空数据：读不到队列时前端必须知道这一页在说谎。
         return 500, {"error": str(exc)}
@@ -434,7 +480,7 @@ def submit_task(data: dict, queue: str | Path) -> tuple[int, dict]:
         return 500, {"error": f"写入失败: {exc}"}
 
 
-def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
+def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788, intelligence_db: str | Path | None = None) -> None:
     """起一个只读 JSON API。每次请求重新读库，所以刷新就能看到新数据。
 
     只绑 127.0.0.1，没有认证 —— 理由见模块 docstring。只实现 GET 和
@@ -465,7 +511,7 @@ def serve_api(db: str | Path, queue: str | Path, *, port: int = 8788) -> None:
             self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib 要求这个名字
-            code, payload = route(self.path, db=db, queue=queue)
+            code, payload = route(self.path, db=db, queue=queue, intelligence_db=intelligence_db)
             self._json(code, payload)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib 要求这个名字

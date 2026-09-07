@@ -3,6 +3,10 @@ import TaskList from './pages/TaskList'
 import TaskDetail from './pages/TaskDetail'
 import Stats from './pages/Stats'
 import Submit from './pages/Submit'
+import IntelligenceHome from './pages/intelligence/Home'
+import CompanyList from './pages/intelligence/CompanyList'
+import CompanyDetail from './pages/intelligence/CompanyDetail'
+import AnalysisWorkbench from './pages/intelligence/AnalysisWorkbench'
 
 /** 顶部导航 + 内容区。三个页面共用，所以放在路由的 element 外层。 */
 function Shell({ children }: { children: React.ReactNode }) {
@@ -22,6 +26,9 @@ function Shell({ children }: { children: React.ReactNode }) {
             </Link>
             <Link to="/stats" className="text-slate-600 hover:text-slate-900">
               统计
+            </Link>
+            <Link to="/intelligence" className="text-blue-600 hover:text-blue-900 font-semibold">
+              商业情报
             </Link>
           </nav>
         </div>
@@ -88,6 +95,42 @@ const router = createBrowserRouter([
     element: (
       <Shell>
         <Stats />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/intelligence',
+    element: (
+      <Shell>
+        <IntelligenceHome />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/intelligence/companies',
+    element: (
+      <Shell>
+        <CompanyList />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/intelligence/company/:companyId',
+    element: (
+      <Shell>
+        <CompanyDetail />
+      </Shell>
+    ),
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: '/intelligence/workbench',
+    element: (
+      <Shell>
+        <AnalysisWorkbench />
       </Shell>
     ),
     errorElement: <ErrorPage />,

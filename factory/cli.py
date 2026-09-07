@@ -946,7 +946,8 @@ def _cmd_api(ns: argparse.Namespace) -> int:
     """
     from factory.api import serve_api
 
-    serve_api(ns.db, ns.queue, port=ns.port)
+    intelligence_db = getattr(ns, 'intelligence_db', None)
+    serve_api(ns.db, ns.queue, port=ns.port, intelligence_db=intelligence_db)
     return 0
 
 
@@ -1160,6 +1161,8 @@ def main(argv: list[str] | None = None) -> int:
     # 只绑 127.0.0.1：外部访问一律走反向代理，认证在那一层做。
     # API 本身没有任何认证，直接暴露到公网等于把审计库敞开。
     ap.add_argument("--port", type=int, default=8788, help="监听端口")
+    ap.add_argument("--intelligence-db", dest="intelligence_db", default=None,
+                    help="商业情报数据库路径（可选）")
     ap.set_defaults(func=_cmd_api)
 
     ns = parser.parse_args(argv)

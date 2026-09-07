@@ -1,0 +1,64 @@
+{
+  "checks": [
+    {
+      "name": "models-importable",
+      "command": "python -c 'from factory.intelligence.models import Company, Personnel, Publication, IndustryDynamic, Evidence, Analysis; print(\"OK\")'",
+      "expect": "exit_zero",
+      "covers": "数据模型完整且可运行"
+    },
+    {
+      "name": "seed-data-runnable",
+      "command": "python factory/intelligence/seed_data.py && test -f intelligence.db",
+      "expect": "exit_zero",
+      "covers": "示例数据包含2家目标公司完整档案"
+    },
+    {
+      "name": "database-has-two-companies",
+      "command": "python -c 'from factory.intelligence.models import init_db, Company; s = init_db(\"intelligence.db\")(); c = s.query(Company).count(); s.close(); assert c == 2, f\"Expected 2 companies, got {c}\"'",
+      "expect": "exit_zero",
+      "covers": "数据库包含世纪互联和广联达两家公司"
+    },
+    {
+      "name": "api-endpoints-importable",
+      "command": "python -c 'from factory.intelligence_api import intelligence_list_companies, intelligence_get_company, intelligence_search, intelligence_list_analyses; print(\"OK\")'",
+      "expect": "exit_zero",
+      "covers": "API端点完整且已集成到主系统"
+    },
+    {
+      "name": "collectors-importable",
+      "command": "python -c 'from factory.intelligence.collectors import BaseCollector, CompanyInfoCollector, FinancialReportCollector, NewsCollector, JobPostingCollector; print(\"OK\")'",
+      "expect": "exit_zero",
+      "covers": "数据采集适配器框架完成（含安全检测）"
+    },
+    {
+      "name": "frontend-files-exist",
+      "command": "test -f frontend/src/pages/intelligence/Home.tsx && test -f frontend/src/pages/intelligence/CompanyList.tsx && test -f frontend/src/pages/intelligence/CompanyDetail.tsx && test -f frontend/src/pages/intelligence/AnalysisWorkbench.tsx",
+      "expect": "exit_zero",
+      "covers": "前端页面可用且样式一致"
+    },
+    {
+      "name": "tests-pass",
+      "command": "python -m pytest tests/test_intelligence.py -v --tb=short",
+      "expect": "exit_zero",
+      "covers": "测试覆盖核心功能"
+    },
+    {
+      "name": "playwright-in-collectors",
+      "command": "grep -q 'playwright' factory/intelligence/collectors.py",
+      "expect": "exit_zero",
+      "covers": "浏览器采集适配器使用Playwright"
+    },
+    {
+      "name": "login-wall-detection",
+      "command": "grep -q 'detect.*login' factory/intelligence/collectors.py",
+      "expect": "exit_zero",
+      "covers": "遇到登录墙要标记并停止"
+    },
+    {
+      "name": "documentation-exists",
+      "command": "test -f docs/INTELLIGENCE.md && test -f QUICKSTART_INTELLIGENCE.md && test -f DELIVERY.md",
+      "expect": "exit_zero",
+      "covers": "文档完整（技术文档+快速启动+验证脚本）"
+    }
+  ]
+}

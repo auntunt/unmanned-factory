@@ -6,6 +6,30 @@
 那是**建造日志**不是手册 —— 按时间顺序记着每个非显然决定和它的理由，包括
 后来被证伪的判断。想知道「为什么是这样」去那儿；想知道「怎么跑」看下面。
 
+## 🎯 商业情报分析系统 MVP
+
+**首个自动化工厂实践项目** —— 中国商业情报分析系统，为 B2B 销售和商业研究团队提供：
+- 📊 公司档案（世纪互联、广联达）
+- 👥 关键人物档案
+- 📰 行业动态追踪
+- 🔍 分析工作台（全文搜索、证据展示、AI 分析）
+
+**快速启动**：
+```bash
+# 生成示例数据
+uv run python factory/intelligence/seed_data.py
+
+# 启动后端
+uv run factory api --intelligence-db intelligence.db
+
+# 启动前端（另一个终端）
+cd frontend && npm install && npm run dev
+```
+
+访问 http://localhost:5173/intelligence
+
+详细文档：[QUICKSTART_INTELLIGENCE.md](QUICKSTART_INTELLIGENCE.md) | [docs/INTELLIGENCE.md](docs/INTELLIGENCE.md)
+
 ## 30 秒跑一个任务
 
 ```bash
