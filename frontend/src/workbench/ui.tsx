@@ -54,12 +54,15 @@ const STATUS_LABELS: Record<string, string> = {
   ready_for_review: '待复核',
   publishing: '发布中',
   published: '已发布',
-  needs_human: '需要确认',
+  // 与 needs_clarification 区分：needs_human 是运行自己停下了，
+  // 通常没有问题要问人（triage.questions 为空），不要都叫「需要确认」。
+  needs_human: '等人介入',
   failed: '失败',
   cancelled: '已取消',
   pending: '待处理',
   completed: '已完成',
-  blocked: '已阻塞',
+  // 任务级 blocked = 上游没通过、本任务从未开工，不是自身失败。
+  blocked: '未开始',
   verified: '已验证',
 }
 
@@ -71,7 +74,9 @@ export function statusLabel(status?: string | null): string {
 function statusTone(status?: string | null): string {
   if (!status) return 'neutral'
   if (['published', 'completed', 'verified'].includes(status)) return 'success'
-  if (['failed', 'cancelled', 'blocked'].includes(status)) return 'danger'
+  // blocked 不算 danger：任务被上游挡住而未开工，红色会被误读成执行失败。
+  if (['failed', 'cancelled'].includes(status)) return 'danger'
+  if (status === 'blocked') return 'neutral'
   if (['needs_clarification', 'awaiting_approval', 'ready_for_review', 'needs_human'].includes(status)) return 'warning'
   if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
   return 'neutral'

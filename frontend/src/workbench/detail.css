@@ -78,7 +78,9 @@
 .wb-side-stat { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid #edf0ed; font-size: 13px; }
 .wb-side-stat:last-child { border-bottom: 0; }
 .wb-side-stat span:first-child { color: var(--detail-muted); }
-.wb-side-stat span:last-child { text-align: right; overflow-wrap: anywhere; }
+/* ID 类长串用等宽字体单行截断，鼠标悬停看全文，避免硬断成两行难以辨认。 */
+.wb-side-stat span:last-child { text-align: right; overflow-wrap: anywhere; min-width: 0; }
+.wb-side-stat-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wb-artifact-list { display: grid; gap: 10px; margin-top: 13px; }
 .wb-artifact { display: grid; gap: 3px; border-top: 1px solid #edf0ed; padding-top: 10px; font-size: 13px; }
 .wb-artifact-label { color: var(--detail-muted); font-size: 12px; }
@@ -162,3 +164,16 @@
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* 停止原因卡片：琥珀色左边框 = 策略性刹车，不是红色的失败。 */
+.wb-stop-reason { border-left: 3px solid #b45309; }
+.wb-stop-reason h2 { margin: 4px 0 6px; font-size: 16px; }
+.wb-stop-reason > p { margin: 0 0 8px; color: var(--detail-ink); font-size: 13px; line-height: 1.6; }
+.wb-stop-reason-note { color: var(--detail-muted); font-size: 12px; }
+.wb-stop-reason-next { margin-top: 10px; border-top: 1px dashed var(--detail-border); padding-top: 10px; }
+.wb-stop-reason-next strong { color: var(--detail-teal); font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.wb-stop-reason-next ul { margin: 6px 0 0; padding-left: 18px; }
+.wb-stop-reason-next li { color: var(--detail-ink); font-size: 13px; line-height: 1.65; }
+.wb-stop-reason-raw { margin-top: 10px; }
+.wb-stop-reason-raw summary { color: var(--detail-muted); cursor: pointer; font-size: 12px; }
+.wb-stop-reason-raw code { display: block; margin-top: 6px; border-radius: 6px; background: #f4f6f4; padding: 8px; overflow-wrap: anywhere; color: #30413b; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
