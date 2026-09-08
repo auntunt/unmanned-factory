@@ -6,7 +6,7 @@ import { formatDate, statusLabel } from './ui'
 
 describe('工作台 shell helpers', () => {
   it('用中文显示主要运行状态，未知值仍保留原值', () => {
-    expect(statusLabel('needs_clarification')).toBe('需要确认')
+    expect(statusLabel('needs_clarification')).toBe('需要补充需求')
     expect(statusLabel('future_state')).toBe('future_state')
   })
 

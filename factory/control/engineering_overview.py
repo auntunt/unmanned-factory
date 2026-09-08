@@ -1,4 +1,9 @@
-"""Pure projection for the operations overview's engineering lifecycle."""
+"""Pure projection for the operations overview's engineering lifecycle.
+
+The lifecycle is an evidence projection, rather than a current-status bucket.
+A run can therefore remain visible in intake, planning, execution, verification
+and delivery after it has been paused or escalated for human attention.
+"""
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -6,11 +11,11 @@ from urllib.parse import quote
 
 
 STAGES = (
-    ("intake", "需求澄清", "已接收或等待补充的信息。", {"received", "needs_clarification"}),
-    ("plan", "方案规划", "正在规划或等待批准的运行。", {"planning", "awaiting_approval"}),
-    ("build", "开发执行", "已排队或正在执行的任务。", {"queued", "running"}),
-    ("verify", "质量验证", "正在核验交付证据的运行。", {"verifying"}),
-    ("deliver", "交付发布", "检查已通过，待发布、发布中或已发布的运行。", {"ready_for_review", "publishing", "published"}),
+    ("intake", "需求澄清", "已接收的需求与补充信息。"),
+    ("plan", "方案规划", "已经形成或正在形成的执行方案。"),
+    ("build", "开发执行", "已排队、执行或留下任务尝试记录。"),
+    ("verify", "质量验证", "已经产生检查结果或进入验证阶段。"),
+    ("deliver", "交付发布", "已有提交、PR 或发布状态记录。"),
 )
 
 STATUS_DETAILS = {
@@ -24,6 +29,9 @@ STATUS_DETAILS = {
     "ready_for_review": "已验证，待发布",
     "publishing": "正在发布",
     "published": "已发布",
+    "needs_human": "等待人工处理",
+    "failed": "运行失败",
+    "cancelled": "已取消",
 }
 
 
@@ -40,11 +48,7 @@ def _run_title(run: Mapping) -> str:
 
 
 def _current_capabilities(capabilities: Iterable[Mapping]) -> list[Mapping]:
-    """Keep one latest supplied revision for each capability id.
-
-    CapabilityStore.list() already returns one current version, but this makes the
-    projection safe for callers that provide a version history.
-    """
+    """Keep one latest supplied revision for each capability id."""
     latest: dict[str, Mapping] = {}
     for capability in capabilities:
         raw_id = capability.get("id")
@@ -53,7 +57,8 @@ def _current_capabilities(capabilities: Iterable[Mapping]) -> list[Mapping]:
         prior = latest.get(raw_id)
         revision = capability.get("revision")
         prior_revision = prior.get("revision") if prior else None
-        if prior is None or (isinstance(revision, int) and (not isinstance(prior_revision, int) or revision >= prior_revision)):
+        if prior is None or (isinstance(revision, int) and
+                             (not isinstance(prior_revision, int) or revision >= prior_revision)):
             latest[raw_id] = capability
     return list(latest.values())
 
@@ -72,42 +77,166 @@ def _frozen_source_run_ids(run: Mapping) -> set[str]:
     }
 
 
-def engineering_overview(runs: Iterable[Mapping], capabilities: Iterable[Mapping], project_names: Mapping[object, str]) -> dict:
-    """Return a factual six-stage lifecycle without inferring progress.
+def _event_map(events: Mapping[str, Iterable[Mapping]] | Iterable[Mapping] | None) -> dict[str, list[Mapping]]:
+    if events is None:
+        return {}
+    if isinstance(events, Mapping):
+        return {str(rid): [event for event in values if isinstance(event, Mapping)]
+                for rid, values in events.items()}
+    result: dict[str, list[Mapping]] = {}
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        rid = event.get("run_id")
+        if rid is not None:
+            result.setdefault(str(rid), []).append(event)
+    return result
 
-    `runs` and `capabilities` are accepted as mappings so this remains independently
-    testable and does not acquire database state or alter persisted records.
+
+def _has_plan(run: Mapping, events: list[Mapping]) -> bool:
+    plan = run.get("plan")
+    return (isinstance(plan, Mapping) and bool(plan)) or any(
+        event.get("type") == "plan.created" for event in events
+    ) or run.get("status") in {"planning", "awaiting_approval"}
+
+
+def _has_execution_tasks(value) -> bool:
+    if not isinstance(value, list):
+        return False
+    for task in value:
+        if not isinstance(task, Mapping):
+            continue
+        attempts = task.get("attempts")
+        if isinstance(attempts, list) and attempts:
+            return True
+        if task.get("status") in {"running", "completed", "verified", "failed", "cancelled"}:
+            return True
+    return False
+
+
+def _has_attempt_checks(value) -> bool:
+    if not isinstance(value, list):
+        return False
+    for task in value:
+        if not isinstance(task, Mapping):
+            continue
+        attempts = task.get("attempts")
+        if not isinstance(attempts, list):
+            continue
+        if any(isinstance(attempt, Mapping) and bool(attempt.get("checks")) for attempt in attempts):
+            return True
+    return False
+
+
+def _has_checks_in_attempts(value) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(attempt, Mapping) and bool(attempt.get("checks")) for attempt in value
+    )
+
+
+def _has_build(run: Mapping, events: list[Mapping]) -> bool:
+    tasks = run.get("tasks")
+    artifacts = run.get("artifacts")
+    artifact_tasks = artifacts.get("tasks") if isinstance(artifacts, Mapping) else None
+    return _has_execution_tasks(tasks) or _has_execution_tasks(artifact_tasks) or any(
+        event.get("type") in {"run.started", "task.started", "task.completed", "task.failed", "execution.checkpoint"}
+        for event in events
+    ) or run.get("status") in {"queued", "running", "verifying"}
+
+
+def _has_verify(run: Mapping, events: list[Mapping]) -> bool:
+    artifacts = run.get("artifacts")
+    checks = artifacts.get("checks") if isinstance(artifacts, Mapping) else None
+    tasks = run.get("tasks")
+    artifact_tasks = artifacts.get("tasks") if isinstance(artifacts, Mapping) else None
+    event_checks = any(
+        bool((event.get("payload") or {}).get("checks")) or
+        _has_checks_in_attempts((event.get("payload") or {}).get("attempts"))
+        for event in events if event.get("type") in {"task.completed", "task.failed", "check.completed"}
+    )
+    return (bool(checks) or _has_attempt_checks(tasks) or _has_attempt_checks(artifact_tasks) or event_checks or
+            run.get("status") == "verifying" or any(
+                event.get("type") in {"run.verified", "verification.completed"} for event in events
+            ))
+
+
+def _has_delivery(run: Mapping, events: list[Mapping]) -> bool:
+    artifacts = run.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    has_delivery_artifact = bool(artifacts.get("commit") or artifacts.get("pr_url") or
+                                 artifacts.get("pr_number") or artifacts.get("merge_evidence"))
+    return has_delivery_artifact or run.get("status") in {"ready_for_review", "publishing", "published"} or any(
+        event.get("type") in {"github.publish_started", "github.published", "github.publish_failed",
+                               "delivery.blocked"}
+        for event in events
+    )
+
+
+def _run_item(run: Mapping, project_names: Mapping[object, str], stage_id: str, detail: str | None = None) -> dict:
+    rid = str(run.get("id", ""))
+    view = {
+        "intake": "requirements",
+        "plan": "plan",
+        "build": "execution",
+        "verify": "verification",
+        "deliver": "delivery",
+    }[stage_id]
+    return {
+        "id": rid,
+        "title": _run_title(run),
+        "project_name": project_names.get(run.get("project_id"), "项目"),
+        "status": run.get("status"),
+        "updated_at": run.get("updated_at", run.get("created_at")),
+        "href": f"/runs/{quote(rid, safe='')}?view={view}",
+        "detail": detail or STATUS_DETAILS.get(run.get("status"), "已记录状态"),
+    }
+
+
+def engineering_overview(
+    runs: Iterable[Mapping],
+    capabilities: Iterable[Mapping],
+    project_names: Mapping[object, str],
+    events: Mapping[str, Iterable[Mapping]] | Iterable[Mapping] | None = None,
+) -> dict:
+    """Return lifecycle stages from facts already present in the store.
+
+    ``events`` is optional for compatibility with callers and unit tests that
+    only have run snapshots.  The API passes all stored events so historical
+    evidence survives later status changes.
     """
     run_list = [run for run in runs if isinstance(run, Mapping)]
-    current_capabilities = _current_capabilities(capability for capability in capabilities if isinstance(capability, Mapping))
-    grouped: dict[str, list[Mapping]] = {stage_id: [] for stage_id, _, _, _ in STAGES}
+    event_map = _event_map(events)
+    current_capabilities = _current_capabilities(
+        capability for capability in capabilities if isinstance(capability, Mapping)
+    )
+    predicates = {
+        "intake": lambda run, run_events: bool(run.get("request")) or any(
+            event.get("type") == "user.message" for event in run_events),
+        "plan": _has_plan,
+        "build": _has_build,
+        "verify": _has_verify,
+        "deliver": _has_delivery,
+    }
+    grouped: dict[str, list[Mapping]] = {stage_id: [] for stage_id, _, _ in STAGES}
     for run in run_list:
-        status = run.get("status")
-        for stage_id, _, _, states in STAGES:
-            if status in states:
+        run_events = event_map.get(str(run.get("id")), [])
+        for stage_id, _, _ in STAGES:
+            if predicates[stage_id](run, run_events):
                 grouped[stage_id].append(run)
-                break
 
     stages = []
-    for stage_id, label, description, _ in STAGES:
+    for stage_id, label, description in STAGES:
         members = sorted(grouped[stage_id], key=_updated, reverse=True)
         stages.append({
             "id": stage_id,
             "label": label,
             "description": description,
             "count": len(members),
-            "unit": "次运行",
-            "items": [{
-                "id": str(run.get("id", "")),
-                "title": _run_title(run),
-                "project_name": project_names.get(run.get("project_id"), "项目"),
-                "status": run.get("status"),
-                "updated_at": run.get("updated_at", run.get("created_at")),
-                "href": f"/runs/{quote(str(run.get('id', '')), safe='')}",
-                "detail": STATUS_DETAILS.get(run.get("status"), "已记录状态"),
-            } for run in members[:6]],
+            "unit": {"intake": "条需求", "plan": "项规划", "build": "项执行", "verify": "项验证", "deliver": "项交付"}[stage_id],
+            "items": [_run_item(run, project_names, stage_id) for run in members[:6]],
         })
 
+    run_by_id = {str(run.get("id")): run for run in run_list}
     derived = [capability for capability in current_capabilities
                if isinstance(capability.get("source_run_id"), str) and capability["source_run_id"]]
     derived.sort(key=_updated, reverse=True)
@@ -120,12 +249,15 @@ def engineering_overview(runs: Iterable[Mapping], capabilities: Iterable[Mapping
         "items": [{
             "id": capability["id"],
             "title": capability.get("name") if isinstance(capability.get("name"), str) else "未命名能力",
-            "project_name": project_names.get(next((run.get("project_id") for run in run_list
-                                                       if run.get("id") == capability.get("source_run_id")), None), "来源运行未保留"),
+            "project_name": project_names.get(
+                (run_by_id.get(str(capability.get("source_run_id"))) or {}).get("project_id"),
+                "来源运行未保留",
+            ),
             "status": capability.get("status"),
             "updated_at": capability.get("updated_at", capability.get("created_at")),
             "href": f"/capabilities?selected={quote(capability['id'], safe='')}",
-            "detail": "能力草稿" if capability.get("status") == "draft" else "可调用能力" if capability.get("status") == "ready" else "已记录能力状态",
+            "detail": "能力草稿" if capability.get("status") == "draft" else
+                      "可调用能力" if capability.get("status") == "ready" else "已记录能力状态",
         } for capability in derived[:6]],
     })
 

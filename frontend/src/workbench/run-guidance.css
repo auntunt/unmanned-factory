@@ -1,0 +1,21 @@
+.wb-guidance { margin: 0 0 16px; border: 1px solid #d5e2dc; border-left: 3px solid #0f766e; border-radius: 10px; background: #f8fcfa; padding: 14px 16px; }
+.wb-guidance.is-warning { border-left-color: #b45309; background: #fffaf0; }
+.wb-guidance.is-danger { border-left-color: #a33c34; background: #fff8f7; }
+.wb-guidance h2 { margin: 3px 0 6px; font-size: 17px; }
+.wb-guidance p { margin: 0; color: #40534b; font-size: 13px; line-height: 1.6; }
+.wb-guidance a { color: #0b5f59; font-size: 13px; font-weight: 650; }
+.wb-view-nav { display: flex; gap: 6px; margin: 16px 0; overflow-x: auto; }
+.wb-view-nav a { flex: 0 0 auto; border: 1px solid #d6dfda; border-radius: 7px; padding: 7px 10px; color: #53665d; font-size: 13px; text-decoration: none; }
+.wb-view-nav a[aria-current='page'] { border-color: #0f766e; background: #eff8f5; color: #0b5f59; font-weight: 700; }
+.wb-stop-reason-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.wb-stop-reason-actions a { border: 1px solid #c7ddd4; border-radius: 7px; padding: 7px 9px; color: #0b5f59; font-size: 13px; font-weight: 650; text-decoration: none; }
+.wb-stop-reason-actions a:hover, .wb-view-nav a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.wb-stop-reason-admin-note { margin-top: 10px; color: #596b65; font-size: 13px; line-height: 1.55; }
+.wb-run-journey-stages a { color: inherit; text-decoration: none; }
+.wb-run-journey-stages a:hover strong, .wb-run-journey-stages a:focus-visible strong { color: #0b5f59; text-decoration: underline; text-underline-offset: 3px; }
+.wb-run-project-filter { display: inline-flex; align-items: center; gap: 7px; color: #53665d; font-size: 13px; }
+.wb-run-project-filter select { max-width: 220px; border: 1px solid #d6dfda; border-radius: 7px; background: #fff; color: #24352d; padding: 7px 8px; font: inherit; }
+.wb-run-guidance { display: block; max-width: 330px; margin-top: 6px; color: #596b65; font-size: 12px; line-height: 1.45; }
+.wb-run-guidance strong { color: #365147; }
+.wb-run-journey-stages .is-evidenced .wb-run-step-number { border-color: #adcfc0; background: #f3faf6; color: #176749; }
+.wb-run-journey-stages .is-evidenced strong { color: #365147; }

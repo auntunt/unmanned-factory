@@ -188,7 +188,7 @@ def test_v3_exports_use_all_events_and_preserve_redacted_large_archive_and_overv
     assert summary["runs"] >= 202
 
 
-def test_overview_keeps_cancelled_runs_out_of_attention_and_lifecycle_stages(control):
+def test_overview_keeps_cancelled_runs_out_of_attention_but_preserves_received_demand(control):
     client, store, service, runner, project, headers = control
     run, _ = store.create_run(project["id"], "Cancelled before planning")
     store.update(run["id"], {"status": "cancelled"}, expected=("received",))
@@ -196,7 +196,63 @@ def test_overview_keeps_cancelled_runs_out_of_attention_and_lifecycle_stages(con
     summary = client.get("/api/v3/overview", headers=headers).json()
 
     assert run["id"] not in {item["id"] for item in summary["attention"]}
-    assert run["id"] not in {item["id"] for stage in summary["engineering"]["stages"] for item in stage["items"]}
+    intake = next(stage for stage in summary["engineering"]["stages"] if stage["id"] == "intake")
+    assert run["id"] in {item["id"] for item in intake["items"]}
+
+
+def test_overview_projects_are_isolated_and_paused_runs_keep_stage_evidence(control):
+    client, store, service, runner, project, headers = control
+    from factory.control.capabilities import CapabilityStore
+
+    other = store.add_project({
+        "name": "Other", "repository": "owner/other", "workspace": project["workspace"],
+        "base_branch": "main", "checks": {}, "auto_issues": False, "auto_publish": False,
+        "budget_usd": 10.0, "actor": "owner",
+    })
+    paused, _ = store.create_run(project["id"], "Repair the release workflow")
+    store.update(paused["id"], {
+        "status": "needs_human",
+        "plan": {"title": "Repair release", "tasks": [{"id": "release", "checks": ["smoke"]}]},
+        "tasks": [{"id": "release", "attempts": [{"status": "verified"}]}],
+        "artifacts": {"tasks": [{"id": "release"}], "checks": [{"name": "smoke", "exit": 0}],
+                      "commit": "abc123"},
+    }, expected=("received",))
+    other_run, _ = store.create_run(other["id"], "Other project's request")
+    healed, _ = store.create_run(project["id"], "A previously failed request")
+    store.update(healed["id"], {"status": "failed"}, expected=("received",),
+                 event=("run.failed", {"message": "transient failure"}))
+    store.update(healed["id"], {"status": "published"}, expected=("failed",),
+                 event=("github.published", {"pr_url": "https://example.test/pr/1"}))
+    foreign = CapabilityStore(store).create({
+        "name": "Other project capability", "description": "foreign source", "category": "engineering",
+        "instructions": "Use the other project source.", "input_description": "request",
+        "output_description": "result", "acceptance": [], "status": "draft",
+    }, source_run_id=other_run["id"], actor="owner")
+
+    global_summary = client.get("/api/v3/overview", headers=headers).json()
+    selected = client.get(f"/api/v3/overview?project_id={project['id']}", headers=headers)
+    assert selected.status_code == 200, selected.text
+    selected = selected.json()
+    assert selected["project_id"] == project["id"]
+    assert selected["projects"] == 1
+    assert selected["runs"] == 2
+    assert other_run["id"] not in {item["id"] for item in selected["attention"]}
+    assert healed["id"] not in {item["id"] for item in selected["attention"]}
+    stage_ids = {stage["id"] for stage in selected["engineering"]["stages"]
+                 if paused["id"] in {item["id"] for item in stage["items"]}}
+    assert stage_ids == {"intake", "plan", "build", "verify", "deliver"}
+    hrefs = {item["href"] for stage in selected["engineering"]["stages"]
+             for item in stage["items"] if item["id"] == paused["id"]}
+    assert hrefs == {f"/runs/{paused['id']}?view={view}" for view in
+                     ("requirements", "plan", "execution", "verification", "delivery")}
+    assert all(item["project_id"] == project["id"] for item in selected["attention"])
+    assert other_run["id"] not in {event["run_id"] for event in selected["recent_events"]}
+    reuse = next(stage for stage in selected["engineering"]["stages"] if stage["id"] == "reuse")
+    assert foreign["id"] not in {item["id"] for item in reuse["items"]}
+    assert {item["id"] for item in global_summary["project_summaries"]} >= {project["id"], other["id"]}
+    assert client.get("/api/v3/overview?project_id=missing", headers=headers).status_code == 404
+    v2_other = client.get(f"/api/v2/runs?project_id={other['id']}", headers=headers)
+    assert [item["id"] for item in v2_other.json()["runs"]] == [other_run["id"]]
 
 
 def test_repeated_start_plan_has_one_durable_planner_dispatch(control):

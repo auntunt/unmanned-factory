@@ -10,20 +10,23 @@ def by_id(summary):
     return {stage["id"]: stage for stage in summary["stages"]}
 
 
-def test_engineering_stages_include_every_supported_state_and_exclude_attention_only_states():
+def test_engineering_stages_keep_stage_evidence_independent_of_current_status():
     statuses = ("received", "needs_clarification", "planning", "awaiting_approval", "queued", "running",
                 "verifying", "ready_for_review", "publishing", "published", "failed", "needs_human", "cancelled")
     summary = engineering_overview([run(status, status) for status in statuses], [], {"project": "工程"})
     stages = by_id(summary)
 
     assert [stage["id"] for stage in summary["stages"]] == ["intake", "plan", "build", "verify", "deliver", "reuse"]
-    assert {item["status"] for item in stages["intake"]["items"]} == {"received", "needs_clarification"}
-    assert {item["status"] for item in stages["plan"]["items"]} == {"planning", "awaiting_approval"}
-    assert {item["status"] for item in stages["build"]["items"]} == {"queued", "running"}
-    assert {item["status"] for item in stages["verify"]["items"]} == {"verifying"}
-    assert {item["status"] for item in stages["deliver"]["items"]} == {"ready_for_review", "publishing", "published"}
-    assert all(item["status"] not in {"failed", "needs_human", "cancelled"}
-               for stage in summary["stages"] for item in stage["items"])
+    assert stages["intake"]["count"] == len(statuses)
+    assert stages["plan"]["count"] == 2
+    assert stages["build"]["count"] == 3
+    assert stages["verify"]["count"] == 1
+    assert stages["deliver"]["count"] == 3
+    assert stages["intake"]["items"][0]["href"].endswith("?view=requirements")
+    assert stages["plan"]["items"][0]["href"].endswith("?view=plan")
+    assert stages["build"]["items"][0]["href"].endswith("?view=execution")
+    assert stages["verify"]["items"][0]["href"].endswith("?view=verification")
+    assert stages["deliver"]["items"][0]["href"].endswith("?view=delivery")
     assert summary["verified_runs"] == 3
     assert summary["published_runs"] == 1
 

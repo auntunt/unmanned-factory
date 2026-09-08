@@ -30,6 +30,8 @@ export interface EngineeringSummary {
 }
 
 export interface OverviewData {
+  project_id?: string | null
+  project_summaries?: ProjectSummary[]
   projects: number
   runs: number
   active_runs: number
@@ -38,11 +40,22 @@ export interface OverviewData {
   known_cost_usd: number
   unknown_cost_runs: number
   recent_events: Array<{ id: number; run_id: string; task_id?: string | null; type: string; payload: unknown; at: string; project_name?: string; run_title?: string }>
-  attention?: Array<{ id: string; project_name?: string; title?: string; status: string; updated_at: string; reason?: string }>
+  attention?: Array<{ id: string; project_id?: string; project_name?: string; title?: string; status: string; updated_at: string; reason?: string; questions?: string[]; billing_incomplete?: unknown }>
   model_usage: Array<{ profile: string; provider?: string; model?: string; calls: number; known_cost_usd: number; unknown_cost_calls: number }>
   activity: Array<{ date: string; runs: number; delivered: number }>
   capabilities: number
   engineering?: EngineeringSummary
+}
+
+export interface ProjectSummary {
+  id: string
+  name: string
+  repository: string
+  budget_usd?: number
+  run_count: number
+  active_runs: number
+  attention_runs: number
+  engineering: EngineeringSummary
 }
 
 export interface Capability {

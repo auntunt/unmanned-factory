@@ -47,7 +47,7 @@ export function EmptyState({ title, description, action }: {
 const STATUS_LABELS: Record<string, string> = {
   received: '已接收',
   planning: '规划中',
-  needs_clarification: '需要确认',
+  needs_clarification: '需要补充需求',
   awaiting_approval: '待审批',
   queued: '已排队',
   running: '执行中',
@@ -55,7 +55,7 @@ const STATUS_LABELS: Record<string, string> = {
   ready_for_review: '已验证',
   publishing: '发布中',
   published: '已发布',
-  needs_human: '需要确认',
+  needs_human: '运行已暂停',
   failed: '失败',
   cancelled: '已取消',
   pending: '待处理',

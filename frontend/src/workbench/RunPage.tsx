@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { request, WorkspaceApiError } from '../workspace/api'
 import RunKnowledge from '../workspace/RunKnowledge'
 import TaskGraph from '../workspace/TaskGraph'
 import type { AuditEvent, ConversationMessage, PlanTask, Run, RunStatus, TaskStatus } from '../workspace/types'
 import type { RuntimeLimits, RuntimeProfiles } from './runtime-types'
 import { StopReason } from './StopReason'
+import { RUN_VIEWS, runGuidance, runView, type RunView } from './run-guidance'
+import { checkPassed } from './run-guidance'
 import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, statusLabel, errorText, type PageProps } from './ui'
 import './detail.css'
+import './run-guidance.css'
 import RunJourney from './RunJourney'
 
 type RunPageProps = PageProps
@@ -104,9 +107,10 @@ function costLabel(value: unknown, missingLabel: string): string {
   return missingLabel
 }
 
-function CheckEvidence({ check, index }: { check: Record<string, unknown>; index: number }) {
-  const passed = check.outcome === 'passed' || check.outcome === 'pass' || check.status === 'passed' || check.exit === 0
-  const name = typeof check.name === 'string' ? check.name : `检查 ${index + 1}`
+function CheckEvidence({ check, index, context }: { check: Record<string, unknown>; index: number; context?: string }) {
+  const passed = checkPassed(check)
+  const baseName = typeof check.name === 'string' ? check.name : `检查 ${index + 1}`
+  const name = context ? `${context} · ${baseName}` : baseName
   const outcome = passed ? '通过' : check.timeout ? '超时' : check.cancelled ? '已取消' : '未通过'
   const hasOutput = typeof check.stdout === 'string' || typeof check.stderr === 'string'
   return <details className="wb-check-detail"><summary><span>{name}</span><strong className={passed ? 'wb-check-pass' : 'wb-check-fail'}>{outcome}</strong></summary><div className="wb-check-meta"><span>退出码：{check.exit === null || check.exit === undefined ? '—' : String(check.exit)}</span><span>超时：{check.timeout === true ? '是' : '否'}</span>{typeof check.duration_s === 'number' && <span>耗时：{check.duration_s}s</span>}</div>{hasOutput && <div className="wb-check-output">{typeof check.stdout === 'string' && <div><span className="wb-artifact-label">stdout</span><pre>{check.stdout}</pre></div>}{typeof check.stderr === 'string' && <div><span className="wb-artifact-label">stderr</span><pre>{check.stderr}</pre></div>}</div>}</details>
@@ -200,12 +204,39 @@ function DeliveryEvidence({ run }: { run: Run }) {
   )
 }
 
-function PlanPanel({ run }: { run: Run }) {
+function PlanPanel({ run, showTasks = true }: { run: Run; showTasks?: boolean }) {
   const [view, setView] = useState<'graph' | 'list'>('graph')
   const statuses = useMemo(() => taskStatusMap(run.tasks), [run.tasks])
   const tasks = useMemo<PlanTask[]>(() => (run.plan?.tasks ?? []).map((task) => ({ ...task, status: statuses.get(task.id) ?? task.status })), [run.plan?.tasks, statuses])
   if (!run.plan) return <EmptyState title="计划尚未返回" description={`当前状态：${run.status === 'planning' ? '规划中' : '暂无计划'}。页面会在运行更新后重新读取。`} />
-  return <section className="wb-detail-card" aria-labelledby="plan-title"><div className="wb-detail-kicker">计划版本 {run.revision}</div><h2 id="plan-title">{run.plan.title}</h2><p>{run.plan.summary}</p><div className="wb-task-view-switch" role="group" aria-label="任务视图"><button className={`wb-task-button ${view === 'graph' ? 'wb-task-button-active' : ''}`} onClick={() => setView('graph')}>依赖图</button><button className={`wb-task-button ${view === 'list' ? 'wb-task-button-active' : ''}`} onClick={() => setView('list')}>任务列表</button></div>{view === 'graph' ? <div className="wb-task-graph"><TaskGraph tasks={tasks} /></div> : tasks.length ? <div className="wb-task-list">{tasks.map((task) => <article className="wb-task-row" key={task.id}><span className="wb-task-id">{task.id}</span><div><strong>{task.title}</strong><p>{task.prompt}</p>{task.depends_on.length > 0 && <div className="wb-task-deps">依赖：{task.depends_on.join('、')}</div>}</div><StatusBadge status={task.status ?? 'pending'} /></article>)}</div> : <div className="wb-empty-inline">当前计划没有任务。</div>}</section>
+  return <section className="wb-detail-card" aria-labelledby="plan-title"><div className="wb-detail-kicker">计划版本 {run.revision}</div><h2 id="plan-title">{run.plan.title}</h2><p>{run.plan.summary}</p>{showTasks && <><div className="wb-task-view-switch" role="group" aria-label="任务视图"><button className={`wb-task-button ${view === 'graph' ? 'wb-task-button-active' : ''}`} onClick={() => setView('graph')}>依赖图</button><button className={`wb-task-button ${view === 'list' ? 'wb-task-button-active' : ''}`} onClick={() => setView('list')}>任务列表</button></div>{view === 'graph' ? <div className="wb-task-graph"><TaskGraph tasks={tasks} /></div> : tasks.length ? <div className="wb-task-list">{tasks.map((task) => <article className="wb-task-row" key={task.id}><span className="wb-task-id">{task.id}</span><div><strong>{task.title}</strong><p>{task.prompt}</p>{task.paths.length > 0 && <div className="wb-task-deps">范围：{task.paths.map((path) => <code key={path}>{path}</code>)}</div>}{task.acceptance.length > 0 && <div className="wb-task-deps">验收：{task.acceptance.join('；')}</div>}{task.depends_on.length > 0 && <div className="wb-task-deps">依赖：{task.depends_on.join('、')}</div>}</div><StatusBadge status={task.status ?? 'pending'} /></article>)}</div> : <div className="wb-empty-inline">当前计划没有任务。</div>}</>}</section>
+}
+
+function verificationChecks(run: Run): Array<{ check: Record<string, unknown>; context: string }> {
+  const evidence: Array<{ check: Record<string, unknown>; context: string }> = []
+  if (Array.isArray(run.artifacts?.checks)) for (const check of run.artifacts.checks) if (isRecord(check)) evidence.push({ check, context: '集成检查' })
+  for (const source of [run.tasks, run.artifacts?.tasks]) {
+    if (!Array.isArray(source)) continue
+    for (const task of source) {
+      if (!isRecord(task)) continue
+      const taskLabel = typeof task.id === 'string' ? `任务 ${task.id}` : '任务检查'
+      if (Array.isArray(task.checks)) for (const check of task.checks) if (isRecord(check)) evidence.push({ check, context: taskLabel })
+      if (!Array.isArray(task.attempts)) continue
+      task.attempts.forEach((attempt, attemptIndex) => {
+        if (!isRecord(attempt) || !Array.isArray(attempt.checks)) return
+        const number = typeof attempt.attempt === 'number' ? attempt.attempt : attemptIndex + 1
+        for (const check of attempt.checks) if (isRecord(check)) evidence.push({ check, context: `${taskLabel} · 第 ${number} 次尝试` })
+      })
+    }
+  }
+  return evidence
+}
+
+function VerificationEvidence({ run }: { run: Run }) {
+  const checks = verificationChecks(run)
+  const failure = runGuidance(run).rawEvidence
+  if (!checks.length && !failure) return <section className="wb-detail-card"><h2>检查证据</h2><p className="wb-runtime-note">{run.status === 'verifying' ? '正在运行检查，完成后结果会显示在这里。' : '尚未记录可展示的检查结果。'}</p></section>
+  return <section className="wb-detail-card" aria-labelledby="verification-title"><h2 id="verification-title">检查证据</h2>{failure && <details className="wb-check-detail"><summary><span>运行记录的失败原因</span><strong className="wb-check-fail">展开证据</strong></summary><pre>{failure}</pre></details>}{checks.length > 0 && <div className="wb-checks">{checks.map(({ check, context }, index) => <CheckEvidence check={check} context={context} index={index} key={`${context}-${String(check.name ?? 'check')}-${index}`} />)}</div>}</section>
 }
 
 function ConversationPanel({ messages, loading, error }: { messages: ConversationMessage[] | null; loading: boolean; error: string | null }) {
@@ -226,8 +257,9 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const isAdmin = user?.role !== 'member'
   const { runId } = useParams<{ runId: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [run, setRun] = useState<Run | null>(null)
-  const [tab, setTab] = useState<'plan' | 'conversation' | 'events'>('plan')
+  const [tab, setTab] = useState<'conversation' | 'events' | null>(null)
   const [messages, setMessages] = useState<ConversationMessage[] | null>(null)
   const [events, setEvents] = useState<AuditEvent[] | null>(null)
   const [auxError, setAuxError] = useState<string | null>(null)
@@ -272,7 +304,7 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   useEffect(() => {
     const sequence = auxiliarySequence.current + 1
     auxiliarySequence.current = sequence
-    if (tab === 'plan') return
+    if (tab === null) return
     setAuxError(null)
     eventCursor.current = tab === 'events' ? 0 : eventCursor.current
     if (tab === 'conversation') setMessages(null)
@@ -311,15 +343,27 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const runSource = (run as Run & { source?: { actor_id?: string | number } }).source
   const actorId = runSource?.actor_id
   const canActOnRun = isAdmin || (actorId !== undefined && actorId !== null && String(actorId) === String(user?.id))
-  const canClarify = canActOnRun && ['needs_clarification', 'needs_human', 'awaiting_approval'].includes(run.status)
   const canApprove = canActOnRun && run.status === 'awaiting_approval' && questions.length === 0
   const canCancel = canActOnRun && ACTIVE_STATUSES.includes(run.status)
   const canPublish = isAdmin && run.status === 'ready_for_review'
   const canRetry = canActOnRun && ['failed', 'needs_human', 'cancelled'].includes(run.status)
   const canDistill = isAdmin && ['ready_for_review', 'published'].includes(run.status)
-  return <div className="wb-detail-page wb-run-page"><PageHeader title={run.plan?.title || run.request.slice(0, 80) || `运行 #${run.id}`} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/runs')}>返回看板</button><details className="wb-export-menu"><summary className="wb-button">导出记录</summary><div><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=json`}>JSON</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=markdown`}>Markdown</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=zip`}>ZIP</a></div></details>{canRetry && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void retry()}>{busy === 'retry' ? '重试中…' : '创建重试运行'}</button>}{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
+  const guidance = runGuidance(run)
+  const activeView = runView(searchParams.get('view'), guidance.view)
+  const viewHref = (view: RunView) => `/runs/${encodeURIComponent(String(run.id))}?view=${view}`
+  const projectHref = `/projects/${encodeURIComponent(String(run.project_id))}?stage=${guidance.stage}`
+  const canClarify = canActOnRun && guidance.kind === 'requirements'
+  return <div className="wb-detail-page wb-run-page"><PageHeader title={run.plan?.title || run.request.slice(0, 80) || `运行 #${run.id}`} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/runs')}>返回看板</button><details className="wb-export-menu"><summary className="wb-button">导出记录</summary><div><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=json`}>JSON</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=markdown`}>Markdown</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=zip`}>ZIP</a></div></details>{canRetry && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void retry()}>{busy === 'retry' ? '重试中…' : '按新配置重试'}</button>}{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
     {error && <ErrorNotice message={error} />}
-    <StopReason run={run} />
+    <p className="wb-run-breadcrumb"><Link to={projectHref}>返回项目闭环</Link><span>·</span><Link to="/runs">运行看板</Link></p>
+    <StopReason run={run} canConfigure={isAdmin} />
     <RunJourney run={run} />
-    <div className="wb-detail-grid"><div className="wb-detail-main"><section className="wb-detail-card"><div className="wb-detail-meta"><span>状态：<StatusBadge status={run.status} /></span><span>当前计划版本：<strong>{run.revision}</strong></span><span>创建于：<strong>{formatDate(run.created_at)}</strong></span></div><div className="wb-detail-tabs" role="tablist" aria-label="运行内容"><button className={`wb-tab ${tab === 'plan' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'plan'} onClick={() => setTab('plan')}>计划与任务</button><button className={`wb-tab ${tab === 'conversation' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'conversation'} onClick={() => setTab('conversation')}>对话</button><button className={`wb-tab ${tab === 'events' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'events'} onClick={() => setTab('events')}>审计事件</button></div>{tab === 'plan' && <><PlanPanel run={run} /><ExecutionAttempts run={run} /></>}{tab === 'conversation' && <ConversationPanel messages={messages} loading={loading} error={auxError} />}{tab === 'events' && <EventsPanel events={events} loading={loading} error={auxError} />}</section>{canClarify && <section className="wb-detail-card wb-question"><h2>{questions.length ? '需要确认' : '补充信息'}</h2>{questions.length > 0 && <ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul>}<div className="wb-field"><label htmlFor="run-clarification">针对当前计划版本 {run.revision} 的补充</label><textarea id="run-clarification" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="提供事实、边界或选择，提交后会重新规划。" /></div><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={!answer.trim() || busy !== null} onClick={() => void act('clarify')}>{busy === 'clarify' ? '提交并重新规划…' : '提交补充并重新规划'}</button>{canApprove && <button className="wb-button" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button>}</div></section>}{canApprove && !canClarify && <section className="wb-detail-card"><h2>批准当前计划</h2><p>计划没有未解决问题。批准后将按当前运行配置进入有界任务调度。</p><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button></div></section>}{canDistill && <section className="wb-detail-card wb-distill-card"><div><span className="wb-eyebrow">能力生产</span><h2>能力归档</h2><p>交付完成后系统会自动留下可追溯的能力草稿；你也可手动生成一个额外草稿供比较或补充。</p></div>{(() => { const candidateId = (run as Run & { capability_candidate_id?: unknown }).capability_candidate_id ?? run.artifacts?.capability_candidate_id; return typeof candidateId === 'string' && candidateId ? <div className="wb-notice">本次交付已归档为能力草稿。<Link className="wb-text-link" to={`/capabilities?selected=${encodeURIComponent(candidateId)}`}>打开已归档能力 →</Link></div> : null })()}<details className="wb-distill-manual"><summary>手动生成额外草稿</summary><form onSubmit={distill} className="wb-distill-form"><input required maxLength={120} value={distillName} onChange={(event) => setDistillName(event.target.value)} placeholder="候选能力名称" /><button className="wb-button wb-button-primary" disabled={busy !== null}>{busy === 'distill' ? '提炼中…' : '生成额外草稿'}</button></form></details>{distillNotice && <div className="wb-notice">{distillNotice} <Link className="wb-text-link" to="/capabilities">打开能力库 →</Link></div>}</section>}{isAdmin && <RunKnowledge key={`${run.id}:${run.revision}`} runId={run.id} revision={run.revision} status={run.status} artifacts={run.artifacts} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}</div><aside className="wb-detail-rail" aria-label="运行详情摘要"><section className="wb-detail-card"><h2>运行概览</h2><div className="wb-side-stat"><span>运行 ID</span><span className="wb-side-stat-id" title={String(run.id)}>{run.id}</span></div><div className="wb-side-stat"><span>工程 ID</span><span className="wb-side-stat-id" title={String(run.project_id)}>{run.project_id}</span></div><div className="wb-side-stat"><span>状态</span><span><StatusBadge status={run.status} /></span></div><div className="wb-side-stat"><span>风险</span><span>{run.triage?.risk ? { low: '低风险', medium: '中风险', high: '高风险' }[run.triage.risk] : '—'}</span></div>{run.triage?.reasons?.length ? <div className="wb-runtime-note">{run.triage.reasons.join('；')}</div> : null}</section><FrozenRuntime run={run} /><DeliveryEvidence run={run} /></aside></div></div>
+    <nav className="wb-view-nav" aria-label="运行工作视图">{RUN_VIEWS.map((view) => <Link key={view} to={viewHref(view)} aria-current={activeView === view ? 'page' : undefined}>{({ requirements: '需求与澄清', plan: '计划', execution: '执行', verification: '验证', delivery: '交付' } as Record<RunView, string>)[view]}</Link>)}</nav>
+    <div className="wb-detail-grid"><div className="wb-detail-main"><section className="wb-detail-card"><div className="wb-detail-meta"><span>状态：<StatusBadge status={run.status} /></span><span>当前计划版本：<strong>{run.revision}</strong></span><span>创建于：<strong>{formatDate(run.created_at)}</strong></span></div>
+      {activeView === 'requirements' && <><div className="wb-detail-kicker">原始需求</div><h2>需求与澄清</h2><p className="wb-message-content">{run.request}</p>{run.triage?.reasons?.length ? <p className="wb-runtime-note">系统记录的判断依据：{run.triage.reasons.join('；')}</p> : null}{questions.length > 0 && <><h3>需要补充的事实</h3><ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul></>}{canClarify && <div className="wb-field"><label htmlFor="run-clarification">{questions.length ? `针对当前计划版本 ${run.revision} 的补充` : '补充目标、范围或验收标准'}</label><textarea id="run-clarification" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder={questions.length ? '提供事实、边界或选择，提交后会重新规划。' : '当前没有可展示的具体问题；请补充需要系统据以规划的事实。'} /></div>}{canClarify && <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={!answer.trim() || busy !== null} onClick={() => void act('clarify')}>{busy === 'clarify' ? '提交并重新规划…' : '提交补充并重新规划'}</button></div>}{!canClarify && guidance.kind !== 'requirements' && <p className="wb-runtime-note">当前无需补充需求。请根据上方状态指引进入对应工作视图。</p>}</>}
+      {activeView === 'plan' && <><PlanPanel run={run} />{canApprove && <section className="wb-question"><h2>批准当前计划</h2><p>计划没有未解决问题。批准后将按当前运行配置进入有界任务调度。</p><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button></div></section>}{!canApprove && run.status === 'awaiting_approval' && <p className="wb-runtime-note">当前账号不能批准这个运行，请联系有执行权限的成员。</p>}</>}
+      {activeView === 'execution' && <><ExecutionAttempts run={run} /><PlanPanel run={run} /></>}
+      {activeView === 'verification' && <VerificationEvidence run={run} />}
+      {activeView === 'delivery' && <><DeliveryEvidence run={run} />{canDistill && <section className="wb-detail-card wb-distill-card"><div><span className="wb-eyebrow">能力生产</span><h2>能力归档</h2><p>交付完成后系统会自动留下可追溯的能力草稿；你也可手动生成一个额外草稿供比较或补充。</p></div>{(() => { const candidateId = (run as Run & { capability_candidate_id?: unknown }).capability_candidate_id ?? run.artifacts?.capability_candidate_id; return typeof candidateId === 'string' && candidateId ? <div className="wb-notice">本次交付已归档为能力草稿。<Link className="wb-text-link" to={`/capabilities?selected=${encodeURIComponent(candidateId)}`}>打开已归档能力 →</Link></div> : null })()}<details className="wb-distill-manual"><summary>手动生成额外草稿</summary><form onSubmit={distill} className="wb-distill-form"><input required maxLength={120} value={distillName} onChange={(event) => setDistillName(event.target.value)} placeholder="候选能力名称" /><button className="wb-button wb-button-primary" disabled={busy !== null}>{busy === 'distill' ? '提炼中…' : '生成额外草稿'}</button></form></details>{distillNotice && <div className="wb-notice">{distillNotice} <Link className="wb-text-link" to="/capabilities">打开能力库 →</Link></div>}</section>}</>}
+    </section><details className="wb-detail-card"><summary><strong>对话和审计记录</strong></summary><div className="wb-detail-tabs" role="tablist" aria-label="运行记录"><button className={`wb-tab ${tab === 'conversation' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'conversation'} onClick={() => setTab('conversation')}>对话</button><button className={`wb-tab ${tab === 'events' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'events'} onClick={() => setTab('events')}>审计事件</button></div>{tab === null ? <p className="wb-runtime-note">按需打开对话或审计事件，避免在不查看时重复读取记录。</p> : tab === 'conversation' ? <ConversationPanel messages={messages} loading={loading} error={auxError} /> : <EventsPanel events={events} loading={loading} error={auxError} />}</details>{isAdmin && <RunKnowledge key={`${run.id}:${run.revision}`} runId={run.id} revision={run.revision} status={run.status} artifacts={run.artifacts} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}</div><aside className="wb-detail-rail" aria-label="运行详情摘要"><section className="wb-detail-card"><h2>运行概览</h2><div className="wb-side-stat"><span>运行 ID</span><span className="wb-side-stat-id" title={String(run.id)}>{run.id}</span></div><div className="wb-side-stat"><span>工程 ID</span><span className="wb-side-stat-id" title={String(run.project_id)}>{run.project_id}</span></div><div className="wb-side-stat"><span>状态</span><span><StatusBadge status={run.status} /></span></div><div className="wb-side-stat"><span>当前指引</span><span>{guidance.label}</span></div><div className="wb-side-stat"><span>风险</span><span>{run.triage?.risk ? { low: '低风险', medium: '中风险', high: '高风险' }[run.triage.risk] : '—'}</span></div></section><FrozenRuntime run={run} /></aside></div></div>
 }

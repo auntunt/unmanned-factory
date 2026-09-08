@@ -1,77 +1,35 @@
-/**
- * 展示运行「为什么停下来」。
- *
- * 后端在 artifacts 里写得很清楚（execution.py 的 stop_reason → artifacts.needs_human /
- * artifacts.billing_incomplete），但此前没有任何界面读它，用户只能看到状态变红、
- * 看不到原因，也不知道自己该做什么。这个组件把原因和下一步动作一起端出来。
- */
+import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
+import { runGuidance } from './run-guidance'
+import './run-guidance.css'
 
-/** 预算类停止的原因文本形如 "observed provider cost $3.9453 exceeds budget $3.0000"。 */
-const BUDGET_PATTERN = /cost \$([0-9.]+) exceeds budget \$([0-9.]+)/
-
-function readReason(run: Run): { text: string; kind: 'budget' | 'billing' | 'other' } | null {
-  const artifacts = run.artifacts
-  if (!artifacts) return null
-  const billing = artifacts.billing_incomplete
-  if (typeof billing === 'string' && billing.trim()) return { text: billing, kind: 'billing' }
-  const stop = artifacts.needs_human
-  if (typeof stop !== 'string' || !stop.trim()) return null
-  return { text: stop, kind: BUDGET_PATTERN.test(stop) ? 'budget' : 'other' }
-}
-
-/** 把英文原因翻成可执行的中文说明，同时保留原文供排查。 */
-function explain(reason: { text: string; kind: string }): { title: string; detail: string; next: string[] } {
-  const budget = reason.text.match(BUDGET_PATTERN)
-  if (budget) {
-    const [, spent, limit] = budget
-    return {
-      title: '已达预算上限，主动停止',
-      detail: `本次运行实际花费 $${spent}，超过工程配置的预算上限 $${limit}。剩余任务没有开工，也不会自动发布。`,
-      next: [
-        `到工程设置里把预算调高到高于 $${spent} 的值，然后重新提交需求`,
-        '或者把运行档位换成更便宜的模型后重跑',
-        '不想继续就直接取消这次运行，已产出的分支和提交仍然保留',
-      ],
-    }
-  }
-  if (reason.kind === 'billing') {
-    return {
-      title: '用量数据不完整，等人确认',
-      detail: reason.text,
-      next: ['核对服务商侧的实际计费，确认可接受后再决定是否继续或发布'],
-    }
-  }
-  return {
-    title: '运行已停下，等人介入',
-    detail: reason.text,
-    next: ['按上面的原因处理后，用下方补充信息重新规划，或取消本次运行'],
-  }
-}
-
-export function StopReason({ run }: { run: Run }) {
-  const reason = readReason(run)
-  if (!reason) return null
-  const { title, detail, next } = explain(reason)
-  const questions = run.triage?.questions ?? []
+/** Shows a persisted stop reason together with only the next actions the viewer may take. */
+export function StopReason({ run, canConfigure }: { run: Run; canConfigure: boolean }) {
+  const guidance = runGuidance(run)
+  if (!['budget', 'billing', 'failure', 'recovery', 'paused'].includes(guidance.kind)) return null
+  const projectHref = `/projects/${encodeURIComponent(String(run.project_id))}?stage=${guidance.stage}`
+  const budgetHref = `/projects/${encodeURIComponent(String(run.project_id))}?tab=settings&return_run=${encodeURIComponent(String(run.id))}#project-budget`
+  const adminActions = guidance.kind === 'budget'
+    ? [{ href: '/settings/runtime', label: '查看模型策略' }, { href: '/team', label: '查看团队额度' }]
+    : guidance.kind === 'billing'
+      ? [{ href: '/team', label: '查看团队额度' }, { href: '/settings/runtime', label: '查看模型策略' }]
+      : guidance.kind === 'recovery' || guidance.kind === 'paused'
+        ? [{ href: '/settings/runtime', label: '查看模型策略' }]
+        : []
+  const tone = guidance.kind === 'failure' ? 'is-danger' : 'is-warning'
   return (
-    <section className="wb-detail-card wb-stop-reason" role="alert" aria-labelledby="stop-reason-title">
-      <div className="wb-detail-kicker">停止原因</div>
-      <h2 id="stop-reason-title">{title}</h2>
-      <p>{detail}</p>
-      {reason.kind === 'budget' && questions.length === 0 && (
-        <p className="wb-stop-reason-note">
-          系统没有需要你回答的问题；这是预算上限触发的策略性停止。
-        </p>
-      )}
-      <div className="wb-stop-reason-next">
-        <strong>可以怎么做</strong>
-        <ul>{next.map((item) => <li key={item}>{item}</li>)}</ul>
+    <section className={`wb-stop-reason wb-guidance ${tone}`} role="alert" aria-labelledby="stop-reason-title">
+      <div className="wb-detail-kicker">当前需要处理</div>
+      <h2 id="stop-reason-title">{guidance.label}</h2>
+      <p>{guidance.summary}</p>
+      {guidance.kind === 'budget' && <p className="wb-stop-reason-admin-note">这里显示的是本次运行使用的预算。调整项目预算后，可点击“按新配置重试”；保存设置不会自动继续这次运行。</p>}
+      <div className="wb-stop-reason-actions">
+        {guidance.kind === 'budget' && canConfigure ? <Link to={budgetHref}>调整项目预算</Link> : <Link to={guidance.primaryHref}>{guidance.primaryLabel}</Link>}
+        <Link to={projectHref}>返回项目</Link>
+        {canConfigure && adminActions.map((action) => <Link key={action.href} to={action.href}>{action.label}</Link>)}
       </div>
-      <details className="wb-stop-reason-raw">
-        <summary>后端原始信息</summary>
-        <code>{reason.text}</code>
-      </details>
+      {!canConfigure && adminActions.length > 0 && <p className="wb-stop-reason-admin-note">你可以查看运行和项目记录；预算、模型策略和团队额度由管理员配置，请联系管理员处理。</p>}
+      {guidance.rawEvidence && <details className="wb-stop-reason-raw"><summary>后端原始信息</summary><code>{guidance.rawEvidence}</code></details>}
     </section>
   )
 }

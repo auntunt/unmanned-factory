@@ -351,8 +351,11 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         return {'providers': svc.runner.available(), 'profiles': svc.runtime_settings.get()['profiles']}
 
     @app.get('/api/v2/runs')
-    def runs():
-        return {'runs': store.runs()}
+    def runs(project_id: str | None = None):
+        if project_id is None:
+            return {'runs': store.runs()}
+        store.project(project_id)
+        return {'runs': [run for run in store.all_runs() if run.get('project_id') == project_id]}
 
     @app.post('/api/v2/runs', status_code=201)
     def new_run(body: NewRun, request: Request):

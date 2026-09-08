@@ -26,71 +26,201 @@ class PolicyBody(BaseModel):
     resume_on_restart: bool = Field(strict=True)
 
 
-def overview(store):
+_OVERVIEW_EVENT_TYPES = (
+    'user.message', 'plan.created', 'task.started', 'task.completed', 'task.failed',
+    'execution.checkpoint', 'run.started', 'run.verified', 'verification.completed', 'check.completed',
+    'github.publish_started', 'github.published', 'github.publish_failed', 'delivery.blocked',
+    'run.failed', 'run.recovered', 'capability.harvest_failed', 'usage.recorded',
+)
+
+
+def _json_projection(value):
+    if value is None:
+        return None
+    if isinstance(value, str) and value[:1] in {'[', '{'}:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _events(store, run_ids):
+    """Read only small lifecycle projections for the selected run IDs."""
+    grouped = {}
+    run_ids = tuple(run_ids)
+    if not run_ids:
+        return grouped
+    marks = ','.join('?' for _ in run_ids)
+    types = ','.join('?' for _ in _OVERVIEW_EVENT_TYPES)
+    query = f'''SELECT id,run_id,task_id,type,at,
+        json_extract(payload, '$.profile') AS profile,
+        json_extract(payload, '$.model') AS model,
+        json_extract(payload, '$.provider') AS provider,
+        json_extract(payload, '$.cost_usd') AS cost_usd,
+        json_extract(payload, '$.attempts') AS attempts,
+        json_extract(payload, '$.checks') AS checks,
+        json_extract(payload, '$.message') AS message,
+        json_extract(payload, '$.error') AS error,
+        json_extract(payload, '$.status') AS status,
+        json_extract(payload, '$.pr_url') AS pr_url
+        FROM events WHERE run_id IN ({marks}) AND type IN ({types}) ORDER BY id'''
+    with store.connect() as db:
+        rows = db.execute(query, (*run_ids, *_OVERVIEW_EVENT_TYPES)).fetchall()
+    for row in rows:
+        event = {key: row[key] for key in ('id', 'run_id', 'task_id', 'type', 'at')}
+        payload = {}
+        for key in ('profile', 'model', 'provider', 'cost_usd', 'attempts', 'checks', 'message', 'error', 'status', 'pr_url'):
+            value = _json_projection(row[key])
+            if value is not None:
+                payload[key] = value
+        event['payload'] = payload
+        event['version'] = 1
+        grouped.setdefault(str(event['run_id']), []).append(event)
+    return grouped
+
+
+def _recent_events(store, run_ids):
+    """Fetch complete payloads only for the bounded recent-events panel."""
+    run_ids = tuple(run_ids)
+    if not run_ids:
+        return []
+    marks = ','.join('?' for _ in run_ids)
+    with store.connect() as db:
+        rows = db.execute(
+            f'SELECT * FROM events WHERE run_id IN ({marks}) ORDER BY id DESC LIMIT 30', run_ids,
+        ).fetchall()
+    result = []
+    for row in rows:
+        event = dict(row)
+        event['payload'] = json.loads(event['payload'])
+        event['version'] = 1
+        result.append(event)
+    return result
+
+
+def _attention(run, events):
+    artifacts = run.get('artifacts') if isinstance(run.get('artifacts'), dict) else {}
+    run_events = events.get(str(run.get('id')), [])
+    status = run.get('status')
+    active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed'}
+    has_needs_human = bool(artifacts.get('needs_human'))
+    has_billing_gap = bool(artifacts.get('billing_incomplete'))
+    billing_attention = status == 'ready_for_review' and has_billing_gap
+    if not (active_attention or billing_attention):
+        return None
+    if has_needs_human:
+        reason = artifacts.get('needs_human') if isinstance(artifacts.get('needs_human'), str) else '运行需要人工处理'
+    elif has_billing_gap:
+        reason = artifacts.get('billing_incomplete') if isinstance(artifacts.get('billing_incomplete'), str) else '费用记录尚未完整确认'
+    else:
+        recovery_events = [event for event in run_events if event.get('type') == 'run.recovered']
+        error_events = [event for event in run_events if event.get('type') in {
+            'run.failed', 'task.failed', 'github.publish_failed', 'capability.harvest_failed',
+        }]
+        if status == 'needs_human' and recovery_events:
+            payload = recovery_events[-1].get('payload') or {}
+            reason = payload.get('message') or '服务恢复后等待人工核对'
+        elif status == 'failed' and error_events:
+            payload = error_events[-1].get('payload') or {}
+            reason = payload.get('message') or payload.get('error') or '运行失败'
+        else:
+            triage = run.get('triage') or {}
+            reason = '；'.join(triage.get('questions') or triage.get('reasons') or []) or '需要补充运行信息'
+    questions = []
+    seen_questions = set()
+    for source in (run.get('triage') or {}, run.get('plan') or {}):
+        for question in source.get('questions') or []:
+            if isinstance(question, str) and question.strip() and question.strip() not in seen_questions:
+                questions.append(question.strip())
+                seen_questions.add(question.strip())
+    return {
+        'id': run['id'], 'project_id': run.get('project_id'),
+        'title': (run.get('plan') or {}).get('title') or str(run.get('request', ''))[:100],
+        'status': run.get('status'), 'project_name': run.get('project_name', '项目'),
+        'updated_at': run.get('updated_at', run.get('created_at')), 'reason': str(reason),
+        'billing_incomplete': artifacts.get('billing_incomplete'),
+        'questions': questions,
+    }
+
+
+def overview(store, project_id=None):
     from factory.control.capabilities import CapabilityStore
     projects = store.projects()
-    names = {p['id']: p['name'] for p in projects}
-    runs = store.all_runs()
-    capabilities = CapabilityStore(store).list()
-    by_id = {r['id']: r for r in runs}
+    project_by_id = {project['id']: project for project in projects}
+    if project_id is not None and project_id not in project_by_id:
+        raise KeyError(project_id)
+    names = {project['id']: project['name'] for project in projects}
+    all_runs = store.all_runs()
+    all_capabilities = CapabilityStore(store).list()
+    run_by_id = {str(run['id']): run for run in all_runs}
+
+    def scope_runs(pid):
+        return [run for run in all_runs if pid is None or run.get('project_id') == pid]
+
+    def scope_capabilities(pid, runs):
+        if pid is None:
+            return all_capabilities
+        source_runs = {str(run['id']) for run in runs}
+        return [capability for capability in all_capabilities
+                if str(capability.get('source_run_id')) in source_runs]
+
+    runs = scope_runs(project_id)
+    capabilities = scope_capabilities(project_id, runs)
+    scoped_run_ids = {str(run['id']) for run in runs}
+    all_events = _events(store, scoped_run_ids)
+    scoped_events = {rid: events for rid, events in all_events.items() if rid in scoped_run_ids}
     usage = {}
     known = 0.0
     unknown_runs = set()
     accounted = set()
-    with store.connect() as db:
-        rows = db.execute("SELECT run_id,payload FROM events WHERE type='usage.recorded' ORDER BY id")
-        for row in rows:
-            payload = json.loads(row['payload'])
+    for rid, run_events in scoped_events.items():
+        for event in run_events:
+            if event.get('type') != 'usage.recorded':
+                continue
+            payload = event.get('payload') or {}
             key = (str(payload.get('profile') or 'unknown'), str(payload.get('model') or '未记录型号'),
                    str(payload.get('provider') or '未记录供应商'))
             item = usage.setdefault(key, {'profile': key[0], 'model': key[1], 'provider': key[2], 'calls': 0,
-                                         'known_cost_usd': 0.0, 'unknown_cost_calls': 0})
+                                          'known_cost_usd': 0.0, 'unknown_cost_calls': 0})
             cost = valid_cost(payload.get('cost_usd'))
             item['calls'] += 1
-            accounted.add(row['run_id'])
+            accounted.add(rid)
             if cost is None:
                 item['unknown_cost_calls'] += 1
-                unknown_runs.add(row['run_id'])
+                unknown_runs.add(rid)
             elif math.isfinite(known + cost) and math.isfinite(item['known_cost_usd'] + cost):
                 item['known_cost_usd'] += cost
                 known += cost
             else:
                 item['unknown_cost_calls'] += 1
-                unknown_runs.add(row['run_id'])
-        latest = [dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 30')]
+                unknown_runs.add(rid)
     # Historical v2 totals remain visible without inventing missing call counts.
     legacy_known = 0.0
     for run in runs:
-        if run['id'] not in accounted:
+        if str(run['id']) not in accounted:
             artifacts = run.get('artifacts') or {}
             cost = valid_cost(artifacts.get('total_known_cost_usd', artifacts.get('known_cost_usd', artifacts.get('observed_cost_usd'))))
             if cost is not None and math.isfinite(known + cost):
                 known += cost
                 legacy_known += cost
             if artifacts.get('billing_incomplete'):
-                unknown_runs.add(run['id'])
+                unknown_runs.add(str(run['id']))
     recent = []
-    for event in latest:
-        run = by_id.get(event['run_id'], {})
-        event['payload'] = json.loads(event['payload'])
-        recent.append({**event, 'version': 1,
-                       'project_name': names.get(run.get('project_id'), '项目'),
-                       'run_title': (run.get('plan') or {}).get('title') or run.get('request', '')[:100]})
-    attention_states = {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed'}
+    for event in _recent_events(store, scoped_run_ids):
+        rid = str(event['run_id'])
+        run = run_by_id.get(rid, {})
+        recent.append({**event, 'project_name': names.get(run.get('project_id'), '项目'),
+                       'run_title': (run.get('plan') or {}).get('title') or str(run.get('request', ''))[:100]})
     attention = []
     for run in runs:
-        if run['status'] not in attention_states or len(attention) >= 10:
-            continue
-        triage = run.get('triage') or {}
-        reason = '；'.join(triage.get('questions') or triage.get('reasons') or [])
-        if run['status'] in ('needs_human', 'failed'):
-            with store.connect() as db:
-                row = db.execute("SELECT payload FROM events WHERE run_id=? AND type IN ('run.failed','run.recovered') ORDER BY id DESC LIMIT 1", (run['id'],)).fetchone()
-            if row:
-                reason = json.loads(row['payload']).get('message', reason)
-        attention.append({'id': run['id'], 'title': (run.get('plan') or {}).get('title') or run['request'][:100],
-            'status': run['status'], 'project_name': names.get(run['project_id'], '项目'),
-            'updated_at': run.get('updated_at', run.get('created_at')), 'reason': reason})
+        enriched = {**run, 'project_name': names.get(run.get('project_id'), '项目')}
+        item = _attention(enriched, scoped_events)
+        if item:
+            attention.append(item)
+    attention.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
+    attention_runs = len(attention)
+    attention = attention[:10]
     today = datetime.now(timezone.utc).date()
     activity = {str(today - timedelta(days=days)): {'date': str(today - timedelta(days=days)), 'runs': 0, 'delivered': 0}
                 for days in range(6, -1, -1)}
@@ -99,17 +229,38 @@ def overview(store):
         day = str(run.get('created_at', ''))[:10]
         if day in activity:
             activity[day]['runs'] += 1
-            activity[day]['delivered'] += int(run['status'] in delivered)
+            activity[day]['delivered'] += int(run.get('status') in delivered)
+
+    def engineering_for(pid, project_runs):
+        project_caps = scope_capabilities(pid, project_runs)
+        ids = {str(run['id']) for run in project_runs}
+        return engineering_overview(project_runs, project_caps, names,
+                                    {rid: scoped_events.get(rid, []) for rid in ids})
+
+    project_summaries = []
+    summary_projects = [project_by_id[project_id]] if project_id is not None else projects
+    for project in summary_projects:
+        project_runs = scope_runs(project['id'])
+        project_attention = sum(_attention({**run, 'project_name': project['name']}, all_events) is not None
+                                for run in project_runs)
+        project_summaries.append({
+            'id': project['id'], 'name': project['name'], 'repository': project.get('repository'),
+            'budget_usd': project.get('budget_usd'), 'run_count': len(project_runs),
+            'active_runs': sum(run.get('status') in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
+                               for run in project_runs),
+            'attention_runs': project_attention,
+            'engineering': engineering_for(project['id'], project_runs),
+        })
     return {
-        'projects': len(projects), 'runs': len(runs),
+        'project_id': project_id, 'project_summaries': project_summaries,
+        'projects': 1 if project_id is not None else len(projects), 'runs': len(runs),
         'active_runs': sum(r['status'] in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing') for r in runs),
-        'attention_runs': sum(r['status'] in attention_states for r in runs),
-        'delivered_runs': sum(r['status'] in delivered for r in runs),
+        'attention_runs': attention_runs,
+        'delivered_runs': sum(r.get('status') in delivered for r in runs),
         'known_cost_usd': known, 'unknown_cost_runs': len(unknown_runs),
-        'legacy_known_cost_usd': legacy_known,
-        'recent_events': recent, 'attention': attention, 'model_usage': list(usage.values()),
-        'activity': list(activity.values()), 'capabilities': len(capabilities),
-        'engineering': engineering_overview(runs, capabilities, names),
+        'legacy_known_cost_usd': legacy_known, 'recent_events': recent,
+        'attention': attention, 'model_usage': list(usage.values()), 'activity': list(activity.values()),
+        'capabilities': len(capabilities), 'engineering': engineering_for(project_id, runs),
     }
 
 
@@ -168,8 +319,11 @@ def router(store, service):
             raise HTTPException(422, str(exc)) from None
 
     @api.get('/overview')
-    def get_overview():
-        return overview(store)
+    def get_overview(project_id: str | None = None):
+        try:
+            return overview(store, project_id=project_id)
+        except KeyError:
+            raise HTTPException(404, '项目不存在') from None
 
     @api.post('/runs/{rid}/retry', status_code=201)
     def retry(rid: str, request: Request):
