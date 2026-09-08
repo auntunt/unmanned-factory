@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runEvidence, runGuidance, runView } from './run-guidance'
+import { canGenerateNextPlan, frozenPolicy, runEvidence, runGuidance, runView } from './run-guidance'
 import type { Run } from '../workspace/types'
 
 function run(overrides: Partial<Run> = {}): Run {
@@ -39,6 +39,14 @@ describe('runGuidance', () => {
     expect(runEvidence(run({ tasks: [{ id: 't1', attempts: [{ checks: [{ name: 'unit', outcome: 'failed', exit: 0 }] }] }] })).checks).toBe('failed')
     expect(runEvidence(run({ artifacts: { checks: [{ name: 'unit', outcome: 'passed' }], commit: 'abc' } })).checks).toBe('passed')
     expect(runEvidence(run({ artifacts: { checks: [{ name: 'unit', outcome: 'passed' }], commit: 'abc' } })).delivery).toBe(true)
+  })
+
+  it('uses the frozen policy for auto waiting guidance and excludes budget stops from new-plan input', () => {
+    const autonomous = Object.assign(run({ status: 'awaiting_approval', triage: { decision: 'human_approval', reasons: ['风险超出项目自动策略'], questions: [], risk: 'high' } }), { policy: { revision: 7, mode: 'autonomous' } })
+    expect(frozenPolicy(autonomous)).toEqual({ revision: 7, mode: 'autonomous' })
+    expect(runGuidance(autonomous).summary).toContain('风险超出项目自动策略')
+    expect(canGenerateNextPlan(autonomous, true)).toBe(true)
+    expect(canGenerateNextPlan(run({ artifacts: { needs_human: stoppedCost } }), true)).toBe(false)
   })
 
   it('creates stable run view links and uses an explicit fallback for old links', () => {

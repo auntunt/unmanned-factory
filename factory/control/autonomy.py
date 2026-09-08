@@ -10,7 +10,7 @@ from factory.control.store import Conflict, Store, now, scrub
 
 
 DEFAULT_POLICY = {
-    'mode': 'supervised', 'max_risk': 'medium', 'max_attempts': 2,
+    'mode': 'autonomous', 'max_risk': 'medium', 'max_attempts': 2,
     'auto_escalate': True, 'resume_on_restart': True,
 }
 

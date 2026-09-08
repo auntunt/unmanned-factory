@@ -152,6 +152,123 @@ class Service:
     def start_plan(self, rid):
         self._submit(self._plan, rid)
 
+    def _waiting_policy_check(self, run, project, policy):
+        """Re-triage a waiting plan and return ``(reason, decision)``."""
+        if policy.get('mode') != 'autonomous':
+            return '仅自主模式可以自动接续待处理计划', {
+                'decision': 'human_approval', 'questions': [],
+                'reasons': ['仅自主模式可以自动接续待处理计划'], 'risk': 'high',
+            }
+        plan = run.get('plan')
+        if not isinstance(plan, dict):
+            return '运行尚未形成可执行计划', {'decision': 'human_approval', 'questions': [],
+                                             'reasons': ['运行尚未形成可执行计划'], 'risk': 'high'}
+        source = run.get('source') if isinstance(run.get('source'), dict) else {}
+        issue_auto = (project.get('auto_issues', False) and source.get('type') == 'github'
+                      and source.get('trusted_label', False) and not source.get('previous_run_id'))
+        eligible = source.get('type') in ('web', 'capability', 'retry') or issue_auto
+        from factory.control.planning import triage as fresh_triage
+        decision = fresh_triage(plan, run.get('request', ''), auto_enabled=eligible)
+        prior_triage = run.get('triage') if isinstance(run.get('triage'), dict) else {}
+        questions = list(dict.fromkeys([
+            *(question for question in prior_triage.get('questions', []) if isinstance(question, str)),
+            *(question for question in plan.get('questions', []) if isinstance(question, str)),
+            *(question for question in decision.get('questions', []) if isinstance(question, str)),
+        ]))
+        decision['questions'] = questions
+        if source.get('previous_run_id'):
+            decision['decision'] = 'human_approval'
+            decision['reasons'].append('该 Issue 已有运行记录；当前计划需要人工核对前次变更')
+        decision = policy_decision(decision, policy, eligible=eligible)
+        if decision.get('questions'):
+            decision['decision'] = 'needs_clarification'
+            return '需求尚有待澄清问题', decision
+        if decision.get('decision') != 'auto_execute':
+            return (decision.get('reasons') or ['当前来源或风险范围不满足自主执行条件'])[-1], decision
+        configuration = run.get('runtime_configuration') or self.runtime_settings.get()
+        if len(plan.get('tasks') or []) > configuration['limits']['max_tasks']:
+            reason = '计划任务数超过运行限制，请重新规划'
+            decision['decision'], decision['reasons'] = 'human_approval', [reason]
+            return reason, decision
+        from factory.control.planning import profile_for
+        try:
+            for task in {profile_for(task) for task in plan.get('tasks') or []}:
+                self._check_profile(configuration['profiles'][task], task)
+        except (Conflict, KeyError) as exc:
+            reason = str(exc)
+            decision['decision'], decision['reasons'] = 'human_approval', [reason]
+            return reason, decision
+        usage = self._usage(run['id'])
+        if usage['known_cost_usd'] >= project['budget_usd']:
+            reason = '本次运行预算已用尽，停止新的执行调用'
+            decision['decision'], decision['reasons'] = 'human_approval', [reason]
+            return reason, decision
+        if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
+            reason = '已有模型调用费用未知，当前策略停止继续'
+            decision['decision'], decision['reasons'] = 'human_approval', [reason]
+            return reason, decision
+        from factory.control.codegraph import baseline_sha
+        try:
+            if run.get('context') and baseline_sha(project) != run['context']['commit_sha']:
+                reason = '工程基线已变化，请重新规划后继续'
+                decision['decision'], decision['reasons'] = 'human_approval', [reason]
+                return reason, decision
+        except Exception as exc:
+            reason = f'无法核对工程基线：{exc}'
+            decision['decision'], decision['reasons'] = 'human_approval', [reason]
+            return reason, decision
+        for task in plan.get('tasks') or []:
+            if not task.get('acceptance') or not task.get('paths') or not task.get('checks'):
+                reason = '任务缺少验收标准、修改范围或已配置检查'
+                decision['decision'], decision['reasons'] = 'human_approval', [reason]
+                return reason, decision
+            if any(check not in project.get('checks', {}) for check in task['checks']):
+                reason = '项目检查配置已变化，请重新规划'
+                decision['decision'], decision['reasons'] = 'human_approval', [reason]
+                return reason, decision
+        return None, decision
+
+    def _apply_waiting_policy_locked(self, project_id, policy, actor):
+        project = self.store.project(project_id)
+        continued, blocked = [], []
+        for snapshot in self.store.all_runs():
+            if snapshot.get('project_id') != project_id or snapshot.get('status') != 'awaiting_approval':
+                continue
+            rid = snapshot['id']
+            reason, decision = self._waiting_policy_check(snapshot, project, policy)
+            payload = {'policy_revision': policy['revision'], 'plan_revision': snapshot.get('revision'),
+                       'previous_policy_revision': (snapshot.get('policy') or {}).get('revision'),
+                       'previous_policy': snapshot.get('policy'),
+                       'actor': actor, 'decision': decision.get('decision')}
+            if reason:
+                payload['reason'] = reason
+            try:
+                adopted = self.store.update(rid, {'policy': policy, 'triage': decision},
+                                            expected=('awaiting_approval',), revision=snapshot['revision'],
+                                            event=('policy.adopted', payload))
+                if reason:
+                    blocked.append({'run_id': rid, 'reason': reason})
+                    continue
+                self.approve(rid, adopted['revision'], actor='project-policy')
+                continued.append(rid)
+            except Conflict as exc:
+                blocked.append({'run_id': rid, 'reason': str(exc)})
+        return {'continued_run_ids': continued, 'blocked': blocked}
+
+    def update_policy(self, project_id, values, revision, actor, *, apply_waiting=False):
+        """Persist a policy and optionally adopt it under one service lock."""
+        with self.lock:
+            policy = self.policies.update(project_id, values, revision, actor)
+            application = None
+            if apply_waiting and policy['mode'] == 'autonomous':
+                application = self._apply_waiting_policy_locked(project_id, policy, actor)
+            return policy, application
+
+    def apply_waiting_policy(self, project_id, policy, actor):
+        """Adopt an explicitly autonomous policy for waiting plans once, safely."""
+        with self.lock:
+            return self._apply_waiting_policy_locked(project_id, policy, actor)
+
     def _check_profile(self, profile, role):
         if not profile.get('model'):
             raise Conflict(f'请先在运行配置中设置 {role} 的模型，再重新规划')

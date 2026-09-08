@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from factory.control.app import create_app
+from factory.control.autonomy import PolicyStore
 from factory.control.providers import ProviderResult
 from factory.control.service import Service
 from factory.control.store import Store
@@ -102,10 +103,80 @@ def _autonomous(client, project, headers, *, risk="low", attempts=2):
     return response.json()
 
 
+def _supervised(client, project, headers, *, risk="medium"):
+    current = client.get(f"/api/v3/projects/{project['id']}/policy", headers=headers).json()
+    response = client.put(f"/api/v3/projects/{project['id']}/policy", json={
+        "revision": current["revision"], "mode": "supervised", "max_risk": risk,
+        "max_attempts": 2, "auto_escalate": True, "resume_on_restart": True,
+    }, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _new_run(client, project, headers, request="Update greeting automatically"):
     response = client.post("/api/v2/runs", json={"project_id": project["id"], "request": request}, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def test_projects_without_saved_policy_default_to_autonomous(control):
+    client, store, service, runner, project, headers = control
+    policy = client.get(f"/api/v3/projects/{project['id']}/policy", headers=headers).json()
+    assert policy["revision"] == 0 and policy["mode"] == "autonomous"
+    rid = _new_run(client, project, headers)
+    run = _wait(store, rid, {"ready_for_review", "needs_human"})
+    assert run["status"] == "ready_for_review", store.events(rid)
+    assert run["policy"]["revision"] == 0 and run["policy"]["mode"] == "autonomous"
+    assert "policy.authorized" in {event["type"] for event in store.events(rid)}
+
+
+def test_autonomous_policy_can_adopt_waiting_plan_once(control):
+    client, store, service, runner, project, headers = control
+    _supervised(client, project, headers)
+    rid = _new_run(client, project, headers, "Wait for explicit policy adoption")
+    waiting = _wait(store, rid, {"awaiting_approval", "needs_human"})
+    assert waiting["status"] == "awaiting_approval"
+    current = client.get(f"/api/v3/projects/{project['id']}/policy", headers=headers).json()
+    response = client.put(f"/api/v3/projects/{project['id']}/policy", json={
+        "revision": current["revision"], "mode": "autonomous", "max_risk": "medium",
+        "max_attempts": 2, "auto_escalate": True, "resume_on_restart": True,
+        "apply_waiting": True,
+    }, headers=headers)
+    assert response.status_code == 200, response.text
+    application = response.json()["application"]
+    assert application["continued_run_ids"] == [rid] and application["blocked"] == []
+    final = _wait(store, rid, {"ready_for_review", "needs_human"})
+    assert final["status"] == "ready_for_review", store.events(rid)
+    types = [event["type"] for event in store.events(rid)]
+    assert "policy.adopted" in types and "policy.authorized" in types
+    assert final["revision"] == waiting["revision"]
+    assert runner.planner_calls == 1 and runner.worker_calls == 1
+    again = service.apply_waiting_policy(project["id"], final["policy"], "owner")
+    assert again == {"continued_run_ids": [], "blocked": []}
+    versions = client.get(f"/api/v3/runs/{rid}/plans", headers=headers).json()["versions"]
+    assert versions[0]["revision"] == waiting["revision"]
+    assert versions[0]["plan"] == waiting["plan"]
+
+
+def test_autonomous_policy_reports_waiting_risk_block_without_dispatch(control):
+    client, store, service, runner, project, headers = control
+    _supervised(client, project, headers)
+    runner.plans = [_plan(risk="high")]
+    rid = _new_run(client, project, headers, "Wait for high risk policy adoption")
+    waiting = _wait(store, rid, {"awaiting_approval", "needs_human"})
+    assert waiting["status"] == "awaiting_approval"
+    current = client.get(f"/api/v3/projects/{project['id']}/policy", headers=headers).json()
+    response = client.put(f"/api/v3/projects/{project['id']}/policy", json={
+        "revision": current["revision"], "mode": "autonomous", "max_risk": "medium",
+        "max_attempts": 2, "auto_escalate": True, "resume_on_restart": True,
+        "apply_waiting": True,
+    }, headers=headers)
+    assert response.status_code == 200, response.text
+    application = response.json()["application"]
+    assert application["continued_run_ids"] == []
+    assert application["blocked"] and application["blocked"][0]["run_id"] == rid
+    assert store.get(rid)["status"] == "awaiting_approval"
+    assert runner.worker_calls == 0
 
 
 def test_autonomous_clear_request_runs_without_approval_and_freezes_policy_and_cost(control):
@@ -257,6 +328,7 @@ def test_overview_projects_are_isolated_and_paused_runs_keep_stage_evidence(cont
 
 def test_repeated_start_plan_has_one_durable_planner_dispatch(control):
     client, store, service, runner, project, headers = control
+    _supervised(client, project, headers)
 
     class BlockingPlanner(Runner):
         def __init__(self):
@@ -312,6 +384,10 @@ def test_recovery_resumes_received_and_preserves_writing_checkpoint(tmp_path):
     store.append(planning_billed["id"], "provider.started", {"profile": "planner", "provider": "codex", "model": "planner-model"})
     store.append(planning_billed["id"], "usage.recorded", {"profile": "planner", "provider": "codex", "model": "planner-model", "cost_usd": 0.1})
     store.update(queued["id"], {"status": "queued", "plan": _plan(), "tasks": [{**_task(), "status": "pending"}]})
+    PolicyStore(store).update(project["id"], {
+        "mode": "supervised", "max_risk": "medium", "max_attempts": 2,
+        "auto_escalate": True, "resume_on_restart": True,
+    }, 0, "test")
     service = Service(store, runner=runner, profiles=profiles)
     try:
         service.recover()
@@ -374,6 +450,23 @@ def test_retry_double_click_creates_one_linked_successor(control):
     second = service.retry(prior["id"], "owner")
     assert first["id"] == second["id"]
     assert len(store.all_runs()) == 2
-    successor = _wait(store, first["id"], {"awaiting_approval", "needs_human"})
+    successor = _wait(store, first["id"], {"ready_for_review", "needs_human"})
+    assert successor["status"] == "ready_for_review"
+    assert runner.worker_calls == 1
     assert successor["previous_run_id"] == prior["id"]
     assert len([event for event in store.events(prior["id"]) if event["type"] == "run.retry_linked"]) == 1
+
+
+def test_waiting_adoption_rechecks_source_and_retained_questions(control):
+    client, store, service, runner, project, headers = control
+    run = {"id": "not-dispatched", "source": {"type": "github", "trusted_label": False},
+           "plan": _plan(), "triage": {"decision": "auto_execute", "questions": []},
+           "request": "Update greeting"}
+    policy = service.policies.get(project["id"])
+    reason, decision = service._waiting_policy_check(run, project, policy)
+    assert reason and decision["decision"] != "auto_execute"
+    run["source"] = {"type": "web"}
+    run["triage"]["questions"] = ["Which greeting?"]
+    reason, decision = service._waiting_policy_check(run, project, policy)
+    assert reason and decision["questions"] == ["Which greeting?"]
+    assert runner.planner_calls == runner.worker_calls == 0

@@ -19,3 +19,9 @@
 .wb-run-guidance strong { color: #365147; }
 .wb-run-journey-stages .is-evidenced .wb-run-step-number { border-color: #adcfc0; background: #f3faf6; color: #176749; }
 .wb-run-journey-stages .is-evidenced strong { color: #365147; }
+.wb-policy-snapshot { display: grid; gap: 7px; margin: 10px 0 0; border: 1px solid #d7e4de; border-radius: 8px; background: #f8fcfa; padding: 10px; }
+.wb-policy-snapshot strong { font-size: 13px; }.wb-policy-snapshot p { margin: 0; color: #53665d; font-size: 12px; line-height: 1.5; }
+.wb-plan-versions { margin-top: 16px; border-top: 1px solid #e3ebe7; padding-top: 13px; }.wb-plan-versions > summary, .wb-plan-version > summary { cursor: pointer; color: #0b5f59; font-size: 13px; font-weight: 650; }.wb-plan-versions > p { color: #596b65; font-size: 12px; line-height: 1.5; }.wb-plan-version { margin-top: 9px; border: 1px solid #e0e8e3; border-radius: 7px; padding: 8px 10px; }.wb-plan-version summary { display: flex; justify-content: space-between; gap: 8px; }.wb-plan-version summary span { color: #65736e; font-size: 11px; font-weight: 400; }.wb-plan-version p, .wb-plan-version li { color: #53665d; font-size: 12px; line-height: 1.55; }.wb-plan-version ul { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 18px; }.wb-plan-version li { display: grid; gap: 2px; }.wb-plan-version li strong { color: #24352d; }
+.wb-policy-manual-approval { margin-top: 4px; }
+.wb-policy-manual-approval summary { cursor: pointer; color: #0b5f59; font-size: 13px; font-weight: 650; }
+.wb-policy-manual-approval p { margin: 7px 0; }

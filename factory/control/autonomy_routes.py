@@ -24,6 +24,7 @@ class PolicyBody(BaseModel):
     max_attempts: int = Field(ge=1, le=3, strict=True)
     auto_escalate: bool = Field(strict=True)
     resume_on_restart: bool = Field(strict=True)
+    apply_waiting: bool = Field(default=False, strict=True)
 
 
 _OVERVIEW_EVENT_TYPES = (
@@ -310,8 +311,18 @@ def router(store, service):
     @api.put('/projects/{pid}/policy')
     def update_policy(pid: str, body: PolicyBody, request: Request):
         try:
-            return policies.update(pid, body.model_dump(exclude={'revision'}), body.revision,
-                                   request.state.user['username'])
+            policy, application = service.update_policy(
+                pid, body.model_dump(exclude={'revision', 'apply_waiting'}), body.revision,
+                request.state.user['username'], apply_waiting=body.apply_waiting,
+            )
+            if body.apply_waiting and body.mode != 'autonomous':
+                application = {
+                    'continued_run_ids': [],
+                    'blocked': [{'run_id': '*', 'reason': '仅自主模式会接续待处理计划'}],
+                }
+            if body.apply_waiting:
+                return {**policy, 'application': application}
+            return policy
         except ValueError as exc:
             from factory.control.store import Conflict
             if isinstance(exc, Conflict):
@@ -324,6 +335,27 @@ def router(store, service):
             return overview(store, project_id=project_id)
         except KeyError:
             raise HTTPException(404, '项目不存在') from None
+
+    @api.get('/runs/{rid}/plans')
+    def plan_versions(rid: str):
+        store.get(rid)
+        with store.connect() as db:
+            rows = db.execute(
+                "SELECT at,payload FROM events WHERE run_id=? AND type='plan.created' "
+                "ORDER BY id DESC LIMIT 100", (rid,),
+            ).fetchall()
+        versions = []
+        for row in rows:
+            payload = json.loads(row['payload'])
+            versions.append({
+                'revision': payload.get('revision'),
+                'summary': payload.get('summary'),
+                'plan': payload.get('plan'),
+                'at': row['at'],
+            })
+        versions.sort(key=lambda item: item.get('revision') if isinstance(item.get('revision'), int) else -1,
+                      reverse=True)
+        return {'versions': versions}
 
     @api.post('/runs/{rid}/retry', status_code=201)
     def retry(rid: str, request: Request):

@@ -17,6 +17,11 @@ export interface RunGuidance {
   rawEvidence?: string
 }
 
+export interface FrozenRunPolicy {
+  revision: number
+  mode: 'supervised' | 'autonomous'
+}
+
 export interface RunEvidence {
   requirements: boolean
   plan: boolean
@@ -34,6 +39,17 @@ function textArtifact(run: Run, key: string): string | undefined {
   const value = run.artifacts?.[key]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
+export function frozenPolicy(run: Run): FrozenRunPolicy | null {
+  const policy = (run as Run & { policy?: unknown }).policy
+  if (!record(policy) || (policy.mode !== 'supervised' && policy.mode !== 'autonomous') || typeof policy.revision !== 'number') return null
+  return { mode: policy.mode, revision: policy.revision }
+}
+
+export function canGenerateNextPlan(run: Run, canActOnRun: boolean): boolean {
+  const guidance = runGuidance(run)
+  return canActOnRun && ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status) && guidance.kind !== 'budget' && guidance.kind !== 'billing'
+}
+
 function runError(run: Run): string | undefined {
   const value = (run as Run & { error?: unknown }).error
   if (typeof value === 'string' && value.trim()) return value.trim()
@@ -86,7 +102,14 @@ export function runGuidance(run: Run): RunGuidance {
     const count = questions.length
     return result(run, { kind: 'requirements', label: count ? '需要补充需求' : '需要补充运行边界', summary: count ? `请回答 ${count} 个已记录问题，系统会据此重新规划。` : '当前没有可展示的具体问题；请补充目标、范围或验收标准后重新规划。', detail: questions[0], view: 'requirements', stage: 'intake', primaryLabel: '查看需求与补充', rawEvidence: stopReason })
   }
-  if (run.status === 'awaiting_approval') return result(run, { kind: 'approval', label: '等待批准计划', summary: '计划和任务范围已经形成；批准当前版本后才能进入执行。', view: 'plan', stage: 'plan', primaryLabel: '查看计划并批准', rawEvidence: stopReason })
+  if (run.status === 'awaiting_approval') {
+    const policy = frozenPolicy(run)
+    if (policy?.mode === 'autonomous') {
+      const reasons = (run.triage?.reasons ?? []).filter((reason) => typeof reason === 'string' && reason.trim())
+      return result(run, { kind: 'approval', label: '自动策略未覆盖本次计划', summary: reasons.length ? reasons.join('；') : `冻结的自主策略 v${policy.revision} 没有授权本次计划，系统没有自动开始。`, detail: reasons[0], view: 'plan', stage: 'plan', primaryLabel: '查看计划与判断依据', rawEvidence: stopReason })
+    }
+    return result(run, { kind: 'approval', label: '监督模式等待批准', summary: policy ? `本次运行冻结为监督模式 v${policy.revision}；批准当前版本后才能进入执行。` : '本次运行未返回策略冻结快照；批准当前版本后才能进入执行。', view: 'plan', stage: 'plan', primaryLabel: '查看计划并批准', rawEvidence: stopReason })
+  }
   if (run.status === 'failed') return result(run, { kind: 'failure', label: '运行失败', summary: failure ? '运行记录了失败原因。请先查看失败和检查证据，再决定是否创建重试。' : '本次执行未形成可继续的结果。请先查看失败和检查证据，再决定是否创建重试。', detail: failure, view: 'verification', stage: 'verify', primaryLabel: '查看失败证据', rawEvidence: failure })
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
   if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '运行没有记录可继续的自动操作；请查看原始停止原因和执行证据，按原因处理后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看停止原因', rawEvidence: stopReason })

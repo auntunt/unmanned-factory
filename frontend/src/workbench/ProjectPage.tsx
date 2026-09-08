@@ -9,6 +9,7 @@ import ChecksEditor, { validateChecks, type ChecksMap } from './ChecksEditor'
 import { EmptyState, ErrorNotice, formatDate, PageHeader } from './ui'
 import type { PageProps } from './ui'
 import ProjectAutomation from './ProjectAutomation'
+import ProjectMode from './ProjectMode'
 import type { ProjectRecord } from './ProjectsPage'
 import type { OverviewData } from './v3-types'
 import ProjectLifecycle from './ProjectLifecycle'
@@ -110,10 +111,11 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
     try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim() } }); if (!controller.signal.aborted) { setValue(''); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
     catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
-  return <section className="wb-card wb-requirement-card"><div className="wb-card-head"><div><span className="wb-eyebrow">需求入口</span><h2>告诉系统要完成什么</h2><p>先描述目标、范围和验收方式，系统会生成可确认的计划。</p></div></div><form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">需求描述<textarea id="project-requirement" required minLength={5} maxLength={50000} rows={6} value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：为订单服务增加批量取消接口，保留现有单笔取消行为，并补充回归检查。" /></label>{error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || value.trim().length < 5}>{busy ? '提交中…' : '提交需求 →'}</button></div></form></section>
+  return <section className="wb-card wb-requirement-card"><div className="wb-card-head"><div><span className="wb-eyebrow">需求入口</span><h2>告诉系统要完成什么</h2><p>先描述目标、范围和验收方式，系统会按项目模式自动推进，遇到缺失信息时再向你提问。</p></div></div><form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">需求描述<textarea id="project-requirement" required minLength={5} maxLength={50000} rows={6} value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：为订单服务增加批量取消接口，保留现有单笔取消行为，并补充回归检查。" /></label>{error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || value.trim().length < 5}>{busy ? '提交中…' : '提交需求 →'}</button></div></form></section>
 }
 
 export default function ProjectPage({ csrfToken, onUnauthorized, user }: PageProps) {
+  const [policyRefresh, setPolicyRefresh] = useState(0)
   const isAdmin = user?.role !== 'member'
   const { projectId } = useParams<{ projectId: string }>()
   const [search, setSearch] = useSearchParams()
@@ -183,7 +185,8 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   return <div className="wb-page pw-project-page">
     <div className="pw-context"><Link to="/">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
     <PageHeader title={project.name} description={`${project.repository} · ${project.base_branch}`} actions={isAdmin ? <Link className="wb-button wb-button-secondary pw-budget-link" to={`/projects/${encodedId}?tab=settings#project-budget`}><span>单次运行预算</span><strong>${(project.budget_usd ?? 0).toFixed(2)}</strong><span>调整 →</span></Link> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
-    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '项目知识'], ['automation', '自主策略与能力'], ['settings', '预算与设置']] as const : [['overview', '工程闭环']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '项目知识'], ['automation', 'Auto 与能力'], ['settings', '预算与设置']] as const : [['overview', '工程闭环']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
       {overview && <section className="ov3-summary" aria-label="本项目进展"><div><span>已接收需求</span><strong>{overview.runs}</strong><small>只统计本项目</small></div><div><span>进行中</span><strong>{overview.active_runs}</strong><small>规划、执行或验证</small></div><div className={overview.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{overview.attention_runs}</strong><small>需要处理的具体原因见下方</small></div><div><span>已知累计费用</span><strong>${overview.known_cost_usd.toFixed(2)}</strong><small>{overview.unknown_cost_runs} 次费用未完整返回</small></div></section>}
@@ -201,7 +204,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
       </section>
     </>}
     {tab === 'agent' && isAdmin && <section className="wb-card wb-agent-card"><div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目知识</span><h2>维护这个项目的知识和代码上下文</h2><p>知识与索引属于当前项目。跨项目复用通过明确的能力绑定完成。</p></div></div><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></section>}
-    {tab === 'automation' && isAdmin && <ProjectAutomation projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
+    {tab === 'automation' && isAdmin && <ProjectAutomation key={String(project.id)} projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onPolicySaved={() => setPolicyRefresh((value) => value + 1)} />}
     {tab === 'settings' && isAdmin && <EditSettings project={project} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onSaved={setProject} />}
   </div>
 }
