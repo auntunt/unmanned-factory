@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from factory.control.auth import AuthError, AuthStore
 from factory.control.github import GitHubDelivery, REPOSITORY, verify_signature
 from factory.control.service import Service
-from factory.control.store import Conflict, Store, scrub
+from factory.control.store import Conflict, Store, now, scrub
 
 COOKIE = 'factory_session'
 
@@ -40,6 +41,16 @@ class Project(Body):
     repository: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')
     workspace: str = Field(min_length=1, max_length=4096)
     base_branch: str = Field(default='main', min_length=1, max_length=200)
+    checks: dict[str, list[str]] = Field(default_factory=dict)
+    auto_issues: bool = False
+    auto_publish: bool = False
+    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+
+
+class ProjectUpdate(Body):
+    revision: int = Field(ge=1, strict=True)
+    name: str = Field(min_length=1, max_length=120)
+    base_branch: str = Field(min_length=1, max_length=200)
     checks: dict[str, list[str]] = Field(default_factory=dict)
     auto_issues: bool = False
     auto_publish: bool = False
@@ -75,6 +86,12 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     token = os.getenv('FACTORY_GITHUB_TOKEN', '')
     svc = service or Service(store, publisher=GitHubDelivery(token) if token else None,
                             timeout_s=int(os.getenv('FACTORY_TASK_TIMEOUT', '600')))
+    # Runtime settings are persisted in the control store. Root may initialize
+    # this on Service; keeping the fallback here preserves compatibility with
+    # injected test services and older callers.
+    from factory.control.runtime import RuntimeSettings
+    if not hasattr(svc, 'runtime_settings'):
+        svc.runtime_settings = RuntimeSettings(store)
     secret = webhook_secret if webhook_secret is not None else os.getenv('FACTORY_WEBHOOK_SECRET', '')
     static = Path(static_dir or Path(__file__).resolve().parents[2] / 'frontend' / 'dist').resolve()
 
@@ -87,6 +104,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                   openapi_url=None, lifespan=lifespan)
     app.state.auth, app.state.service, app.state.store = auth, svc, store
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed_origin.hostname, '127.0.0.1', 'localhost'])
+    from factory.control.runtime_routes import router as runtime_router
+    app.include_router(runtime_router(store, svc, allowed_root, static))
 
     @app.exception_handler(AuthError)
     async def auth_error(req, exc):
@@ -162,21 +181,131 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             raise HTTPException(400, '仓库必须位于 FACTORY_WORKSPACE_ROOT 的独立子目录')
         if not root.is_dir():
             raise HTTPException(400, '服务器上的仓库目录不存在')
-        if len(body.checks) > 20:
-            raise HTTPException(400, '最多配置 20 条检查')
-        for name, argv in body.checks.items():
-            if not re.fullmatch(r'[A-Za-z0-9_-]{1,60}', name) or not argv or len(argv) > 100 or any(not a or len(a) > 4096 or '\x00' in a for a in argv):
-                raise HTTPException(400, '检查必须为名称到非空命令参数数组的映射')
-        for args in (['check-ref-format', '--branch', body.base_branch], ['rev-parse', '--show-toplevel'],
-                     ['rev-parse', '--verify', f'refs/heads/{body.base_branch}']):
-            result = subprocess.run(['git', *args], cwd=root, capture_output=True, text=True, timeout=15)
-            if result.returncode or (args[0] == 'rev-parse' and args[1] == '--show-toplevel' and Path(result.stdout.strip()).resolve() != root):
-                raise HTTPException(400, '必须提供 Git 仓库根目录和存在的本地基线分支')
+        validate_check_definitions(body.checks)
+        validate_project_git(root, body.base_branch)
         return store.add_project({**body.model_dump(), 'workspace': str(root)})
+
+    def validate_check_definitions(checks):
+        if len(checks) > 20:
+            raise HTTPException(400, '最多配置 20 条检查')
+        for name, argv in checks.items():
+            if (not re.fullmatch(r'[A-Za-z0-9_-]{1,60}', name) or not argv or len(argv) > 100
+                    or any(not isinstance(a, str) or not a or len(a) > 4096 or '\x00' in a for a in argv)):
+                raise HTTPException(400, '检查必须为名称到非空命令参数数组的映射')
+
+    def validate_project_git(root, base_branch):
+        for args in (['check-ref-format', '--branch', base_branch], ['rev-parse', '--show-toplevel'],
+                     ['rev-parse', '--verify', f'refs/heads/{base_branch}']):
+            try:
+                result = subprocess.run(['git', *args], cwd=root, capture_output=True,
+                                        text=True, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                raise HTTPException(400, '无法验证项目 Git 仓库或基线分支') from None
+            if result.returncode or (args[0] == 'rev-parse' and args[1] == '--show-toplevel'
+                                     and Path(result.stdout.strip()).resolve() != root):
+                raise HTTPException(400, '必须提供 Git 仓库根目录和存在的本地基线分支')
+
+    @app.put('/api/v2/projects/{pid}')
+    def update_project(pid: str, body: ProjectUpdate, request: Request):
+        project = store.project(pid)
+        root = Path(project['workspace']).expanduser().resolve()
+        if not root.is_relative_to(allowed_root) or root == allowed_root:
+            raise HTTPException(400, '仓库必须位于 FACTORY_WORKSPACE_ROOT 的独立子目录')
+        validate_check_definitions(body.checks)
+        validate_project_git(root, body.base_branch)
+        try:
+            return store.update_project(pid, body.model_dump(exclude={'revision'}), body.revision,
+                                        request.state.user['username'])
+        except Conflict:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.get('/api/v2/projects/{pid}/readiness')
+    def project_readiness(pid: str):
+        project = store.project(pid)
+        root = Path(project['workspace']).expanduser().resolve()
+        checks = []
+
+        def add_check(identifier, label, status, message):
+            checks.append({'id': identifier, 'label': label, 'status': status, 'message': message})
+
+        if not root.is_relative_to(allowed_root) or root == allowed_root:
+            add_check('workspace', '工作区', 'blocked', '工作区不在 FACTORY_WORKSPACE_ROOT 内')
+            add_check('repository', 'Git 仓库', 'blocked', '无法检查 Git 仓库')
+            add_check('base_branch', '基线分支', 'blocked', '工作区不可用')
+            add_check('head_matches_base', 'HEAD 与基线', 'blocked', '工作区不可用')
+            add_check('clean_head', '工作区洁净', 'blocked', '工作区不可用')
+        elif not root.is_dir():
+            add_check('workspace', '工作区', 'blocked', '工作区目录不存在')
+            add_check('repository', 'Git 仓库', 'blocked', '无法检查 Git 仓库')
+            add_check('base_branch', '基线分支', 'blocked', '工作区不可用')
+            add_check('head_matches_base', 'HEAD 与基线', 'blocked', '工作区不可用')
+            add_check('clean_head', '工作区洁净', 'blocked', '工作区不可用')
+        else:
+            def git(args):
+                try:
+                    return subprocess.run(['git', *args], cwd=root, capture_output=True,
+                                          text=True, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    return None
+
+            add_check('workspace', '工作区', 'ok', '工作区目录存在')
+            repo = git(['rev-parse', '--show-toplevel'])
+            if repo is None or repo.returncode != 0 or Path(repo.stdout.strip()).resolve() != root:
+                add_check('repository', 'Git 仓库', 'blocked', '路径不是可用的 Git 仓库根目录')
+            else:
+                add_check('repository', 'Git 仓库', 'ok', 'Git 仓库根目录有效')
+            branch = git(['rev-parse', '--verify', f"refs/heads/{project['base_branch']}"])
+            if branch is None or branch.returncode != 0:
+                add_check('base_branch', '基线分支', 'blocked', '本地基线分支不存在')
+            else:
+                add_check('base_branch', '基线分支', 'ok', '本地基线分支存在')
+            head = git(['rev-parse', 'HEAD'])
+            if (branch is None or branch.returncode != 0 or head is None or head.returncode != 0):
+                add_check('head_matches_base', 'HEAD 与基线', 'blocked', '无法比较当前 HEAD 与基线')
+            elif head.stdout.strip() != branch.stdout.strip():
+                add_check('head_matches_base', 'HEAD 与基线', 'blocked', '当前 HEAD 不等于配置的本地基线')
+            else:
+                add_check('head_matches_base', 'HEAD 与基线', 'ok', '当前 HEAD 等于配置的本地基线')
+            clean = git(['status', '--porcelain=v1', '--untracked-files=all'])
+            if clean is None or clean.returncode != 0:
+                add_check('clean_head', '工作区洁净', 'blocked', '无法检查工作区状态')
+            elif clean.stdout:
+                add_check('clean_head', '工作区洁净', 'blocked', '工作区有未提交或未跟踪改动')
+            else:
+                add_check('clean_head', '工作区洁净', 'ok', '工作区干净')
+
+        validate_error = None
+        try:
+            validate_check_definitions(project.get('checks') or {})
+        except HTTPException as exc:
+            validate_error = str(exc.detail)
+        if validate_error:
+            add_check('checks', '检查定义', 'blocked', validate_error)
+        elif not project.get('checks'):
+            add_check('checks', '检查定义', 'blocked', '尚未配置可信检查')
+        else:
+            for name, argv in project['checks'].items():
+                executable = argv[0] if argv else ''
+                if Path(executable).is_absolute():
+                    path = Path(executable)
+                    found = path.is_file() and os.access(path, os.X_OK)
+                elif '/' in executable or '\\' in executable:
+                    # Checks execute with cwd=root; resolve relative paths the
+                    # same way without shell-style ~ expansion.
+                    path = (root / executable).resolve()
+                    found = path.is_file() and os.access(path, os.X_OK)
+                else:
+                    found = bool(shutil.which(executable))
+                add_check(f'check:{name}', f'检查 {name}', 'ok' if found else 'blocked',
+                          '检查可执行文件存在' if found else f'找不到检查可执行文件：{executable}')
+        return {'project_id': pid, 'ready': all(item['status'] == 'ok' for item in checks),
+                'checks': checks, 'checked_at': now()}
 
     @app.get('/api/v2/providers')
     def providers():
-        return {'providers': svc.runner.available(), 'profiles': svc.profiles}
+        return {'providers': svc.runner.available(), 'profiles': svc.runtime_settings.get()['profiles']}
 
     @app.get('/api/v2/runs')
     def runs():
@@ -237,6 +366,9 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         for message in store.conversation(rid):
             parts.append(f"## {'用户' if message['role'] == 'user' else '系统'} · {message['at']}\n\n{message['content']}\n\n事件：{message['event_ids']}")
         parts.append('## 交付证据\n\n```json\n' + json.dumps(run['artifacts'], ensure_ascii=False, indent=2) + '\n```')
+        if run.get('runtime_configuration'):
+            parts.append('## 本次冻结的执行配置\n\n```json\n' +
+                         json.dumps(run['runtime_configuration'], ensure_ascii=False, indent=2) + '\n```')
         if run.get('context'):
             parts.append('## 本次冻结的项目上下文\n\n```json\n' + json.dumps(run['context'], ensure_ascii=False, indent=2) + '\n```')
         return PlainTextResponse('\n\n'.join(parts), media_type='text/markdown',

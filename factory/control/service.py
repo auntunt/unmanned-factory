@@ -23,10 +23,14 @@ class Service:
                  execute=None, timeout_s=600, max_parallel=2):
         from factory.control.providers import SDKRunner
         from factory.control.execution import execute_plan
+        from factory.control.runtime import RuntimeSettings
         self.store = store
         self.runner = runner or SDKRunner()
         self.publisher = publisher
-        self.profiles = profiles or configured_profiles()
+        self.runtime_settings = RuntimeSettings(store, profiles=profiles or configured_profiles(),
+            limits={'timeout_s': timeout_s, 'max_parallel': max_parallel})
+        self.profiles = self.runtime_settings.get()['profiles']
+        self.check_runtime = runner is None or isinstance(runner, SDKRunner)
         self.execute = execute or execute_plan
         self.timeout_s = timeout_s
         self.max_parallel = max_parallel
@@ -46,6 +50,15 @@ class Service:
 
     def start_plan(self, rid):
         self._submit(self._plan, rid)
+
+    def _check_profile(self, profile, role):
+        if not profile.get('model'):
+            raise Conflict(f'请先在运行配置中设置 {role} 的模型，再重新规划')
+        if self.check_runtime:
+            from factory.control.runtime import profile_blockers
+            blockers = profile_blockers(profile, role)
+            if blockers:
+                raise Conflict('；'.join(blockers))
 
     def _emit(self, rid, kind, payload, task_id=None):
         self.store.append(rid, kind, payload, task_id)
@@ -80,9 +93,16 @@ class Service:
             run = self.store.update(rid, {'status': 'planning'}, expected=('received',),
                                     event=('run.planning', {'message': '正在梳理需求与验收条件'}))
             project = self.store.project(run['project_id'])
-            profile = self.profiles['planner']
-            if not profile.get('model'):
-                raise ValueError('请配置 FACTORY_PLANNER_PROVIDER 和 FACTORY_PLANNER_MODEL，再补充需求重试')
+            configuration = self.runtime_settings.get()
+            profile = configuration['profiles']['planner']
+            self.store.update(rid, {'runtime_configuration': configuration}, expected=('planning',),
+                event=('runtime.configuration_frozen', configuration))
+            try:
+                self._check_profile(profile, 'planner')
+            except Conflict as exc:
+                # A configuration blocker is a recoverable failure, not a
+                # cancellation race. Keep it visible with a next action.
+                raise ValueError(str(exc)) from None
             from factory.control.context import assemble_context, verify_planning_checkout
             context = assemble_context(self.store, project, run['request'], run['history'])
             verify_planning_checkout(project, context['commit_sha'])
@@ -91,10 +111,12 @@ class Service:
             self._emit(rid, 'provider.started', {'profile': 'planner', **profile}, 'planner')
             result = self.runner.run(ProviderRequest(provider=profile['provider'], model=profile['model'],
                 prompt=build_prompt(run['request'], project, run['history'], context=context), workspace=project['workspace'],
-                timeout_s=self.timeout_s, read_only=True),
+                timeout_s=configuration['limits']['timeout_s'], read_only=True),
                 lambda kind, payload: self._emit(rid, kind, payload, 'planner'), self.cancels[rid])
             verify_planning_checkout(project, context['commit_sha'])
             plan = parse_plan(result.text, project)
+            if len(plan['tasks']) > configuration['limits']['max_tasks']:
+                raise ValueError('计划任务数超过运行配置限制；请缩小需求或调整限制后重新规划')
             source = run['source']
             auto = (project.get('auto_issues', False) and source.get('type') == 'github'
                     and source.get('trusted_label', False) and not source.get('previous_run_id'))
@@ -118,7 +140,8 @@ class Service:
         with self.lock:
             run = self.store.get(rid)
             updated = self.store.update(rid, {'status': 'received', 'plan': None, 'triage': None,
-                'history': [*run['history'], answer], 'tasks': [], 'context': None},
+                'history': [*run['history'], answer], 'tasks': [], 'context': None,
+                'runtime_configuration': None},
                 expected=('needs_clarification', 'awaiting_approval', 'needs_human'),
                 event=('user.message', {'text': answer, 'actor': actor, 'revision': run['revision']}))
             try:
@@ -134,6 +157,12 @@ class Service:
             if not run.get('plan') or run['plan'].get('questions'):
                 raise Conflict('需求尚有待澄清问题')
             project = self.store.project(run['project_id'])
+            configuration = run.get('runtime_configuration') or self.runtime_settings.get()
+            if len(run['plan']['tasks']) > configuration['limits']['max_tasks']:
+                raise Conflict('计划任务数超过运行限制，请重新规划')
+            from factory.control.planning import profile_for
+            for role in {profile_for(task) for task in run['plan']['tasks']}:
+                self._check_profile(configuration['profiles'][role], role)
             from factory.control.codegraph import baseline_sha
             if run.get('context') and baseline_sha(project) != run['context']['commit_sha']:
                 raise Conflict('工程基线已变化，请补充说明并重新规划，不能批准旧版本代码上的计划')
@@ -142,8 +171,10 @@ class Service:
                     raise Conflict('任务缺少验收标准、修改范围或已配置检查')
                 if any(c not in project['checks'] for c in task['checks']):
                     raise Conflict('检查配置已变化，请重新规划')
-            updated = self.store.update(rid, {'status': 'queued'}, expected=('awaiting_approval',),
-                revision=revision, event=('human.approved', {'actor': actor, 'revision': revision}))
+            updated = self.store.update(rid, {'status': 'queued', 'runtime_configuration': configuration},
+                expected=('awaiting_approval',), revision=revision,
+                event=('human.approved', {'actor': actor, 'revision': revision,
+                                        'configuration_revision': configuration['revision']}))
             try:
                 self._submit(self._run, rid)
             except Exception as exc:
@@ -156,6 +187,10 @@ class Service:
             run = self.store.update(rid, {'status': 'running'}, expected=('queued',),
                                     event=('run.started', {}))
             project = self.store.project(run['project_id'])
+            configuration = run.get('runtime_configuration') or self.runtime_settings.get()
+            limits = configuration['limits']
+            project = {**project, 'max_tasks': limits['max_tasks'],
+                       'unknown_cost_policy': limits['unknown_cost_policy']}
             if run.get('context'):
                 project = {**project, 'expected_base_sha': run['context']['commit_sha']}
             from factory.control.context import context_prompt
@@ -163,9 +198,9 @@ class Service:
                 {**task, 'prompt': task['prompt'] + context_prompt(run.get('context'))}
                 for task in run['plan']['tasks']]}
             artifacts = self.execute(run_id=rid, plan=plan, project=project,
-                profiles=self.profiles, runner=self.runner,
+                profiles=configuration['profiles'], runner=self.runner,
                 emit=lambda kind, payload, task_id=None: self._emit(rid, kind, payload, task_id),
-                cancel=self.cancels[rid], max_parallel=self.max_parallel, timeout_s=self.timeout_s)
+                cancel=self.cancels[rid], max_parallel=limits['max_parallel'], timeout_s=limits['timeout_s'])
             tasks = artifacts.get('tasks') or [{**t, 'status': 'completed'} for t in run['tasks']]
             self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts, 'tasks': tasks},
                 expected=('running', 'verifying'), event=('run.verified', artifacts))
@@ -194,7 +229,8 @@ class Service:
         with self.lock:
             self.cancels.setdefault(rid, threading.Event()).set()
             return self.store.update(rid, {'status': 'cancelled'},
-                expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval', 'needs_clarification'),
+                expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval',
+                          'needs_clarification', 'needs_human', 'ready_for_review'),
                 event=('run.cancelled', {'message': '用户取消执行，保留日志和工作区', 'actor': actor}))
 
     def sync_merge(self, rid):

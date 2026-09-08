@@ -5,11 +5,13 @@
 新增带登录的工程工作台：需求梳理与任务图、分档模型调度、Claude/Codex/DSH 适配、独立工作区验证、可追溯问答、GitHub Issue 分流和 PR 发布。现有 CLI 与历史记录保留。
 
 - [设计规划与同类项目分析](docs/rewrite/PLAN.zh-CN.md)
+- [全新工作台与运行环境](docs/rewrite/WORKBENCH.zh-CN.md)
 - [运行说明](docs/rewrite/RUNBOOK.zh-CN.md)
+- [现有服务器更新与 Hermes 交接](deploy/HERMES-HANDOFF.md)
 - [Project Agent 实践说明](docs/rewrite/PROJECT-AGENT.zh-CN.md)
 - [已完成范围、验证结果与后续里程碑](docs/rewrite/STATUS.md)
 
-新入口为 `uv run factory-web serve`；先按运行说明配置模型、构建前端并创建账号。下方是原有引擎文档，旧 `factory api` 入口不应直接暴露公网。
+新入口为 `.venv/bin/factory-web serve`；先用 `uv sync --frozen --all-extras` 安装 SDK 与配套运行时，按运行说明构建前端并创建账号。运行配置支持保存模型分工、连接测试和执行限制。维护此虚拟环境时持续保留 extras，避免普通 `uv sync` / `uv run` 将其卸载。下方是原有引擎文档，旧 `factory api` 入口不应直接暴露公网。
 
 一个调度 + 审计层：把任务派给 coding agent，用四道监工判收，全程留可回查的证据。
 
@@ -73,7 +75,7 @@ launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败�
 
 ```
 uv run factory api --db audit.db --queue ~/.factory/q     # 后端，含 SSE
-cd frontend && npm run dev                                 # 前端，/ 是控制室，/admin 是原看板
+cd frontend && npm run dev                                 # 前端：新版工程工作台
 ```
 
 浏览器开 `http://localhost:5173/` 看 live；开

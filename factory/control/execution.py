@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import math
 import os
 import re
 import signal
@@ -17,6 +18,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -66,6 +70,65 @@ class EventError(ExecutionError):
     """The durable event sink rejected an execution evidence event."""
 
 
+@dataclass
+class _ExecutionBudget:
+    deadline: float
+    timeout_s: float
+    cancel: threading.Event
+    artifacts: dict | None = None
+
+
+_execution_budget: ContextVar[_ExecutionBudget | None] = ContextVar('factory_execution_budget', default=None)
+
+
+def _remaining_budget() -> float | None:
+    budget = _execution_budget.get()
+    if budget is None:
+        return None
+    left = budget.deadline - time.monotonic()
+    if left <= 0:
+        budget.cancel.set()
+        raise ExecutionError(f'execution timeout after {budget.timeout_s}s', artifacts=budget.artifacts)
+    return left
+
+
+def _deadline_checked(fn):
+    """Checkpoint local inspection helpers whose syscalls are not cancellable."""
+    @wraps(fn)
+    def checked(*args, **kwargs):
+        _remaining_budget()
+        result = fn(*args, **kwargs)
+        _remaining_budget()
+        return result
+    return checked
+
+
+def _with_execution_budget(fn):
+    @wraps(fn)
+    def bounded(*args, **kwargs):
+        timeout = kwargs.get('timeout_s', 600)
+        budget = _ExecutionBudget(time.monotonic() + float(timeout), timeout, kwargs['cancel'])
+        token = _execution_budget.set(budget)
+        try:
+            result = fn(*args, **kwargs)
+            _remaining_budget()
+            return result
+        finally:
+            _execution_budget.reset(token)
+    return bounded
+
+
+def _reported_cost(value: Any) -> float | None:
+    """Malformed usage is unknown, never a zero-cost or non-finite success."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0 else None
+
+
 def _clip(value: Any, limit: int = _MAX_OUTPUT) -> str:
     text = "" if value is None else str(value)
     return text if len(text) <= limit else text[: max(0, limit - 4)] + "\n..."
@@ -81,13 +144,17 @@ def _emit(emit: Callable[[str, dict, str | None], None], typ: str, payload: dict
 
 
 def _git(root: Path, *argv: str, timeout_s: float) -> tuple[int, str, str]:
+    remaining = _remaining_budget()
+    timeout = float(timeout_s) if remaining is None else min(float(timeout_s), remaining)
     try:
         proc = run_bounded(
-            ["git", *argv], cwd=root, timeout_s=max(0.1, float(timeout_s)),
+            ["git", *argv], cwd=root, timeout_s=max(0.001, timeout),
             env={**check_env(), "GIT_TERMINAL_PROMPT": "0"},
         )
     except ProcTimeout as exc:
+        _remaining_budget()
         raise ExecutionError(f"git timeout after {timeout_s}s: git {' '.join(argv)}") from exc
+    _remaining_budget()
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -145,6 +212,7 @@ def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
     return tuple(sorted(p for p in paths if p and not _is_generated(p)))
 
 
+@_deadline_checked
 def _working_hash(root: Path, paths: Iterable[str], *, timeout_s: float) -> str:
     """Hash the complete visible change, including untracked files."""
     rc, diff, err = _git(root, "diff", "--no-ext-diff", "--binary", "HEAD", "--", timeout_s=timeout_s)
@@ -177,6 +245,7 @@ def _reject_symlinks(root: Path, paths: Iterable[str]) -> None:
             raise ExecutionError(f"symlink changes are not allowed: {rel}")
 
 
+@_deadline_checked
 def _baseline(root: Path) -> dict[str, Any]:
     return {
         "head": head_position(root),
@@ -189,6 +258,7 @@ def _baseline(root: Path) -> dict[str, Any]:
     }
 
 
+@_deadline_checked
 def _guard_workspace(root: Path, before: dict[str, Any], changed: tuple[str, ...]) -> None:
     now = _baseline(root)
     if now["head"] != before["head"]:
@@ -295,6 +365,7 @@ def _run_check(root: Path, name: str, argv: list[str], timeout_s: float, emit: C
     return record
 
 
+@_deadline_checked
 def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: float) -> str:
     if not paths:
         raise ExecutionError("worker produced no changes")
@@ -315,6 +386,7 @@ def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: fl
     return commit
 
 
+@_with_execution_budget
 def execute_plan(
     *,
     run_id: str,
@@ -332,14 +404,8 @@ def execute_plan(
         raise ExecutionError("max_parallel must be positive")
     if timeout_s <= 0:
         raise ExecutionError("timeout_s must be positive")
-    deadline = time.monotonic() + float(timeout_s)
-
     def remaining() -> float:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            cancel.set()
-            raise ExecutionError(f"execution timeout after {timeout_s}s")
-        return left
+        return _remaining_budget()
 
     run_part = _safe_ref_part(run_id, "run id")
     workspace = Path(project.get("workspace", "")).expanduser().resolve()
@@ -354,6 +420,12 @@ def execute_plan(
     raw_tasks = plan.get("tasks") if isinstance(plan, Mapping) else None
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise ExecutionError("plan has no tasks")
+    max_tasks = project.get('max_tasks', 20)
+    if type(max_tasks) is not int or not 1 <= max_tasks <= 20 or len(raw_tasks) > max_tasks:
+        raise ExecutionError('plan exceeds the configured task limit')
+    unknown_cost_policy = project.get('unknown_cost_policy', 'stop')
+    if unknown_cost_policy not in ('stop', 'allow_bounded'):
+        raise ExecutionError('invalid unknown_cost_policy')
 
     tasks: dict[str, dict] = {}
     for raw in raw_tasks:
@@ -400,7 +472,9 @@ def execute_plan(
     integration_path = root / "integration"
     _git_ok(workspace, "worktree", "add", "-q", "-b", integration_branch, str(integration_path), base_sha, timeout_s=timeout_s)
     artifacts: dict[str, Any] = {"branch": integration_branch, "base_sha": base_sha, "commit": None, "worktree": str(integration_path), "checks": [], "tasks": []}
+    _execution_budget.get().artifacts = artifacts
     by_id = {task_id: {"id": task_id, "status": "queued", "profile": None, "branch": None, "worktree": None, "commit": None, "checks": []} for task_id in tasks}
+    artifacts['tasks'] = list(by_id.values())
     child_commits: dict[str, str] = {}
     integrated = base_sha
     observed_cost = 0.0
@@ -418,7 +492,7 @@ def execute_plan(
               "model": profile_cfg['model'], "branch": branch, "worktree": str(child_root)}, task_id)
         try:
             from factory.control.providers import ProviderRequest
-            request = ProviderRequest(provider=str(profile_cfg["provider"]), model=str(profile_cfg["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), timeout_s=int(timeout_s), read_only=False)
+            request = ProviderRequest(provider=str(profile_cfg["provider"]), model=str(profile_cfg["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), timeout_s=max(1, int(remaining())), read_only=False)
             last_assistant_text: str | None = None
             def callback(typ: Any, payload: Any = None, *extra: Any) -> None:
                 # SDK adapters historically used both emit(kind, payload) and
@@ -455,7 +529,7 @@ def execute_plan(
             before_hash = _working_hash(child_root, changed, timeout_s=timeout_s)
             records: list[dict] = []
             for name, argv in _check_argv(project, task.get("checks") or ()):
-                record = _run_check(child_root, name, argv, timeout_s, emit, task_id, cancel)
+                record = _run_check(child_root, name, argv, remaining(), emit, task_id, cancel)
                 records.append(record)
                 if record.get("cancelled"):
                     return {"status": "cancelled", "checks": records, "error": "cancel requested"}
@@ -471,10 +545,10 @@ def execute_plan(
             if _status_paths(child_root, timeout_s=timeout_s):
                 raise ExecutionError("worktree dirty after commit")
             committed_diff = _git_ok(child_root, "show", "--format=", "--binary", commit, timeout_s=timeout_s)
-            cost = getattr(result, "cost_usd", None)
+            cost = _reported_cost(getattr(result, "cost_usd", None))
             commit_hash = diff_hash(committed_diff)
             _emit(emit, "git.commit", {"commit": commit, "branch": branch, "diff_hash": commit_hash}, task_id)
-            return {"status": "verified", "commit": commit, "diff_hash": commit_hash, "checks": records, "cost_usd": cost if cost is None else float(cost)}
+            return {"status": "verified", "commit": commit, "diff_hash": commit_hash, "checks": records, "cost_usd": cost}
         except EventError:
             raise
         except ExecutionError as exc:
@@ -532,7 +606,7 @@ def execute_plan(
                 child_path = root / f"task-{task_id}"
                 _git_ok(workspace, "worktree", "add", "-q", "-b", child_branch, str(child_path), integration_branch, timeout_s=timeout_s)
                 by_id[task_id].update({"profile": profile_name, "branch": child_branch, "worktree": str(child_path), "status": "running"})
-                future = pool.submit(run_one, task, child_path, child_branch, profile_name, profile_cfg)
+                future = pool.submit(copy_context().run, run_one, task, child_path, child_branch, profile_name, profile_cfg)
                 futures[future] = (task, child_path, child_branch, profile_name, profile_cfg)
             done, pending = concurrent.futures.wait(futures, timeout=remaining())
             if pending:
@@ -550,10 +624,21 @@ def execute_plan(
                     _emit(emit, "task.failed", {"status": result.get("status", "failed"), "error": result.get("error", "")}, task_id)
                 if result.get("cost_usd") is None:
                     cost_unknown = True
-                    stop_reason = "provider cost is unknown; continuation requires human review"
-                    stop_kind = "unknown_cost"
+                    artifacts['billing_incomplete'] = 'provider cost is unknown; the dollar budget cannot be guaranteed'
+                    artifacts['autopublish_blocked'] = True
+                    _emit(emit, 'billing.unknown', {'policy': unknown_cost_policy,
+                          'message': artifacts['billing_incomplete']}, task_id)
+                    if unknown_cost_policy == 'stop' and stop_kind != 'budget':
+                        stop_reason = "provider cost is unknown; continuation requires human review"
+                        stop_kind = "unknown_cost"
                 else:
-                    observed_cost += float(result["cost_usd"])
+                    subtotal = observed_cost + result["cost_usd"]
+                    if not math.isfinite(subtotal):
+                        artifacts.update(billing_incomplete='reported cost subtotal overflowed; the dollar budget cannot be verified',
+                                         autopublish_blocked=True, observed_cost_usd=None,
+                                         known_cost_usd=observed_cost)
+                        raise ExecutionError('reported cost subtotal overflowed', artifacts=artifacts)
+                    observed_cost = subtotal
                     if budget is not None and observed_cost > budget:
                         stop_reason = f"observed provider cost ${observed_cost:.4f} exceeds budget ${budget:.4f}"
                         stop_kind = "budget"
@@ -615,7 +700,11 @@ def execute_plan(
     if judge_files_touched(final_changed) or runner_hooks(integration_path):
         raise ExecutionError("final verification changed test/check infrastructure", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
     _guard_workspace(integration_path, final_before, final_changed)
-    artifacts.update({"commit": integrated, "checks": final_checks, "tasks": list(by_id.values()), "observed_cost_usd": observed_cost})
+    remaining()
+    artifacts.update({"commit": integrated, "checks": final_checks, "tasks": list(by_id.values()),
+                      "observed_cost_usd": None if cost_unknown else observed_cost,
+                      "known_cost_usd": observed_cost,
+                      "unknown_cost_policy": unknown_cost_policy})
     if stop_reason is not None:
         if stop_kind == "unknown_cost" and not stop_blocked:
             artifacts["billing_incomplete"] = stop_reason

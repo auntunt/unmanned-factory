@@ -1,68 +1,96 @@
-# 把看板挂到公网
+# v2 runtime update
 
-三步。假设代码在 `/home/ubuntu/workspace/unmanned-factory`，数据在
-`/home/ubuntu/factory-data`。
+The existing deployment uses `factoryweb.service`, project checkout
+`/home/ubuntu/workspace/unmannedfactory`, and Caddy origin
+`https://harness.cloudwaveai.cn`. Preserve its actual external EnvironmentFile,
+control data directory, service user, unit and Caddy configuration. Do not
+create another service on port 8788. The `factory-control.service` file is an
+example for a new host, not a replacement for the existing unit.
 
-## 1. 准备数据目录
+The v2 gateway starts SDK children for individual tasks; it does not require a
+long-lived agent daemon. Legacy `factoryapi` / `factory-api`, dashboard and
+worker units must not be activated for this deployment.
 
-```sh
-mkdir -p ~/factory-data/queue
-cd ~/factory-data/queue && mkdir -p inbox running done needs-human blocked log
-```
+## Inspect and update
 
-队列子目录必须齐全。缺了的话看板能打开，但一提需求就报「不像一个队列」——
-`--queue` 指向的目录不带这些子目录时，依赖树会退化成平表，网页提需求直接失败。
-
-## 2. 起服务
-
-```sh
-sudo cp deploy/factory-dashboard.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now factory-dashboard
-systemctl is-active factory-dashboard   # 应该输出 active
-```
-
-看板绑 `127.0.0.1:8788`，此时还连不上公网 —— 这是对的。
-
-## 3. 配反代 + 认证
+Inspect only non-secret systemd metadata; do not print `Environment`, full
+unit files, credentials or authentication files:
 
 ```sh
-caddy hash-password --plaintext '你的密码'    # 拿到 $2a$14$... 哈希
+systemctl show factoryweb.service -p FragmentPath -p User -p WorkingDirectory -p EnvironmentFiles
+systemctl is-active factoryweb.service
 ```
 
-把 `deploy/Caddyfile.example` 里的 `HOST` 和哈希替换掉，然后：
+Find the existing control data directory locally without copying environment
+values into a support transcript. Run the installer as the service account,
+using the actual existing paths (the angle-bracket values below must be filled):
 
 ```sh
-sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo systemctl reload caddy
+cd /home/ubuntu/workspace/unmannedfactory
+bash deploy/install-control.sh --checkout "$PWD" --user ubuntu \
+  --env-file '<existing EnvironmentFile path>' \
+  --data-dir '<existing FACTORY_CONTROL_DATA directory>' \
+  --unit-file '<existing factoryweb.service FragmentPath>'
 ```
 
-先 validate 再 reload。配置写坏时 reload 会让整个 Caddy 起不来，
-连带打挂同一台机器上的其他站点。
+Repeat with `--apply` for the already authorized deployment update. It runs
+`uv sync --frozen --all-extras --no-dev`, `npm ci`, and
+`node ./node_modules/vite/bin/vite.js build` in the correct directories. It
+runs doctor against a temporary read-only snapshot of the existing database.
+It does not modify the live database, external env file, unit, Caddy, firewall
+or apt state. It does not activate any service. Running apply as root is
+rejected to avoid changing ownership of SDKs, assets and authentication state.
 
-## 验一遍
+Before rebuilding an active deployment, retain the previous reviewed commit
+and frontend build for rollback. Preserve existing local edits; deploy an
+explicit reviewed commit, not an assumed moving branch. Restart the existing
+unit after checking the build:
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' http://HOST/                    # 401
-curl -s -o /dev/null -w '%{http_code}\n' -u admin:密码 http://HOST/      # 200
+sudo systemctl restart factoryweb.service
+systemctl is-active factoryweb.service
+curl -fsS -o /dev/null http://127.0.0.1:8788/
 ```
 
-再用浏览器提一个需求，确认表单真的有反应 —— 这条链路上踩过两个坑
-（表单绝对路径、Origin 白名单枚举本机名），两个的症状都是「点了没反应」
-而不是报错。现在有测试兜着，但换部署形态时值得手验一次。
+Do not run `uv run` at service startup: dependency resync can remove optional
+SDK extras. The existing unit should use the checkout's `.venv/bin/factory-web
+serve` directly. If its command differs, prepare a targeted unit adjustment
+that preserves the external EnvironmentFile and all actual deployment paths.
+Never replace an existing environment file with the example or an empty file.
 
-## 为什么认证在 Caddy 层
+## Doctor and connection tests
 
-dashboard 自带的 token + Origin 检查只防 CSRF，**GET 全部无认证**。
-审计库里有 diff 和模型原始输出，裸在公网上等于公开代码和成本数据。
-所以 basic_auth 是必需的。
+```sh
+.venv/bin/python -m factory.control.runtime_cli doctor --json \
+  --workspace "$PWD" --static-dir "$PWD/frontend/dist" \
+  --db '<existing FACTORY_CONTROL_DATA directory>/control.db'
+```
 
-dashboard 刻意不提供 `--host` 参数，固定绑 loopback —— 暴露面只由
-Caddy 配置决定，不会因为漏传一个参数就意外全网可达。
+Doctor checks SDK import/API compatibility and the executable resolved by each
+SDK, including bundled runtimes. It reports credential presence as a hint,
+without reading credential-file contents. The current CLI environment may
+ differ from systemd's environment; use the authenticated runtime page for the
+service's actual configuration. Doctor makes no model request and never seeds
+or migrates the live database.
 
-## 提需求需要 worker 二进制
+Saved model roles take precedence over environment seed values after first
+startup. Configure the four actual model IDs through the runtime page. A
+successful read-only connection test is a timestamped observation, not a
+promise of future availability or write capability. DSH cannot be tested by
+this read-only probe. GitHub token presence does not prove publish permission.
+Unknown model costs remain unknown; bounded execution requires the project's
+explicit budget policy and does not enable automatic publication.
 
-网页提需求会调 `--binary` 指定的 CLI（默认 `claude`）做需求提取。
-那个二进制不在 PATH 时，表单返回 200 但结果里是
-`无法启动 claude: [Errno 2] No such file or directory`。
-只看审计数据不需要它，要用写入口就得先装。
+## New hosts only
+
+Use `factory-control.service` and `control.env.example` as reviewed templates.
+Create a new external mode-0600 EnvironmentFile only after checking it does
+not already exist. Adjust user, checkout, data and workspace locations to the
+host. Configure the HTTPS origin to match Caddy exactly. Use the same data
+directory when creating the first owner with `factory-web create-user`; read
+the password interactively. The app supplies authentication and CSRF; extra
+Caddy basic-auth is not required. Review OS sandbox compatibility with the
+chosen SDK before enabling a new service. SDK sandboxing and a web login do
+not provide separate OS identities for the control plane and workers.
+
+See [HERMES-HANDOFF.md](HERMES-HANDOFF.md) for local operator assistance.

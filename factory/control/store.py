@@ -13,6 +13,7 @@ from pathlib import Path
 from factory.redact import redact_text
 
 ACTIVE = ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
+PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
 SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key)$')
 
 
@@ -53,10 +54,23 @@ class Store:
                     payload TEXT NOT NULL, at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
                 CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_settings_audit(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    at TEXT NOT NULL
+                );
                 CREATE TRIGGER IF NOT EXISTS no_event_update BEFORE UPDATE ON events
                     BEGIN SELECT RAISE(ABORT,'events are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS no_event_delete BEFORE DELETE ON events
                     BEGIN SELECT RAISE(ABORT,'events are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS no_project_audit_update BEFORE UPDATE ON project_settings_audit
+                    BEGIN SELECT RAISE(ABORT,'project settings audit is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS no_project_audit_delete BEFORE DELETE ON project_settings_audit
+                    BEGIN SELECT RAISE(ABORT,'project settings audit is append-only'); END;
             ''')
 
     @contextmanager
@@ -71,17 +85,22 @@ class Store:
 
     def projects(self):
         with self.connect() as db:
-            return [json.loads(r[0]) for r in db.execute('SELECT data FROM projects ORDER BY rowid DESC')]
+            return [self._project_view(json.loads(r[0])) for r in db.execute('SELECT data FROM projects ORDER BY rowid DESC')]
 
     def project(self, pid):
         with self.connect() as db:
             row = db.execute('SELECT data FROM projects WHERE id=?', (pid,)).fetchone()
             if row is None:
                 raise KeyError(pid)
-            return json.loads(row[0])
+            return self._project_view(json.loads(row[0]))
+
+    @staticmethod
+    def _project_view(data):
+        """Expose legacy rows with revision 1 without rewriting their JSON."""
+        return {**data, 'revision': int(data.get('revision', 1))}
 
     def add_project(self, data):
-        project = {**data, 'id': uuid.uuid4().hex, 'created_at': now()}
+        project = {**data, 'id': uuid.uuid4().hex, 'revision': 1, 'created_at': now()}
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             # One registered project per repository gives webhook an unambiguous target.
@@ -89,7 +108,49 @@ class Store:
                 if json.loads(row[0])['repository'].casefold() == project['repository'].casefold():
                     raise Conflict('该仓库已登记')
             db.execute('INSERT INTO projects VALUES (?,?)', (project['id'], json.dumps(project)))
+            db.execute('INSERT INTO project_settings_audit(project_id,revision,actor,action,data,at) VALUES (?,?,?,?,?,?)',
+                       (project['id'], 1, str(data.get('actor', 'system')), 'created',
+                        json.dumps(project, ensure_ascii=False), project['created_at']))
         return project
+
+    def update_project(self, pid, changes, expected_revision, actor):
+        """CAS update of mutable project settings with an append-only audit row."""
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError('项目 revision 必须是正整数')
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError('项目设置修改人不能为空')
+        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd'}
+        if not isinstance(changes, dict) or set(changes) - allowed:
+            raise ValueError('项目设置包含不可修改字段')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM projects WHERE id=?', (pid,)).fetchone()
+            if row is None:
+                raise KeyError(pid)
+            project = json.loads(row[0])
+            current = int(project.get('revision', 1))
+            if current != expected_revision:
+                raise Conflict('项目设置已更新，请重新加载后再保存')
+            busy = db.execute("SELECT 1 FROM runs WHERE json_extract(data, '$.project_id')=? "
+                              "AND json_extract(data, '$.status') IN (%s) LIMIT 1" %
+                              ','.join('?' for _ in PROJECT_EDIT_BLOCKING),
+                              (pid, *sorted(PROJECT_EDIT_BLOCKING))).fetchone()
+            if busy is not None:
+                raise Conflict('项目存在进行中的运行，暂时不能修改设置')
+            updated = {**project, **changes, 'revision': current + 1, 'updated_at': now()}
+            db.execute('UPDATE projects SET data=? WHERE id=?',
+                       (json.dumps(updated, ensure_ascii=False), pid))
+            db.execute('INSERT INTO project_settings_audit(project_id,revision,actor,action,data,at) VALUES (?,?,?,?,?,?)',
+                       (pid, updated['revision'], actor.strip(), 'updated',
+                        json.dumps(changes, ensure_ascii=False), updated['updated_at']))
+        return self._project_view(updated)
+
+    def project_audit(self, pid):
+        self.project(pid)
+        with self.connect() as db:
+            rows = db.execute('SELECT id,project_id,revision,actor,action,data,at '
+                              'FROM project_settings_audit WHERE project_id=? ORDER BY id', (pid,)).fetchall()
+        return [{**dict(row), 'data': json.loads(row['data'])} for row in rows]
 
     @staticmethod
     def _event(db, rid, kind, payload, task_id=None):
