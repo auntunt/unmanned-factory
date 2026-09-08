@@ -1,5 +1,17 @@
 # 自动化无人工厂
 
+## 自主交付工厂（v3）
+
+新增自主运行策略、持久任务队列、模型分级与失败升级、完整费用账本、Agent 能力版本库、自动交付归档和全量日志导出。工作台包含总览、运行看板、项目、Agent 能力库、模型与成本；保留 v2 项目知识、SDK 和 GitHub 交付接口。
+
+- [顶层架构与对象边界](docs/v3/ARCHITECTURE.md)
+- [关键设计决策](docs/v3/DECISIONS.md)
+- [页面与用户流程](docs/v3/USER-JOURNEYS.md)
+- [启动、迁移与运行说明](docs/v3/RUNBOOK.md)
+- [验证记录与当前边界](docs/v3/VALIDATION.md)
+
+本地体验：安装依赖并构建前端后，运行 `.venv/bin/python scripts/preview_v3.py`，打开 `http://127.0.0.1:8790`，使用 `preview / factory-preview-only`。这是明确标记的隔离演练：执行真实的 Git 工作区和项目检查，模型响应由脚本提供，不调用模型或外部服务。真实工作使用下方 `factory-web` 入口和独立数据目录。
+
 ## 工程 Harness 重写（v2）
 
 新增带登录的工程工作台：需求梳理与任务图、分档模型调度、Claude/Codex/DSH 适配、独立工作区验证、可追溯问答、GitHub Issue 分流和 PR 发布。现有 CLI 与历史记录保留。

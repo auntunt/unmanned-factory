@@ -57,7 +57,7 @@ export default function TaskGraph({ tasks }: Props) {
   return (
     <div className="wf-graph-wrap">
       <div className="wf-graph-scroll">
-        <svg className="wf-graph" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="任务依赖图">
+        <svg className="wf-graph" viewBox={`0 0 ${width} ${height}`} role="group" aria-label="可交互任务依赖图">
           <defs>
             <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#a5b1c4" />
@@ -71,11 +71,11 @@ export default function TaskGraph({ tasks }: Props) {
           {positions.map((position) => {
             const isSelected = position.task.id === selected
             return (
-              <g key={position.task.id} className={`wf-node ${isSelected ? 'is-selected' : ''}`} onClick={() => setSelected(position.task.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelected(position.task.id) }}>
-                <rect x={position.x} y={position.y} width="178" height="84" rx="10" fill={isSelected ? '#eaf1fb' : '#fff'} stroke={isSelected ? '#315f9b' : '#d8e0eb'} strokeWidth={isSelected ? 2 : 1} />
+              <g key={position.task.id} className={`wf-node ${isSelected ? 'is-selected' : ''}`} onClick={() => setSelected(position.task.id)} role="button" aria-label={position.task.title} aria-pressed={isSelected} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(position.task.id) } }}>
+                <rect x={position.x} y={position.y} width="178" height="84" rx="10" fill={isSelected ? '#edf6f1' : '#fff'} stroke={isSelected ? '#136b53' : '#d8e2dc'} strokeWidth={isSelected ? 2 : 1} />
                 <text x={position.x + 14} y={position.y + 23} className="wf-node-id">{position.task.id}</text>
-                <text x={position.x + 14} y={position.y + 46} className="wf-node-title">{position.task.title.slice(0, 22)}{position.task.title.length > 22 ? '…' : ''}</text>
-                <text x={position.x + 14} y={position.y + 67} className={`wf-node-meta wf-task-status-${position.task.status ?? 'pending'}`}>{taskStatusLabels[position.task.status ?? 'pending']} · {position.task.complexity} · {position.task.risk} 风险</text>
+                <text x={position.x + 14} y={position.y + 46} className="wf-node-title">{position.task.title.slice(0, 11)}{position.task.title.length > 11 ? '…' : ''}</text>
+                <text x={position.x + 14} y={position.y + 67} className={`wf-node-meta wf-task-status-${position.task.status ?? 'pending'}`}>{taskStatusLabels[position.task.status ?? 'pending']} · {{ small: '简单', medium: '中等', large: '复杂' }[position.task.complexity]} · {{ low: '低', medium: '中', high: '高' }[position.task.risk]}风险</text>
               </g>
             )
           })}
@@ -84,7 +84,7 @@ export default function TaskGraph({ tasks }: Props) {
       {selectedTask && (
         <aside className="wf-criterion" aria-label="任务范围和验收标准">
           <div className="wf-criterion-kicker">{selectedTask.id} · 任务详情</div>
-          <h4>{selectedTask.title}</h4>
+          <h3>{selectedTask.title}</h3>
           <p>{selectedTask.prompt}</p>
           <div className="wf-detail-block"><strong>范围</strong>{selectedTask.paths.length ? <ul>{selectedTask.paths.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <span className="wf-muted">未提供路径</span>}</div>
           <div className="wf-detail-block"><strong>验收标准</strong>{selectedTask.acceptance.length ? <ul>{selectedTask.acceptance.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul> : <span className="wf-muted">未提供验收标准</span>}</div>

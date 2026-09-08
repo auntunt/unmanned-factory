@@ -23,3 +23,7 @@ demo-queue/
 # 前端构建产物：留在工作树里会被 shadow_code 影子代码闸门判为违规
 frontend/dist/
 frontend/node_modules/
+
+# Local v3 rehearsal, including isolated sample repositories and browser evidence.
+.factory-preview/
+*.worker.lock

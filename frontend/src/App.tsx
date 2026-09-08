@@ -8,6 +8,10 @@ import Workbench from './workbench/Workbench'
 import OverviewPage from './workbench/OverviewPage'
 import ProjectsPage from './workbench/ProjectsPage'
 import ProjectPage from './workbench/ProjectPage'
+import RunsPage from './workbench/RunsPage'
+import CapabilitiesPage from './workbench/CapabilitiesPage'
+import CostsPage from './workbench/CostsPage'
+import TeamPage from './workbench/TeamPage'
 import type { PageProps } from './workbench/ui'
 import './workbench/workbench.css'
 
@@ -71,8 +75,9 @@ function AuthGate({ children }: { children: (session: AuthResponse, logout: () =
 }
 
 function RoutedWorkbench({ session, logout }: { session: AuthResponse; logout: () => void }) {
-  const pageProps: PageProps = { csrfToken: session.csrf_token, onUnauthorized: logout }
-  return <Workbench user={session.user} onLogout={logout} {...pageProps}><Suspense fallback={<div className="wb-page"><div className="wb-card wb-loading-card"><span className="wb-spinner" aria-hidden="true" />正在打开页面…</div></div>}><Routes><Route index element={<OverviewPage {...pageProps} />} /><Route path="projects" element={<ProjectsPage {...pageProps} />} /><Route path="projects/:projectId" element={<ProjectPage {...pageProps} />} /><Route path="runs/:runId" element={<RunPage {...pageProps} />} /><Route path="settings/runtime" element={<RuntimePage {...pageProps} />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></Suspense></Workbench>
+  const pageProps: PageProps = { csrfToken: session.csrf_token, onUnauthorized: logout, user: session.user }
+  const isAdmin = session.user.role !== 'member'
+  return <Workbench user={session.user} onLogout={logout} {...pageProps}><Suspense fallback={<div className="wb-page"><div className="wb-card wb-loading-card"><span className="wb-spinner" aria-hidden="true" />正在打开页面…</div></div>}><Routes><Route index element={<OverviewPage {...pageProps} />} /><Route path="runs" element={<RunsPage {...pageProps} />} /><Route path="projects" element={<ProjectsPage {...pageProps} />} /><Route path="projects/:projectId" element={<ProjectPage {...pageProps} />} /><Route path="capabilities" element={<CapabilitiesPage {...pageProps} />} /><Route path="costs" element={<CostsPage {...pageProps} />} /><Route path="team" element={<TeamPage {...pageProps} />} /><Route path="runs/:runId" element={<RunPage {...pageProps} />} />{isAdmin && <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />}<Route path="*" element={<Navigate to="/" replace />} /></Routes></Suspense></Workbench>
 }
 
 export default function App() {

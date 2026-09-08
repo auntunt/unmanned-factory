@@ -15,12 +15,13 @@ from factory.harness.proc import run_bounded
 
 
 def test_current_usage_counts_threads():
-    """必须数线程，不能只数进程。RLIMIT_NPROC 在 Linux 上计的是 task。"""
+    """Linux 数 task；Darwin 按 RLIMIT_NPROC 的进程语义计数。"""
     n = procfence.current_usage()
     assert n is not None
     assert n > 0
-    # 本进程至少 1 个主线程 + pytest 自己的若干线程，肯定 >1
-    assert n > 1
+    if sys.platform.startswith("linux"):
+        # Linux 的 RLIMIT_NPROC 计 task，本进程至少有 pytest 辅助线程。
+        assert n > 1
 
 
 def test_plan_respects_reserve_ratio():

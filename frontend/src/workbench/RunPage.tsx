@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { request, WorkspaceApiError } from '../workspace/api'
 import RunKnowledge from '../workspace/RunKnowledge'
 import TaskGraph from '../workspace/TaskGraph'
 import type { AuditEvent, ConversationMessage, PlanTask, Run, RunStatus, TaskStatus } from '../workspace/types'
 import type { RuntimeLimits, RuntimeProfiles } from './runtime-types'
-import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, errorText, type PageProps } from './ui'
+import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, statusLabel, errorText, type PageProps } from './ui'
 import './detail.css'
+import RunJourney from './RunJourney'
 
 type RunPageProps = PageProps
 
@@ -64,6 +66,15 @@ function eventSummary(value: unknown): string {
   return pieces.length ? pieces.join(' · ') : '已记录一条审计事实'
 }
 
+const eventTypeLabels: Record<string, string> = {
+  'quota.reserved': '额度已预留',
+  'quota.settled': '额度已结算',
+}
+
+function eventTypeLabel(type: string): string {
+  return eventTypeLabels[type] ?? type
+}
+
 function hasFailureEvidence(event: AuditEvent): boolean {
   if (/fail|error|check/i.test(event.type)) return true
   if (!isRecord(event.payload)) return false
@@ -79,7 +90,11 @@ function EventEvidence({ event }: { event: AuditEvent }) {
 }
 
 function actionError(error: unknown): string {
-  if (error instanceof WorkspaceApiError && error.status === 409) return `当前版本已变化：${error.detail} 请重新读取运行后再操作。`
+  if (error instanceof WorkspaceApiError && error.status === 409) {
+    if (/版本|revision|刷新|重新读取/.test(error.detail)) return `当前版本已变化：${error.detail} 请重新读取运行后再操作。`
+    return `当前状态不允许这项操作：${error.detail}`
+  }
+  if (error instanceof WorkspaceApiError && error.status === 403) return `没有执行这项操作的权限，或会话验证已失效：${error.detail}`
   return errorText(error)
 }
 
@@ -96,6 +111,60 @@ function CheckEvidence({ check, index }: { check: Record<string, unknown>; index
   return <details className="wb-check-detail"><summary><span>{name}</span><strong className={passed ? 'wb-check-pass' : 'wb-check-fail'}>{outcome}</strong></summary><div className="wb-check-meta"><span>退出码：{check.exit === null || check.exit === undefined ? '—' : String(check.exit)}</span><span>超时：{check.timeout === true ? '是' : '否'}</span>{typeof check.duration_s === 'number' && <span>耗时：{check.duration_s}s</span>}</div>{hasOutput && <div className="wb-check-output">{typeof check.stdout === 'string' && <div><span className="wb-artifact-label">stdout</span><pre>{check.stdout}</pre></div>}{typeof check.stderr === 'string' && <div><span className="wb-artifact-label">stderr</span><pre>{check.stderr}</pre></div>}</div>}</details>
 }
 
+interface TaskAttemptGroup {
+  id: string
+  title: string
+  status?: string
+  attempts: Record<string, unknown>[]
+}
+
+function attemptGroups(run: Run): TaskAttemptGroup[] {
+  const titles = new Map<string, string>()
+  for (const item of run.plan?.tasks ?? []) titles.set(item.id, item.title)
+  const groups = new Map<string, TaskAttemptGroup>()
+  for (const source of [run.tasks, run.artifacts?.tasks]) {
+    if (!Array.isArray(source)) continue
+    for (const raw of source) {
+      if (!isRecord(raw) || !Array.isArray(raw.attempts)) continue
+      const attempts = raw.attempts.filter(isRecord)
+      if (!attempts.length) continue
+      const id = typeof raw.id === 'string' ? raw.id : `任务 ${groups.size + 1}`
+      if (groups.has(id)) continue
+      groups.set(id, {
+        id,
+        title: typeof raw.title === 'string' ? raw.title : titles.get(id) ?? id,
+        status: typeof raw.status === 'string' ? raw.status : undefined,
+        attempts,
+      })
+    }
+  }
+  return [...groups.values()]
+}
+
+function attemptState(attempt: Record<string, unknown>): { text: string; tone: string } {
+  const status = attempt.status
+  if (status === 'verified' || status === 'completed') return { text: '已验证', tone: 'is-success' }
+  if (status === 'cancelled') return { text: '已取消', tone: 'is-muted' }
+  if (status === 'failed') return { text: '失败', tone: 'is-failed' }
+  return { text: '执行中', tone: 'is-active' }
+}
+
+function attemptEvidence(attempt: Record<string, unknown>): string | null {
+  const evidence: Record<string, unknown> = {}
+  if (typeof attempt.error === 'string' && attempt.error) evidence.error = attempt.error
+  if (Array.isArray(attempt.checks) && attempt.checks.length) evidence.checks = attempt.checks
+  if (typeof attempt.failure_kind === 'string') evidence.failure_kind = attempt.failure_kind
+  if (typeof attempt.retryable === 'boolean') evidence.retryable = attempt.retryable
+  return Object.keys(evidence).length ? JSON.stringify(evidence, null, 2) : null
+}
+
+function ExecutionAttempts({ run }: { run: Run }) {
+  const groups = attemptGroups(run)
+  const active = ['queued', 'running', 'verifying'].includes(run.status)
+  if (!groups.length) return <section className="wb-execution-card"><div><span className="wb-eyebrow">执行分工与修复</span><h2>模型调用记录</h2><p className="wb-runtime-note">{active ? '正在执行，尚未收到可持久化的模型尝试记录。' : '本次运行尚未记录模型尝试。'}</p></div></section>
+  return <section className="wb-execution-card" aria-labelledby="execution-attempts-title"><div className="wb-execution-heading"><div><span className="wb-eyebrow">执行分工与修复</span><h2 id="execution-attempts-title">实际模型尝试</h2><p>每次调用和验证结果均来自本次运行的已记录证据。</p></div><span className="wb-execution-total">{groups.reduce((total, group) => total + group.attempts.length, 0)} 次尝试</span></div><div className="wb-attempt-groups">{groups.map((group) => <article className="wb-attempt-group" key={group.id}><header><div><span className="wb-task-id">{group.id}</span><strong>{group.title}</strong></div><span>{group.attempts.length} 次尝试{group.status ? ` · ${statusLabel(group.status)}` : ''}</span></header><div className="wb-attempt-list">{group.attempts.map((attempt, index) => { const state = attemptState(attempt); const evidence = attemptEvidence(attempt); const profile = typeof attempt.profile === 'string' ? attempt.profile : '未记录角色'; const provider = typeof attempt.provider === 'string' ? attempt.provider : '未记录服务'; const model = typeof attempt.model === 'string' ? attempt.model : '未记录模型'; const reason = typeof attempt.reason === 'string' ? attempt.reason : '未记录选择原因'; const number = typeof attempt.attempt === 'number' ? attempt.attempt : index + 1; return <article className="wb-attempt" key={`${group.id}-${number}-${index}`}><div className="wb-attempt-summary"><div><strong>第 {number} 次</strong><span className={`wb-attempt-state ${state.tone}`}>{state.text}</span></div><span>{profile} · {provider} / {model}</span><span>{reason}</span><strong>{costLabel(attempt.cost_usd, '费用未知')}</strong></div>{evidence && <details className="wb-attempt-evidence"><summary>展开错误与检查证据</summary><pre>{evidence}</pre></details>}</article> })}</div></article>)}</div></section>
+}
+
 function FrozenRuntime({ run }: { run: Run }) {
   const snapshot = (run as RunWithFrozenRuntime).runtime_configuration
   if (!snapshot) return <section className="wb-detail-card"><h2>本次冻结配置</h2><p className="wb-runtime-note">服务端没有返回本次运行的配置快照。不会用当前运行配置冒充历史任务配置。</p></section>
@@ -110,8 +179,8 @@ function DeliveryEvidence({ run }: { run: Run }) {
   const commit = artifacts?.commit
   const baseSha = artifacts?.base_sha
   const prUrl = artifacts?.pr_url
-  const knownCost = artifacts?.known_cost_usd
-  const observedCost = artifacts?.observed_cost_usd
+  const totalKnownCost = artifacts?.total_known_cost_usd
+  const plannerCost = artifacts?.planner_cost_usd
   const billingIncomplete = artifacts?.billing_incomplete
   const billingMessage = typeof billingIncomplete === 'string' ? billingIncomplete : '部分 provider 费用未知，因此不能保证美元预算。系统不会自动发布，但你仍可在复核后手动发布。'
   const hasBillingIncomplete = billingIncomplete !== undefined && billingIncomplete !== null && billingIncomplete !== false && billingIncomplete !== ''
@@ -122,7 +191,7 @@ function DeliveryEvidence({ run }: { run: Run }) {
         <div className="wb-artifact"><span className="wb-artifact-label">基线 SHA</span><span className="wb-sha">{shortSha(baseSha)}</span></div>
         <div className="wb-artifact"><span className="wb-artifact-label">交付 commit SHA</span><span className="wb-sha">{shortSha(commit)}</span></div>
         <div className="wb-artifact"><span className="wb-artifact-label">来源 PR</span>{safeGithubPr(prUrl) ? <a href={prUrl} target="_blank" rel="noreferrer">在 GitHub 打开 PR ↗</a> : <span>{typeof prUrl === 'string' && prUrl ? '已记录链接，但不是受支持的 GitHub PR 地址' : '尚未生成 PR'}</span>}</div>
-        <div className="wb-artifact"><span className="wb-artifact-label">费用记录</span><div className="wb-cost-list"><div><span>已知费用小计</span><strong>{costLabel(knownCost, '未报告')}</strong></div><div><span>费用总额</span><strong>{observedCost === null ? '未知' : costLabel(observedCost, '未报告')}</strong></div></div></div>
+        <div className="wb-artifact"><span className="wb-artifact-label">费用记录</span><div className="wb-cost-list"><div><span>已知费用（规划与全部尝试）</span><strong>{costLabel(totalKnownCost, '未完整汇总')}</strong></div><div><span>其中规划费用</span><strong>{costLabel(plannerCost, '未报告')}</strong></div><div><span>费用总额</span><strong>{hasBillingIncomplete || typeof totalKnownCost !== 'number' || !Number.isFinite(totalKnownCost) ? '未知' : costLabel(totalKnownCost, '未知')}</strong></div></div></div>
         {hasBillingIncomplete && <div className="wb-billing-warning"><strong>费用记录不完整</strong><span>{billingMessage}</span></div>}
         {checkItems.length > 0 && <div className="wb-artifact"><span className="wb-artifact-label">检查结果</span><div className="wb-checks">{checkItems.map((check, index) => <CheckEvidence check={check} index={index} key={`${String(check.name ?? 'check')}-${index}`} />)}</div></div>}
       </div>
@@ -149,10 +218,11 @@ function EventsPanel({ events, loading, error }: { events: AuditEvent[] | null; 
   if (loading && events === null) return <div className="wb-loading" role="status">正在同步审计事件…</div>
   if (error) return <ErrorNotice message={error} />
   if (!events?.length) return <EmptyState title="没有审计事件" description="运行尚未产生可展示的持久化事件。" />
-  return <div className="wb-events">{events.map((event) => <article className="wb-event" key={event.id}><span className="wb-event-type">{event.type}</span><span className="wb-event-time">{formatDate(event.at)}</span><EventEvidence event={event} /></article>)}</div>
+  return <div className="wb-events">{events.map((event) => <article className="wb-event" key={event.id}><span className="wb-event-type">{eventTypeLabel(event.type)}</span><span className="wb-event-time">{formatDate(event.at)}</span><EventEvidence event={event} /></article>)}</div>
 }
 
-export default function RunPage({ csrfToken, onUnauthorized }: RunPageProps) {
+export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProps) {
+  const isAdmin = user?.role !== 'member'
   const { runId } = useParams<{ runId: string }>()
   const navigate = useNavigate()
   const [run, setRun] = useState<Run | null>(null)
@@ -161,9 +231,11 @@ export default function RunPage({ csrfToken, onUnauthorized }: RunPageProps) {
   const [events, setEvents] = useState<AuditEvent[] | null>(null)
   const [auxError, setAuxError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'clarify' | 'approve' | 'cancel' | 'publish' | null>(null)
+  const [busy, setBusy] = useState<'clarify' | 'approve' | 'cancel' | 'publish' | 'retry' | 'distill' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
+  const [distillName, setDistillName] = useState('')
+  const [distillNotice, setDistillNotice] = useState<string | null>(null)
   const eventCursor = useRef(0)
   const runRequestSequence = useRef(0)
   const auxiliarySequence = useRef(0)
@@ -218,16 +290,34 @@ export default function RunPage({ csrfToken, onUnauthorized }: RunPageProps) {
     try { const next = await request<Run>(`/api/v2/runs/${encodeURIComponent(runId)}/${kind}`, { method: 'POST', csrfToken, onUnauthorized, body }); setRun(next); if (kind === 'clarify') setAnswer('') } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(actionError(cause)) } finally { setBusy(null) }
   }
 
-  if (!runId) return <main className="wb-detail-page"><EmptyState title="缺少运行编号" description="请从运行列表打开一个有效的运行。" /></main>
-  if (loading && !run) return <main className="wb-detail-page"><div className="wb-loading" role="status">正在读取运行…</div></main>
-  if (!run) return <main className="wb-detail-page">{error ? <ErrorNotice message={error} /> : <EmptyState title="找不到这个运行" description="运行可能已被删除，或当前账号无权访问。" action={<Link className="wb-button" to="/">返回工作台</Link>} />}</main>
+  const retry = async () => {
+    if (!run || !runId) return
+    setBusy('retry'); setError(null)
+    try { const next = await request<Run>(`/api/v3/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST', csrfToken, onUnauthorized }); navigate(`/runs/${encodeURIComponent(String(next.id))}`) } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(actionError(cause)) } finally { setBusy(null) }
+  }
+
+  const distill = async (event: FormEvent) => {
+    event.preventDefault(); if (!runId || !distillName.trim()) return
+    setBusy('distill'); setError(null); setDistillNotice(null)
+    try { const candidate = await request<{ id: string; name: string }>('/api/v3/runs/' + encodeURIComponent(runId) + '/distill', { method: 'POST', csrfToken, onUnauthorized, body: { name: distillName.trim() } }); setDistillNotice(`已生成草稿能力“${candidate.name}”（${candidate.id}），请在能力库审阅后配置。`); setDistillName('') } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) } finally { setBusy(null) }
+  }
+
+  if (!runId) return <div className="wb-detail-page wb-run-page"><EmptyState title="缺少运行编号" description="请从运行列表打开一个有效的运行。" /></div>
+  if (loading && !run) return <div className="wb-detail-page wb-run-page"><div className="wb-loading" role="status">正在读取运行…</div></div>
+  if (!run) return <div className="wb-detail-page wb-run-page">{error ? <ErrorNotice message={error} /> : <EmptyState title="找不到这个运行" description="运行可能已被删除，或当前账号无权访问。" action={<Link className="wb-button" to="/">返回工作台</Link>} />}</div>
 
   const questions = Array.from(new Set([...(run.plan?.questions ?? []), ...(run.triage?.questions ?? [])]))
-  const canClarify = ['needs_clarification', 'needs_human', 'awaiting_approval'].includes(run.status)
-  const canApprove = run.status === 'awaiting_approval' && questions.length === 0
-  const canCancel = ACTIVE_STATUSES.includes(run.status)
-  const canPublish = run.status === 'ready_for_review'
-  return <main className="wb-detail-page"><PageHeader title={run.plan?.title || `运行 #${run.id}`} description={`运行 #${run.id} · 更新时间 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/projects')}>返回项目</button><a className="wb-button" href={`/api/v2/runs/${encodeURIComponent(runId)}/export`} target="_blank" rel="noreferrer">导出工程记录</a>{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
+  const runSource = (run as Run & { source?: { actor_id?: string | number } }).source
+  const actorId = runSource?.actor_id
+  const canActOnRun = isAdmin || (actorId !== undefined && actorId !== null && String(actorId) === String(user?.id))
+  const canClarify = canActOnRun && ['needs_clarification', 'needs_human', 'awaiting_approval'].includes(run.status)
+  const canApprove = canActOnRun && run.status === 'awaiting_approval' && questions.length === 0
+  const canCancel = canActOnRun && ACTIVE_STATUSES.includes(run.status)
+  const canPublish = isAdmin && run.status === 'ready_for_review'
+  const canRetry = canActOnRun && ['failed', 'needs_human', 'cancelled'].includes(run.status)
+  const canDistill = isAdmin && ['ready_for_review', 'published'].includes(run.status)
+  return <div className="wb-detail-page wb-run-page"><PageHeader title={run.plan?.title || run.request.slice(0, 80) || `运行 #${run.id}`} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/runs')}>返回看板</button><details className="wb-export-menu"><summary className="wb-button">导出记录</summary><div><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=json`}>JSON</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=markdown`}>Markdown</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=zip`}>ZIP</a></div></details>{canRetry && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void retry()}>{busy === 'retry' ? '重试中…' : '创建重试运行'}</button>}{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
     {error && <ErrorNotice message={error} />}
-    <div className="wb-detail-grid"><div className="wb-detail-main"><section className="wb-detail-card"><div className="wb-detail-meta"><span>状态：<StatusBadge status={run.status} /></span><span>当前计划版本：<strong>{run.revision}</strong></span><span>创建于：<strong>{formatDate(run.created_at)}</strong></span></div><div className="wb-detail-tabs" role="tablist" aria-label="运行内容"><button className={`wb-tab ${tab === 'plan' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'plan'} onClick={() => setTab('plan')}>计划与任务</button><button className={`wb-tab ${tab === 'conversation' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'conversation'} onClick={() => setTab('conversation')}>对话</button><button className={`wb-tab ${tab === 'events' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'events'} onClick={() => setTab('events')}>审计事件</button></div>{tab === 'plan' && <PlanPanel run={run} />}{tab === 'conversation' && <ConversationPanel messages={messages} loading={loading} error={auxError} />}{tab === 'events' && <EventsPanel events={events} loading={loading} error={auxError} />}</section>{canClarify && <section className="wb-detail-card wb-question"><h2>{questions.length ? '需要确认' : '补充信息'}</h2>{questions.length > 0 && <ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul>}<div className="wb-field"><label htmlFor="run-clarification">针对当前计划版本 {run.revision} 的补充</label><textarea id="run-clarification" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="提供事实、边界或选择，提交后会重新规划。" /></div><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={!answer.trim() || busy !== null} onClick={() => void act('clarify')}>{busy === 'clarify' ? '提交并重新规划…' : '提交补充并重新规划'}</button>{canApprove && <button className="wb-button" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button>}</div></section>}{canApprove && !canClarify && <section className="wb-detail-card"><h2>批准当前计划</h2><p>计划没有未解决问题。批准后将按当前运行配置进入有界任务调度。</p><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button></div></section>}<RunKnowledge key={`${run.id}:${run.revision}`} runId={run.id} revision={run.revision} status={run.status} artifacts={run.artifacts} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div><aside className="wb-detail-rail"><section className="wb-detail-card"><h2>运行概览</h2><div className="wb-side-stat"><span>运行 ID</span><span>{run.id}</span></div><div className="wb-side-stat"><span>工程 ID</span><span>{run.project_id}</span></div><div className="wb-side-stat"><span>状态</span><span><StatusBadge status={run.status} /></span></div><div className="wb-side-stat"><span>风险</span><span>{run.triage?.risk ?? '—'}</span></div>{run.triage?.reasons?.length ? <div className="wb-runtime-note">{run.triage.reasons.join('；')}</div> : null}</section><FrozenRuntime run={run} /><DeliveryEvidence run={run} /></aside></div></main>
+    <RunJourney run={run} />
+    <div className="wb-detail-grid"><div className="wb-detail-main"><section className="wb-detail-card"><div className="wb-detail-meta"><span>状态：<StatusBadge status={run.status} /></span><span>当前计划版本：<strong>{run.revision}</strong></span><span>创建于：<strong>{formatDate(run.created_at)}</strong></span></div><div className="wb-detail-tabs" role="tablist" aria-label="运行内容"><button className={`wb-tab ${tab === 'plan' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'plan'} onClick={() => setTab('plan')}>计划与任务</button><button className={`wb-tab ${tab === 'conversation' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'conversation'} onClick={() => setTab('conversation')}>对话</button><button className={`wb-tab ${tab === 'events' ? 'wb-tab-active' : ''}`} role="tab" aria-selected={tab === 'events'} onClick={() => setTab('events')}>审计事件</button></div>{tab === 'plan' && <><PlanPanel run={run} /><ExecutionAttempts run={run} /></>}{tab === 'conversation' && <ConversationPanel messages={messages} loading={loading} error={auxError} />}{tab === 'events' && <EventsPanel events={events} loading={loading} error={auxError} />}</section>{canClarify && <section className="wb-detail-card wb-question"><h2>{questions.length ? '需要确认' : '补充信息'}</h2>{questions.length > 0 && <ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul>}<div className="wb-field"><label htmlFor="run-clarification">针对当前计划版本 {run.revision} 的补充</label><textarea id="run-clarification" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="提供事实、边界或选择，提交后会重新规划。" /></div><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={!answer.trim() || busy !== null} onClick={() => void act('clarify')}>{busy === 'clarify' ? '提交并重新规划…' : '提交补充并重新规划'}</button>{canApprove && <button className="wb-button" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button>}</div></section>}{canApprove && !canClarify && <section className="wb-detail-card"><h2>批准当前计划</h2><p>计划没有未解决问题。批准后将按当前运行配置进入有界任务调度。</p><div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('approve')}>{busy === 'approve' ? '批准中…' : `批准计划版本 ${run.revision}`}</button></div></section>}{canDistill && <section className="wb-detail-card wb-distill-card"><div><span className="wb-eyebrow">能力生产</span><h2>能力归档</h2><p>交付完成后系统会自动留下可追溯的能力草稿；你也可手动生成一个额外草稿供比较或补充。</p></div>{(() => { const candidateId = (run as Run & { capability_candidate_id?: unknown }).capability_candidate_id ?? run.artifacts?.capability_candidate_id; return typeof candidateId === 'string' && candidateId ? <div className="wb-notice">本次交付已归档为能力草稿。<Link className="wb-text-link" to={`/capabilities?selected=${encodeURIComponent(candidateId)}`}>打开已归档能力 →</Link></div> : null })()}<details className="wb-distill-manual"><summary>手动生成额外草稿</summary><form onSubmit={distill} className="wb-distill-form"><input required maxLength={120} value={distillName} onChange={(event) => setDistillName(event.target.value)} placeholder="候选能力名称" /><button className="wb-button wb-button-primary" disabled={busy !== null}>{busy === 'distill' ? '提炼中…' : '生成额外草稿'}</button></form></details>{distillNotice && <div className="wb-notice">{distillNotice} <Link className="wb-text-link" to="/capabilities">打开能力库 →</Link></div>}</section>}{isAdmin && <RunKnowledge key={`${run.id}:${run.revision}`} runId={run.id} revision={run.revision} status={run.status} artifacts={run.artifacts} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}</div><aside className="wb-detail-rail" aria-label="运行详情摘要"><section className="wb-detail-card"><h2>运行概览</h2><div className="wb-side-stat"><span>运行 ID</span><span>{run.id}</span></div><div className="wb-side-stat"><span>工程 ID</span><span>{run.project_id}</span></div><div className="wb-side-stat"><span>状态</span><span><StatusBadge status={run.status} /></span></div><div className="wb-side-stat"><span>风险</span><span>{run.triage?.risk ? { low: '低风险', medium: '中风险', high: '高风险' }[run.triage.risk] : '—'}</span></div>{run.triage?.reasons?.length ? <div className="wb-runtime-note">{run.triage.reasons.join('；')}</div> : null}</section><FrozenRuntime run={run} /><DeliveryEvidence run={run} /></aside></div></div>
 }

@@ -90,7 +90,7 @@
 .wf-task-status-failed, .wf-task-status-blocked, .wf-task-status-cancelled { fill: #b05246; }
 .wf-criterion { border: 1px solid #e0e7f0; border-radius: 9px; padding: 13px; background: #fbfcfe; min-height: 175px; }
 .wf-criterion-kicker { color: #6e819c; font-size: 11px; }
-.wf-criterion h4 { margin: 5px 0 7px; font-size: 14px; color: #244166; }
+.wf-criterion h3 { margin: 5px 0 7px; font-size: 14px; color: #244166; }
 .wf-criterion p { color: #5a6c84; font-size: 12px; line-height: 1.5; margin: 0 0 10px; white-space: pre-wrap; }
 .wf-detail-block { margin-top: 10px; font-size: 12px; color: #526681; }
 .wf-detail-block strong { display: block; font-size: 11px; color: #7c8aa0; }

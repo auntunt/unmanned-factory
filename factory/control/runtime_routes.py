@@ -59,7 +59,7 @@ def router(store, service, workspace_root=None, static_dir=None):
             raise HTTPException(400, str(exc)) from None
 
     @api.post("/runtime/probe")
-    def probe(body: RuntimeProbeBody):
+    def probe(body: RuntimeProbeBody, http_request: Request):
         if body.profile not in ROLES:
             raise HTTPException(400, "未知运行档位")
         if not _probe_gate.acquire(blocking=False):
@@ -101,7 +101,11 @@ def router(store, service, workspace_root=None, static_dir=None):
                                 prompt="Reply with exactly: OK",
                                 workspace=workspace, timeout_s=30, read_only=True,
                             )
-                            response = service.runner.run(request, lambda *_: None, threading.Event())
+                            runner = service.runner
+                            if getattr(service, 'governance', None) is not None:
+                                from factory.control.governance import GovernedRunner
+                                runner = GovernedRunner(runner, service.governance, actor_id=http_request.state.user['id'])
+                            response = runner.run(request, lambda *_: None, threading.Event())
                             if response.text.strip() != "OK":
                                 raise ValueError("Unexpected probe response")
                         result.update(outcome="passed", message="provider read-only probe completed")

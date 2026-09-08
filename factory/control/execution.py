@@ -129,6 +129,16 @@ def _reported_cost(value: Any) -> float | None:
     return cost if math.isfinite(cost) and cost >= 0 else None
 
 
+def _reported_tokens(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return tokens if tokens >= 0 else None
+
+
 def _clip(value: Any, limit: int = _MAX_OUTPUT) -> str:
     text = "" if value is None else str(value)
     return text if len(text) <= limit else text[: max(0, limit - 4)] + "\n..."
@@ -284,22 +294,6 @@ def _guard_workspace(root: Path, before: dict[str, Any], changed: tuple[str, ...
 
 def _within(path: str, declared: tuple[str, ...]) -> bool:
     return any(path == d or path.startswith(d.rstrip("/") + "/") for d in declared)
-
-
-def _profile(task: Mapping[str, Any], profiles: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
-    # Profile selection is a control-plane policy.  Normalize paths to the
-    # list shape required by planning.profile_for and ignore model overrides.
-    from factory.control.planning import profile_for
-    normalized = dict(task)
-    normalized["paths"] = list(task.get("paths") or ())
-    normalized["checks"] = list(task.get("checks") or ())
-    name = str(profile_for(normalized))
-    config = profiles.get(name)
-    if not isinstance(config, Mapping):
-        raise ExecutionError(f"profile {name!r} is not configured")
-    if not config.get("provider") or not config.get("model"):
-        raise ExecutionError(f"profile {name!r} lacks provider/model")
-    return name, config
 
 
 def _overlaps(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
@@ -473,46 +467,174 @@ def execute_plan(
     _git_ok(workspace, "worktree", "add", "-q", "-b", integration_branch, str(integration_path), base_sha, timeout_s=timeout_s)
     artifacts: dict[str, Any] = {"branch": integration_branch, "base_sha": base_sha, "commit": None, "worktree": str(integration_path), "checks": [], "tasks": []}
     _execution_budget.get().artifacts = artifacts
-    by_id = {task_id: {"id": task_id, "status": "queued", "profile": None, "branch": None, "worktree": None, "commit": None, "checks": []} for task_id in tasks}
+    by_id = {task_id: {"id": task_id, "status": "queued", "profile": None, "branch": None, "worktree": None, "commit": None, "checks": [], "attempts": []} for task_id in tasks}
     artifacts['tasks'] = list(by_id.values())
     child_commits: dict[str, str] = {}
     integrated = base_sha
     observed_cost = 0.0
     cost_unknown = False
+    cost_lock = threading.Lock()
     budget = project.get("budget_usd")
     try:
         budget = float(budget) if budget is not None else None
     except (TypeError, ValueError):
         raise ExecutionError("project budget_usd must be numeric") from None
 
-    def run_one(task: dict, child_root: Path, branch: str, profile_name: str, profile_cfg: Mapping[str, Any]) -> dict:
+    routing_policy = project.get("routing_policy")
+    if routing_policy is None:
+        # v2 callers did not authorize retries. Preserve their one-call
+        # execution behavior even when profiles contain stronger roles.
+        max_attempts, auto_escalate = 1, False
+    else:
+        if not isinstance(routing_policy, Mapping):
+            raise ExecutionError("routing_policy must be a mapping")
+        max_attempts = routing_policy.get("max_attempts")
+        auto_escalate = routing_policy.get("auto_escalate")
+        if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
+            raise ExecutionError("routing_policy max_attempts must be between 1 and 3")
+        if not isinstance(auto_escalate, bool):
+            raise ExecutionError("routing_policy auto_escalate must be a boolean")
+
+    def checkpoint() -> None:
+        with cost_lock:
+            known_cost = observed_cost
+        _emit(emit, "execution.checkpoint", {
+            "integration_branch": integration_branch,
+            "integration_worktree": str(integration_path),
+            "base_sha": base_sha,
+            "current_commit": integrated,
+            "tasks": list(by_id.values()),
+            "known_cost_usd": known_cost,
+        })
+
+    def dispatch_block_reason() -> str | None:
+        """Read the attempt ledger before a new provider call is dispatched."""
+        with cost_lock:
+            if cost_unknown and unknown_cost_policy == "stop":
+                return "provider cost is unknown; continuation requires human review"
+            if budget is not None and observed_cost >= budget:
+                return f"known provider cost ${observed_cost:.4f} exhausted budget ${budget:.4f}"
+        return None
+
+    checkpoint()
+
+    def run_one(task: dict, child_root: Path, branch: str, route: Mapping[str, Any]) -> dict:
         task_id = task["id"]
         before = _baseline(child_root)
-        _emit(emit, "task.started", {"profile": profile_name, "provider": profile_cfg['provider'],
-              "model": profile_cfg['model'], "branch": branch, "worktree": str(child_root)}, task_id)
+        _emit(emit, "model.selected", dict(route), task_id)
+        _emit(emit, "attempt.started", {**route, "branch": branch, "worktree": str(child_root)}, task_id)
+        result = None
+        cost: float | None = None
+        usage_emitted = False
+        streamed_usage: dict[str, Any] = {}
+        # GovernedRunner emits quota.reserved only after its atomic token
+        # reservation.  Do not create usage evidence for a provider call until
+        # that point: an exhausted quota must leave no phantom unknown charge.
+        provider_dispatched = getattr(runner, "governance", None) is None
+        provider_started_emitted = False
+
+        def provider_started(call_id: Any = None) -> None:
+            nonlocal provider_started_emitted
+            if provider_started_emitted:
+                return
+            provider_started_emitted = True
+            payload = {**route}
+            if isinstance(call_id, str) and call_id:
+                payload["call_id"] = call_id
+            _emit(emit, "provider.started", payload, task_id)
+
+        def remember_streamed_usage(payload: Any) -> None:
+            if not isinstance(payload, Mapping):
+                return
+            total = payload.get("total")
+            source = total if isinstance(total, Mapping) else payload
+            for name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+                value = _reported_tokens(source.get(name))
+                if value is not None:
+                    streamed_usage[name] = value
+            value = _reported_cost(source.get("cost_usd"))
+            if value is not None:
+                streamed_usage["cost_usd"] = value
+
+        def usage() -> None:
+            nonlocal usage_emitted, cost, observed_cost, cost_unknown
+            if usage_emitted or not provider_dispatched:
+                return
+            usage_emitted = True
+            cost = _reported_cost(getattr(result, "cost_usd", None)) if result is not None else None
+            if cost is None:
+                cost = _reported_cost(streamed_usage.get("cost_usd"))
+            payload: dict[str, Any] = {**route, "cost_usd": cost}
+            for source, target in (("tokens_in", "input_tokens"), ("tokens_out", "output_tokens"),
+                                   ("cached_input_tokens", "cached_input_tokens")):
+                value = getattr(result, source, None) if result is not None else None
+                if value is None:
+                    value = streamed_usage.get(target)
+                if value is not None:
+                    payload[target] = value
+            _emit(emit, "usage.recorded", payload, task_id)
+            # The event is durable before its charge enters the shared dispatch
+            # ledger. Threads may already be in flight, but no later attempt
+            # or wave may start once the configured budget/unknown-cost policy
+            # is reached.
+            with cost_lock:
+                if cost is None:
+                    cost_unknown = True
+                    artifacts['billing_incomplete'] = 'provider cost is unknown; the dollar budget cannot be guaranteed'
+                    artifacts['autopublish_blocked'] = True
+                    artifacts['known_cost_usd'] = observed_cost
+                    artifacts['observed_cost_usd'] = None
+                    return
+                subtotal = observed_cost + cost
+                if not math.isfinite(subtotal):
+                    artifacts.update(billing_incomplete='reported cost subtotal overflowed; the dollar budget cannot be verified',
+                                     autopublish_blocked=True, observed_cost_usd=None,
+                                     known_cost_usd=observed_cost)
+                    raise ExecutionError('reported cost subtotal overflowed', artifacts=artifacts)
+                observed_cost = subtotal
+                artifacts['known_cost_usd'] = observed_cost
+                artifacts['observed_cost_usd'] = None if cost_unknown else observed_cost
+
+        def finish(status: str, **values: Any) -> dict:
+            usage()
+            payload = {**route, "status": status, "cost_usd": cost, **values}
+            _emit(emit, "attempt.completed" if status == "verified" else "attempt.failed", payload, task_id)
+            return {"status": status, "cost_usd": cost, "attempt": payload, **values}
+
         try:
             from factory.control.providers import ProviderRequest
-            request = ProviderRequest(provider=str(profile_cfg["provider"]), model=str(profile_cfg["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), timeout_s=max(1, int(remaining())), read_only=False)
+            request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), timeout_s=max(1, int(remaining())), read_only=False)
             last_assistant_text: str | None = None
             def callback(typ: Any, payload: Any = None, *extra: Any) -> None:
                 # SDK adapters historically used both emit(kind, payload) and
                 # emit(kind, payload, task_id); task identity is coordinator
                 # owned, so ignore a provider supplied third argument.
                 nonlocal last_assistant_text
-                if str(typ) in {"assistant.message", "assistant_message"}:
+                nonlocal provider_dispatched
+                kind = str(typ)
+                if kind in {"assistant.message", "assistant_message"}:
                     if isinstance(payload, dict):
                         candidate = payload.get("text", payload.get("content"))
                     else:
                         candidate = payload
                     if candidate is not None:
                         last_assistant_text = str(candidate)
-                _emit(emit, str(typ), payload if isinstance(payload, dict) else {"value": _clip(payload)}, task_id)
+                if kind == "provider.usage":
+                    remember_streamed_usage(payload)
+                event_payload = payload if isinstance(payload, dict) else {"value": payload}
+                _emit(emit, kind, event_payload, task_id)
+                if kind == "quota.reserved":
+                    provider_dispatched = True
+                    provider_started(event_payload.get("id"))
+            if provider_dispatched:
+                provider_started()
             result = runner.run(request, callback, cancel=cancel)
             final_text = str(getattr(result, "text", "") or "")
             if final_text and final_text != last_assistant_text:
-                _emit(emit, "assistant.message", {"text": _clip(final_text)}, task_id)
+                _emit(emit, "assistant.message", {"text": final_text}, task_id)
+            usage()
             if cancel.is_set():
-                return {"status": "cancelled", "error": "cancel requested"}
+                return finish("cancelled", error="cancel requested", retryable=False)
             changed = _status_paths(child_root, timeout_s=timeout_s)
             if any(any(part in _FORBIDDEN_PARTS for part in PurePosixPath(p).parts) or PurePosixPath(p).name in _FORBIDDEN_NAMES for p in changed):
                 raise ExecutionError("worker changed forbidden metadata or secret path")
@@ -532,9 +654,9 @@ def execute_plan(
                 record = _run_check(child_root, name, argv, remaining(), emit, task_id, cancel)
                 records.append(record)
                 if record.get("cancelled"):
-                    return {"status": "cancelled", "checks": records, "error": "cancel requested"}
+                    return finish("cancelled", checks=records, error="cancel requested", retryable=False)
                 if record.get("timeout") or record.get("exit") != 0:
-                    return {"status": "failed", "checks": records, "error": f"verification failed: {name}"}
+                    return finish("failed", checks=records, error=f"verification failed: {name}", retryable=True)
             after_changed = _status_paths(child_root, timeout_s=timeout_s)
             _reject_symlinks(child_root, after_changed)
             _guard_workspace(child_root, before, after_changed)
@@ -545,16 +667,79 @@ def execute_plan(
             if _status_paths(child_root, timeout_s=timeout_s):
                 raise ExecutionError("worktree dirty after commit")
             committed_diff = _git_ok(child_root, "show", "--format=", "--binary", commit, timeout_s=timeout_s)
-            cost = _reported_cost(getattr(result, "cost_usd", None))
             commit_hash = diff_hash(committed_diff)
             _emit(emit, "git.commit", {"commit": commit, "branch": branch, "diff_hash": commit_hash}, task_id)
-            return {"status": "verified", "commit": commit, "diff_hash": commit_hash, "checks": records, "cost_usd": cost}
+            return finish("verified", commit=commit, diff_hash=commit_hash, checks=records, retryable=False)
         except EventError:
             raise
         except ExecutionError as exc:
-            return {"status": "failed", "error": str(exc)}
+            usage()
+            if str(exc) == 'reported cost subtotal overflowed':
+                _emit(emit, "attempt.failed", {**route, "status": "failed", "cost_usd": cost,
+                      "error": str(exc), "retryable": False, "failure_kind": "billing"}, task_id)
+                raise
+            # Scope/metadata guards, cancellation and the shared deadline are
+            # control-plane boundaries. A new model cannot be allowed to evade
+            # them. A no-change response is the narrowly repairable exception.
+            retryable = str(exc) == "worker produced no changes"
+            return finish("failed", error=str(exc), retryable=retryable,
+                          failure_kind="execution" if retryable else "policy_or_deadline")
         except Exception as exc:
-            return {"status": "failed", "error": f"worker error: {type(exc).__name__}: {_clip(exc)}"}
+            usage()
+            return finish("failed", error=f"worker error: {type(exc).__name__}: {_clip(exc)}", retryable=True,
+                          failure_kind="execution")
+
+    def run_with_retries(task: dict, child_root: Path, branch: str, route: Mapping[str, Any], *, attempt_limit: int | None = None) -> dict:
+        """Keep failed attempts and repair evidence in separate worktrees."""
+        from factory.control.model_routing import RoutingError, select_profile
+
+        task_id = task["id"]
+        limit = max_attempts if attempt_limit is None else attempt_limit
+        attempts: list[dict[str, Any]] = []
+        current_task, current_root, current_branch, current_route = task, child_root, branch, route
+        while True:
+            result = run_one(current_task, current_root, current_branch, current_route)
+            attempt_evidence = result.pop("attempt")
+            attempts.append(attempt_evidence)
+            if result.get("status") == "verified":
+                total_cost = sum(cost for cost in (item.get("cost_usd") for item in attempts) if cost is not None)
+                task_cost = None if any(item.get("cost_usd") is None for item in attempts) else total_cost
+                return {**result, "cost_usd": task_cost, "known_cost_usd": total_cost,
+                        "attempts": attempts, "profile": current_route["profile"],
+                        "branch": current_branch, "worktree": str(current_root)}
+            if (not result.get("retryable") or len(attempts) >= limit or cancel.is_set()):
+                total_cost = sum(cost for cost in (item.get("cost_usd") for item in attempts) if cost is not None)
+                task_cost = None if any(item.get("cost_usd") is None for item in attempts) else total_cost
+                return {**result, "cost_usd": task_cost, "known_cost_usd": total_cost,
+                        "attempts": attempts, "profile": current_route["profile"],
+                        "branch": current_branch, "worktree": str(current_root)}
+            blocked = dispatch_block_reason()
+            if blocked:
+                known_attempt_cost = sum(cost for cost in (item.get("cost_usd") for item in attempts) if cost is not None)
+                return {**result, "error": blocked,
+                        "retryable": False, "cost_usd": None if any(item.get("cost_usd") is None for item in attempts) else known_attempt_cost,
+                        "known_cost_usd": known_attempt_cost, "attempts": attempts,
+                        "profile": current_route["profile"], "branch": current_branch,
+                        "worktree": str(current_root)}
+            _remaining_budget()
+            next_attempt = len(attempts) + 1
+            try:
+                next_route = select_profile(task, profiles, attempt=next_attempt, auto_escalate=auto_escalate)
+            except RoutingError as exc:
+                # A missing upgrade profile is configuration evidence, not a
+                # reason to silently retry an unrelated or weaker model.
+                return {"status": "failed", "error": str(exc), "retryable": False,
+                        "attempts": attempts, "profile": current_route["profile"],
+                        "branch": current_branch, "worktree": str(current_root)}
+            evidence = _clip(result.get("error", ""), 4_000)
+            current_task = {**task, "prompt": str(task.get("prompt", "")) +
+                            "\n\nPrevious attempt failed. Repair only the declared scope and preserve trusted checks.\n"
+                            f"Failure evidence: {evidence}"}
+            current_branch = f"factory/{run_part}-attempt/{task_id}/{next_attempt}"
+            current_root = root / f"task-{task_id}-a{next_attempt}"
+            _git_ok(workspace, "worktree", "add", "-q", "-b", current_branch, str(current_root),
+                    integration_branch, timeout_s=timeout_s)
+            current_route = next_route
 
     completed: set[str] = set()
     failed: str | None = None
@@ -569,6 +754,10 @@ def execute_plan(
                 if task_id not in completed:
                     by_id[task_id]["status"] = "cancelled"
             raise ExecutionError("execution cancelled", artifacts=artifacts)
+        current_block = dispatch_block_reason()
+        if current_block is not None:
+            stop_reason = current_block
+            stop_kind = "unknown_cost" if cost_unknown else "budget"
         ready = [task for task_id, task in tasks.items() if task_id not in completed and all(dep in completed for dep in task["depends_on"])]
         if failed is not None:
             for task in tasks.values():
@@ -594,36 +783,41 @@ def execute_plan(
             used.update(task["paths"])
         if not wave:
             wave = [ready[0]]
-        futures: dict[concurrent.futures.Future, tuple[dict, Path, str, str, Mapping[str, Any]]] = {}
+        futures: dict[concurrent.futures.Future, tuple[dict, Path, str, Mapping[str, Any]]] = {}
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="factory-task")
         pending: set[concurrent.futures.Future] = set()
         try:
             for task in wave:
                 remaining()
                 task_id = task["id"]
-                profile_name, profile_cfg = _profile(task, profiles)
+                from factory.control.model_routing import RoutingError, select_profile
+                try:
+                    route = select_profile(task, profiles, attempt=1, auto_escalate=auto_escalate)
+                except RoutingError as exc:
+                    raise ExecutionError(str(exc), artifacts=artifacts) from None
                 child_branch = f"factory/{run_part}-task/{task_id}"
                 child_path = root / f"task-{task_id}"
                 _git_ok(workspace, "worktree", "add", "-q", "-b", child_branch, str(child_path), integration_branch, timeout_s=timeout_s)
-                by_id[task_id].update({"profile": profile_name, "branch": child_branch, "worktree": str(child_path), "status": "running"})
-                future = pool.submit(copy_context().run, run_one, task, child_path, child_branch, profile_name, profile_cfg)
-                futures[future] = (task, child_path, child_branch, profile_name, profile_cfg)
+                by_id[task_id].update({"profile": route["profile"], "branch": child_branch, "worktree": str(child_path), "status": "running"})
+                _emit(emit, "task.started", {**route, "branch": child_branch, "worktree": str(child_path)}, task_id)
+                future = pool.submit(copy_context().run, run_with_retries, task, child_path, child_branch, route)
+                futures[future] = (task, child_path, child_branch, route)
             done, pending = concurrent.futures.wait(futures, timeout=remaining())
             if pending:
                 cancel.set()
                 raise ExecutionError(f"task timeout after {timeout_s}s", artifacts=artifacts)
             for future in done:
-                task, child_path, child_branch, _, _ = futures[future]
+                task, child_path, child_branch, _ = futures[future]
                 task_id = task["id"]
                 result = future.result()
                 by_id[task_id].update(result)
                 completed.add(task_id)
                 if result.get("status") == "verified":
-                    _emit(emit, "task.completed", {"status": "verified", "commit": result.get("commit"), "cost_usd": result.get("cost_usd")}, task_id)
+                    _emit(emit, "task.completed", {"status": "verified", "commit": result.get("commit"), "cost_usd": result.get("cost_usd"), "attempts": result.get("attempts", [])}, task_id)
                 else:
-                    _emit(emit, "task.failed", {"status": result.get("status", "failed"), "error": result.get("error", "")}, task_id)
-                if result.get("cost_usd") is None:
-                    cost_unknown = True
+                    _emit(emit, "task.failed", {"status": result.get("status", "failed"), "error": result.get("error", ""), "attempts": result.get("attempts", [])}, task_id)
+                attempt_costs = [attempt.get("cost_usd") for attempt in result.get("attempts", [])]
+                if any(cost is None for cost in attempt_costs):
                     artifacts['billing_incomplete'] = 'provider cost is unknown; the dollar budget cannot be guaranteed'
                     artifacts['autopublish_blocked'] = True
                     _emit(emit, 'billing.unknown', {'policy': unknown_cost_policy,
@@ -631,17 +825,10 @@ def execute_plan(
                     if unknown_cost_policy == 'stop' and stop_kind != 'budget':
                         stop_reason = "provider cost is unknown; continuation requires human review"
                         stop_kind = "unknown_cost"
-                else:
-                    subtotal = observed_cost + result["cost_usd"]
-                    if not math.isfinite(subtotal):
-                        artifacts.update(billing_incomplete='reported cost subtotal overflowed; the dollar budget cannot be verified',
-                                         autopublish_blocked=True, observed_cost_usd=None,
-                                         known_cost_usd=observed_cost)
-                        raise ExecutionError('reported cost subtotal overflowed', artifacts=artifacts)
-                    observed_cost = subtotal
-                    if budget is not None and observed_cost > budget:
-                        stop_reason = f"observed provider cost ${observed_cost:.4f} exceeds budget ${budget:.4f}"
-                        stop_kind = "budget"
+                current_block = dispatch_block_reason()
+                if current_block is not None:
+                    stop_reason = current_block
+                    stop_kind = "unknown_cost" if cost_unknown else "budget"
                 if result.get("status") != "verified":
                     if result.get("status") == "cancelled":
                         cancelled = True
@@ -671,6 +858,7 @@ def execute_plan(
                 _git(integration_path, "cherry-pick", "--abort", timeout_s=timeout_s)
                 raise ExecutionError(f"cherry-pick failed for {task_id}: {_clip(err)}", artifacts={**artifacts, "tasks": list(by_id.values())})
             integrated = _git_ok(integration_path, "rev-parse", "HEAD", timeout_s=timeout_s)
+        checkpoint()
         # Dependents must start from the newly integrated commit.
 
     if cancelled:
@@ -681,16 +869,70 @@ def execute_plan(
                 by_id[task["id"]]["status"] = "blocked"
         raise ExecutionError(f"task {failed} failed", artifacts={**artifacts, "tasks": list(by_id.values())})
 
-    final_before = _baseline(integration_path)
-    final_tree = _git_ok(integration_path, "rev-parse", "HEAD^{tree}", timeout_s=timeout_s)
-    if _status_paths(integration_path, timeout_s=timeout_s):
-        raise ExecutionError("integration worktree is dirty before final verification", artifacts={**artifacts, "tasks": list(by_id.values()), "commit": integrated})
     final_checks: list[dict] = []
-    for name, argv in _check_argv(project, (project.get("checks") or {}).keys()):
-        record = _run_check(integration_path, name, argv, remaining(), emit, None, cancel)
-        final_checks.append(record)
-        if record.get("timeout") or record.get("exit") != 0:
-            raise ExecutionError(f"final verification failed: {name}", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+    integration_repaired = False
+    while True:
+        final_before = _baseline(integration_path)
+        final_tree = _git_ok(integration_path, "rev-parse", "HEAD^{tree}", timeout_s=timeout_s)
+        if _status_paths(integration_path, timeout_s=timeout_s):
+            raise ExecutionError("integration worktree is dirty before final verification", artifacts={**artifacts, "tasks": list(by_id.values()), "commit": integrated})
+        final_checks = []
+        failed_check: tuple[str, dict] | None = None
+        for name, argv in _check_argv(project, (project.get("checks") or {}).keys()):
+            record = _run_check(integration_path, name, argv, remaining(), emit, None, cancel)
+            final_checks.append(record)
+            if record.get("cancelled"):
+                raise ExecutionError("execution cancelled", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+            if record.get("timeout") or record.get("exit") != 0:
+                failed_check = (name, record)
+                break
+        if failed_check is None:
+            break
+        # Only projects that explicitly opted into bounded routing receive one
+        # repair pass.  It is a new, auditable task limited to the union of
+        # already-authorized paths and trusted final checks.
+        if integration_repaired or routing_policy is None or max_attempts <= 1:
+            raise ExecutionError(f"final verification failed: {failed_check[0]}", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+        blocked = dispatch_block_reason()
+        if blocked:
+            raise ExecutionError(f"final verification failed: {failed_check[0]}; integration repair not dispatched: {blocked}",
+                                 artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+        repair_id = "integration-repair"
+        if repair_id in by_id:
+            raise ExecutionError("final verification failed and integration repair task id is unavailable", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+        evidence = _clip((str(failed_check[1].get("stderr", "")) + "\n" + str(failed_check[1].get("stdout", ""))).strip(), 4_000)
+        repair_task = {"id": repair_id, "title": "Repair integrated delivery", "complexity": "large", "risk": "medium",
+                       "paths": tuple(sorted({path for task in tasks.values() for path in task["paths"]})),
+                       "checks": list((project.get("checks") or {}).keys()), "acceptance": [], "depends_on": [],
+                       "prompt": "The integrated delivery failed a trusted final check. Repair only the declared paths; do not modify test or check infrastructure.\n"
+                                 f"Failing check: {failed_check[0]}\nFailure evidence:\n{evidence}"}
+        from factory.control.model_routing import RoutingError, select_profile
+        try:
+            route = select_profile(repair_task, profiles, attempt=1, auto_escalate=auto_escalate)
+        except RoutingError as exc:
+            raise ExecutionError(str(exc), artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated}) from None
+        repair_branch = f"factory/{run_part}-task/{repair_id}"
+        repair_path = root / f"task-{repair_id}"
+        _git_ok(workspace, "worktree", "add", "-q", "-b", repair_branch, str(repair_path), integration_branch, timeout_s=timeout_s)
+        by_id[repair_id] = {"id": repair_id, "status": "running", "profile": route["profile"], "branch": repair_branch, "worktree": str(repair_path), "commit": None, "checks": [], "attempts": []}
+        _emit(emit, "task.started", {**route, "branch": repair_branch, "worktree": str(repair_path), "integration_repair": True}, repair_id)
+        # A failed final check receives one provider repair attempt.  It is a
+        # separate task for auditability, but must not inherit the regular
+        # task escalation loop and turn one integration repair into several
+        # paid model calls.
+        result = run_with_retries(repair_task, repair_path, repair_branch, route, attempt_limit=1)
+        by_id[repair_id].update(result)
+        if result.get("status") != "verified":
+            _emit(emit, "task.failed", {"status": result.get("status", "failed"), "error": result.get("error", ""), "attempts": result.get("attempts", []), "integration_repair": True}, repair_id)
+            raise ExecutionError(f"integration repair failed: {result.get('error', 'unknown error')}", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+        _emit(emit, "task.completed", {"status": "verified", "commit": result.get("commit"), "cost_usd": result.get("cost_usd"), "attempts": result.get("attempts", []), "integration_repair": True}, repair_id)
+        rc, _, err = _git(integration_path, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Factory", "-c", "user.email=factory@localhost", "cherry-pick", str(result["commit"]), timeout_s=timeout_s)
+        if rc != 0:
+            _git(integration_path, "cherry-pick", "--abort", timeout_s=timeout_s)
+            raise ExecutionError(f"cherry-pick failed for integration repair: {_clip(err)}", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})
+        integrated = _git_ok(integration_path, "rev-parse", "HEAD", timeout_s=timeout_s)
+        integration_repaired = True
+        checkpoint()
     final_changed = _status_paths(integration_path, timeout_s=timeout_s)
     if final_changed:
         raise ExecutionError(f"final verification left worktree changes: {', '.join(final_changed)}", artifacts={**artifacts, "tasks": list(by_id.values()), "checks": final_checks, "commit": integrated})

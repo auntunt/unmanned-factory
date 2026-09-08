@@ -1,0 +1,75 @@
+{
+  "date": "2026-09-08",
+  "provider": "codex",
+  "sdk_version": "0.147.0",
+  "run_id": "ebf1b8ed8608477a949c33a7e6e6dc9a",
+  "status": "ready_for_review",
+  "base_checkout_unchanged": true,
+  "base_commit": "d226205b18970a8e50f12a39f4157af3a0738942",
+  "delivery_commit": "2c9abf9ca2c550eebe7f6b829a888381a7debc5b",
+  "tasks": [
+    {
+      "id": "rules",
+      "status": "verified",
+      "commit": "11aee35064da8dc70aa8f0b6357bbe5777b140b6"
+    },
+    {
+      "id": "summary",
+      "status": "verified",
+      "commit": "2c9abf9ca2c550eebe7f6b829a888381a7debc5b"
+    }
+  ],
+  "checks": [
+    {
+      "name": "routing",
+      "exit": 0,
+      "duration_s": 0.03
+    },
+    {
+      "name": "summary",
+      "exit": 0,
+      "duration_s": 0.033
+    }
+  ],
+  "assertions": 11,
+  "token_usage": {
+    "limit_tokens": 400000,
+    "used_tokens": 156649,
+    "reserved_tokens": 0,
+    "unknown_calls": 0,
+    "remaining_tokens": 243351
+  },
+  "calls": [
+    {
+      "model": "gpt-5.6-terra",
+      "actual_tokens": 64625,
+      "status": "settled",
+      "created_at": "2026-09-08T10:52:54.481494+00:00",
+      "settled_at": "2026-09-08T10:53:38.765294+00:00"
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "actual_tokens": 80472,
+      "status": "settled",
+      "created_at": "2026-09-08T10:51:58.510841+00:00",
+      "settled_at": "2026-09-08T10:52:53.917138+00:00"
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "actual_tokens": 11552,
+      "status": "settled",
+      "created_at": "2026-09-08T10:51:31.770029+00:00",
+      "settled_at": "2026-09-08T10:51:57.733667+00:00"
+    }
+  ],
+  "event_count": 89,
+  "capability_drafts": [
+    "8d249b0131884e49a71814a8c0cf5c2a"
+  ],
+  "limitations": [
+    "No external publication or deployment.",
+    "Model-reported USD cost unavailable; tokens include cached inputs.",
+    "SDK native command runner encountered a Unicode path failure; file edits succeeded and factory-owned checks passed independently."
+  ],
+  "evidence_directory": ".factory-preview/live-qualification-ffe703dbdf"
+}

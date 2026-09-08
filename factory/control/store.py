@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
 import uuid
+import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,18 +23,18 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def scrub(value):
+def scrub(value, *, max_chars=100_000):
     if isinstance(value, dict):
-        return {str(k): '***REDACTED***' if SECRET_KEY.match(str(k)) else scrub(v)
+        return {str(k): '***REDACTED***' if SECRET_KEY.match(str(k)) else scrub(v, max_chars=max_chars)
                 for k, v in value.items() if str(k) not in {'thinking', 'reasoning', 'chain_of_thought'}}
     if isinstance(value, (list, tuple)):
-        return [scrub(v) for v in value]
+        return [scrub(v, max_chars=max_chars) for v in value]
     if isinstance(value, str):
         text = redact_text(value)
         for key, secret in os.environ.items():
             if len(secret) >= 8 and re.search(r'(?i)(TOKEN|PASSWORD|SECRET|API_KEY)$', key):
                 text = text.replace(secret, '***REDACTED***')
-        return text if len(text) <= 100_000 else text[:100_000] + '\n[输出已截断：超过 100000 字符]'
+        return text if max_chars is None or len(text) <= max_chars else text[:max_chars] + f'\n[输出已截断：超过 {max_chars} 字符]'
     return value
 
 
@@ -53,6 +55,13 @@ class Store:
                     run_id TEXT NOT NULL, task_id TEXT, type TEXT NOT NULL,
                     payload TEXT NOT NULL, at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
+                CREATE TABLE IF NOT EXISTS event_archives(
+                    event_id INTEGER PRIMARY KEY, content BLOB NOT NULL,
+                    sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL);
+                CREATE TRIGGER IF NOT EXISTS no_archive_update BEFORE UPDATE ON event_archives
+                    BEGIN SELECT RAISE(ABORT,'event archives are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS no_archive_delete BEFORE DELETE ON event_archives
+                    BEGIN SELECT RAISE(ABORT,'event archives are immutable'); END;
                 CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS project_settings_audit(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,8 +163,15 @@ class Store:
 
     @staticmethod
     def _event(db, rid, kind, payload, task_id=None):
-        return db.execute('INSERT INTO events(run_id,task_id,type,payload,at) VALUES (?,?,?,?,?)',
-                          (rid, task_id, kind, json.dumps(scrub(payload), ensure_ascii=False), now())).lastrowid
+        summary = json.dumps(scrub(payload), ensure_ascii=False)
+        eid = db.execute('INSERT INTO events(run_id,task_id,type,payload,at) VALUES (?,?,?,?,?)',
+                          (rid, task_id, kind, summary, now())).lastrowid
+        full = json.dumps(scrub(payload, max_chars=None), ensure_ascii=False)
+        if full != summary:
+            raw = full.encode('utf-8')
+            db.execute('INSERT INTO event_archives VALUES (?,?,?,?)',
+                       (eid, zlib.compress(raw), hashlib.sha256(raw).hexdigest(), len(raw)))
+        return eid
 
     def create_run(self, project_id, request, *, source=None, delivery_id=None, semantic_id=None):
         rid = uuid.uuid4().hex
@@ -195,6 +211,11 @@ class Store:
     def runs(self):
         with self.connect() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC LIMIT 200')]
+
+    def all_runs(self):
+        """Accounting and recovery must not silently omit older runs."""
+        with self.connect() as db:
+            return [json.loads(r[0]) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC')]
 
     def published_runs_for_pr(self, project_id, number, repository):
         """Find deliveries independently of the dashboard's recent-run limit."""
@@ -239,6 +260,27 @@ class Store:
             rows = db.execute('SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?',
                               (rid, after, min(limit, 2000))).fetchall()
             return [{**dict(r), 'payload': json.loads(r['payload']), 'version': 1} for r in rows]
+
+    def export_events(self, rid, *, through=None):
+        """Read the complete stored payload against a stable event watermark."""
+        with self.connect() as db:
+            rows = db.execute('''SELECT e.*, a.content AS archive, a.sha256 AS archive_sha
+                FROM events e LEFT JOIN event_archives a ON a.event_id=e.id
+                WHERE e.run_id=? AND (? IS NULL OR e.id<=?) ORDER BY e.id''',
+                (rid, through, through))
+            for row in rows:
+                value = dict(row)
+                archive, sha = value.pop('archive'), value.pop('archive_sha')
+                if archive is not None:
+                    raw = zlib.decompress(archive)
+                    if hashlib.sha256(raw).hexdigest() != sha:
+                        raise ValueError('事件归档完整性校验失败')
+                    value['payload'] = json.loads(raw)
+                    value['archive_sha256'] = sha
+                else:
+                    value['payload'] = json.loads(value['payload'])
+                value['version'] = 1
+                yield value
 
     def conversation(self, rid):
         messages, after = [], 0

@@ -40,6 +40,7 @@ _PROVIDER_MODULES = {
 }
 _PROBE_CACHE_TTL = 10.0
 _PROBE_TIMEOUT = 5.0
+_SYSTEM_PROXY_WARNING = "系统启用代理但模型进程未配置代理，可能无法连接，请在服务启动环境设置 HTTP_PROXY、HTTPS_PROXY 或 ALL_PROXY。"
 _inspect_cache_lock = threading.Lock()
 _inspect_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
@@ -400,6 +401,31 @@ def _auth_sources(provider: str) -> list[str]:
     return sources
 
 
+def _proxy_environment_configured() -> bool:
+    """Whether this process has an explicit proxy without exposing its value."""
+    return any(bool(os.getenv(name, "").strip()) for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    ))
+
+
+def _macos_system_proxy_without_process_proxy() -> bool:
+    """Read the macOS proxy switch only; never inspect or report proxy URLs."""
+    if sys.platform != "darwin" or _proxy_environment_configured():
+        return False
+    try:
+        result = subprocess.run(["scutil", "--proxy"], capture_output=True, text=True,
+                                timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    # scutil's dictionary reports HTTPEnable / HTTPSEnable independently.
+    # We retain only the boolean signal, not its port or endpoint.
+    import re
+    return bool(re.search(r"(?m)^\s*HTTPS?Enable\s*:\s*1\s*$", result.stdout or ""))
+
+
 def profile_blockers(profile: Mapping[str, Any], role: str) -> list[str]:
     """Return only deterministic blockers; absence of env auth is unknown."""
     blockers: list[str] = []
@@ -495,6 +521,9 @@ def _inspect_runtime_uncached(settings: RuntimeSettings, workspace_root: str | P
                    and latest[role]["model"] == profile["model"])
         for role, profile in config["profiles"].items()
     }
+    verification_note = "Connection tests describe the last observed result at checked_at; credentials and access may change. GitHub publishing has not been tested."
+    if _macos_system_proxy_without_process_proxy():
+        verification_note += " " + _SYSTEM_PROXY_WARNING
     return {
         "checked_at": _iso(),
         "execution_mode": "local_sdk_children",
@@ -510,7 +539,7 @@ def _inspect_runtime_uncached(settings: RuntimeSettings, workspace_root: str | P
                       "execution": execution and all(live_verified[r] for r in ROLES if r != "planner"),
                       "publishing": False},
         "live_verified": live_verified,
-        "verification_note": "Connection tests describe the last observed result at checked_at; credentials and access may change. GitHub publishing has not been tested.",
+        "verification_note": verification_note,
         "blockers": list(dict.fromkeys(blockers)),
         "last_probes": probes,
     }
@@ -520,7 +549,12 @@ def inspect_runtime(settings: RuntimeSettings, workspace_root: str | Path | None
                     static_dir: str | Path | None = None) -> dict[str, Any]:
     """Return bounded diagnostics, cached briefly to keep GET inexpensive."""
     config = settings.get()
-    key = (settings.store.path, config["revision"], str(workspace_root or ""), str(static_dir or ""))
+    # Proxy variables can be added to a service environment without changing
+    # its runtime configuration; do not serve the old warning from cache.
+    proxy_environment = tuple(bool(os.getenv(name, "").strip()) for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+    ))
+    key = (settings.store.path, config["revision"], str(workspace_root or ""), str(static_dir or ""), proxy_environment)
     current = time.monotonic()
     with _inspect_cache_lock:
         cached = _inspect_cache.get(key)

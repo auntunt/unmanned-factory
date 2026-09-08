@@ -1,0 +1,98 @@
+.ov3-page { min-width: 0; }
+.ov3-page .wb-page-header { margin-bottom: 24px; }
+.ov3-refresh { min-width: 58px; }
+.ov3-card { box-shadow: 0 2px 7px rgba(25, 48, 41, .025); }
+.ov3-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.ov3-summary > div { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; border: 1px solid var(--wb-border); border-radius: 8px; background: var(--wb-panel); padding: 12px 14px; }
+.ov3-summary > div.is-attention { border-color: #ead5ab; background: #fffdf8; }
+.ov3-summary span { color: var(--wb-muted); font-size: 12px; }
+.ov3-summary strong { color: var(--wb-ink); font-size: 23px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+.ov3-summary small { grid-column: 1 / -1; color: var(--wb-faint); font-size: 10px; }
+.ov3-flow-card { margin-bottom: 20px; padding: 25px 25px 20px; border-color: #c5d8cf; }
+.ov3-flow-card .ov3-section-head { margin-bottom: 24px; }
+.ov3-flow-card .ov3-section-head h2 { font-size: 23px; font-weight: 650; }
+.ov3-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
+.ov3-section-head h2 { margin: 5px 0 0; color: var(--wb-ink); font-size: 17px; letter-spacing: -.025em; line-height: 1.3; }
+.ov3-section-head p { max-width: 540px; margin: 6px 0 0; color: var(--wb-muted); font-size: 12px; line-height: 1.5; }
+.ov3-flow-note { color: var(--wb-faint); font-size: 10px; white-space: nowrap; }
+.ov3-item:focus-visible, .ov3-attention-row:focus-visible, .ov3-event-row:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 3px; }
+.ov3-stage-total { flex: 0 0 auto; border-radius: 5px; background: var(--wb-teal-soft); color: var(--wb-teal-dark); padding: 6px 8px; font-size: 10px; font-weight: 700; }
+.ov3-item-list { display: grid; gap: 0; }
+.ov3-item, .ov3-attention-row, .ov3-event-row { min-width: 0; display: flex; align-items: center; gap: 10px; border-top: 1px solid #edf1ef; padding: 12px 0; }
+.ov3-item:first-child, .ov3-attention-row:first-child, .ov3-event-row:first-child { border-top: 0; padding-top: 0; }
+.ov3-item:last-child, .ov3-attention-row:last-child, .ov3-event-row:last-child { padding-bottom: 0; }
+.ov3-item-copy, .ov3-attention-row > span:nth-child(2), .ov3-event-row > span:nth-child(2) { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.ov3-item-copy strong, .ov3-attention-row strong, .ov3-event-row strong { overflow: hidden; color: var(--wb-ink); text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.ov3-item-copy small, .ov3-attention-row small, .ov3-event-row small { overflow: hidden; color: var(--wb-faint); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.ov3-item-copy > span { overflow: hidden; color: var(--wb-muted); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.ov3-stage-status { flex: 0 0 auto; border-radius: 5px; padding: 5px 7px; font-size: 10px; font-weight: 700; }
+.ov3-stage-status-draft { background: #f0f2ef; color: var(--wb-muted); }
+.ov3-stage-status-ready { background: var(--wb-teal-soft); color: var(--wb-teal-dark); }
+.ov3-item:hover strong, .ov3-attention-row:hover strong, .ov3-event-row:hover strong { color: var(--wb-teal-dark); }
+.ov3-arrow { flex: 0 0 auto; color: var(--wb-teal); font-size: 17px; line-height: 1; }
+.ov3-list-foot { margin: 15px 0 0; border-top: 1px solid #edf1ef; padding-top: 12px; color: var(--wb-faint); font-size: 10px; }
+.ov3-attention-card { min-width: 0; }
+.ov3-attention-count { display: inline-grid; min-width: 26px; height: 26px; place-items: center; border-radius: 50%; background: var(--wb-amber-soft); color: var(--wb-amber); font-size: 11px; font-weight: 750; }
+.ov3-attention-mark { display: grid; width: 25px; height: 25px; flex: 0 0 auto; place-items: center; border-radius: 7px; background: var(--wb-amber-soft); color: var(--wb-amber); font-size: 12px; font-weight: 750; }
+.ov3-outcomes { margin-bottom: 16px; }
+.ov3-outcome-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.ov3-outcome-grid > div { display: grid; grid-template-columns: auto 1fr; gap: 4px 9px; border-left: 2px solid #b8d9d1; padding: 7px 10px; }
+.ov3-outcome-grid strong { color: var(--wb-teal-dark); font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+.ov3-outcome-grid span { align-self: end; color: var(--wb-ink); font-size: 12px; font-weight: 680; }
+.ov3-outcome-grid small { grid-column: 1 / -1; color: var(--wb-faint); font-size: 10px; line-height: 1.4; }
+.ov3-capability-note { margin: 16px 0 0; border-top: 1px solid #edf1ef; padding-top: 12px; color: var(--wb-muted); font-size: 11px; }
+.ov3-capability-note b { color: var(--wb-ink); font-variant-numeric: tabular-nums; }
+.ov3-events { margin-bottom: 18px; }
+.ov3-event-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--wb-teal); box-shadow: 0 0 0 4px var(--wb-teal-soft); }
+.ov3-loading { display: grid; gap: 12px; }
+.ov3-loading span { display: block; height: 42px; border-radius: 7px; background: linear-gradient(100deg, #f0f3f0 25%, #fafcfb 40%, #f0f3f0 60%); background-size: 200% 100%; animation: ov3-shimmer 1.2s ease-in-out infinite; }
+@keyframes ov3-shimmer { to { background-position: -200% 0; } }
+
+
+@media (max-width: 760px) {
+  .ov3-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov3-outcome-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov3-section-head { gap: 9px; }
+  .ov3-flow-note { display: none; }
+}
+
+@media (max-width: 460px) {
+  .ov3-flow-card, .ov3-card.wb-card { padding: 17px 15px; }
+  .ov3-section-head h2 { font-size: 15px; }
+  .ov3-outcome-grid { gap: 6px; }
+  .ov3-outcome-grid > div { padding: 6px 8px; }
+  .ov3-item .wb-status, .ov3-item .ov3-stage-status, .ov3-attention-row .wb-status { display: none; }
+}
+
+/* The orbit and its selected work form one workspace. */
+.ov3-loop-workbench { overflow: hidden; }
+.ov3-cycle-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(275px, .85fr); align-items: center; gap: 24px; }
+.ov3-cycle-inspector { min-width: 0; align-self: stretch; display: flex; flex-direction: column; justify-content: center; border-left: 1px solid #e1e9e4; padding-left: 24px; }
+.ov3-cycle-records { min-width: 0; }
+.ov3-cycle-records .ov3-item-list { max-height: 330px; overflow-y: auto; padding: 3px 5px; margin: 0 -5px; }
+.ov3-cycle-records .ov3-section-head { margin-bottom: 18px; }
+.ov3-cycle-records .ov3-item { padding: 13px 0; }
+.ov3-cycle-records .ov3-item-copy strong { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.55; font-size: 13px; }
+.ov3-cycle-records .ov3-item .wb-status, .ov3-cycle-records .ov3-item .ov3-stage-status { display: none; }
+.ov3-cycle-records .wb-empty-state { align-items: flex-start; text-align: left; padding: 12px 0; }
+.ov3-cycle-records .wb-empty-mark { display: none; }
+.ov3-cycle-attention { border-top: 1px solid #e1e9e4; padding-top: 22px; margin-top: 22px; }
+.ov3-cycle-attention .ov3-section-head { margin-bottom: 15px; }
+.ov3-cycle-attention .ov3-section-head h2 { font-size: 15px; }
+.ov3-cycle-clear { display: flex; align-items: start; gap: 10px; color: #576e60; font-size: 12px; }
+.ov3-cycle-clear > span { display: grid; place-items: center; flex-shrink: 0; width: 25px; height: 25px; border-radius: 50%; background: #edf6f0; color: #166b4c; }
+.ov3-cycle-clear strong { color: #3d584a; font-weight: 550; }
+.ov3-cycle-clear p { margin: 5px 0 0; line-height: 1.5; font-size: 11px; }
+@media (max-width: 1130px) {
+  .ov3-cycle-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .ov3-cycle-inspector { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 25px; border-left: 0; border-top: 1px solid #e1e9e4; padding: 23px 0 0; }
+  .ov3-cycle-attention { border-top: 0; border-left: 1px solid #e1e9e4; padding: 0 0 0 23px; margin: 0; }
+}
+@media (max-width: 600px) {
+  .ov3-loop-workbench.wb-card { padding: 20px 10px 18px; }
+  .ov3-loop-workbench > .ov3-section-head { padding: 0 6px; margin-bottom: 12px; }
+  .ov3-flow-card .ov3-section-head h2 { font-size: 21px; }
+  .ov3-cycle-inspector { grid-template-columns: minmax(0, 1fr); padding: 20px 7px 0; }
+  .ov3-cycle-attention { border-left: 0; border-top: 1px solid #e1e9e4; padding: 20px 0 0; }
+  .ov3-cycle-records .ov3-section-head h2 { font-size: 17px; }
+}

@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "provider": "codex",
+  "model": "gpt-5.6-terra",
+  "session_id": "01a08100-3f83-7a42-aa59-3498795781ac",
+  "workspace_contains_unicode": true,
+  "model_read_expected_nonce": true,
+  "observed_command_calls": 1,
+  "observed_successful_command_results": 1,
+  "tokens_in": 22012,
+  "tokens_out": 209,
+  "cached_input_tokens": 9984,
+  "cost_usd": null,
+  "quota_calls": [
+    {
+      "id": "b2799a18ffab488c9217499ca28400de",
+      "run_id": null,
+      "actor_id": 1,
+      "project_id": null,
+      "provider": "codex",
+      "model": "gpt-5.6-terra",
+      "month": "2026-09",
+      "reserved_tokens": 30000,
+      "actual_tokens": 22221,
+      "status": "settled",
+      "created_at": "2026-09-08T12:31:08.451014+00:00",
+      "settled_at": "2026-09-08T12:31:30.157523+00:00"
+    }
+  ]
+}

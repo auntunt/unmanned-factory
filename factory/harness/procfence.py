@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import resource
+import subprocess
+import sys
 from dataclasses import dataclass
 
 #: 给系统留的救护车道比例。0.1 = 余量的 10% 不给 worker 用。
@@ -63,6 +65,36 @@ def current_usage(uid: int | None = None) -> int | None:
     是常态，跳过即可——要的是量级，不是精确快照。
     """
     want = os.getuid() if uid is None else uid
+    if sys.platform == "darwin":
+        # Darwin documents RLIMIT_NPROC as simultaneous *processes* for a uid,
+        # unlike Linux's task accounting.  There is no /proc task tree here;
+        # ask the native ps for its uid/pid process table rather than pretending
+        # that a Linux thread count exists.  The command is fixed argv, bounded,
+        # and failure remains the documented soft failure.
+        try:
+            listing = subprocess.run(
+                ["ps", "-axo", "uid=,pid="], text=True, capture_output=True,
+                timeout=3, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if listing.returncode:
+            return None
+        count = 0
+        for line in listing.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            try:
+                process_uid = int(fields[0])
+                int(fields[1])
+            except ValueError:
+                continue
+            if int(process_uid) == want:
+                count += 1
+        # A caller's own uid must be present. Treat an empty/incomplete ps view
+        # as unavailable so plan() disables the fence rather than undercounts.
+        return count if count else None
     try:
         pids = [p for p in os.listdir("/proc") if p.isdigit()]
     except OSError:
@@ -101,7 +133,7 @@ def plan(reserve_ratio: float = DEFAULT_RESERVE_RATIO,
 
     used = current_usage(uid)
     if used is None:
-        return Fence(None, "数不出当前 uid 的进程数（/proc 读不到），不设围栏")
+        return Fence(None, "数不出当前 uid 的资源用量，不设围栏")
 
     headroom = hard - used
     if headroom <= 0:

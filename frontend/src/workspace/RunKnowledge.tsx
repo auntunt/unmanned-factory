@@ -16,6 +16,7 @@ function isAbort(cause: unknown): boolean { return cause instanceof DOMException
 function errorText(cause: unknown): string { return cause instanceof WorkspaceApiError ? cause.detail : cause instanceof Error ? cause.message : '请求失败' }
 function dateText(value: unknown): string { if (typeof value !== 'string') return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false }) }
 function isSafeGithubUrl(value: string): boolean { try { const url = new URL(value); return url.protocol === 'https:' && url.hostname === 'github.com' && /^\/[^/]+\/[^/]+\/pull\/\d+(?:\/)?$/.test(url.pathname) } catch { return false } }
+function statusText(status: RunStatus | string): string { return ({ received: '已接收', planning: '规划中', needs_clarification: '等待补充', awaiting_approval: '等待批准', queued: '排队中', running: '执行中', verifying: '验证中', ready_for_review: '等待复核', publishing: '发布中', published: '已发布', needs_human: '需要人工处理', failed: '失败', cancelled: '已取消' } as Record<string, string>)[status] ?? status }
 
 interface RunKnowledgeViewProps {
   status: RunStatus | string
@@ -35,9 +36,9 @@ export function RunKnowledgeView({ status, artifacts, context, loading, error, m
   const evidence = mergeResult?.evidence && typeof mergeResult.evidence === 'object' && !Array.isArray(mergeResult.evidence) ? mergeResult.evidence as Record<string, unknown> : null
   const mergeSha = evidence?.merge_commit_sha
   return <section className="pa-panel rk-root">
-    <div className="pa-panel-heading"><div><h2>运行知识上下文</h2><p>这是运行启动时冻结的证据快照，不会随项目后续更新而改变。</p></div><span className="pa-tag">状态：{status}</span></div>
+    <div className="pa-panel-heading"><div><h2>运行知识上下文</h2><p>这是运行启动时冻结的证据快照，不会随项目后续更新而改变。</p></div><span className="pa-tag">状态：{statusText(status)}</span></div>
     {error && <div className="pa-error" role="alert">{error}</div>}
-    {loading ? <div className="pa-loading">正在读取冻结上下文…</div> : context === null ? <div className="pa-empty">该运行没有保存的上下文快照。</div> : <div className="rk-context"><div className="rk-meta"><span>组装时间：{dateText(context.assembled_at ?? context.created_at)}</span><span>基线 SHA：{typeof context.commit_sha === 'string' ? context.commit_sha : '—'}</span><span>索引 SHA：{typeof code?.commit_sha === 'string' ? code.commit_sha : '—'}</span></div>{warnings.length > 0 && <div className="pa-warning"><strong>上下文警告</strong>{warnings.map((warning, index) => <div key={`${String(warning)}-${index}`}>{String(warning)}</div>)}</div>}<pre className="rk-snapshot">{formatUnknown(context)}</pre></div>}
+    {loading ? <div className="pa-loading">正在读取冻结上下文…</div> : context === null ? <div className="pa-empty">该运行没有保存的上下文快照。</div> : <div className="rk-context"><div className="rk-meta"><span>组装时间：{dateText(context.assembled_at ?? context.created_at)}</span><span>基线 SHA：{typeof context.commit_sha === 'string' ? context.commit_sha : '—'}</span><span>索引 SHA：{typeof code?.commit_sha === 'string' ? code.commit_sha : '—'}</span></div>{warnings.length > 0 && <div className="pa-warning"><strong>上下文警告</strong>{warnings.map((warning, index) => <div key={`${String(warning)}-${index}`}>{String(warning)}</div>)}</div>}<details className="rk-raw-snapshot"><summary>查看完整冻结快照（原始 JSON）</summary><pre className="rk-snapshot">{formatUnknown(context)}</pre></details></div>}
     {prUrl && <div className="rk-merge"><div><h3>合并确认</h3><p>已记录 PR：{isSafeGithubUrl(prUrl) ? <a href={prUrl} target="_blank" rel="noreferrer">{prUrl}</a> : <span>{prUrl}</span>}。确认会重新向 GitHub 校验，不会执行远程写操作。</p></div><button className="wf-button wf-button-primary" disabled={mergeBusy} onClick={onSyncMerge}>{mergeBusy ? '核验中…' : '核验合并状态'}</button></div>}
     {mergeResult && <div className={mergeResult.merged === true ? 'pa-success' : 'pa-info'} role="status">{mergeResult.merged === true ? `已核验并记录合并事实（${String(mergeSha ?? 'merge SHA 未返回')}）。` : `尚未合并：${String(mergeResult.reason ?? 'GitHub 尚未返回 merged=true')}。`}</div>}
   </section>

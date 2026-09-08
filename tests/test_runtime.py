@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,6 +88,49 @@ def test_import_and_auth_hint_do_not_imply_live_readiness(tmp_path, monkeypatch)
     assert report['readiness']['planning'] is False
     assert report['tools'][1]['runtime_status'] == 'available'
     assert 'not-a-real-secret' not in str(report)
+
+
+def test_macos_system_proxy_without_process_proxy_is_a_nonblocking_connection_hint(tmp_path, monkeypatch):
+    import factory.control.runtime as runtime
+    runtime._inspect_cache.clear()
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "_sdk_inspect", lambda provider: {
+        "installed": True, "version": "1", "runtime_version": None,
+        "import_status": "ok", "compatible": True, "runtime_ok": True})
+    monkeypatch.setattr(runtime, "_binary_available", lambda name: True)
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    calls = []
+
+    def scutil(argv, *, capture_output, text, timeout, check):
+        calls.append((argv, timeout))
+        return SimpleNamespace(returncode=0, stdout="<dictionary> {\n  HTTPEnable : 1\n  HTTPPort : 7897\n}\n")
+
+    monkeypatch.setattr(runtime.subprocess, "run", scutil)
+    report = inspect_runtime(_settings(tmp_path))
+    assert calls == [(["scutil", "--proxy"], 2)]
+    assert "系统启用代理但模型进程未配置代理" in report["verification_note"]
+    assert "7897" not in str(report)
+    # It is diagnostic evidence, not an installation or connection blocker.
+    assert not any("proxy" in item.casefold() for item in report["blockers"])
+
+
+def test_explicit_proxy_environment_suppresses_macos_system_proxy_warning(tmp_path, monkeypatch):
+    import factory.control.runtime as runtime
+    runtime._inspect_cache.clear()
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime, "_sdk_inspect", lambda provider: {
+        "installed": True, "version": "1", "runtime_version": None,
+        "import_status": "ok", "compatible": True, "runtime_ok": True})
+    monkeypatch.setattr(runtime, "_binary_available", lambda name: True)
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7897")
+
+    def unexpected_scutil(*args, **kwargs):
+        raise AssertionError("scutil must not run when the process proxy is configured")
+
+    monkeypatch.setattr(runtime.subprocess, "run", unexpected_scutil)
+    report = inspect_runtime(_settings(tmp_path))
+    assert "系统启用代理但模型进程未配置代理" not in report["verification_note"]
 
 
 def test_real_sdk_resolves_bundled_runtime_without_path_cli(monkeypatch):

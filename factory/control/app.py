@@ -1,4 +1,4 @@
-"""Single-owner authenticated web gateway. Run one process; workers are bounded."""
+"""Trusted-team authenticated web gateway. Run one process; workers are bounded."""
 from __future__ import annotations
 
 import argparse
@@ -82,10 +82,12 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         raise ValueError('公网登录必须使用 HTTPS')
     auth = AuthStore(data / 'users.db')
     store = service.store if service else Store(data / 'control.db')
-    store.recover()
     token = os.getenv('FACTORY_GITHUB_TOKEN', '')
     svc = service or Service(store, publisher=GitHubDelivery(token) if token else None,
                             timeout_s=int(os.getenv('FACTORY_TASK_TIMEOUT', '600')))
+    from factory.control.governance import Governance
+    governance = Governance(auth, store)
+    svc.governance = governance
     # Runtime settings are persisted in the control store. Root may initialize
     # this on Service; keeping the fallback here preserves compatibility with
     # injected test services and older callers.
@@ -97,15 +99,28 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     @asynccontextmanager
     async def lifespan(app):
-        yield
-        svc.close()
+        if hasattr(svc, 'recover'):
+            svc.recover()
+        else:
+            store.recover()
+        try:
+            yield
+        finally:
+            svc.close()
 
     app = FastAPI(title='Engineering Harness', docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
     app.state.auth, app.state.service, app.state.store = auth, svc, store
+    app.state.governance = governance
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed_origin.hostname, '127.0.0.1', 'localhost'])
     from factory.control.runtime_routes import router as runtime_router
     app.include_router(runtime_router(store, svc, allowed_root, static))
+    from factory.control.autonomy_routes import router as autonomy_router
+    from factory.control.capability_routes import router as capability_router
+    app.include_router(autonomy_router(store, svc))
+    app.include_router(capability_router(store, svc))
+    from factory.control.team_routes import router as team_router
+    app.include_router(team_router(auth, governance))
 
     @app.exception_handler(AuthError)
     async def auth_error(req, exc):
@@ -142,6 +157,34 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             if request.method not in ('GET', 'HEAD', 'OPTIONS'):
                 if not hmac.compare_digest(request.headers.get('x-csrf-token', ''), user['csrf_token']):
                     return JSONResponse({'detail': '会话验证失败，请重新登录'}, status_code=403)
+                if user['role'] != 'admin':
+                    # This is a shared workspace. Members may dispatch only
+                    # assigned projects and act on their own runs. New write
+                    # endpoints are admin-only unless explicitly listed here.
+                    own_account = path in ('/api/auth/logout', '/api/auth/password') and request.method == 'POST'
+                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|approve|cancel|retry)', path)
+                    creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
+                    try:
+                        if request.method == 'POST' and (run_action or creation):
+                            if run_action:
+                                target = store.get(run_action[1])
+                                if target.get('source', {}).get('actor_id') != user['id']:
+                                    raise AuthError('成员只能操作自己发起的运行', 403)
+                                project_id = target['project_id']
+                            else:
+                                body = await request.json()
+                                project_id = body.get('project_id') if isinstance(body, dict) else None
+                                if not isinstance(project_id, str):
+                                    raise AuthError('请选择项目', 422)
+                            governance.require_project(user['id'], project_id)
+                        elif not own_account:
+                            raise AuthError('此操作需要管理员权限', 403)
+                    except AuthError as exc:
+                        return JSONResponse({'detail': str(exc)}, status_code=exc.status)
+                    except KeyError:
+                        return JSONResponse({'detail': '记录不存在'}, status_code=404)
+                    except (ValueError, TypeError):
+                        return JSONResponse({'detail': '请求格式无效'}, status_code=422)
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
@@ -161,7 +204,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     @app.get('/api/auth/me')
     def me(request: Request):
         user = request.state.user
-        return {'user': {'id': user['id'], 'username': user['username']}, 'csrf_token': user['csrf_token']}
+        return {'user': {key: user[key] for key in ('id', 'username', 'role', 'active')}, 'csrf_token': user['csrf_token']}
 
     @app.post('/api/auth/logout')
     def logout(request: Request):
@@ -315,7 +358,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def new_run(body: NewRun, request: Request):
         store.project(body.project_id)
         run, _ = store.create_run(body.project_id, body.request,
-                                 source={'type': 'web', 'actor': request.state.user['username']})
+                                 source={'type': 'web', 'actor': request.state.user['username'],
+                                         'actor_id': request.state.user['id']})
         try:
             svc.start_plan(run['id'])
         except Exception as exc:

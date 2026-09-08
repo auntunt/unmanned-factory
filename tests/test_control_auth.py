@@ -16,13 +16,14 @@ def test_create_login_and_authenticate(tmp_path):
     user = store.create_user(" Alice ", PASSWORD)
     token, csrf_token, login_user = store.login("ALICE", PASSWORD)
 
-    assert login_user == user == {"id": 1, "username": "alice"}
+    assert login_user == user == {"id": 1, "username": "alice", "role": "admin", "active": True}
     assert csrf_token
     assert store.authenticate(token) == {
         "id": 1,
         "username": "alice",
         "csrf_token": csrf_token,
         "expires_at": pytest.approx(time.time() + 12 * 60 * 60, abs=2),
+        "role": "admin", "active": True,
     }
 
 

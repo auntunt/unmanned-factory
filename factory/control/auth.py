@@ -163,12 +163,20 @@ class AuthStore:
                     ON sessions(expires_at);
                 """
             )
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(users)')}
+            # Existing installations had trusted owners only.
+            if 'role' not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+            if 'active' not in columns:
+                connection.execute('ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1')
 
     @staticmethod
     def _user_dict(row: tuple[Any, ...]) -> dict[str, Any]:
-        return {"id": int(row[0]), "username": str(row[1])}
+        return {"id": int(row[0]), "username": str(row[1]), "role": str(row[3]), "active": bool(row[4])}
 
-    def create_user(self, username: str, password: str) -> dict[str, Any]:
+    def create_user(self, username: str, password: str, *, role: str = 'admin') -> dict[str, Any]:
+        if role not in ('admin', 'member'):
+            raise AuthError('角色无效', 422)
         normalized = _normalize_username(username)
         checked_password = _check_password(password)
         password_hash = _hash_password(checked_password)
@@ -176,13 +184,46 @@ class AuthStore:
         try:
             with self._connection() as connection:
                 cursor = connection.execute(
-                    "INSERT INTO users(username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (normalized, password_hash, created_at),
+                    "INSERT INTO users(username, password_hash, created_at, role) VALUES (?, ?, ?, ?)",
+                    (normalized, password_hash, created_at, role),
                 )
                 user_id = int(cursor.lastrowid)
         except sqlite3.IntegrityError:
             raise AuthError("username is already registered", 409) from None
-        return {"id": user_id, "username": normalized}
+        return {"id": user_id, "username": normalized, "role": role, "active": True}
+
+    def users(self):
+        with self._connection() as db:
+            return [self._user_dict(row) for row in db.execute(
+                'SELECT id,username,password_hash,role,active FROM users ORDER BY id')]
+
+    def update_user(self, user_id: int, *, role: str, active: bool, password: str | None = None):
+        if role not in ('admin', 'member') or type(active) is not bool:
+            raise AuthError('成员设置无效', 422)
+        encoded = _hash_password(_check_password(password)) if password is not None else None
+        with self._connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT id,username,password_hash,role,active FROM users WHERE id=?', (user_id,)).fetchone()
+            if row is None:
+                raise AuthError('成员不存在', 404)
+            if row[3] == 'admin' and row[4] and (role != 'admin' or not active):
+                if db.execute("SELECT count(*) FROM users WHERE role='admin' AND active=1").fetchone()[0] <= 1:
+                    raise AuthError('至少保留一名启用的管理员', 409)
+            db.execute('UPDATE users SET role=?,active=?,password_hash=? WHERE id=?',
+                       (role, int(active), encoded or row[2], user_id))
+            if not active or encoded or role != row[3]:
+                db.execute('UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL', (time.time(), user_id))
+            return {'id': user_id, 'username': row[1], 'role': role, 'active': active}
+
+    def change_password(self, user_id: int, current: str, password: str):
+        encoded = _hash_password(_check_password(password))
+        with self._connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT password_hash FROM users WHERE id=? AND active=1', (user_id,)).fetchone()
+            if row is None or not _verify_password(current, row[0]):
+                raise AuthError('当前密码不正确', 403)
+            db.execute('UPDATE users SET password_hash=? WHERE id=?', (encoded, user_id))
+            db.execute('UPDATE sessions SET revoked_at=? WHERE user_id=?', (time.time(), user_id))
 
     def login(
         self, username: str, password: str
@@ -203,7 +244,7 @@ class AuthStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT id, username, password_hash FROM users WHERE username = ?",
+                "SELECT id, username, password_hash, role, active FROM users WHERE username = ?",
                 (normalized,),
             ).fetchone()
             failure = connection.execute(
@@ -226,7 +267,7 @@ class AuthStore:
                     raise AuthError("too many login attempts", 429)
 
             stored_hash = str(row[2]) if row is not None else _DUMMY_HASH
-            valid = _verify_password(password, stored_hash)
+            valid = _verify_password(password, stored_hash) and row is not None and bool(row[4])
             if not valid:
                 if failure is None:
                     connection.execute(
@@ -268,12 +309,13 @@ class AuthStore:
         with self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT users.id, users.username, sessions.csrf_token, sessions.expires_at
+                SELECT users.id, users.username, sessions.csrf_token, sessions.expires_at, users.role
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = ?
                   AND sessions.revoked_at IS NULL
                   AND sessions.expires_at > ?
+                  AND users.active = 1
                 """,
                 (token_hash, now),
             ).fetchone()
@@ -284,6 +326,8 @@ class AuthStore:
             "username": str(row[1]),
             "csrf_token": str(row[2]),
             "expires_at": float(row[3]),
+            "role": str(row[4]),
+            "active": True,
         }
 
     def logout(self, token: str) -> None:

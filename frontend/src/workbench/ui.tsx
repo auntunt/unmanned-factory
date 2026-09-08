@@ -5,6 +5,7 @@ import type { User } from '../workspace/types'
 export interface PageProps {
   csrfToken: string
   onUnauthorized: () => void
+  user?: User
 }
 
 export interface WorkbenchProps extends PageProps {
@@ -51,7 +52,7 @@ const STATUS_LABELS: Record<string, string> = {
   queued: '已排队',
   running: '执行中',
   verifying: '验证中',
-  ready_for_review: '待复核',
+  ready_for_review: '已验证',
   publishing: '发布中',
   published: '已发布',
   needs_human: '需要确认',
@@ -70,9 +71,9 @@ export function statusLabel(status?: string | null): string {
 
 function statusTone(status?: string | null): string {
   if (!status) return 'neutral'
-  if (['published', 'completed', 'verified'].includes(status)) return 'success'
+  if (['published', 'completed', 'verified', 'ready_for_review'].includes(status)) return 'success'
   if (['failed', 'cancelled', 'blocked'].includes(status)) return 'danger'
-  if (['needs_clarification', 'awaiting_approval', 'ready_for_review', 'needs_human'].includes(status)) return 'warning'
+  if (['needs_clarification', 'awaiting_approval', 'needs_human'].includes(status)) return 'warning'
   if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
   return 'neutral'
 }
@@ -96,4 +97,3 @@ export function errorText(error: unknown): string {
   if (error && typeof error === 'object' && 'detail' in error && typeof error.detail === 'string') return error.detail
   return error instanceof Error ? error.message : '网络请求失败，请稍后重试。'
 }
-

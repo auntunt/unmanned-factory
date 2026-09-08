@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import inspect
+from enum import Enum
 import os
 import selectors
 import signal
+import tomllib
 import subprocess
 import sys
 import threading
@@ -39,6 +41,7 @@ class ProviderResult:
     cost_usd: float | None = None
     tokens_in: int | None = None
     tokens_out: int | None = None
+    cached_input_tokens: int | None = None
 
 
 class ProviderError(RuntimeError):
@@ -62,10 +65,28 @@ _PROVIDER_IMPORTS = {
 # Provider credentials (for example ANTHROPIC_API_KEY) intentionally remain
 # available because SDK authentication is provider-owned.
 _STRIPPED_ENV_KEYS = {
+    # Shell bookkeeping for the last executable is not worker configuration.
+    # macOS launchers can put non-UTF-8 bytes here for a Unicode Python path;
+    # Rust's env::vars() then panics before any SDK shell tool can start.
+    "_",
     "FACTORY_GITHUB_TOKEN",
     "FACTORY_WEBHOOK_SECRET",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+}
+# These are Codex Desktop host-control channels, not provider credentials.
+# Inheriting them makes a standalone SDK app-server attach to the desktop
+# executor, whose version/transport can differ from the installed SDK.
+_DESKTOP_CODEX_ENV_KEYS = {
+    "CODEX_APP_TOOLS_PIPE_PATH",
+    "CODEX_CI",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "CODEX_MCP_NODE_PATH",
+    "CODEX_PERMISSION_PROFILE",
+    "CODEX_SESSION_ID",
+    "CODEX_SHELL",
+    "CODEX_THREAD_ID",
+    "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
 }
 
 Emit = Callable[[str, dict[str, Any]], None]
@@ -93,6 +114,10 @@ def _safe_json(value: Any, *, _depth: int = 0) -> Any:
         return {"type": "reasoning", "redacted": True}
     if value is None or isinstance(value, (bool, int, float)):
         return value
+    # SDK item states are Enum instances. Serializing their ``vars`` pulls in
+    # the complete enum class graph and turns a one-word state into kilobytes.
+    if isinstance(value, Enum):
+        return _safe_json(value.value, _depth=_depth + 1)
     if isinstance(value, str):
         return value if len(value) <= 32_000 else value[:32_000] + "...[truncated]"
     if isinstance(value, Mapping):
@@ -155,15 +180,58 @@ def _usage_numbers(usage: Any) -> tuple[int | None, int | None]:
         incoming = _value(usage, "prompt_tokens")
     if outgoing is None:
         outgoing = _value(usage, "completion_tokens")
-    try:
-        incoming = int(incoming) if incoming is not None else None
-    except (TypeError, ValueError):
-        incoming = None
-    try:
-        outgoing = int(outgoing) if outgoing is not None else None
-    except (TypeError, ValueError):
-        outgoing = None
-    return incoming, outgoing
+    return (_token_number(incoming), _token_number(outgoing))
+
+
+def _token_number(value):
+    # Never turn bools, fractions or malformed counts into billable integers.
+    if type(value) is int:
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
+def _cached_input_tokens(usage: Any) -> int | None:
+    """Read the installed SDKs' documented cache-read token fields.
+
+    Codex exposes ``cached_input_tokens`` on TokenUsageBreakdown; Claude's
+    ModelUsage reports the same fact as ``cacheReadInputTokens``.
+    """
+    values = []
+    for field in ("cached_input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        raw = _value(usage, field)
+        if raw is None:
+            continue
+        value = _token_number(raw)
+        if value is not None:
+            values.append(value)
+    return sum(values) if values else None
+
+
+def _claude_model_usage_totals(model_usage: Any) -> tuple[int | None, int | None, int | None, float | None]:
+    if not isinstance(model_usage, Mapping):
+        return None, None, None, None
+    totals = [0, 0, 0]
+    has = [False, False, False]
+    cost = 0.0
+    has_cost = False
+    for usage in model_usage.values():
+        incoming, outgoing = _usage_numbers(usage)
+        cached = _cached_input_tokens(usage)
+        for index, value in enumerate((incoming, outgoing, cached)):
+            if value is not None:
+                totals[index] += value
+                has[index] = True
+        raw_cost = _value(usage, "costUSD")
+        try:
+            amount = float(raw_cost) if raw_cost is not None else None
+        except (TypeError, ValueError):
+            amount = None
+        if amount is not None and amount >= 0:
+            cost += amount
+            has_cost = True
+    return (*(totals[index] if has[index] else None for index in range(3)), cost if has_cost else None)
 
 
 def _emit_session(emit: Emit, session_id: Any) -> str | None:
@@ -317,11 +385,11 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     text_parts: list[str] = []
     result: Any = None
     session_id: str | None = None
-    tokens_in = tokens_out = None
+    tokens_in = tokens_out = cached_input_tokens = None
     cost_usd: float | None = None
 
     async def consume() -> None:
-        nonlocal result, session_id, tokens_in, tokens_out, cost_usd
+        nonlocal result, session_id, tokens_in, tokens_out, cached_input_tokens, cost_usd
         options = ClaudeAgentOptions(**options_kwargs)
         async for message in query(prompt=req.prompt, options=options):
             name = _event_class(message)
@@ -364,7 +432,24 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
                         cost_usd = float(cost)
                     except (TypeError, ValueError):
                         pass
-                tokens_in, tokens_out = _usage_numbers(_value(message, "usage"))
+                direct_usage = _value(message, "usage")
+                tokens_in, tokens_out = _usage_numbers(direct_usage)
+                cached_input_tokens = _cached_input_tokens(direct_usage)
+                if tokens_in is not None:
+                    tokens_in += cached_input_tokens or 0
+                model_in, model_out, model_cached, model_cost = _claude_model_usage_totals(_value(message, "model_usage"))
+                if model_in is not None:
+                    # Claude ModelUsage.inputTokens excludes both cache read and
+                    # cache creation inputs. Governance reserves total input.
+                    tokens_in = model_in + (model_cached or 0)
+                if model_out is not None:
+                    tokens_out = model_out
+                if model_cached is not None:
+                    cached_input_tokens = model_cached
+                if cost_usd is None and model_cost is not None:
+                    cost_usd = model_cost
+                emit("provider.usage", {"input_tokens": tokens_in, "output_tokens": tokens_out,
+                                         "cached_input_tokens": cached_input_tokens, "cost_usd": cost_usd})
             elif name == "SystemMessage" or "systemmessage" in name.lower():
                 data = _value(message, "data", {})
                 sid = _value(data, "session_id")
@@ -382,7 +467,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         final = "".join(text_parts)
     if not final:
         raise ProviderError("Claude SDK completed without an assistant result")
-    return ProviderResult(final, session_id, cost_usd, tokens_in, tokens_out)
+    return ProviderResult(final, session_id, cost_usd, tokens_in, tokens_out, cached_input_tokens)
 
 
 def _codex_item(item: Any, emit: Emit) -> bool:
@@ -414,6 +499,140 @@ def _codex_item(item: Any, emit: Emit) -> bool:
     return False
 
 
+def _codex_tool_started(item: Any, emit: Emit) -> bool:
+    """Emit the call half of a streamed Codex tool item, if it is a tool."""
+    root = _value(item, "root", item)
+    typ = str(_value(root, "type", type(root).__name__))
+    low = typ.lower()
+    if "reasoning" in low:
+        return False
+    if "commandexecution" in low or "shell" in low:
+        emit("tool.call", _safe_json({"id": _value(root, "id"), "name": "command",
+                                       "command": _value(root, "command")}))
+        return True
+    if "mcp" in low or "dynamictool" in low:
+        emit("tool.call", _safe_json(root))
+        return True
+    if "filechange" in low:
+        emit("tool.call", _safe_json({"id": _value(root, "id"), "name": "file_change",
+                                       "changes": _value(root, "changes")}))
+        return True
+    return False
+
+
+def _codex_tool_completed(item: Any, emit: Emit) -> bool:
+    """Emit the result half of a previously announced Codex tool item."""
+    root = _value(item, "root", item)
+    typ = str(_value(root, "type", type(root).__name__))
+    low = typ.lower()
+    if "reasoning" in low:
+        return False
+    if "commandexecution" in low or "shell" in low:
+        emit("tool.result", _safe_json({"id": _value(root, "id"),
+                                         "output": _value(root, "aggregated_output"),
+                                         "exit_code": _value(root, "exit_code")}))
+        return True
+    if "mcp" in low or "dynamictool" in low:
+        emit("tool.result", _safe_json(root))
+        return True
+    if "filechange" in low:
+        emit("tool.result", _safe_json({"id": _value(root, "id"),
+                                         "status": _value(root, "status")}))
+        return True
+    return False
+
+
+def _codex_final_text(items: Sequence[Any]) -> str | None:
+    """Use completed public thread items to select Codex's final response."""
+    fallback = None
+    for item in reversed(items):
+        root = _value(item, "root", item)
+        typ = str(_value(root, "type", type(root).__name__)).lower()
+        if "reasoning" in typ or ("agentmessage" not in typ and typ not in {"assistant.message", "assistant_message"}):
+            continue
+        text = _value(root, "text")
+        if not isinstance(text, str) or not text:
+            continue
+        phase = _value(root, "phase")
+        phase = str(getattr(phase, "value", phase)).lower()
+        if phase in {"final_answer", "finalanswer"}:
+            return text
+        if fallback is None:
+            fallback = text
+    return fallback
+
+
+def _run_codex_stream(thread: Any, prompt: str, run_kwargs: Mapping[str, Any], emit: Emit) -> Any:
+    """Consume the public Thread.turn/TurnHandle.stream API without private SDK hooks."""
+    turn = thread.turn(prompt, **_accepted_kwargs(thread.turn, run_kwargs))
+    stream = turn.stream()
+    completed_items: list[Any] = []
+    started_tool_ids: set[str] = set()
+    latest_usage: Any = None
+    emitted_usage: Any = None
+    completed_turn: Any = None
+    assistant_emitted = False
+    try:
+        for notification in stream:
+            method = str(_value(notification, "method", ""))
+            payload = _value(notification, "payload")
+            low_method = method.lower()
+            # The public stream includes thought deltas. Never persist them,
+            # even as a generic provider event.
+            if "reasoning" in low_method or "thinking" in low_method:
+                continue
+            if method == "item/started":
+                item = _value(payload, "item")
+                if _codex_tool_started(item, emit):
+                    ident = _value(_value(item, "root", item), "id")
+                    if ident is not None:
+                        started_tool_ids.add(str(ident))
+                continue
+            if method == "item/completed":
+                item = _value(payload, "item")
+                completed_items.append(item)
+                ident = _value(_value(item, "root", item), "id")
+                if ident is not None and str(ident) in started_tool_ids:
+                    _codex_tool_completed(item, emit)
+                else:
+                    assistant_emitted = _codex_item(item, emit) or assistant_emitted
+                continue
+            if method == "thread/tokenUsage/updated":
+                latest_usage = _value(payload, "token_usage")
+                safe_usage = _safe_json(latest_usage)
+                emit("provider.usage", safe_usage if isinstance(safe_usage, dict) else {"value": safe_usage})
+                emitted_usage = safe_usage
+                continue
+            if method == "turn/completed":
+                completed_turn = _value(payload, "turn", payload)
+                continue
+            # Agent-message deltas are token-by-token text and would flood
+            # durable events. The completed item below carries the public
+            # answer exactly once; reasoning is filtered above.
+            if method in {"item/agentMessage/delta", "item/agent_message/delta"}:
+                continue
+            # The remaining stream notifications can be useful operational
+            # progress, but have no stable task semantics. Keep them bounded
+            # and scrubbed while excluding thought above.
+            _emit_generic_event(notification, emit)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    if completed_turn is None:
+        raise ProviderError("Codex turn completed event not received")
+    final = _codex_final_text(completed_items)
+    return {
+        "status": _value(completed_turn, "status", "completed"),
+        "error": _value(completed_turn, "error"),
+        "items": completed_items,
+        "usage": latest_usage,
+        "final_response": final,
+        "assistant_emitted": assistant_emitted,
+        "emitted_usage": emitted_usage,
+    }
+
+
 def _accepted_kwargs(function: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """Filter compatibility kwargs without retrying an invoked SDK call."""
     try:
@@ -425,9 +644,229 @@ def _accepted_kwargs(function: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]
     return {key: value for key, value in kwargs.items() if key in parameters}
 
 
+_CODEX_HOOK_EVENTS = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "UserPromptSubmit",
+    "Stop",
+    "Interrupt",
+)
+_CODEX_DISABLED_MCP_COMMAND = "/__factory_mcp_disabled__"
+_CODEX_MAX_ISOLATED_MCP_SERVERS = 256
+_CODEX_MAX_ISOLATED_SKILLS = 256
+
+
+def _codex_home() -> Path:
+    """Return Codex's existing home without changing its environment."""
+    configured = os.environ.get("CODEX_HOME")
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+
+def _codex_config_files(workspace: str) -> list[Path]:
+    """List config layers that can contribute ambient MCP/skill settings."""
+    home = _codex_home()
+    paths = [home / "config.toml"]
+    current = Path(workspace).resolve()
+    # The app server resolves trusted project config from the working directory
+    # upward. Reading extra ancestors can only add disable overrides, never
+    # grant a capability, and keeps the worker fail-closed for those layers.
+    for directory in (current, *current.parents):
+        candidate = directory / ".codex" / "config.toml"
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _read_codex_config(path: Path) -> Mapping[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            parsed = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # Starting the app server after failing to read a layer could launch
+        # the very ambient tool this adapter is supposed to deny.
+        raise ProviderError(f"cannot safely read Codex config for isolation: {path}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ProviderError(f"invalid Codex config for isolation: {path}")
+    return parsed
+
+
+def _codex_ambient_configuration(workspace: str) -> tuple[set[str], set[Path]]:
+    """Collect only names/paths; never copy provider env or credentials."""
+    mcp_names: set[str] = set()
+    skill_paths: set[Path] = set()
+    for path in _codex_config_files(workspace):
+        config = _read_codex_config(path)
+        servers = config.get("mcp_servers")
+        if servers is not None:
+            if not isinstance(servers, Mapping):
+                raise ProviderError(f"invalid mcp_servers in Codex config: {path}")
+            mcp_names.update(str(name) for name in servers)
+        skills = config.get("skills")
+        if isinstance(skills, Mapping):
+            entries = skills.get("config")
+            if entries is not None:
+                if not isinstance(entries, list):
+                    raise ProviderError(f"invalid skills.config in Codex config: {path}")
+                for entry in entries:
+                    if isinstance(entry, Mapping) and isinstance(entry.get("path"), str):
+                        skill_paths.add(Path(entry["path"]).expanduser().resolve())
+    # Explicitly disable standard ambient skill locations as well as entries
+    # configured above. Project skills are provided by the harness prompt, not
+    # discovered by the SDK worker.
+    home = _codex_home()
+    roots = (home / "skills", Path.home() / ".agents" / "skills", Path(workspace).resolve() / ".codex" / "skills")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for skill in root.rglob("SKILL.md"):
+                # SDK 0.147.0 matches per-skill config against the SKILL.md
+                # file path (despite the reference calling it a skill folder).
+                skill_paths.add(skill.resolve())
+        except OSError as exc:
+            raise ProviderError(f"cannot safely inspect Codex skills for isolation: {root}") from exc
+    if len(mcp_names) > _CODEX_MAX_ISOLATED_MCP_SERVERS:
+        raise ProviderError("too many configured Codex MCP servers to isolate safely")
+    if len(skill_paths) > _CODEX_MAX_ISOLATED_SKILLS:
+        raise ProviderError("too many configured Codex skills to isolate safely")
+    return mcp_names, skill_paths
+
+
+def _codex_isolation_overrides(workspace: str) -> tuple[str, ...]:
+    """Build session-only app-server overrides for a file-only worker.
+
+    Codex merges table overrides. Therefore an empty ``mcp_servers`` or
+    ``plugins`` table would retain an operator's configured entries. Each
+    configured direct MCP is replaced with a disabled, inert stdio entry. The
+    replacement deliberately contains no copied command, URL, environment, or
+    credentials, so those values never enter the app-server command line.
+    """
+    mcp_names, skill_paths = _codex_ambient_configuration(workspace)
+    overrides = [
+        "features.apps=false",
+        "features.plugins=false",
+        # Terra's tool protocol requires its code-mode host. Keep it enabled,
+        # while using a predictable shell without the operator's snapshots.
+        "features.code_mode_host=true",
+        "features.unified_exec=false",
+        "features.shell_snapshot=false",
+        "features.shell_tool=true",
+        "features.remote_plugin=false",
+        "features.skill_mcp_dependency_install=false",
+        "features.workspace_dependencies=false",
+        "tools.web_search=false",
+        "show_raw_agent_reasoning=false",
+        "hide_agent_reasoning=true",
+        "skills.config=[]",
+    ]
+    if mcp_names:
+        members = ",".join(
+            f"{json.dumps(name)}={{command={json.dumps(_CODEX_DISABLED_MCP_COMMAND)},enabled=false}}"
+            for name in sorted(mcp_names)
+        )
+        overrides.append(f"mcp_servers={{{members}}}")
+    # Override every documented hook event. A plain hooks={} is a deep merge,
+    # so it would leave configured hook handlers active.
+    overrides.extend(f"hooks.{json.dumps(event)}=[]" for event in _CODEX_HOOK_EVENTS)
+    if skill_paths:
+        members = ",".join(
+            f"{{path={json.dumps(str(path))},enabled=false}}" for path in sorted(skill_paths)
+        )
+        overrides.append(f"skills.config=[{members}]")
+    return tuple(overrides)
+
+
+def _codex_config_value(config: Any, key: str) -> Any:
+    if isinstance(config, Mapping):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def _verify_codex_isolation(codex: Any, workspace: str) -> None:
+    """Fail before thread_start unless app-server reports zero external tools."""
+    client = getattr(codex, "_client", None)
+    if client is None:
+        raise ProviderError("Codex isolation verification transport is unavailable")
+    try:
+        from openai_codex.generated.v2_all import (  # type: ignore[import-not-found]
+            ConfigReadResponse,
+            ListMcpServerStatusResponse,
+            SkillsListResponse,
+        )
+        workspace_path = str(Path(workspace).resolve())
+        config_result = client.request(
+            "config/read",
+            {"cwd": workspace_path},
+            response_model=ConfigReadResponse,
+        )
+        status_pages: list[Any] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(32):
+            params: dict[str, Any] = {"limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = client.request(
+                "mcpServerStatus/list",
+                params,
+                response_model=ListMcpServerStatusResponse,
+            )
+            status_pages.extend(page.data)
+            cursor = getattr(page, "next_cursor", None)
+            if cursor is None:
+                break
+            if cursor in seen_cursors:
+                raise ProviderError("Codex isolation verification received a repeated MCP status cursor")
+            seen_cursors.add(cursor)
+        else:
+            raise ProviderError("too many Codex MCP status pages to verify safely")
+        skills_result = client.request(
+            "skills/list",
+            {"cwds": [workspace_path], "forceReload": True},
+            response_model=SkillsListResponse,
+        )
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError("Codex isolation verification failed before model dispatch") from exc
+    features = _codex_config_value(config_result.config, "features")
+    if _codex_config_value(features, "apps") is not False or _codex_config_value(features, "plugins") is not False:
+        raise ProviderError("Codex isolation verification found apps or plugins enabled")
+    if (
+        _codex_config_value(features, "code_mode_host") is not True
+        or _codex_config_value(features, "unified_exec") is not False
+        or _codex_config_value(features, "shell_snapshot") is not False
+        or _codex_config_value(features, "shell_tool") is not True
+    ):
+        raise ProviderError("Codex isolation verification found an invalid command executor")
+    hooks = _codex_config_value(config_result.config, "hooks")
+    if isinstance(hooks, Mapping) and any(value for value in hooks.values()):
+        raise ProviderError("Codex isolation verification found active hooks")
+    active = [status.name for status in status_pages if getattr(status, "tools", ())]
+    if active:
+        raise ProviderError("Codex isolation verification found active MCP tools")
+    enabled_skills = [
+        skill.name
+        for entry in skills_result.data
+        for skill in getattr(entry, "skills", ())
+        if getattr(skill, "enabled", False)
+    ]
+    if enabled_skills:
+        raise ProviderError("Codex isolation verification found active skills")
+
+
 def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
     try:
-        from openai_codex import Codex, Sandbox  # type: ignore[import-not-found]
+        from openai_codex import Codex, CodexConfig, Sandbox  # type: ignore[import-not-found]
     except ImportError as exc:
         raise ProviderError("codex SDK is not installed; install openai-codex") from exc
 
@@ -443,9 +882,20 @@ def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
         "model": req.model,
         "sandbox": sandbox,
         "cwd": str(Path(req.workspace).resolve()),
+        # A team worker must not inherit an operator's personal ultra effort
+        # setting. Role routing picks the model; each SDK task uses medium.
+        "config": {"model_reasoning_effort": "medium"},
     }
     start_kwargs["approval_mode"] = ApprovalMode.deny_all
-    with Codex() as codex:
+    # Config overrides are passed when the app-server starts, before a thread
+    # exists. They retain Codex's normal auth and proxy environment while
+    # replacing ambient integrations for this one worker process only.
+    config = CodexConfig(
+        cwd=str(Path(req.workspace).resolve()),
+        config_overrides=_codex_isolation_overrides(req.workspace),
+    )
+    with Codex(config) as codex:
+        _verify_codex_isolation(codex, req.workspace)
         if req.session_id:
             resume = getattr(codex, "thread_resume", None)
             if not callable(resume):
@@ -453,25 +903,41 @@ def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
             thread = resume(req.session_id, **_accepted_kwargs(resume, start_kwargs))
         else:
             thread = codex.thread_start(**_accepted_kwargs(codex.thread_start, start_kwargs))
-        # thread.run is the documented stable API.  Current builds return a
-        # TurnResult containing item-level notifications and usage.
+        session_id = _value(thread, "id") or req.session_id
+        if session_id is not None:
+            session_id = _emit_session(emit, session_id) or session_id
         run_kwargs = {"cwd": str(Path(req.workspace).resolve()), "sandbox": sandbox}
         run_kwargs["approval_mode"] = ApprovalMode.deny_all
-        # Filter an older SDK's keyword surface before invocation. Retrying on
-        # TypeError would execute a paid prompt twice when the SDK itself fails.
-        result = thread.run(req.prompt, **_accepted_kwargs(thread.run, run_kwargs))
-    session_id = _value(thread, "id") or req.session_id
-    if session_id is not None:
-        session_id = _emit_session(emit, session_id) or session_id
+        # Current openai-codex exposes Thread.turn(...).stream(), a public
+        # typed notification stream.  Consume it directly so long turns show
+        # observable tool/usage progress. Older SDKs and test doubles retain
+        # the documented complete-turn run() fallback.
+        turn = getattr(thread, "turn", None)
+        streamed = callable(turn)
+        if streamed:
+            result = _run_codex_stream(thread, req.prompt, run_kwargs, emit)
+        else:
+            # Filter an older SDK's keyword surface before invocation.
+            # Retrying on TypeError would execute a paid prompt twice when the
+            # SDK itself fails.
+            result = thread.run(req.prompt, **_accepted_kwargs(thread.run, run_kwargs))
     items = _value(result, "items", []) or []
-    assistant_emitted = False
-    for item in items:
-        if _codex_item(item, emit):
-            assistant_emitted = True
+    assistant_emitted = bool(_value(result, "assistant_emitted", False))
+    if not streamed:
+        for item in items:
+            if _codex_item(item, emit):
+                assistant_emitted = True
     usage = _value(result, "usage")
-    tokens_in, tokens_out = _usage_numbers(_value(usage, "total", usage))
+    total_usage = _value(usage, "total", usage)
+    tokens_in, tokens_out = _usage_numbers(total_usage)
+    cached_input_tokens = _cached_input_tokens(total_usage)
     if usage is not None:
-        emit("provider.usage", _safe_json(usage))
+        safe_usage = _safe_json(usage)
+        # A completed stream normally already delivered the same final usage.
+        # Read it regardless for the returned accounting result, but avoid a
+        # duplicate durable notification.
+        if not streamed or safe_usage != _value(result, "emitted_usage"):
+            emit("provider.usage", safe_usage)
     status = str(getattr(_value(result, "status"), "value", _value(result, "status", "completed")))
     error = _value(result, "error")
     if error is not None or status.lower() in {"failed", "error", "cancelled", "canceled"}:
@@ -481,7 +947,7 @@ def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
         raise ProviderError("Codex SDK completed without an assistant result")
     if not assistant_emitted:
         emit("assistant.message", {"text": text})
-    return ProviderResult(text, session_id, None, tokens_in, tokens_out)
+    return ProviderResult(text, session_id, None, tokens_in, tokens_out, cached_input_tokens)
 
 
 def _run_dsh(req: ProviderRequest, emit: Emit) -> ProviderResult:
@@ -543,12 +1009,13 @@ def _worker_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in list(env):
         upper = key.upper()
-        if key in _STRIPPED_ENV_KEYS or (
+        if key in _STRIPPED_ENV_KEYS or key in _DESKTOP_CODEX_ENV_KEYS or (
             upper.startswith("FACTORY_")
             and any(word in upper for word in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"))
         ):
             env.pop(key, None)
     return env
+
 
 
 class SDKRunner:
@@ -603,6 +1070,7 @@ class SDKRunner:
         payload = json.dumps(asdict(request), separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
         if len(payload) > _MAX_JSONL_LINE:
             raise ProviderError(f"provider request exceeds {_MAX_JSONL_LINE} byte JSONL limit")
+        worker_env = _worker_env()
         command = list(self.worker_command or (self.python, "-m", self.worker_module))
         try:
             proc = self._popen(
@@ -610,7 +1078,7 @@ class SDKRunner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=_worker_env(),
+                env=worker_env,
                 start_new_session=(os.name == "posix"),
                 close_fds=True,
             )
@@ -711,6 +1179,7 @@ class SDKRunner:
                 cost_usd=result_payload.get("cost_usd"),
                 tokens_in=result_payload.get("tokens_in"),
                 tokens_out=result_payload.get("tokens_out"),
+                cached_input_tokens=result_payload.get("cached_input_tokens"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError("provider worker returned an invalid result") from exc

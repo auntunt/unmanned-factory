@@ -20,6 +20,8 @@ export type TaskStatus = 'pending' | 'queued' | 'running' | 'verified' | 'comple
 export interface User {
   id: string | number
   username: string
+  role?: 'admin' | 'member'
+  active?: boolean
 }
 
 export interface Project {
