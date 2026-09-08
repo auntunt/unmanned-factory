@@ -13,7 +13,8 @@ interface Position {
 }
 
 const taskStatusLabels: Record<TaskStatus, string> = {
-  pending: '待执行', queued: '已排队', running: '执行中', verified: '已验证', completed: '已完成', failed: '失败', blocked: '已阻塞', cancelled: '已取消',
+  // blocked 与 ui.tsx 的 STATUS_LABELS 保持一致：任务被上游挡住而未开工，不是失败。
+  pending: '待执行', queued: '已排队', running: '执行中', verified: '已验证', completed: '已完成', failed: '失败', blocked: '未开始', cancelled: '已取消',
 }
 
 function taskLevels(tasks: PlanTask[]): Position[] {

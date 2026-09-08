@@ -60,7 +60,8 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: '已取消',
   pending: '待处理',
   completed: '已完成',
-  blocked: '已阻塞',
+  // 任务被上游阻塞时尚未开始，不应显示为执行失败。
+  blocked: '未开始',
   verified: '已验证',
 }
 
@@ -72,7 +73,8 @@ export function statusLabel(status?: string | null): string {
 function statusTone(status?: string | null): string {
   if (!status) return 'neutral'
   if (['published', 'completed', 'verified', 'ready_for_review'].includes(status)) return 'success'
-  if (['failed', 'cancelled', 'blocked'].includes(status)) return 'danger'
+  if (['failed', 'cancelled'].includes(status)) return 'danger'
+  if (status === 'blocked') return 'neutral'
   if (['needs_clarification', 'awaiting_approval', 'needs_human'].includes(status)) return 'warning'
   if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
   return 'neutral'

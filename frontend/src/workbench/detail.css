@@ -79,6 +79,8 @@
 .wb-detail-page .wb-side-stat:last-child { border-bottom: 0; }
 .wb-detail-page .wb-side-stat span:first-child { color: var(--detail-muted); }
 .wb-detail-page .wb-side-stat span:last-child { text-align: right; overflow-wrap: anywhere; }
+/* 长 ID 单行截断，完整值可通过 title 查看。 */
+.wb-detail-page .wb-side-stat-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .wb-detail-page .wb-side-stat .wb-status-success { color: #0b5f59; }
 .wb-detail-page .rk-meta, .wb-detail-page .pa-panel-heading p { color: #596b65; }
 .wb-detail-page .wb-artifact-list { display: grid; gap: 10px; margin-top: 13px; }
@@ -207,3 +209,17 @@
   .wb-detail-page .wb-detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .wb-detail-page .wb-detail-actions .wb-button { width: 100%; white-space: nowrap; }
 }
+
+
+/* 停止原因：琥珀色表示策略性停止，避免和任务失败混淆。 */
+.wb-detail-page .wb-stop-reason { border-left: 3px solid #b45309; }
+.wb-detail-page .wb-stop-reason h2 { margin: 4px 0 6px; font-size: 16px; }
+.wb-detail-page .wb-stop-reason > p { margin: 0 0 8px; color: var(--detail-ink); font-size: 13px; line-height: 1.6; }
+.wb-detail-page .wb-stop-reason-note { color: var(--detail-muted); font-size: 12px; }
+.wb-detail-page .wb-stop-reason-next { margin-top: 10px; border-top: 1px dashed var(--detail-border); padding-top: 10px; }
+.wb-detail-page .wb-stop-reason-next strong { color: var(--detail-teal); font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.wb-detail-page .wb-stop-reason-next ul { margin: 6px 0 0; padding-left: 18px; }
+.wb-detail-page .wb-stop-reason-next li { color: var(--detail-ink); font-size: 13px; line-height: 1.65; }
+.wb-detail-page .wb-stop-reason-raw { margin-top: 10px; }
+.wb-detail-page .wb-stop-reason-raw summary { color: var(--detail-muted); cursor: pointer; font-size: 12px; }
+.wb-detail-page .wb-stop-reason-raw code { display: block; margin-top: 6px; border-radius: 6px; background: #f4f6f4; padding: 8px; overflow-wrap: anywhere; color: #30413b; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
