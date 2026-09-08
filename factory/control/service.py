@@ -6,7 +6,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from factory.control.store import ACTIVE, Conflict, Store
+from factory.control.store import ACTIVE, Conflict, Store, now
 from factory.control.autonomy import (DurableQueue, PolicyStore, all_events,
     capability_context, capability_prompt, policy_decision, valid_cost)
 
@@ -536,6 +536,22 @@ class Service:
                 expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval',
                           'needs_clarification', 'needs_human', 'ready_for_review'),
                 event=('run.cancelled', {'message': '用户取消执行，保留日志和工作区', 'actor': actor}))
+
+    def discard(self, rid, actor):
+        """Retire obsolete work from operational attention while retaining all evidence."""
+        with self.lock:
+            run = self.store.get(rid)
+            return self.store.update(rid, {
+                'status': 'discarded',
+                'artifacts': {**(run.get('artifacts') or {}), 'discarded': {
+                    'actor': actor, 'previous_status': run['status'], 'at': now(),
+                }},
+            }, expected=('needs_clarification', 'awaiting_approval', 'needs_human',
+                         'failed', 'ready_for_review', 'cancelled'),
+               event=('run.discarded', {
+                   'message': '旧任务已标记废弃；保留计划、费用、日志和工作区记录',
+                   'actor': actor, 'previous_status': run['status'],
+               }))
 
     def _usage(self, rid, *, profile=None):
         costs = [valid_cost(e['payload'].get('cost_usd')) for e in all_events(self.store, rid)

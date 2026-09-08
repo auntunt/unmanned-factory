@@ -57,6 +57,7 @@ const STATUS_LABELS: Record<string, string> = {
   published: '已发布',
   needs_human: '运行已暂停',
   failed: '失败',
+  discarded: '已废弃',
   cancelled: '已取消',
   pending: '待处理',
   completed: '已完成',
@@ -73,7 +74,7 @@ export function statusLabel(status?: string | null): string {
 function statusTone(status?: string | null): string {
   if (!status) return 'neutral'
   if (['published', 'completed', 'verified', 'ready_for_review'].includes(status)) return 'success'
-  if (['failed', 'cancelled'].includes(status)) return 'danger'
+  if (['failed', 'discarded', 'cancelled'].includes(status)) return 'danger'
   if (status === 'blocked') return 'neutral'
   if (['needs_clarification', 'awaiting_approval', 'needs_human'].includes(status)) return 'warning'
   if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'

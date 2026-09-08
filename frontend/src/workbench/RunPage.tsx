@@ -12,6 +12,7 @@ import { RUN_VIEWS, canGenerateNextPlan, frozenPolicy, runGuidance, runView, typ
 import { checkPassed } from './run-guidance'
 import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, statusLabel, errorText, type PageProps } from './ui'
 import './detail.css'
+import { notifyDataChanged } from './data-refresh'
 import './run-guidance.css'
 import RunJourney from './RunJourney'
 
@@ -284,7 +285,7 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const [events, setEvents] = useState<AuditEvent[] | null>(null)
   const [auxError, setAuxError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'clarify' | 'approve' | 'cancel' | 'publish' | 'retry' | 'distill' | null>(null)
+  const [busy, setBusy] = useState<'clarify' | 'approve' | 'cancel' | 'discard' | 'publish' | 'retry' | 'distill' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
   const [distillName, setDistillName] = useState('')
@@ -336,11 +337,11 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
     return () => { controller.abort(); window.clearInterval(timer) }
   }, [loadConversation, loadEvents, tab, runId])
 
-  const act = async (kind: 'clarify' | 'approve' | 'cancel' | 'publish') => {
+  const act = async (kind: 'clarify' | 'approve' | 'cancel' | 'discard' | 'publish') => {
     if (!run || !runId) return
     setBusy(kind); setError(null)
     const body = kind === 'clarify' ? { answer: answer.trim() } : kind === 'approve' ? { revision: run.revision } : undefined
-    try { const next = await request<Run>(`/api/v2/runs/${encodeURIComponent(runId)}/${kind}`, { method: 'POST', csrfToken, onUnauthorized, body }); setRun(next); if (kind === 'clarify') setAnswer('') } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(actionError(cause)) } finally { setBusy(null) }
+    try { const next = await request<Run>(`/api/v2/runs/${encodeURIComponent(runId)}/${kind}`, { method: 'POST', csrfToken, onUnauthorized, body }); setRun(next); notifyDataChanged(); if (kind === 'clarify') setAnswer('') } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(actionError(cause)) } finally { setBusy(null) }
   }
 
   const retry = async () => {
@@ -364,6 +365,7 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const actorId = runSource?.actor_id
   const canActOnRun = isAdmin || (actorId !== undefined && actorId !== null && String(actorId) === String(user?.id))
   const canCancel = canActOnRun && ACTIVE_STATUSES.includes(run.status)
+  const canDiscard = canActOnRun && ['needs_clarification', 'awaiting_approval', 'needs_human', 'failed', 'cancelled'].includes(run.status)
   const canPublish = isAdmin && run.status === 'ready_for_review'
   const canRetry = canActOnRun && ['failed', 'needs_human', 'cancelled'].includes(run.status)
   const canDistill = isAdmin && ['ready_for_review', 'published'].includes(run.status)
@@ -373,7 +375,7 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const projectHref = `/projects/${encodeURIComponent(String(run.project_id))}?stage=${guidance.stage}`
   const canManualApprove = canActOnRun && run.status === 'awaiting_approval' && questions.length === 0
   const canClarify = canGenerateNextPlan(run, canActOnRun)
-  return <div className="wb-detail-page wb-run-page"><PageHeader title={run.plan?.title || run.request.slice(0, 80) || `运行 #${run.id}`} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/runs')}>返回看板</button><details className="wb-export-menu"><summary className="wb-button">导出记录</summary><div><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=json`}>JSON</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=markdown`}>Markdown</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=zip`}>ZIP</a></div></details>{canClarify && <Link className="wb-button" to={viewHref('requirements')}>补充要求并生成下一版计划</Link>}{canRetry && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void retry()}>{busy === 'retry' ? '重试中…' : '按新配置重试'}</button>}{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
+  return <div className="wb-detail-page wb-run-page"><PageHeader title={run.plan?.title || run.request.slice(0, 80) || `运行 #${run.id}`} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<div className="wb-detail-actions"><button className="wb-button" onClick={() => navigate('/runs')}>返回看板</button><details className="wb-export-menu"><summary className="wb-button">导出记录</summary><div><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=json`}>JSON</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=markdown`}>Markdown</a><a href={`/api/v3/runs/${encodeURIComponent(runId)}/export?format=zip`}>ZIP</a></div></details>{canClarify && <Link className="wb-button" to={viewHref('requirements')}>补充要求并生成下一版计划</Link>}{canRetry && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void retry()}>{busy === 'retry' ? '重试中…' : '按新配置重试'}</button>}{canDiscard && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('discard')}>{busy === 'discard' ? '处理中…' : '标记为废弃'}</button>}{canCancel && <button className="wb-button wb-button-danger" disabled={busy !== null} onClick={() => void act('cancel')}>{busy === 'cancel' ? '处理中…' : run.status === 'ready_for_review' ? '放弃本次交付' : '取消运行'}</button>}{canPublish && <button className="wb-button wb-button-primary" disabled={busy !== null} onClick={() => void act('publish')}>{busy === 'publish' ? '发布中…' : '发布交付'}</button>}</div>} />
     {error && <ErrorNotice message={error} />}
     <p className="wb-run-breadcrumb"><Link to={projectHref}>返回项目闭环</Link><span>·</span><Link to="/runs">运行看板</Link></p>
     <StopReason run={run} canConfigure={isAdmin} />

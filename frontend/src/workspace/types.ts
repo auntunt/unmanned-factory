@@ -11,6 +11,7 @@ export type RunStatus =
   | 'published'
   | 'needs_human'
   | 'failed'
+  | 'discarded'
   | 'cancelled'
 
 export type Complexity = 'small' | 'medium' | 'large'

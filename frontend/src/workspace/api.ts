@@ -28,6 +28,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   try {
     response = await fetch(path, {
       method,
+      cache: method === 'GET' || method === 'HEAD' ? 'no-store' : undefined,
       credentials: 'same-origin',
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),

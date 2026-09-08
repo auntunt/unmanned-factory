@@ -6,6 +6,7 @@ import { EmptyState, ErrorNotice, formatDate, PageHeader, errorText, type PagePr
 import type { OverviewData } from './v3-types'
 import { PROJECT_STAGES, projectStageHref } from './project-stages'
 import AttentionList from './AttentionList'
+import { subscribeDataRefresh } from './data-refresh'
 import './overview.css'
 import './project-workspace.css'
 
@@ -41,6 +42,7 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
       .finally(() => { if (controllerRef.current === controller) { controllerRef.current = null; if (!controller.signal.aborted) setLoading(false) } })
   }, [onUnauthorized])
   useEffect(() => { load(true); const timer = window.setInterval(() => load(), 15000); return () => { controllerRef.current?.abort(); window.clearInterval(timer) } }, [load])
+  useEffect(() => subscribeDataRefresh(() => load(true)), [load])
   const attention = data?.attention ?? []
   const events = (data?.recent_events ?? []).filter((event) => EVENT_LABELS[event.type]).slice(0, 5)
 

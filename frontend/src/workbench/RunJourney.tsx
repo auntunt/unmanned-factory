@@ -30,7 +30,7 @@ export default function RunJourney({ run }: { run: Run }) {
     evidence.checks === 'passed' ? '检查通过' : evidence.checks === 'failed' ? '检查未通过' : evidence.checks === 'recorded' ? '已记录检查' : '未记录',
     evidence.delivery ? (run.status === 'published' ? '已发布' : '已记录交付') : '未记录',
   ]
-  const terminal = run.status === 'published' || run.status === 'cancelled'
+  const terminal = run.status === 'published' || run.status === 'discarded' || run.status === 'cancelled'
   return <section className="wb-run-journey" aria-labelledby="run-journey-title">
     <div className="wb-run-journey-heading">
       <div><span className="wb-eyebrow">本次工程闭环</span><h2 id="run-journey-title">{guidance.summary}</h2></div>

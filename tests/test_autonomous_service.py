@@ -271,6 +271,24 @@ def test_overview_keeps_cancelled_runs_out_of_attention_but_preserves_received_d
     assert run["id"] in {item["id"] for item in intake["items"]}
 
 
+def test_discarded_run_leaves_attention_but_retains_evidence(control):
+    client, store, service, runner, project, headers = control
+    run, _ = store.create_run(project["id"], "Obsolete stopped task")
+    store.update(run["id"], {
+        "status": "needs_human", "artifacts": {"needs_human": "old budget stop"},
+    }, expected=("received",))
+    assert run["id"] in {item["id"] for item in client.get("/api/v3/overview", headers=headers).json()["attention"]}
+
+    response = client.post(f"/api/v2/runs/{run['id']}/discard", headers=headers)
+    assert response.status_code == 200, response.text
+    discarded = response.json()
+    assert discarded["status"] == "discarded"
+    assert discarded["artifacts"]["needs_human"] == "old budget stop"
+    assert discarded["artifacts"]["discarded"]["previous_status"] == "needs_human"
+    assert run["id"] not in {item["id"] for item in client.get("/api/v3/overview", headers=headers).json()["attention"]}
+    assert any(event["type"] == "run.discarded" for event in store.events(run["id"]))
+
+
 def test_overview_projects_are_isolated_and_paused_runs_keep_stage_evidence(control):
     client, store, service, runner, project, headers = control
     from factory.control.capabilities import CapabilityStore

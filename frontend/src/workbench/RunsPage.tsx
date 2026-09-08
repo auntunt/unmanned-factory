@@ -6,6 +6,7 @@ import { runGuidance } from './run-guidance'
 import type { V3Project } from './v3-types'
 import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, errorText, type PageProps } from './ui'
 import './run-guidance.css'
+import { subscribeDataRefresh } from './data-refresh'
 
 const filters = [['all', '全部'], ['active', '进行中'], ['attention', '需要处理'], ['ready_for_review', '已验证'], ['published', '已发布'], ['failed', '异常与取消']] as const
 type Filter = typeof filters[number][0]
@@ -22,6 +23,7 @@ export default function RunsPage({ onUnauthorized }: PageProps) {
   const [refreshIndex, setRefreshIndex] = useState(0)
   const projectId = searchParams.get('project_id') ?? ''
   useEffect(() => { setFilter(asFilter(searchParams.get('filter'))) }, [searchParams])
+  useEffect(() => subscribeDataRefresh(() => setRefreshIndex((value) => value + 1)), [])
   useEffect(() => {
     const current = searchParams.get('filter')
     if (current === filter || (filter === 'all' && !current)) return
@@ -46,7 +48,7 @@ export default function RunsPage({ onUnauthorized }: PageProps) {
     return () => { controller.abort(); window.clearInterval(timer) }
   }, [onUnauthorized, refreshIndex])
   const visible = useMemo(() => (runs ?? []).filter((run) => {
-    const matchesFilter = filter === 'all' || filter === 'active' ? (filter === 'all' || ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status)) : filter === 'attention' ? ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status) : filter === 'failed' ? ['failed', 'cancelled'].includes(run.status) : run.status === filter
+    const matchesFilter = filter === 'all' || filter === 'active' ? (filter === 'all' || ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status)) : filter === 'attention' ? ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status) : filter === 'failed' ? ['failed', 'discarded', 'cancelled'].includes(run.status) : run.status === filter
     const matchesProject = !projectId || String(run.project_id) === projectId
     const text = `${run.request} ${run.plan?.title ?? ''} ${run.id} ${projects.find((project) => String(project.id) === String(run.project_id))?.name ?? ''}`.toLowerCase()
     return matchesFilter && matchesProject && text.includes(query.trim().toLowerCase())
@@ -59,7 +61,7 @@ export default function RunsPage({ onUnauthorized }: PageProps) {
   }
   return <div className="wb-page">
     <PageHeader title="运行看板" description="按真实运行状态追踪需求、异常和交付证据。" actions={<><button className="wb-button wb-button-secondary" onClick={() => setRefreshIndex((value) => value + 1)}>刷新</button><Link className="wb-button wb-button-primary" to="/projects">提交新需求 <span aria-hidden="true">＋</span></Link></>} />
-    <section className="wb-card wb-runs-toolbar" aria-label="运行筛选"><label className="wb-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索需求、项目或运行编号" aria-label="搜索运行" /></label><label className="wb-run-project-filter">项目<select aria-label="按项目筛选运行" value={projectId} onChange={(event) => setProject(event.target.value)}><option value="">全部项目</option>{projects.map((project) => <option key={String(project.id)} value={String(project.id)}>{project.name}</option>)}</select></label><div className="wb-filter-list" role="tablist" aria-label="运行状态"><div>{filters.map(([key, label]) => <button key={key} role="tab" aria-selected={filter === key} className={`wb-filter ${filter === key ? 'is-active' : ''}`} onClick={() => setFilter(key)}>{label}<span>{key === 'all' ? runs?.length ?? '—' : key === 'active' ? runs?.filter((run) => ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status)).length ?? '—' : key === 'attention' ? runs?.filter((run) => ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status)).length ?? '—' : runs?.filter((run) => key === 'failed' ? ['failed', 'cancelled'].includes(run.status) : run.status === key).length ?? '—'}</span></button>)}</div></div></section>
+    <section className="wb-card wb-runs-toolbar" aria-label="运行筛选"><label className="wb-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索需求、项目或运行编号" aria-label="搜索运行" /></label><label className="wb-run-project-filter">项目<select aria-label="按项目筛选运行" value={projectId} onChange={(event) => setProject(event.target.value)}><option value="">全部项目</option>{projects.map((project) => <option key={String(project.id)} value={String(project.id)}>{project.name}</option>)}</select></label><div className="wb-filter-list" role="tablist" aria-label="运行状态"><div>{filters.map(([key, label]) => <button key={key} role="tab" aria-selected={filter === key} className={`wb-filter ${filter === key ? 'is-active' : ''}`} onClick={() => setFilter(key)}>{label}<span>{key === 'all' ? runs?.length ?? '—' : key === 'active' ? runs?.filter((run) => ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status)).length ?? '—' : key === 'attention' ? runs?.filter((run) => ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status)).length ?? '—' : runs?.filter((run) => key === 'failed' ? ['failed', 'discarded', 'cancelled'].includes(run.status) : run.status === key).length ?? '—'}</span></button>)}</div></div></section>
     {error && <ErrorNotice message={error} />}{projectsError && <ErrorNotice message={projectsError} />}
     {!runs && !error && <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>}
     {runs && visible.length === 0 && <div className="wb-card"><EmptyState title={query || projectId ? '没有匹配的运行' : '还没有运行'} description={query || projectId ? '换一个关键词、项目或状态筛选试试。' : '从项目提交一条需求后，运行现场会出现在这里。'} action={!query && !projectId ? <Link className="wb-button wb-button-primary" to="/projects">浏览项目</Link> : undefined} /></div>}

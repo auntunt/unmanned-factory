@@ -16,6 +16,7 @@ import ProjectLifecycle from './ProjectLifecycle'
 import AttentionList from './AttentionList'
 import { projectStage } from './project-stages'
 import { runGuidance } from './run-guidance'
+import { subscribeDataRefresh } from './data-refresh'
 import './overview.css'
 import './project-workspace.css'
 
@@ -166,7 +167,8 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
     }
     void load()
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load() }, 15000)
-    return () => { controller.abort(); window.clearInterval(timer) }
+    const unsubscribe = subscribeDataRefresh(() => void load())
+    return () => { controller.abort(); window.clearInterval(timer); unsubscribe() }
   }, [onUnauthorized, projectId])
 
   useEffect(() => {

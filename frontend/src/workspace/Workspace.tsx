@@ -24,7 +24,7 @@ interface ProjectForm {
 }
 
 const statusLabels: Record<RunStatus, string> = {
-  received: '已接收', planning: '规划中', needs_clarification: '待澄清', awaiting_approval: '待审批', queued: '已排队', running: '执行中', verifying: '验证中', ready_for_review: '待复核', publishing: '发布中', published: '已发布', needs_human: '需人工介入', failed: '失败', cancelled: '已取消',
+  received: '已接收', planning: '规划中', needs_clarification: '待澄清', awaiting_approval: '待审批', queued: '已排队', running: '执行中', verifying: '验证中', ready_for_review: '待复核', publishing: '发布中', published: '已发布', needs_human: '需人工介入', failed: '失败', discarded: '已废弃', cancelled: '已取消',
 }
 
 const initialProjectForm: ProjectForm = {

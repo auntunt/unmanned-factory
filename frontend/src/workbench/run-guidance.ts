@@ -92,6 +92,7 @@ export function runGuidance(run: Run): RunGuidance {
 
   // Terminal runs retain their historical billing/budget artifacts without being presented as pending work.
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交、检查和费用记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
+  if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划、费用和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
   if (budget) {
     const [, spent, limit] = budget

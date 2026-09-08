@@ -28,6 +28,7 @@ describe('runGuidance', () => {
   it('keeps historic budget data out of terminal-run guidance and favors run.error for a failure', () => {
     expect(runGuidance(run({ status: 'published', artifacts: { needs_human: stoppedCost } })).kind).toBe('delivery')
     expect(runGuidance(run({ status: 'cancelled', artifacts: { needs_human: stoppedCost } })).kind).toBe('progress')
+    expect(runGuidance(run({ status: 'discarded', artifacts: { needs_human: stoppedCost } })).label).toBe('任务已废弃')
     const failed = Object.assign(run({ status: 'failed', artifacts: { needs_human: 'triage fallback' } }), { error: 'actual runner error' })
     const guidance = runGuidance(failed)
     expect(guidance.rawEvidence).toBe('actual runner error')
