@@ -1,5 +1,15 @@
 # 自动化无人工厂
 
+## 工程 Harness 重写（v2）
+
+新增带登录的工程工作台：需求梳理与任务图、分档模型调度、Claude/Codex/DSH 适配、独立工作区验证、可追溯问答、GitHub Issue 分流和 PR 发布。现有 CLI 与历史记录保留。
+
+- [设计规划与同类项目分析](docs/rewrite/PLAN.zh-CN.md)
+- [运行说明](docs/rewrite/RUNBOOK.zh-CN.md)
+- [已完成范围、验证结果与后续里程碑](docs/rewrite/STATUS.md)
+
+新入口为 `uv run factory-web serve`；先按运行说明配置模型、构建前端并创建账号。下方是原有引擎文档，旧 `factory api` 入口不应直接暴露公网。
+
 一个调度 + 审计层：把任务派给 coding agent，用四道监工判收，全程留可回查的证据。
 
 设计文档是 `docs/superpowers/plans/2026-08-06-unmanned-factory-p0.md`（约 4700 行）。

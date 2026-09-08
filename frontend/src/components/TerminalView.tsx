@@ -79,7 +79,7 @@ function SectionBar({ label, right }: { label: string; right?: string }) {
   )
 }
 
-export default function TerminalView({ buckets, counts, analytics, onTaskClick, onNodeClick }: Props) {
+export default function TerminalView({ counts, analytics, onTaskClick, onNodeClick }: Props) {
   const stages = ['inbox', 'running', 'judging', 'reworking', 'done', 'needs_human', 'merged']
   const total = stages.reduce((s, k) => s + (counts[k] ?? 0), 0)
   const merged = counts.merged ?? 0

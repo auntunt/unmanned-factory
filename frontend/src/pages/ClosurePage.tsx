@@ -5,7 +5,7 @@ import KanbanView from '../components/KanbanView'
 import TerminalView from '../components/TerminalView'
 import NodeDrawer from '../components/NodeDrawer'
 import KpiHeader, { type KpiCounter, type KpiRing } from '../components/KpiHeader'
-import type { ClosureNode } from '../theme/nodes'
+import { NODES, type ClosureNode } from '../theme/nodes'
 import type { TaskRow } from '../components/FactoryTaskCard'
 import { bucketTasks, countsFromBuckets, type ApiTasks } from '../lib/bucket'
 import { C } from '../theme/tokens'
@@ -29,6 +29,11 @@ interface Props {
 export default function ClosurePage({ tasks, analytics, loading, onTaskClick }: Props) {
   const [view, setView] = useState<'ring' | 'kanban' | 'terminal'>('ring')
   const [openNode, setOpenNode] = useState<ClosureNode | null>(null)
+
+  const handleNodeClick = (key: string) => {
+    const node = NODES.find((candidate) => candidate.key === key)
+    if (node) setOpenNode(node)
+  }
 
   const buckets = useMemo(() => bucketTasks(tasks ?? {}), [tasks])
   const counts = useMemo(() => countsFromBuckets(buckets), [buckets])
@@ -189,7 +194,7 @@ export default function ClosurePage({ tasks, analytics, loading, onTaskClick }: 
             counts={counts}
             analytics={analytics}
             onTaskClick={onTaskClick}
-            onNodeClick={setOpenNode}
+            onNodeClick={handleNodeClick}
           />
         )}
       </Card>

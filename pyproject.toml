@@ -5,6 +5,9 @@ requires-python = ">=3.12"
 dependencies = [
     "SQLAlchemy==2.0.50",
     "PyYAML==6.0.2",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "httpx>=0.28.1",
 ]
 
 # 文档里从第一天就写着 `factory run ...`，但这个入口点一直不存在 ——
@@ -13,6 +16,18 @@ dependencies = [
 # plist、cron、README 的每一行。
 [project.scripts]
 factory = "factory.cli:main"
+factory-web = "factory.control.app:main"
+
+[project.optional-dependencies]
+codex = [
+    "openai-codex>=0.147.0",
+]
+claude = [
+    "claude-agent-sdk>=0.2.152",
+]
+dsh = [
+    "deepseek-harness-sdk>=0.1.2rc1",
+]
 
 [build-system]
 requires = ["hatchling"]

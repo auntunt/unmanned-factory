@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
 import { Alert, Layout, Result, Select, Space, Tabs, Tag } from 'antd'
 import ClosurePage from './pages/ClosurePage'
@@ -13,6 +14,9 @@ import type { TaskRow } from './components/FactoryTaskCard'
 import type { ApiTasks } from './lib/bucket'
 import { C, FONT } from './theme/tokens'
 import ControlRoom from './controlroom/ControlRoom'
+import Workspace from './workspace/Workspace'
+import { request, WorkspaceApiError } from './workspace/api'
+import type { User } from './workspace/types'
 
 /**
  * 应用外壳 —— 移植自 OA 闭环监控页：卡片式页签 + 单页无路由跳转。
@@ -35,19 +39,55 @@ const WINDOWS = [
  * the context of a Router」白屏。页签导航不走路由，但这些页面内部的跳转要。
  */
 /**
- * 两个入口：
- *   /          控制室 —— 给客户看的单屏（controlroom/）
- *   /admin/*   原来的多页签看板 —— 给自己用
- * 用路径而不是页签切换：demo 时地址栏就是「模式」，`/?replay=T-142&speed=4`
- * 一个链接发给谁都能放。
+ * 三个入口：
+ *   /            新工程工作台
+ *   /control-room 控制室 —— 旧的单屏事件视图
+ *   /admin/*     原来的多页签管理台
  */
+interface AuthResponse {
+  user: User
+  csrf_token: string
+}
+
+function LoginPage({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); setError(null); setBusy(true)
+    try { await onLogin(username.trim(), password) } catch (cause) { setError(cause instanceof Error ? cause.message : '登录失败') } finally { setBusy(false) }
+  }
+  return <main className="wf-login-page"><form className="wf-login-card" onSubmit={submit}><h1>工程工作台</h1><p>使用控制平面账号登录，查看规划、执行和交付证据。</p><div className="wf-field"><label htmlFor="login-username">用户名</label><input id="login-username" required autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></div><div className="wf-field" style={{ marginTop: 12 }}><label htmlFor="login-password">密码</label><input id="login-password" required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></div>{error && <div className="wf-error" role="alert">{error}</div>}<div className="wf-form-actions" style={{ marginTop: 19 }}><button className="wf-button wf-button-primary" disabled={busy}>{busy ? '登录中…' : '登录'}</button></div></form></main>
+}
+
+function AuthGate({ children }: { children: (session: AuthResponse, logout: () => void) => ReactNode }) {
+  const [session, setSession] = useState<AuthResponse | null>(null)
+  const [checking, setChecking] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    request<AuthResponse>('/api/auth/me').then((next) => { if (!cancelled) { setSession(next); setError(null) } }).catch((cause) => { if (!cancelled && !(cause instanceof WorkspaceApiError && cause.status === 401)) setError(cause instanceof Error ? cause.message : '无法连接认证服务') }).finally(() => { if (!cancelled) setChecking(false) })
+    return () => { cancelled = true }
+  }, [])
+  const login = async (username: string, password: string) => {
+    const next = await request<AuthResponse>('/api/auth/login', { method: 'POST', body: { username, password } })
+    setSession(next); setError(null)
+  }
+  const logout = useCallback(() => {
+    const current = session
+    setSession(null)
+    if (current) void request('/api/auth/logout', { method: 'POST', csrfToken: current.csrf_token }).catch(() => undefined)
+  }, [session])
+  if (checking) return <main className="wf-login-page"><div className="wf-login-card"><p>正在验证登录状态…</p></div></main>
+  if (!session) return error ? <main className="wf-login-page"><div className="wf-login-card"><h1>暂时无法登录</h1><p>{error}</p><button className="wf-button wf-button-primary" onClick={() => { setError(null); setChecking(true); window.location.reload() }}>重试</button></div></main> : <LoginPage onLogin={login} />
+  return <>{children(session, logout)}</>
+}
+
 export default function App() {
-  const admin = window.location.pathname.startsWith('/admin')
-  return (
-    <BrowserRouter basename={admin ? '/admin' : undefined}>
-      {admin ? <FactoryConsole /> : <ControlRoom />}
-    </BrowserRouter>
-  )
+  const path = window.location.pathname
+  const admin = path.startsWith('/admin')
+  return <BrowserRouter basename={admin ? '/admin' : undefined}><AuthGate>{(session, logout) => path.startsWith('/admin') ? <FactoryConsole /> : path.startsWith('/control-room') ? <ControlRoom /> : <Workspace user={session.user} csrfToken={session.csrf_token} onLogout={logout} />}</AuthGate></BrowserRouter>
 }
 
 // 不叫 Console：和全局 console 混淆，也和旧的 pages/Console 看板页重名。

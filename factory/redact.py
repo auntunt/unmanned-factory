@@ -19,7 +19,7 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     # 前缀 [A-Za-z0-9_.-]* 是为了吃掉 DEPLOY_PASSWORD 这种带前缀的名字：
     # \b 在 "DEPLOY_PASSWORD" 的 _P 处不成立，光靠 \b 会漏。
     re.compile(
-        r"""(?i)([A-Za-z0-9_.\-]*
+        r"""(?i)(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]*
         (?:pass(?:wd|word)?|secret|token|api[_-]?key|access[_-]?key
         |secret[_-]?key|credential|auth[_-]?token|private[_-]?key)
         \s*["']?\s*[:=]\s*["']?)([^\s"',;)}\]]+)""",

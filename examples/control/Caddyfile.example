@@ -1,0 +1,5 @@
+# Set FACTORY_PUBLIC_ORIGIN=https://factory.example.com before starting factory-web.
+# Replace this host with your domain. Keep factory-web bound to loopback.
+factory.example.com {
+    reverse_proxy 127.0.0.1:8788
+}
