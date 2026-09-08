@@ -135,6 +135,22 @@ class Store:
         with self.connect() as db:
             return [json.loads(r[0]) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC LIMIT 200')]
 
+    def published_runs_for_pr(self, project_id, number, repository):
+        """Find deliveries independently of the dashboard's recent-run limit."""
+        self.project(project_id)
+        canonical = f'https://github.com/{repository}/pull/{number}'.casefold()
+        with self.connect() as db:
+            rows = db.execute("SELECT data FROM runs WHERE json_extract(data, '$.project_id')=? "
+                              "AND json_extract(data, '$.status')='published'", (project_id,))
+            result = []
+            for row in rows:
+                run = json.loads(row[0])
+                artifacts = run.get('artifacts', {})
+                if (artifacts.get('pr_number') == number or
+                        str(artifacts.get('pr_url', '')).casefold() == canonical):
+                    result.append(run)
+            return result
+
     def update(self, rid, changes, *, expected=None, revision=None, event=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')

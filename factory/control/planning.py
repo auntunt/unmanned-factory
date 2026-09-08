@@ -163,7 +163,7 @@ def _trusted_check_names(project: dict[str, Any]) -> set[str]:
     return set(checks)
 
 
-def build_prompt(request: str, project: dict, history: list[str] | None = None) -> str:
+def build_prompt(request: str, project: dict, history: list[str] | None = None, context: dict | None = None) -> str:
     """Build the bounded planner prompt for a trusted project configuration."""
 
     if not isinstance(request, str):
@@ -199,6 +199,10 @@ def build_prompt(request: str, project: dict, history: list[str] | None = None) 
         history_text = "\n".join(reversed(kept))
         if truncated:
             history_text = "[earlier planning history truncated]\n" + history_text
+    reference = ''
+    if context is not None:
+        from factory.control.context import context_prompt
+        reference = context_prompt(context)
     return f"""You are a planning assistant for a single-owner engineering workstation.
 Return ONLY one JSON object (optionally inside a ```json code fence), with this exact shape:
 {{"title": string, "summary": string, "questions": [string], "tasks": [{{"id": string, "title": string, "prompt": string, "acceptance": [string], "paths": [string], "checks": [string], "depends_on": [string], "complexity": "small"|"medium"|"large", "risk": "low"|"medium"|"high"}}]}}
@@ -211,6 +215,7 @@ Project: {json.dumps(project, ensure_ascii=False, sort_keys=True)}
 Request: {request}
 Prior planning history:
 {history_text}
+{reference}
 """
 
 

@@ -83,11 +83,17 @@ class Service:
             profile = self.profiles['planner']
             if not profile.get('model'):
                 raise ValueError('请配置 FACTORY_PLANNER_PROVIDER 和 FACTORY_PLANNER_MODEL，再补充需求重试')
+            from factory.control.context import assemble_context, verify_planning_checkout
+            context = assemble_context(self.store, project, run['request'], run['history'])
+            verify_planning_checkout(project, context['commit_sha'])
+            self.store.update(rid, {'context': context}, expected=('planning',),
+                              event=('context.assembled', context))
             self._emit(rid, 'provider.started', {'profile': 'planner', **profile}, 'planner')
             result = self.runner.run(ProviderRequest(provider=profile['provider'], model=profile['model'],
-                prompt=build_prompt(run['request'], project, run['history']), workspace=project['workspace'],
+                prompt=build_prompt(run['request'], project, run['history'], context=context), workspace=project['workspace'],
                 timeout_s=self.timeout_s, read_only=True),
                 lambda kind, payload: self._emit(rid, kind, payload, 'planner'), self.cancels[rid])
+            verify_planning_checkout(project, context['commit_sha'])
             plan = parse_plan(result.text, project)
             source = run['source']
             auto = (project.get('auto_issues', False) and source.get('type') == 'github'
@@ -112,7 +118,7 @@ class Service:
         with self.lock:
             run = self.store.get(rid)
             updated = self.store.update(rid, {'status': 'received', 'plan': None, 'triage': None,
-                'history': [*run['history'], answer], 'tasks': []},
+                'history': [*run['history'], answer], 'tasks': [], 'context': None},
                 expected=('needs_clarification', 'awaiting_approval', 'needs_human'),
                 event=('user.message', {'text': answer, 'actor': actor, 'revision': run['revision']}))
             try:
@@ -128,6 +134,9 @@ class Service:
             if not run.get('plan') or run['plan'].get('questions'):
                 raise Conflict('需求尚有待澄清问题')
             project = self.store.project(run['project_id'])
+            from factory.control.codegraph import baseline_sha
+            if run.get('context') and baseline_sha(project) != run['context']['commit_sha']:
+                raise Conflict('工程基线已变化，请补充说明并重新规划，不能批准旧版本代码上的计划')
             for task in run['plan']['tasks']:
                 if not task['acceptance'] or not task['paths'] or not task['checks']:
                     raise Conflict('任务缺少验收标准、修改范围或已配置检查')
@@ -147,7 +156,13 @@ class Service:
             run = self.store.update(rid, {'status': 'running'}, expected=('queued',),
                                     event=('run.started', {}))
             project = self.store.project(run['project_id'])
-            artifacts = self.execute(run_id=rid, plan=run['plan'], project=project,
+            if run.get('context'):
+                project = {**project, 'expected_base_sha': run['context']['commit_sha']}
+            from factory.control.context import context_prompt
+            plan = {**run['plan'], 'tasks': [
+                {**task, 'prompt': task['prompt'] + context_prompt(run.get('context'))}
+                for task in run['plan']['tasks']]}
+            artifacts = self.execute(run_id=rid, plan=plan, project=project,
                 profiles=self.profiles, runner=self.runner,
                 emit=lambda kind, payload, task_id=None: self._emit(rid, kind, payload, task_id),
                 cancel=self.cancels[rid], max_parallel=self.max_parallel, timeout_s=self.timeout_s)
@@ -181,6 +196,28 @@ class Service:
             return self.store.update(rid, {'status': 'cancelled'},
                 expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval', 'needs_clarification'),
                 event=('run.cancelled', {'message': '用户取消执行，保留日志和工作区', 'actor': actor}))
+
+    def sync_merge(self, rid):
+        """Observe GitHub; never merge a PR or treat a plan claim as established fact."""
+        from factory.control.knowledge import KnowledgeStore
+        run = self.store.get(rid)
+        if run['status'] != 'published' or not run['artifacts'].get('pr_url'):
+            raise Conflict('该运行尚未发布 PR')
+        if not self.publisher or not hasattr(self.publisher, 'observe_merge'):
+            raise Conflict('尚未配置支持合并状态核对的 GitHub 凭据')
+        project = self.store.project(run['project_id'])
+        evidence = self.publisher.observe_merge(project, run)
+        if not evidence.get('merged'):
+            return evidence
+        result = KnowledgeStore(self.store).record_merge(project['id'], run, evidence)
+        # Knowledge insertion is independently atomic/idempotent. A crash here is
+        # reconciled by the next sync; it cannot create duplicate factual entries.
+        with self.lock:
+            current = self.store.get(rid)
+            if current['artifacts'].get('merge_evidence') != evidence:
+                self.store.update(rid, {'artifacts': {**current['artifacts'], 'merge_evidence': evidence}},
+                    expected=('published',), event=('github.merge_confirmed', evidence))
+        return {'merged': True, 'evidence': evidence, **result}
 
     def close(self):
         for event in self.cancels.values():

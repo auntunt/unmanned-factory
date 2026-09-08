@@ -6,6 +6,7 @@
 
 - [设计规划与同类项目分析](docs/rewrite/PLAN.zh-CN.md)
 - [运行说明](docs/rewrite/RUNBOOK.zh-CN.md)
+- [Project Agent 实践说明](docs/rewrite/PROJECT-AGENT.zh-CN.md)
 - [已完成范围、验证结果与后续里程碑](docs/rewrite/STATUS.md)
 
 新入口为 `uv run factory-web serve`；先按运行说明配置模型、构建前端并创建账号。下方是原有引擎文档，旧 `factory api` 入口不应直接暴露公网。

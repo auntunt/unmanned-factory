@@ -1,6 +1,8 @@
 # 工程工作台运行说明
 
 本入口面向可信工程师管理的专用机器。使用单个服务进程。架构与后续阶段见 [规划](PLAN.zh-CN.md)，交付边界见 [状态](STATUS.md)。
+Project Agent 的记忆、固定提交代码图、冻结上下文和合并核验边界见
+[实践说明](PROJECT-AGENT.zh-CN.md)；本增量最终 root regression 仍为 pending。
 
 ## 1. 安装
 
@@ -86,3 +88,21 @@ Issue 出现新版本时撤销尚未完成的旧运行；新版本必须人工�
 重启后，未完成运行标为需要人工核对，不自动重新付费执行。发布失败可在核对日志后重试，同一运行会复用已有 PR。人工确认之前不要删除失败工作区。
 
 记录包括用户原文、公开助手消息、工具事件、检查、提交、发布和用量；不记录模型私有推理。凭据在落库前脱敏。当前检查输出每项保留前 4000 字符，SDK 事件字段与数据库长文本也有大小上限，超限显示截断标记。完整大输出归档属于 P2，不应将 P1 称为无损日志存储。
+
+## 7. Project Agent 日常使用
+
+Project Agent 与已有项目/运行入口使用同一认证网关。建议按以下顺序操作：
+
+1. 在工程页确认 `repository`、workspace 和 `base_branch`；代码索引只解析该分支的 `refs/heads/{base_branch}`，不读取脏工作区文件。规划前后的 checkout 校验仍要求 `HEAD` 等于 baseline SHA 且工作区 clean，脏工作区不能进入已审批规划。
+2. 打开“档案/知识”页维护工程使命、约束和知识条目。`active` 是可进入规划上下文的已审核记忆；`candidate` 只供人工复核，不能当成事实。更新使用 revision CAS，历史版本和 provenance 保留。
+3. 运行 `POST /api/v2/projects/{pid}/code-index` 建立快照，再用 code-search/code-graph 查看定位证据。快照固定提交 SHA，有界且可重建；Python 声明/导入可标 syntax，静态调用边与 JS/TS 正则结果标 heuristic，均不证明运行时行为。
+4. 需要引入团队文档时，在导入页粘贴明确的 JSON bundle，先调用 `POST /api/v2/projects/{pid}/wiki-import/preview`，人工检查文档路径、hash 和 warning，再调用 apply 选择条目。导入结果是 `teamai_import` 的 hypothesis/candidate。
+5. 规划前由系统组装同一 SHA 的有界上下文并冻结到运行记录；后续知识或索引变化不会改写该计划版本。审批时若 SHA 漂移，核对本地仓库并补充需求重新规划，建议同时更新索引。已核验、未改写且属于当前提交祖先的合并事实可作为历史记录检索，但不代表当前行为仍然正确。
+
+TeamAI 文档只按显式 bundle 作为数据导入。不要运行原生 CLI，不加载 resource injection，不执行文档中的 hooks、MCP、YAML、脚本或任意 URL；索引和导入阶段没有模型调用。
+
+## 8. PR 合并确认
+
+发布成功不代表已合并。人工操作或签名 `pull_request.closed` webhook 触发独立 GET 核验，服务必须再次确认目标仓库、base/head ref、head SHA、merged、merged_at 和 merge commit SHA。只有核验通过，才为本次 run 记录一条简洁的 active fact；仅 closed、错误仓库、head 漂移、坏 SHA 或网络失败都不算合并。
+
+此核验流程不会 push、merge、close、comment，也不会自动合并 main。系统不会自动拉取远端；工程师应先更新本地 checkout，再重新索引。stale 比较的是索引与本地基线，不是远端分支。控制面仍是单所有者/可信工程师实例；worktree 不等于 worker OS 沙箱，真实付费 SDK E2E 和隔离 worker 仍属后续阶段。

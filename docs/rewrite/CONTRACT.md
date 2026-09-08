@@ -29,7 +29,7 @@ JSON responses, errors `{detail: string}`. Every endpoint except login and signe
 
 ## Objects
 
-Run: `id,project_id,request,status,revision,plan,triage,tasks,artifacts,created_at,updated_at`.
+Run: `id,project_id,request,status,revision,plan,triage,tasks,artifacts,created_at,updated_at`. The Project Agent increment adds frozen `context` and independently verified merge evidence; its [contract](PROJECT-AGENT-CONTRACT.md) extends this initial milestone, including signed `pull_request.closed` intake for observation only.
 States: `received,planning,needs_clarification,awaiting_approval,queued,running,verifying,ready_for_review,publishing,published,needs_human,failed,cancelled`.
 Artifacts: `branch,base_sha,commit,pr_url,checks,worktree`; missing values absent/null, never fictional.
 

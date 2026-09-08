@@ -1,6 +1,6 @@
 # 本次交付状态
 
-日期：2026-09-07；重写基线：`e545d0b`。本次交付为 **P0 设计 + P1 工程纵向流程实现**。没有将测试替身通过表述为三家真实供应商已完成端到端认证。
+日期：2026-09-08。本次交付为 **P0 设计 + P1 工程纵向流程实现，并增补 Project Agent 的知识、代码图和交付核验边界**。已完成本地集成与回归；这不等于三家真实供应商端到端认证或生产上线。
 
 ## 已实现
 
@@ -15,19 +15,20 @@
 | 工程验证 | 新 worktree、范围检查、Git 元数据保护、可信检查、验证前后内容核对、集成后回归、提交 SHA 绑定 |
 | 留痕与问答 | `store.py`：SQLite 追加写事件、脱敏、真实消息投影、Markdown 导出、重启转人工核对；大输出有明确截断 |
 | GitHub | `github.py`：验证分支推送、PR 创建/复用；Issue 签名与重复投递校验、确定性分流、内容更新撤销旧待执行计划 |
+| Project Agent 增量 | `knowledge.py`、`codegraph.py`、`context.py`、`history.py`、`project_routes.py` 及工作台组件：版本化工程记忆、候选/活动区分、固定 Git 对象代码图与源码链接、显式 TeamAI 文档预览/应用、运行上下文冻结、独立 PR 合并观察与经祖先校验的历史检索 |
 | 文档与迁移 | 同类项目取舍、分层设计、接口契约、部署说明；原 CLI 和历史数据保留 |
 
-主代理负责设计、契约、集成、复查和提交；Luna 子代理承担认证、计划规则、SDK 映射、工作台和执行器等已明确任务，并完成针对性修复。
+Astra 负责架构建议和困难边界审查，主代理负责契约、集成、复查和提交；Luna 子代理承担知识库、代码图、GitHub 证据、工作台及测试等明确任务，并按审查结果完成针对性修复。React 检查推动了表单草稿保留、项目切换取消请求、运行上下文刷新与证据 SHA 展示修复。
 
 ## 验证
 
-- 新增后端模块与相关脱敏回归：**69 passed**，其中 50 项为 `test_control_*`。包含真实本地 Git worktree、任务检查、集成提交、推送本地 bare remote、重复 PR 核对、签名/登录/CSRF/过期审批/内容更新和失败场景。模型响应和 GitHub HTTP 为替身，没有冒充远程成功。
-- 前端：**94 passed**，TypeScript 与 Vite 生产构建通过。这些是现有前端单元测试；新工作台完成编译检查，未执行浏览器端到端验证。构建仍有旧界面合包超过 500 KB 的体积提示。
-- 三家真实包接口核对：`openai-codex==0.147.0`、`claude-agent-sdk==0.2.152`、`deepseek-harness-sdk==0.1.2rc1`。已安装到独立临时环境，核对实际类、参数、返回类型与可安全构造的配置；未调用付费模型或启动已认证任务。
-- 原测试环境检查：在未修改基线 `e545d0b` 上独立执行 permission hook / 进程测试，结果 **9 failed, 9 passed**。9 个失败均来自该环境禁止 AF_UNIX socket 的 `PermissionError`；不能把这组结果写成全绿。
-- 其余后端回归：**1324 passed, 38 skipped, 2 deselected**。命令为 `uv run pytest -s -m 'not smoke' --ignore=tests/test_permission_hook.py --ignore=tests/test_proc_fd_leak.py`；上述两个文件单独在未修改基线核对，真实模型 smoke 未执行。没有改写或弱化这些环境敏感测试。
-
-同时修复了 npm 锁文件指向不可用 HTTP 镜像、两处已有 TypeScript 构建错误，以及旧脱敏规则对长连续字符串的重复扫描问题。
+- 后端主回归：**1382 passed / 38 skipped / 2 deselected**。命令：`.venv/bin/pytest -s -m 'not smoke' --ignore=tests/test_permission_hook.py --ignore=tests/test_proc_fd_leak.py`。真实模型 smoke 未运行，隔离/环境条件不足的测试保留 skip，不把它们算作通过。
+- 随后补充并复跑 Project Agent 与关联控制模块专项：**67 passed**，包含新增的历史合并事实进入上下文、人工改写后排除用例。
+- `permission_hook` 与进程文件描述符测试未纳入上述主回归；此前在未修改基线的同一执行环境单独核对为 **9 failed / 9 passed**，失败来自 AF_UNIX socket 权限限制。本轮未修改这些模块，也未尝试绕过该限制。
+- 前端：**103 passed**，TypeScript 与生产构建通过；仍有大于 500 kB 的 bundle 提示，代码分包属于后续优化。
+- 真实仓库的只读索引检查：241 个文件、2872 个节点、6263 条边；过大/敏感路径显式跳过。没有调用模型或执行仓库脚本。
+- 未执行真实付费模型调用或已认证的供应商任务；GitHub HTTP 使用替身时只能证明协议分支，不能宣称远程合并成功。
+- 未进行真实浏览器点选验收：环境缺少 agent-browser 与 Chromium，使用了组件渲染/纯函数测试及 HTTP 集成测试；没有公网部署。
 
 ## 仍需完成
 
@@ -37,5 +38,7 @@
 4. **完整证据存储**：大日志无损归档、事件保留策略和灾备恢复；当前保存有界脱敏记录，不能称为全部原始字节永久保存。
 5. **工程反馈循环**：CI 检查与 PR review 回流、独立语义审查、视觉预览反馈、Issue 自动评论和重复修复防护。
 6. **团队与管理**：账号恢复、项目设置编辑、项目 ACL、GitHub App 短期凭据与远程沙箱。
+7. **大仓库与团队互通**：更丰富的代码语义索引、增量更新、检索质量评测，以及 TeamAI 原生团队资源协议适配；当前只支持显式 Markdown 交换，不运行其 CLI/hooks/MCP。
 
-运行手册见 [RUNBOOK.zh-CN.md](RUNBOOK.zh-CN.md)，后续阶段验收见 [PLAN.zh-CN.md](PLAN.zh-CN.md)。默认交付 PR，不自动合并主分支。
+运行手册见 [RUNBOOK.zh-CN.md](RUNBOOK.zh-CN.md)，Project Agent 实践说明见
+[PROJECT-AGENT.zh-CN.md](PROJECT-AGENT.zh-CN.md)，后续阶段验收见 [PLAN.zh-CN.md](PLAN.zh-CN.md)。默认交付 PR，不自动合并主分支。

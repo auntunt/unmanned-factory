@@ -349,6 +349,8 @@ def execute_plan(
     if not isinstance(base_branch, str) or not base_branch or base_branch.startswith("-"):
         raise ExecutionError("project base_branch is required")
     base_sha = _git_ok(workspace, "rev-parse", "--verify", f"{base_branch}^{{commit}}", timeout_s=timeout_s)
+    if project.get('expected_base_sha') and project['expected_base_sha'] != base_sha:
+        raise ExecutionError('project baseline changed since planning; review and replan before execution')
     raw_tasks = plan.get("tasks") if isinstance(plan, Mapping) else None
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise ExecutionError("plan has no tasks")
@@ -396,7 +398,7 @@ def execute_plan(
     integration_branch = f"factory/{run_part}"
     root = Path(tempfile.mkdtemp(prefix=f".factory-{run_part}-", dir=str(workspace.parent)))
     integration_path = root / "integration"
-    _git_ok(workspace, "worktree", "add", "-q", "-b", integration_branch, str(integration_path), base_branch, timeout_s=timeout_s)
+    _git_ok(workspace, "worktree", "add", "-q", "-b", integration_branch, str(integration_path), base_sha, timeout_s=timeout_s)
     artifacts: dict[str, Any] = {"branch": integration_branch, "base_sha": base_sha, "commit": None, "worktree": str(integration_path), "checks": [], "tasks": []}
     by_id = {task_id: {"id": task_id, "status": "queued", "profile": None, "branch": None, "worktree": None, "commit": None, "checks": []} for task_id in tasks}
     child_commits: dict[str, str] = {}

@@ -237,6 +237,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         for message in store.conversation(rid):
             parts.append(f"## {'用户' if message['role'] == 'user' else '系统'} · {message['at']}\n\n{message['content']}\n\n事件：{message['event_ids']}")
         parts.append('## 交付证据\n\n```json\n' + json.dumps(run['artifacts'], ensure_ascii=False, indent=2) + '\n```')
+        if run.get('context'):
+            parts.append('## 本次冻结的项目上下文\n\n```json\n' + json.dumps(run['context'], ensure_ascii=False, indent=2) + '\n```')
         return PlainTextResponse('\n\n'.join(parts), media_type='text/markdown',
             headers={'Content-Disposition': f'attachment; filename="factory-{rid}.md"'})
 
@@ -245,11 +247,42 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         raw = await request.body()
         if not verify_signature(raw, request.headers.get('x-hub-signature-256', ''), secret):
             raise HTTPException(401, 'Webhook 签名无效')
-        if request.headers.get('x-github-event') != 'issues':
+        event = request.headers.get('x-github-event')
+        if event not in ('issues', 'pull_request'):
             return {'ignored': True}
         delivery = request.headers.get('x-github-delivery', '')
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', delivery):
             raise HTTPException(400, '缺少有效 delivery id')
+        if event == 'pull_request':
+            try:
+                payload = json.loads(raw)
+                if payload.get('action') != 'closed':
+                    return {'ignored': True}
+                pull = payload['pull_request']
+                if pull.get('merged') is not True:
+                    return {'ignored': True, 'reason': 'not_merged'}
+                repo = payload['repository']['full_name']
+                number = payload['number']
+                if not isinstance(repo, str) or not REPOSITORY.fullmatch(repo) or type(number) is not int or number < 1:
+                    raise ValueError('invalid pull request identity')
+            except (ValueError, KeyError, TypeError, AttributeError):
+                raise HTTPException(400, '无效 GitHub Pull Request 事件') from None
+            project = next((p for p in store.projects() if p['repository'].casefold() == repo.casefold()), None)
+            if not project:
+                return {'ignored': True, 'reason': 'repository_not_registered'}
+            matching = store.published_runs_for_pr(project['id'], number, repo)
+            if not matching:
+                return {'ignored': True, 'reason': 'run_not_found'}
+            # The signed event is only a trigger. Fetch GitHub's current PR state
+            # independently; never promote webhook-provided SHAs or summaries.
+            from starlette.concurrency import run_in_threadpool
+            try:
+                results = [await run_in_threadpool(svc.sync_merge, run['id']) for run in matching]
+            except (Conflict, KeyError):
+                raise
+            except Exception:
+                raise HTTPException(502, 'GitHub 合并状态核对失败；可重发事件或在控制台重试') from None
+            return {'results': results}
         try:
             payload = json.loads(raw)
             if payload.get('action') not in ('opened', 'edited', 'labeled', 'reopened'):
@@ -289,6 +322,9 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                 svc._fail(run['id'], exc)
                 raise
         return {'run_id': run['id'], 'duplicate': not created}
+
+    from factory.control.project_routes import router
+    app.include_router(router(store, svc))
 
     @app.get('/api/{path:path}')
     def legacy(path: str, request: Request):
