@@ -11,6 +11,7 @@ import concurrent.futures
 import hashlib
 import math
 import os
+import json
 import re
 import signal
 import subprocess
@@ -316,6 +317,23 @@ def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[
             raise ExecutionError(f"check {name!r} contains NUL")
         out.append((name, list(argv)))
     return out
+
+
+def _check_launch_error(root: Path, argv: list[str]) -> str | None:
+    executable = argv[0]
+    target = str(root / executable) if '/' in executable and not Path(executable).is_absolute() else executable
+    if shutil.which(target, path=check_env().get('PATH', '')) is None:
+        return f'check executable unavailable: {executable}'
+    return None
+
+
+def _check_failure_kind(record: dict) -> str:
+    text = (str(record.get('stdout', '')) + '\n' + str(record.get('stderr', ''))).lower()
+    if record.get('exit') in (126, 127) or 'unrecognized arguments:' in text:
+        return 'check_configuration'
+    if 'modulenotfounderror:' in text or 'no module named ' in text:
+        return 'check_environment'
+    return 'verification'
 
 
 def _run_check(root, name, argv, timeout_s, emit, task_id, cancel=None):
@@ -719,13 +737,19 @@ def execute_plan(
 
         def finish(status: str, **values: Any) -> dict:
             usage()
-            payload = {**route, "status": status, "cost_usd": cost, "duration_s": round(time.monotonic() - attempt_started_at, 3), **values}
+            payload = {**route, "status": status, "session_id": getattr(result, "session_id", None), "cost_usd": cost, "duration_s": round(time.monotonic() - attempt_started_at, 3), **values}
             _emit(emit, "attempt.completed" if status == "verified" else "attempt.failed", payload, task_id)
-            return {"status": status, "cost_usd": cost, "attempt": payload, **values}
+            return {"status": status, "cost_usd": cost, "session_id": getattr(result, "session_id", None), "attempt": payload, **values}
 
         try:
+            for check_name, argv in _check_argv(project, task.get('checks') or ()):
+                error = _check_launch_error(child_root, argv)
+                if error:
+                    provider_dispatched = False
+                    return finish('failed', error=error, retryable=False, failure_kind='check_configuration',
+                                  checks=[{'name': check_name, 'argv': argv, 'exit': None, 'stderr': error}])
             from factory.control.providers import ProviderRequest
-            request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), timeout_s=max(1, int(remaining())), read_only=False)
+            request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), session_id=task.get('_resume_session'), timeout_s=max(1, int(remaining())), read_only=False)
             last_assistant_text: str | None = None
             def callback(typ: Any, payload: Any = None, *extra: Any) -> None:
                 # SDK adapters historically used both emit(kind, payload) and
@@ -779,7 +803,9 @@ def execute_plan(
                 if record.get("cancelled"):
                     return finish("cancelled", checks=records, error="cancel requested", retryable=False)
                 if record.get("timeout") or record.get("exit") != 0:
-                    return finish("failed", checks=records, error=f"verification failed: {name}", retryable=True)
+                    kind = _check_failure_kind(record)
+                    return finish("failed", checks=records, error=f"verification failed: {name}",
+                                  retryable=kind != 'check_configuration', failure_kind=kind)
             after_changed = _status_paths(child_root, timeout_s=timeout_s)
             _reject_symlinks(child_root, after_changed)
             _guard_workspace(child_root, before, after_changed)
@@ -830,7 +856,8 @@ def execute_plan(
                 return {**result, "cost_usd": task_cost, "known_cost_usd": total_cost,
                         "attempts": attempts, "profile": current_route["profile"],
                         "branch": current_branch, "worktree": str(current_root)}
-            if (not result.get("retryable") or len(attempts) >= limit or cancel.is_set()):
+            if (not result.get("retryable") or len(attempts) >= limit or cancel.is_set()
+                    or (result.get("failure_kind") == "check_environment" and len(attempts) >= 2)):
                 total_cost = sum(cost for cost in (item.get("cost_usd") for item in attempts) if cost is not None)
                 task_cost = None if any(item.get("cost_usd") is None for item in attempts) else total_cost
                 return {**result, "cost_usd": task_cost, "known_cost_usd": total_cost,
@@ -847,21 +874,34 @@ def execute_plan(
             _remaining_budget()
             next_attempt = len(attempts) + 1
             try:
-                next_route = select_profile(task, profiles, attempt=next_attempt, auto_escalate=auto_escalate)
+                next_route = select_profile(task, profiles, attempt=max(1, next_attempt - 1), auto_escalate=auto_escalate and result.get('failure_kind') not in ('check_environment', 'execution'))
             except RoutingError as exc:
                 # A missing upgrade profile is configuration evidence, not a
                 # reason to silently retry an unrelated or weaker model.
                 return {"status": "failed", "error": str(exc), "retryable": False,
                         "attempts": attempts, "profile": current_route["profile"],
                         "branch": current_branch, "worktree": str(current_root)}
-            evidence = _clip(result.get("error", ""), 4_000)
+            next_route = {**next_route, 'attempt': next_attempt}
+            if next_route['model'] == current_route['model']:
+                next_route['reason'] = 'repair existing work with the same model before considering escalation'
+            evidence = _clip(str(result.get('error', '')) + '\n' +
+                             json.dumps(result.get('checks', []), ensure_ascii=False), 12000)
             current_task = {**task, "prompt": str(task.get("prompt", "")) +
                             "\n\nPrevious attempt failed. Repair only the declared scope and preserve trusted checks.\n"
                             f"Failure evidence: {evidence}"}
-            current_branch = f"factory/{run_part}-attempt/{task_id}/{next_attempt}"
-            current_root = root / f"task-{task_id}-a{next_attempt}"
-            _git_ok(workspace, "worktree", "add", "-q", "-b", current_branch, str(current_root),
-                    integration_branch, timeout_s=timeout_s)
+            # Keep the working tree, dependency environment and Claude session.
+            # Preserve changed, declared files as immutable attempt evidence first.
+            snapshot = root / f'attempt-{task_id}-{len(attempts)}'
+            snapshot.mkdir()
+            for rel in _status_paths(current_root, timeout_s=timeout_s):
+                source = current_root / rel
+                if _within(rel, tuple(task['paths'])) and source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(current_root.resolve()):
+                    destination = snapshot / rel
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+            attempts[-1]['draft_snapshot'] = str(snapshot)
+            if (next_route['provider'], next_route['model']) == (current_route['provider'], current_route['model']):
+                current_task['_resume_session'] = result.get('session_id')
             current_route = next_route
 
     completed: set[str] = set(restored)

@@ -19,6 +19,7 @@ from factory.control.store import Store
 class Result:
     text: str = "changed"
     cost_usd: float | None = 0.0
+    session_id: str | None = "test-session"
     tokens_in: int | None = 11
     tokens_out: int | None = 7
 
@@ -51,6 +52,13 @@ class RepairRunner:
 
     def run(self, request, emit, cancel=None):
         self.calls.append((request.model, request.prompt))
+        if len(self.calls) == 1:
+            self.workspace = request.workspace
+        else:
+            assert request.workspace == self.workspace
+            assert request.session_id == 'test-session'
+            assert Path(request.workspace, 'repair.txt').read_text() == 'bad\n'
+            assert 'AssertionError' in request.prompt
         body = "bad\n" if len(self.calls) == 1 else "good\n"
         Path(request.workspace, "repair.txt").write_text(body)
         return Result(cost_usd=0.15 if len(self.calls) == 1 else 0.25)
@@ -82,7 +90,7 @@ def test_select_profile_exposes_missing_required_profile():
         select_profile(_task(), {"standard": {"provider": "fake", "model": "m"}})
 
 
-def test_retry_records_each_charge_and_escalates_after_verification_failure(tmp_path):
+def test_retry_preserves_workspace_session_and_repairs_before_escalating(tmp_path):
     repo = _repo(tmp_path)
     runner = RepairRunner()
     events: list[tuple[str, dict, str | None]] = []
@@ -90,14 +98,14 @@ def test_retry_records_each_charge_and_escalates_after_verification_failure(tmp_
         repo, routing_policy={"max_attempts": 2, "auto_escalate": True}), profiles=_profiles(), runner=runner,
         emit=lambda kind, payload, task_id=None: events.append((kind, payload, task_id)), cancel=threading.Event())
 
-    assert [model for model, _ in runner.calls] == ["cheap-model", "standard-model"]
+    assert [model for model, _ in runner.calls] == ["cheap-model", "cheap-model"]
     assert "Previous attempt failed" in runner.calls[1][1]
     task = artifacts["tasks"][0]
     assert task["known_cost_usd"] == pytest.approx(0.4)
     assert task["cost_usd"] == pytest.approx(0.4)
     assert artifacts["known_cost_usd"] == pytest.approx(0.4)
     assert [event[1]["attempt"] for event in events if event[0] == "usage.recorded"] == [1, 2]
-    assert [event[1]["profile"] for event in events if event[0] == "model.selected"] == ["cheap", "standard"]
+    assert [event[1]["profile"] for event in events if event[0] == "model.selected"] == ["cheap", "cheap"]
     assert [event[0] for event in events].count("task.failed") == 0
     assert [event[0] for event in events].count("execution.checkpoint") >= 2
 
@@ -261,3 +269,22 @@ def test_integration_repair_does_not_dispatch_after_known_budget_is_exhausted(tm
                      profiles=_profiles(), runner=BudgetRunner(), emit=lambda *_: None,
                      cancel=threading.Event())
     assert len(calls) == 1
+
+
+def test_missing_check_executable_does_not_dispatch_model(tmp_path):
+    repo = _repo(tmp_path)
+    project = _project(repo, routing_policy={'max_attempts': 3, 'auto_escalate': True})
+    project['checks'] = {'verify': ['/definitely-missing-webuddy-test-runner']}
+    runner = RepairRunner()
+    with pytest.raises(ExecutionError) as caught:
+        execute_plan(run_id='missing-check', plan={'tasks': [_task()]}, project=project,
+                     profiles=_profiles(), runner=runner, emit=lambda *a: None, cancel=threading.Event())
+    assert not runner.calls
+    assert caught.value.artifacts['tasks'][0]['failure_kind'] == 'check_configuration'
+
+
+def test_check_environment_failure_is_distinct_from_assertion_failure():
+    from factory.control.execution import _check_failure_kind
+    assert _check_failure_kind({'exit': 1, 'stderr': "ModuleNotFoundError: No module named 'pytest'"}) == 'check_environment'
+    assert _check_failure_kind({'exit': 127, 'stderr': 'pytest: command not found'}) == 'check_configuration'
+    assert _check_failure_kind({'exit': 1, 'stderr': 'AssertionError: expected 42'}) == 'verification'
