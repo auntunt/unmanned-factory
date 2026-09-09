@@ -1,5 +1,5 @@
 [Unit]
-Description=Unmanned Factory 审计看板
+Description=webuddy 审计看板
 # 反复重启就停手，别静默重启到天荒地老 —— 这两个键属于 [Unit]，
 # 放在 [Service] 里 systemd 会直接忽略（journal 报 Unknown key name）。
 StartLimitIntervalSec=300

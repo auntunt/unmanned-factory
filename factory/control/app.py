@@ -123,7 +123,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         finally:
             svc.close()
 
-    app = FastAPI(title='Engineering Harness', docs_url=None, redoc_url=None,
+    app = FastAPI(title='webuddy', docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
     app.state.auth, app.state.service, app.state.store = auth, svc, store
     app.state.governance = governance
@@ -648,7 +648,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Engineering Harness authenticated gateway')
+    parser = argparse.ArgumentParser(description='webuddy authenticated gateway')
     sub = parser.add_subparsers(dest='command', required=True)
     user = sub.add_parser('create-user')
     user.add_argument('username')

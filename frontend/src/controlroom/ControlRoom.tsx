@@ -55,7 +55,7 @@ function Head({
     <header className="cr-head">
       <div className="name">
         <span className={'dot' + (connected ? '' : ' off')} />
-        无人工厂
+        webuddy
         <span className="mode">
           {mode.kind === 'replay' ? `回放 ${mode.taskId} · ${mode.speed}×` : connected ? '实时' : '连接中'}
         </span>

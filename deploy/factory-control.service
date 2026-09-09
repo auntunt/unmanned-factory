@@ -1,6 +1,6 @@
 # NEW HOST EXAMPLE ONLY. Preserve the existing factoryweb.service on deployed hosts.
 [Unit]
-Description=Unmanned Factory v2 authenticated control plane
+Description=webuddy v2 authenticated control plane
 After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=5

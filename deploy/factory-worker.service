@@ -1,5 +1,5 @@
 [Unit]
-Description=Unmanned Factory Worker Loop
+Description=webuddy Worker Loop
 After=network.target factory-dashboard.service
 # worker 依赖 dashboard 的审计库，但不强制 —— dashboard 挂了 worker 可以继续跑
 

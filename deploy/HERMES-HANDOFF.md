@@ -27,7 +27,7 @@ do not guess flags:
 umask 077
 handoff_path=$(mktemp /tmp/factory-hermes-handoff.XXXXXX)
 cat > "$handoff_path" <<'REQUEST'
-Continue the authorized Unmanned Factory deployment locally. Work as the
+Continue the authorized webuddy deployment locally. Work as the
 existing service account on /home/ubuntu/workspace/unmannedfactory.
 Never print environment contents, unit contents, tokens, login files, private
 keys or raw exception output that may include credentials.

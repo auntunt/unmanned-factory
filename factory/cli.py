@@ -1,4 +1,4 @@
-"""无人工厂入口。
+"""webuddy 入口。
 
 装好后是 `factory <子命令>`（`[project.scripts]`）；没装时
 `python -m factory.cli <子命令>` 等价 —— 定时任务里用前者的绝对路径，

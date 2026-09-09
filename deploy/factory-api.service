@@ -1,5 +1,5 @@
 [Unit]
-Description=Unmanned Factory 只读 JSON API（前端数据源）
+Description=webuddy 只读 JSON API（前端数据源）
 # 反复重启就停手。这两个键属于 [Unit]，放 [Service] 会被静默忽略。
 StartLimitIntervalSec=300
 StartLimitBurst=5

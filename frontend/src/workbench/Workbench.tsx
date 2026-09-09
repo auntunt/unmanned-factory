@@ -37,8 +37,8 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
       <button className={`wb-mobile-scrim ${navOpen ? 'is-visible' : ''}`} aria-label="关闭导航" onClick={() => setNavOpen(false)} />
       <aside className={`wb-sidebar ${navOpen ? 'is-open' : ''}`} aria-label="工作台导航">
         <div className="wb-brand-lockup">
-          <span className="wb-brand-mark" aria-hidden="true">F</span>
-          <span><strong>无人工厂</strong><small>自主工程工作台</small></span>
+          <span className="wb-brand-mark" aria-hidden="true">w</span>
+          <span><strong>webuddy</strong><small>自主工程工作台</small></span>
         </div>
         <nav className="wb-nav" aria-label="主导航">
           <span className="wb-nav-label">工作区</span>
@@ -62,7 +62,7 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
       <div className="wb-main">
         <header className="wb-mobile-header">
           <button className="wb-menu-button" aria-label="打开导航" aria-expanded={navOpen} onClick={() => setNavOpen(true)}>☰</button>
-          <span className="wb-mobile-title">无人工厂 <em>/</em> {currentPage?.label ?? '工作区'}</span>
+          <span className="wb-mobile-title">webuddy <em>/</em> {currentPage?.label ?? '工作区'}</span>
           <span className="wb-avatar wb-avatar-small" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
         </header>
         {environment?.mode === 'preview' && <div className="wb-preview-banner" role="status"><span aria-hidden="true">◌</span><strong>本地演练</strong><span>{environment.label || '使用脚本执行，不调用模型或外部服务'}</span></div>}

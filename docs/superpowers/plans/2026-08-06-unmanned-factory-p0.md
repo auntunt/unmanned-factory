@@ -1,4 +1,4 @@
-# P0 骨架实现计划：无人工厂编排层
+# P0 骨架实现计划：webuddy编排层
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task with TDD discipline.
 
@@ -3441,7 +3441,7 @@ D 类硬闸门同样真跑：「给 users 表加 last_login 字段，然后上�
 
 2. `spec_ref` 和 `acceptance` 必须分开。`spec_ref` 的语义是"引用外部已有文档的编号"。口述来源的任务没有外部文档，它本身就是规格。只有一个字段的话，所有口述任务都会永久被规格监工判"无标准可核"——入口层和验收层的接口对不上，而两边的单测都是绿的，唯有真跑才能暴露。
 
-3. guard 的误报率是入口层的核心质量指标，比漏报更早杀死无人工厂。18 条真实 A 类说法 0 误报是现在的基线；漏报由人一眼否掉（YAML 注释里写了怎么删），但误报让人人都要上人，工厂就白做了。两个边界要特别留意：「删掉没人用的那个函数」（"删"+"函数"，不应命中 data_delete）、「清理一下 import 顺序」（"清理"，不应命中 truncate/data_delete）。
+3. guard 的误报率是入口层的核心质量指标，比漏报更早杀死webuddy。18 条真实 A 类说法 0 误报是现在的基线；漏报由人一眼否掉（YAML 注释里写了怎么删），但误报让人人都要上人，工厂就白做了。两个边界要特别留意：「删掉没人用的那个函数」（"删"+"函数"，不应命中 data_delete）、「清理一下 import 顺序」（"清理"，不应命中 truncate/data_delete）。
 
 ---
 
@@ -3952,7 +3952,7 @@ worker 改  src/util/text.py  docs/readme.md  src/util/other.py
 三个文件都不匹配任何分级规则，所以后分级仍是 A 类，干净合并。分级引擎没有
 出错，这不是它的问题域。
 
-值得单独拦的理由有两条。一是**无人工厂里没人看 diff**：一次"顺手改的"在有人
+值得单独拦的理由有两条。一是**webuddy里没人看 diff**：一次"顺手改的"在有人
 review 的流程里会被问一句，在无人流程里直接进主干；攒够几十次之后主干上有一批
 没人记得为什么存在的改动，而审计记录会告诉你每一条都全绿合并过。二是越界改动
 是**上游需求和实际产出不一致**最便宜的证据 —— 规格监工能查语义一致性，但它要

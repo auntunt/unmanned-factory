@@ -1,6 +1,7 @@
 [project]
 name = "unmanned-factory"
 version = "0.1.0"
+description = "webuddy — a customizable AI workspace for planning, execution, verification, and delivery"
 requires-python = ">=3.12"
 dependencies = [
     "SQLAlchemy==2.0.50",
