@@ -117,11 +117,13 @@ def test_continue_keeps_verified_work_and_failed_draft(repo, provider_module, dr
                 (root / 'a.txt').write_text('done')
             elif request.prompt == 'second':
                 assert (root / 'a.txt').read_text() == 'done'
+                (root / 'a.txt').write_text('done\n\n')
                 (root / 'b.txt').write_text('draft')
                 (root / 'outside.txt').write_text('remove me')
             else:
                 assert 'Continue the existing draft' in request.prompt
-                assert (root / 'a.txt').read_text() == 'done'
+                assert (root / 'a.txt').read_text() == 'done\n\n'
+                (root / 'a.txt').write_text('done')
                 assert (root / 'b.txt').read_text() == 'draft'
                 (root / 'outside.txt').unlink()
                 (root / 'b.txt').write_text('finished')

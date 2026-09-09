@@ -448,10 +448,12 @@ def _restore_draft(workspace: Path, prior: dict, target: Path, timeout_s: float)
         if not file.resolve().is_relative_to(source) or any(part in _FORBIDDEN_PARTS for part in PurePosixPath(rel).parts) or PurePosixPath(rel).name in _FORBIDDEN_NAMES:
             raise ExecutionError('paused draft contains forbidden paths')
     _reject_symlinks(source, changed)
-    patch = _git_ok(source, 'diff', '--no-ext-diff', '--binary', 'HEAD', '--', timeout_s=timeout_s)
-    if patch:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.patch') as output:
-            output.write(patch); output.flush()
+    # Write directly to a file: textual command output is stripped/bounded and
+    # cannot safely transport a Git patch (including binary or large diffs).
+    with tempfile.NamedTemporaryFile(suffix='.patch') as output:
+        _git_ok(source, 'diff', '--no-ext-diff', '--binary',
+                '--output=' + output.name, 'HEAD', '--', timeout_s=timeout_s)
+        if Path(output.name).stat().st_size:
             _git_ok(target, 'apply', '--binary', '--', output.name, timeout_s=timeout_s)
     untracked = _git_ok(source, 'ls-files', '--others', '--exclude-standard', '-z', timeout_s=timeout_s).split('\0')
     for rel in untracked:
