@@ -15,6 +15,8 @@ import re
 import signal
 import subprocess
 import tempfile
+import shutil
+import tomllib
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -380,6 +382,88 @@ def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: fl
     return commit
 
 
+def _protected_changes(root: Path, changed: tuple[str, ...]) -> tuple[str, ...]:
+    """Project/package metadata is editable; test selection and hooks remain frozen."""
+    blocked = list(judge_files_touched(changed))
+    if 'pyproject.toml' not in blocked:
+        return tuple(blocked)
+    try:
+        rc, original, _ = _git(root, 'show', 'HEAD:pyproject.toml', timeout_s=30)
+        before = tomllib.loads(original) if rc == 0 else {}
+        after = tomllib.loads((root / 'pyproject.toml').read_text())
+        def protected(document):
+            document = dict(document)
+            project = dict(document.get('project', {}))
+            for key in ('name', 'version', 'description', 'readme', 'requires-python', 'license', 'license-files', 'authors', 'maintainers', 'keywords', 'classifiers', 'urls', 'dependencies', 'optional-dependencies'):
+                project.pop(key, None)
+            # Entry-point plugins and custom dynamic metadata stay protected.
+            scripts = dict(project.get('scripts', {}))
+            scripts = {key: value for key, value in scripts.items() if key in ('pytest', 'py.test', 'python', 'pip')}
+            if scripts:
+                project['scripts'] = scripts
+            else:
+                project.pop('scripts', None)
+            if project:
+                document['project'] = project
+            else:
+                document.pop('project', None)
+            # Standard setuptools packaging is normal scaffolding. Custom
+            # backend paths and alternative backends remain review boundaries.
+            build = document.get('build-system', {})
+            if set(build) <= {'requires', 'build-backend'} and build.get('build-backend') == 'setuptools.build_meta' and all(re.fullmatch(r'(setuptools|wheel)([<>=!~].*)?', item) for item in build.get('requires', [])):
+                document.pop('build-system', None)
+            tool = dict(document.get('tool', {}))
+            packaging = dict(tool.get('setuptools', {}))
+            for key in ('packages', 'package-dir', 'package-data', 'exclude-package-data', 'include-package-data', 'py-modules'):
+                packaging.pop(key, None)
+            if packaging:
+                tool['setuptools'] = packaging
+            else:
+                tool.pop('setuptools', None)
+            if tool:
+                document['tool'] = tool
+            else:
+                document.pop('tool', None)
+            return document
+        if protected(before) == protected(after):
+            blocked.remove('pyproject.toml')
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return tuple(blocked)
+
+
+def _restore_draft(workspace: Path, prior: dict, target: Path, timeout_s: float) -> None:
+    """Copy only file changes into a fresh guarded worktree; never copy Git metadata."""
+    source = Path(prior.get('worktree') or '').resolve()
+    if not source.is_dir() or not source.is_relative_to(workspace.parent):
+        raise ExecutionError('paused task workspace is missing; cannot continue its draft')
+    expected = _git_ok(workspace, 'rev-parse', '--path-format=absolute', '--git-common-dir', timeout_s=timeout_s)
+    actual = _git_ok(source, 'rev-parse', '--path-format=absolute', '--git-common-dir', timeout_s=timeout_s)
+    if actual != expected or _git_ok(source, 'symbolic-ref', '--short', 'HEAD', timeout_s=timeout_s) != prior.get('branch'):
+        raise ExecutionError('paused task workspace identity changed')
+    changed = _status_paths(source, timeout_s=timeout_s)
+    for rel in changed:
+        _relative(rel)
+        file = source / rel
+        if not file.resolve().is_relative_to(source) or any(part in _FORBIDDEN_PARTS for part in PurePosixPath(rel).parts) or PurePosixPath(rel).name in _FORBIDDEN_NAMES:
+            raise ExecutionError('paused draft contains forbidden paths')
+    _reject_symlinks(source, changed)
+    patch = _git_ok(source, 'diff', '--no-ext-diff', '--binary', 'HEAD', '--', timeout_s=timeout_s)
+    if patch:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.patch') as output:
+            output.write(patch); output.flush()
+            _git_ok(target, 'apply', '--binary', '--', output.name, timeout_s=timeout_s)
+    untracked = _git_ok(source, 'ls-files', '--others', '--exclude-standard', '-z', timeout_s=timeout_s).split('\0')
+    for rel in untracked:
+        if not rel or rel not in changed:
+            continue
+        file, destination = source / rel, target / rel
+        if not destination.resolve().is_relative_to(target.resolve()) or destination.exists():
+            raise ExecutionError('paused draft conflicts with completed work')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file, destination)
+
+
 @_with_execution_budget
 def execute_plan(
     *,
@@ -392,6 +476,7 @@ def execute_plan(
     cancel: threading.Event,
     max_parallel: int = 2,
     timeout_s: int = 600,
+    resume_artifacts: dict | None = None,
 ) -> dict:
     """Execute and integrate a validated plan, preserving every worktree."""
     if max_parallel < 1:
@@ -471,6 +556,25 @@ def execute_plan(
     artifacts['tasks'] = list(by_id.values())
     child_commits: dict[str, str] = {}
     integrated = base_sha
+    previous = {item['id']: item for item in (resume_artifacts or {}).get('tasks', []) if item.get('id') in tasks}
+    restored: set[str] = set()
+    if resume_artifacts:
+        if resume_artifacts.get('base_sha') != base_sha:
+            raise ExecutionError('paused execution baseline changed', artifacts=artifacts)
+        pending_verified = {key for key, value in previous.items() if value.get('status') in ('verified', 'completed') and value.get('commit')}
+        while pending_verified:
+            ready_verified = [key for key in tasks if key in pending_verified and all(dep in restored for dep in tasks[key]['depends_on'])]
+            if not ready_verified:
+                raise ExecutionError('paused verified task dependencies are incomplete', artifacts=artifacts)
+            for key in ready_verified:
+                commit = previous[key]['commit']
+                if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40,64}', commit):
+                    raise ExecutionError('invalid paused task commit', artifacts=artifacts)
+                _git_ok(integration_path, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Factory', '-c', 'user.email=factory@localhost', 'cherry-pick', commit, timeout_s=timeout_s)
+                by_id[key] = dict(previous[key])
+                restored.add(key); pending_verified.remove(key)
+        integrated = _git_ok(integration_path, 'rev-parse', 'HEAD', timeout_s=timeout_s)
+        artifacts['tasks'] = list(by_id.values())
     observed_cost = 0.0
     cost_unknown = False
     cost_lock = threading.Lock()
@@ -643,7 +747,7 @@ def execute_plan(
             if out_of_scope:
                 raise ExecutionError(f"out-of-scope changes: {', '.join(out_of_scope)}")
             _reject_symlinks(child_root, changed)
-            judge = judge_files_touched(changed)
+            judge = _protected_changes(child_root, changed)
             hooks = runner_hooks(child_root)
             if judge or hooks:
                 raise ExecutionError(f"worker changed test/check infrastructure: {', '.join(judge + hooks)}")
@@ -741,7 +845,7 @@ def execute_plan(
                     integration_branch, timeout_s=timeout_s)
             current_route = next_route
 
-    completed: set[str] = set()
+    completed: set[str] = set(restored)
     failed: str | None = None
     cancelled = False
     stop_reason: str | None = None
@@ -798,6 +902,12 @@ def execute_plan(
                 child_branch = f"factory/{run_part}-task/{task_id}"
                 child_path = root / f"task-{task_id}"
                 _git_ok(workspace, "worktree", "add", "-q", "-b", child_branch, str(child_path), integration_branch, timeout_s=timeout_s)
+                prior = previous.get(task_id)
+                if prior and prior.get('status') == 'failed' and prior.get('worktree'):
+                    _restore_draft(workspace, prior, child_path, timeout_s)
+                    task = {**task, 'prompt': str(task.get('prompt', '')) +
+                            '\n\nContinue the existing draft already present in this workspace. Do not redo completed tasks. Repair the failure while preserving the original declared paths and trusted checks. Python project metadata may be edited, but restore test-selection/configuration changes to their original values.\nFailure evidence: ' + str(prior.get('error') or (prior.get('attempts') or [{}])[-1].get('error', ''))}
+                    _emit(emit, 'task.draft_restored', {'previous_worktree': prior['worktree'], 'worktree': str(child_path)}, task_id)
                 by_id[task_id].update({"profile": route["profile"], "branch": child_branch, "worktree": str(child_path), "status": "running"})
                 _emit(emit, "task.started", {**route, "branch": child_branch, "worktree": str(child_path)}, task_id)
                 future = pool.submit(copy_context().run, run_with_retries, task, child_path, child_branch, route)
@@ -810,6 +920,9 @@ def execute_plan(
                 task, child_path, child_branch, _ = futures[future]
                 task_id = task["id"]
                 result = future.result()
+                previous_attempts = previous.get(task_id, {}).get('attempts', [])
+                if previous_attempts:
+                    result['attempts'] = [*previous_attempts, *[{**attempt, 'attempt': len(previous_attempts) + index + 1} for index, attempt in enumerate(result.get('attempts', []))]]
                 by_id[task_id].update(result)
                 completed.add(task_id)
                 if result.get("status") == "verified":

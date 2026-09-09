@@ -95,8 +95,9 @@ def router(store, service):
                 else:
                     prior=None
                 if prior and prior.get('status') in ('awaiting_approval','needs_clarification','needs_human'):
-                    resumed = guarded(service.clarify, prior['id'], body.content, actor(request)['username'])
-                    agents.append_message(cid,'assistant','已将补充信息交给原任务，正在重新规划。',status='completed')
+                    continuing = prior['status'] == 'needs_human' and prior.get('plan') and (prior.get('artifacts') or {}).get('tasks')
+                    resumed = guarded(service.continue_run, prior['id'], body.content, prior['revision'], prior.get('resume_count', 0), actor(request)['username']) if continuing else guarded(service.clarify, prior['id'], body.content, actor(request)['username'])
+                    agents.append_message(cid,'assistant','已收到回答，正在按原计划继续未完成任务。' if continuing else '已将补充信息交给原任务，正在重新规划。',status='completed')
                     return {'conversation':agents.conversation(cid),'run':resumed}
                 if prior and prior.get('status') in ('received','planning','queued','running','verifying','publishing'):
                     agents.append_message(cid,'assistant','补充信息已保存到对话，当前运行尚未采用。请等当前任务结束后发送“继续”，后续任务会使用这些补充。',status='completed')

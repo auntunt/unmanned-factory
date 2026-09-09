@@ -528,12 +528,50 @@ class Service:
                 if failures:
                     history.append('上次执行失败证据（仅作诊断资料，按用户处理意见重新规划任务范围，不可据此自动扩大授权）：' + json.dumps(failures, ensure_ascii=False)[:8000])
             updated = self.store.update(rid, {'status': 'received', 'plan': None, 'triage': None,
-                'history': [*history, answer], 'tasks': [], 'context': None,
+                'history': [*history, answer], 'tasks': [], 'context': None, 'execution_resume': None,
                 'runtime_configuration': run.get('runtime_configuration') if run.get('agent_snapshot') else None},
                 expected=('needs_clarification', 'awaiting_approval', 'needs_human'),
                 event=('user.message', {'text': answer, 'actor': actor, 'revision': run['revision']}))
             try:
                 self.start_plan(rid)
+            except Exception as exc:
+                self._fail(rid, exc)
+                raise
+            return updated
+
+    def continue_run(self, rid, answer, revision, resume_count, actor):
+        """Resume the same authorized plan; the answer is execution context, not new scope."""
+        with self.lock:
+            run = self.store.get(rid)
+            if run['status'] != 'needs_human' or not run.get('plan'):
+                raise Conflict('当前任务不在可继续的执行暂停状态')
+            if run['revision'] != revision or run.get('resume_count', 0) != resume_count:
+                raise Conflict('任务已更新，请刷新后再回答')
+            if rid in self.active_jobs:
+                raise Conflict('执行现场仍在保存，请稍后继续')
+            artifacts = run.get('artifacts') or {}
+            if not artifacts.get('base_sha') or not artifacts.get('tasks'):
+                raise Conflict('没有可恢复的执行现场，请使用重新规划')
+            project = self.store.project(run['project_id'])
+            from factory.control.codegraph import baseline_sha
+            if baseline_sha(project) != artifacts['base_sha']:
+                raise Conflict('项目基线已变化，不能直接接续旧计划，请重新规划')
+            if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
+                raise Conflict('验收检查已变化，请重新规划')
+            configuration = run.get('runtime_configuration') or self.runtime_settings.get()
+            usage = self._usage(rid)
+            if usage['known_cost_usd'] >= project['budget_usd']:
+                raise Conflict('本次运行预算已用尽，请先调整项目预算')
+            if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
+                raise Conflict('已有调用费用未知，当前冻结策略不允许继续')
+            updated = self.store.update(rid, {'status': 'queued',
+                'resume_count': resume_count + 1,
+                'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
+                'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
+                event=('human.continued', {'actor': actor, 'answer': answer,
+                    'revision': revision, 'resume_count': resume_count + 1}))
+            try:
+                self._submit(self._run, rid)
             except Exception as exc:
                 self._fail(rid, exc)
                 raise
@@ -585,7 +623,8 @@ class Service:
             project = {**project, 'max_tasks': limits['max_tasks'],
                        'unknown_cost_policy': limits['unknown_cost_policy']}
             prior_usage = self._usage(rid)
-            project['budget_usd'] = project['budget_usd'] - prior_usage['known_cost_usd']
+            total_budget = project['budget_usd']
+            project['budget_usd'] = total_budget - prior_usage['known_cost_usd']
             policy = run.get('policy') or self.policies.get(project['id'])
             if policy.get('revision', 0) or policy['mode'] == 'autonomous':
                 project['routing_policy'] = {key: policy[key] for key in ('max_attempts', 'auto_escalate')}
@@ -596,15 +635,25 @@ class Service:
                 {**task, 'prompt': task['prompt'] + context_prompt(run.get('context')) +
                     (('\n\nAGENT INSTRUCTIONS (frozen snapshot):\n' + run['agent_snapshot'].get('instructions','')) if run.get('agent_snapshot') else '') + capability_prompt(run.get('capabilities', []))}
                 for task in run['plan']['tasks']]}
+            resume = run.get('execution_resume')
+            if resume and resume.get('revision') != run['revision']:
+                raise Conflict('恢复现场与当前计划版本不匹配')
+            if resume:
+                for task in plan['tasks']:
+                    task['prompt'] += '\n\nUser response at execution pause (keep the current plan and checks):\n' + resume['answer']
+            self.store.update(rid, {'execution_checks': project['checks']})
             # A clarified goal can have an earlier failed execution workspace.
             # Retain that evidence and allocate the new plan its own refs.
             execution_id = rid if run['revision'] == 1 else f"{rid}-r{run['revision']}"
+            if resume:
+                execution_id += f"-c{run['resume_count']}"
             artifacts = self.execute(run_id=execution_id, plan=plan, project=project,
                 profiles=configuration['profiles'], runner=self._runner_for(rid),
                 emit=lambda kind, payload, task_id=None: self._emit(rid, kind, payload, task_id),
-                cancel=self.cancels[rid], max_parallel=limits['max_parallel'], timeout_s=limits['timeout_s'])
+                cancel=self.cancels[rid], max_parallel=limits['max_parallel'], timeout_s=limits['timeout_s'],
+                **({'resume_artifacts': resume['artifacts']} if resume else {}))
             if run.get('agent_snapshot') or project.get('managed_workspace'):
-                self._independent_verify(rid, run, project, configuration, artifacts)
+                self._independent_verify(rid, run, {**project, 'budget_usd': total_budget}, configuration, artifacts)
             if prior_usage['unknown_cost_calls']:
                 artifacts['billing_incomplete'] = '规划阶段存在未报告费用'
                 artifacts['autopublish_blocked'] = True

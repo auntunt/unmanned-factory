@@ -237,6 +237,8 @@ def test_planned_run_uses_frozen_profiles_after_runtime_update(tmp_path):
     with TestClient(app) as client:
         headers = _login(client)
         project = _create_project(client, repo, headers)
+        from factory.control.autonomy import DEFAULT_POLICY
+        service.policies.update(project["id"], {**DEFAULT_POLICY, "mode": "supervised"}, 0, "test")
         first_id = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "first"}, headers=headers).json()["id"]
         planned = _wait(store, first_id, {"awaiting_approval"})
         old_config = planned["runtime_configuration"]
@@ -265,6 +267,8 @@ def test_unknown_cost_never_auto_publishes(tmp_path):
     with TestClient(app) as client:
         headers = _login(client)
         project = _create_project(client, repo, headers, auto_publish=True)
+        from factory.control.autonomy import DEFAULT_POLICY
+        service.policies.update(project["id"], {**DEFAULT_POLICY, "mode": "supervised"}, 0, "test")
         rid = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "publish"}, headers=headers).json()["id"]
         planned = _wait(store, rid, {"awaiting_approval"})
         assert client.post(f"/api/v2/runs/{rid}/approve", json={"revision": planned["revision"]}, headers=headers).status_code == 200

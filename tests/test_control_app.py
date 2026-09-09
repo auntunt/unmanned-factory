@@ -223,3 +223,69 @@ def test_paused_clarification_carries_failure_evidence_to_new_plan(app_env, monk
     assert received[0]['history'][-1] == answer
     assert received[0]['plan'] is None and received[0]['tasks'] == []
     assert client.post(f'/api/v2/runs/{rid}/approve', json={'revision': first['revision']}, headers=headers).status_code == 409
+
+
+def test_continue_queues_execution_without_replanning_or_changing_revision(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
+    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    first = wait_state(store, rid, {'awaiting_approval'})
+    deadline = time.monotonic() + 5
+    while rid in svc.active_jobs and time.monotonic() < deadline:
+        time.sleep(.01)
+    sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    artifacts = {'base_sha': sha, 'tasks': [{'id': 'greeting', 'status': 'failed'}]}
+    store.update(rid, {'status': 'needs_human', 'artifacts': artifacts})
+    queued = []
+    monkeypatch.setattr(svc, '_submit', lambda fn, run_id: queued.append((fn, run_id)))
+    body = {'answer': '保留依赖，恢复测试配置并继续', 'revision': first['revision'], 'resume_count': 0}
+    assert client.post(f'/api/v2/runs/{rid}/continue', json=body).status_code == 403
+    response = client.post(f'/api/v2/runs/{rid}/continue', json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()['revision'] == first['revision']
+    assert response.json()['plan'] == first['plan']
+    assert response.json()['status'] == 'queued'
+    assert queued == [(svc._run, rid)]
+    assert store.get(rid)['execution_resume']['artifacts'] == artifacts
+    assert client.post(f'/api/v2/runs/{rid}/continue', json=body, headers=headers).status_code == 409
+    store.update(rid, {'status': 'needs_human'})
+    assert client.post(f'/api/v2/runs/{rid}/continue', json=body, headers=headers).status_code == 409
+
+
+def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    calls = {'planning': 0, 'execution': 0}
+    original = svc.runner.run
+    def runner(request, emit, cancel=None):
+        if request.read_only:
+            calls['planning'] += 1
+            return original(request, emit, cancel)
+        calls['execution'] += 1
+        root = Path(request.workspace)
+        if calls['execution'] == 1:
+            (root / 'greeting.txt').write_text('draft')
+            (root / 'outside.txt').write_text('outside')
+        else:
+            assert '恢复原范围并继续' in request.prompt
+            assert (root / 'greeting.txt').read_text() == 'draft'
+            (root / 'outside.txt').unlink()
+            (root / 'greeting.txt').write_text('hello world')
+        return ProviderResult('done', cost_usd=.01)
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    paused = wait_state(store, rid, {'needs_human'})
+    deadline = time.monotonic() + 5
+    while rid in svc.active_jobs and time.monotonic() < deadline:
+        time.sleep(.01)
+    response = client.post(f'/api/v2/runs/{rid}/continue', json={'answer': '恢复原范围并继续', 'revision': paused['revision']}, headers=headers)
+    assert response.status_code == 200, response.text
+    done = wait_state(store, rid, {'ready_for_review', 'needs_human'})
+    assert done['status'] == 'ready_for_review', done.get('artifacts')
+    assert done['revision'] == paused['revision'] and done['plan'] == paused['plan']
+    assert calls == {'planning': 1, 'execution': 2}
+    assert done['artifacts']['total_known_cost_usd'] == pytest.approx(.03)
