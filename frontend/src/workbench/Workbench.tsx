@@ -11,8 +11,8 @@ const navigation = [
   { to: '/runs', label: '运行看板', icon: 'M4 4h16v16H4zM9 4v16M15 4v16M4 10h5M9 14h6M15 8h5', end: false },
   { to: '/projects', label: '项目', icon: 'M3 7V5h6l2 2h10v13H3z', end: false },
   { to: '/capabilities', label: '工作能力', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },
-  { to: '/costs', label: '模型与成本', icon: 'M4 4v16h17M8 15v-4M13 15V7M18 15v-6', end: false },
-  { to: '/team', label: '团队与额度', icon: 'M7 20v-2.5A3.5 3.5 0 0 1 10.5 14h3A3.5 3.5 0 0 1 17 17.5V20M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 13a2.5 2.5 0 0 1 2 2.45V18M17 5.5a2.5 2.5 0 0 1 0 4.5', end: false },
+  { to: '/costs', label: '调用记录', icon: 'M4 4v16h17M8 15v-4M13 15V7M18 15v-6', end: false },
+  { to: '/team', label: '团队', icon: 'M7 20v-2.5A3.5 3.5 0 0 1 10.5 14h3A3.5 3.5 0 0 1 17 17.5V20M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 13a2.5 2.5 0 0 1 2 2.45V18M17 5.5a2.5 2.5 0 0 1 0 4.5', end: false },
 ]
 
 const secondaryNavigation = [{ to: '/settings/runtime', label: '运行配置', icon: 'M4 7h16M4 17h16M8 4v6M16 14v6', end: false }]

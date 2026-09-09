@@ -27,7 +27,7 @@ export function taskGroupCounts(runs: Run[]) {
     blocked: items.filter((item) => ['blocked', 'failed', 'cancelled'].includes(item.status ?? '')).length }
 }
 
-export default function OverviewPage({ onUnauthorized, user }: PageProps) {
+export default function OverviewPage({ onUnauthorized }: PageProps) {
   const [data, setData] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +89,7 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
             </Link>
           })}</nav>
           <footer className="pw-project-footer"><span>需求 → 方案 → 执行 → 验证 → 交付 · 按需沉淀经验</span>
-            {user?.role !== 'member' ? <Link to={`/projects/${encodeURIComponent(project.id)}?tab=settings#project-budget`}>单次运行预算 {typeof project.budget_usd === 'number' ? `$${project.budget_usd.toFixed(2)}` : '未返回'} →</Link> : <span>项目配置由管理员维护</span>}
+            <span>计费由中转站管理</span>
           </footer>
         </article>)}
         {currentProjects.length === 0 && completed.length > 0 && <p className="wb-runtime-note">当前工作已完成。可以查看下方成果，或进入项目提出新需求。</p>}

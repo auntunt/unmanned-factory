@@ -30,7 +30,6 @@ export interface RunEvidence {
   delivery: boolean
 }
 
-const BUDGET_PATTERN = /cost \$([0-9.]+) exceeds budget \$([0-9.]+)/i
 const RECOVERY_PATTERN = /recover|recovery|resume|restart|interrupted|crash|恢复|重启|中断/i
 
 function record(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
@@ -99,23 +98,18 @@ export function runEvidence(run: Run): RunEvidence {
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
   const questions = requirements(run)
-  const stopReason = textArtifact(run, 'needs_human') ?? executionFailure(run)
-  const billing = textArtifact(run, 'billing_incomplete') ?? (run.artifacts?.billing_incomplete === true ? '服务商没有提供完整美元费用。' : undefined)
+  const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
-  const budget = stopReason?.match(BUDGET_PATTERN)
+  if (run.status === 'needs_human' && /cost|budget|quota|费用|预算|额度/i.test(stopReason || '')) return result(run, { kind: 'paused', label: '可以继续原任务', summary: '旧计费限制已停用，费用和额度统一由中转站管理。继续执行原计划即可。', view: 'execution', stage: 'build', primaryLabel: '回答并继续执行' })
 
   // Terminal runs retain their historical billing/budget artifacts without being presented as pending work.
-  if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交、检查和费用记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
-  if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划、费用和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
+  if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交和检查记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
+  if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
-  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : (billing ? '成果已通过验证，可以查看和下载；部分服务商费用尚未返回，不影响领取成果。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。'), view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
-  if (budget && run.status === 'needs_human') {
-    const [, spent, limit] = budget
-    return result(run, { kind: 'budget', label: '预算上限已触发', summary: `已记录费用 $${spent} 超过预算 $${limit}；系统已停止新的调用。`, detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看执行与费用', rawEvidence: stopReason })
-  }
+  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。', view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
+
   if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。在执行页回答后，助手会结合失败证据修正草稿，按原计划继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '回答并继续执行', rawEvidence: stopReason })
   if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置改动需要处理', summary: '执行助手改动了受保护的测试配置。回答后将继续修正当前草稿，保留原计划与已完成任务。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '回答并继续执行', rawEvidence: stopReason })
-  if (billing && ['needs_human', 'failed', 'needs_clarification', 'awaiting_approval'].includes(run.status)) return result(run, { kind: 'billing', label: '费用记录不完整', summary: '至少一笔服务商美元费用未完整记录，因此费用总额不能确认；这不等同于 token 用量未知。', detail: billing, view: 'execution', stage: 'build', primaryLabel: '处理费用问题并继续', rawEvidence: billing })
   if (run.status === 'needs_clarification' || (run.status === 'needs_human' && questions.length > 0) || (run.status === 'awaiting_approval' && questions.length > 0)) {
     const count = questions.length
     return result(run, { kind: 'requirements', label: count ? '需要补充需求' : '需要补充运行边界', summary: count ? `请回答 ${count} 个已记录问题，系统会据此重新规划。` : '当前没有可展示的具体问题；请补充目标、范围或验收标准后重新规划。', detail: questions[0], view: 'requirements', stage: 'intake', primaryLabel: '查看需求与补充', rawEvidence: stopReason })

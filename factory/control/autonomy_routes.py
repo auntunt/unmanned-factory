@@ -106,14 +106,12 @@ def _attention(run, events):
     status = run.get('status')
     active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed'}
     has_needs_human = bool(artifacts.get('needs_human'))
-    has_billing_gap = bool(artifacts.get('billing_incomplete'))
-    billing_attention = False  # Missing billing does not block collecting verified deliverables.
-    if not (active_attention or billing_attention):
+    if not active_attention:
         return None
-    if has_needs_human:
+    if run.get('error'):
+        reason = run['error']
+    elif has_needs_human:
         reason = artifacts.get('needs_human') if isinstance(artifacts.get('needs_human'), str) else '运行需要人工处理'
-    elif has_billing_gap:
-        reason = artifacts.get('billing_incomplete') if isinstance(artifacts.get('billing_incomplete'), str) else '费用记录尚未完整确认'
     else:
         recovery_events = [event for event in run_events if event.get('type') == 'run.recovered']
         error_events = [event for event in run_events if event.get('type') in {

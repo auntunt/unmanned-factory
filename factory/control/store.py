@@ -209,16 +209,25 @@ class Store:
             row = db.execute('SELECT data FROM runs WHERE id=?', (rid,)).fetchone()
             if row is None:
                 raise KeyError(rid)
-            return json.loads(row[0])
+            return self._run_view(db, json.loads(row[0]))
+
+    @staticmethod
+    def _run_view(db, run):
+        # Older workers recorded the stopping error only in the event stream.
+        if run.get("status") == "needs_human":
+            event = db.execute("SELECT type,payload FROM events WHERE run_id=? AND type IN ('run.failed','run.started','run.resumed','run.recovered','run.planning','run.verified') ORDER BY id DESC LIMIT 1", (run["id"],)).fetchone()
+            if event and event[0] == "run.failed":
+                run["error"] = json.loads(event[1]).get("message")
+        return run
 
     def runs(self):
         with self.connect() as db:
-            return [json.loads(r[0]) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC LIMIT 200')]
+            return [self._run_view(db, json.loads(r[0])) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC LIMIT 200')]
 
     def all_runs(self):
         """Accounting and recovery must not silently omit older runs."""
         with self.connect() as db:
-            return [json.loads(r[0]) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC')]
+            return [self._run_view(db, json.loads(r[0])) for r in db.execute('SELECT data FROM runs ORDER BY rowid DESC')]
 
     def published_runs_for_pr(self, project_id, number, repository):
         """Find deliveries independently of the dashboard's recent-run limit."""

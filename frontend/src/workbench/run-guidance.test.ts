@@ -13,8 +13,8 @@ describe('runGuidance', () => {
     const guidance = runGuidance(run({ status: 'ready_for_review', artifacts: { billing_incomplete: '费用未返回', commit: 'verified' } }))
     expect(guidance.kind).toBe('delivery')
     expect(guidance.primaryLabel).toBe('查看和下载成果')
-    expect(guidance.summary).toContain('不影响领取成果')
-    expect(runGuidance(run({ status: 'needs_human', artifacts: { billing_incomplete: '费用未返回' } })).kind).toBe('billing')
+    expect(guidance.summary).toContain('下载')
+    expect(runGuidance(run({ status: 'needs_human', artifacts: { billing_incomplete: '费用未返回' } })).kind).toBe('paused')
   })
   it('does not invent a question for a paused run without triage questions', () => {
     const guidance = runGuidance(run({ artifacts: { needs_human: 'manual intervention requested' } }))
@@ -27,8 +27,8 @@ describe('runGuidance', () => {
     expect(runGuidance(run({ status: 'needs_clarification', triage: { decision: 'needs_clarification', reasons: [], questions: ['生产环境地址？'], risk: 'low' } })).kind).toBe('requirements')
     expect(runGuidance(run({ status: 'awaiting_approval' })).kind).toBe('approval')
     expect(runGuidance(run({ status: 'awaiting_approval', plan: { title: 'p', summary: '', questions: ['接口地址？'], tasks: [] } })).kind).toBe('requirements')
-    expect(runGuidance(run({ triage: { decision: 'needs_clarification', reasons: [], questions: ['无关问题'], risk: 'low' }, artifacts: { needs_human: stoppedCost } })).kind).toBe('budget')
-    expect(runGuidance(run({ artifacts: { billing_incomplete: 'provider usage unknown' } })).summary).toContain('美元费用')
+    expect(runGuidance(run({ triage: { decision: 'needs_clarification', reasons: [], questions: ['无关问题'], risk: 'low' }, artifacts: { needs_human: stoppedCost } })).kind).toBe('paused')
+    expect(runGuidance(run({ artifacts: { billing_incomplete: 'provider usage unknown' } })).summary).not.toContain('美元费用')
     expect(runGuidance(run({ artifacts: { needs_human: 'recovery paused after interruption' } })).kind).toBe('recovery')
   })
 
@@ -54,7 +54,7 @@ describe('runGuidance', () => {
     expect(frozenPolicy(autonomous)).toEqual({ revision: 7, mode: 'autonomous' })
     expect(runGuidance(autonomous).summary).toContain('风险超出项目自动策略')
     expect(canGenerateNextPlan(autonomous, true)).toBe(true)
-    expect(canGenerateNextPlan(run({ artifacts: { needs_human: stoppedCost } }), true)).toBe(false)
+    expect(canGenerateNextPlan(run({ artifacts: { needs_human: stoppedCost } }), true)).toBe(true)
   })
 
   it('creates stable run view links and uses an explicit fallback for old links', () => {

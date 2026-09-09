@@ -234,19 +234,7 @@ class GovernedRunner:
         return self.runner.available()
 
     def run(self, request, emit, cancel=None):
+        """The gateway owns token accounting; keep cancellation local."""
         if cancel is not None and cancel.is_set():
             raise ProviderCancelled('execution cancelled before dispatch')
-        call = self.governance.reserve(self.run_id, request.provider, request.model, actor_id=self.actor_id)
-        result = None
-        try:
-            emit('quota.reserved', {key: call[key] for key in ('id', 'actor_id', 'reserved_tokens', 'month')})
-            result = self.runner.run(request, emit, cancel=cancel)
-            return result
-        finally:
-            # Partial streaming usage may omit the final billable turn. It is
-            # evidence for an administrator, not proof of complete settlement.
-            incoming = token_count(getattr(result, 'tokens_in', None))
-            outgoing = token_count(getattr(result, 'tokens_out', None))
-            actual = incoming + outgoing if incoming is not None and outgoing is not None else None
-            settled = self.governance.settle(call['id'], actual)
-            emit('quota.settled', {key: settled[key] for key in ('id', 'actor_id', 'actual_tokens', 'reserved_tokens', 'status')})
+        return self.runner.run(request, emit, cancel=cancel)

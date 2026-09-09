@@ -295,14 +295,6 @@ class Service:
             decision['decision'], decision['reasons'] = 'human_approval', [reason]
             return reason, decision
         usage = self._usage(run['id'])
-        if usage['known_cost_usd'] >= project['budget_usd']:
-            reason = '本次运行预算已用尽，停止新的执行调用'
-            decision['decision'], decision['reasons'] = 'human_approval', [reason]
-            return reason, decision
-        if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-            reason = '已有模型调用费用未知，当前策略停止继续'
-            decision['decision'], decision['reasons'] = 'human_approval', [reason]
-            return reason, decision
         from factory.control.codegraph import baseline_sha
         try:
             if run.get('context') and baseline_sha(project) != run['context']['commit_sha']:
@@ -375,10 +367,7 @@ class Service:
                 raise Conflict('；'.join(blockers))
 
     def _runner_for(self, rid):
-        if self.governance is None:
-            return self.runner
-        from factory.control.governance import GovernedRunner
-        return GovernedRunner(self.runner, self.governance, rid)
+        return self.runner
 
     def _emit(self, rid, kind, payload, task_id=None):
         self.store.append(rid, kind, payload, task_id)
@@ -470,16 +459,9 @@ class Service:
             self.store.update(rid, {'context': context}, expected=('planning',),
                               event=('context.assembled', context))
             ledger = self._usage(rid)
-            if ledger['known_cost_usd'] >= project['budget_usd']:
-                raise ValueError('本次需求已达到预算，停止新的规划调用')
-            if ledger['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-                raise ValueError('已有调用费用未知，当前策略停止继续；可在运行配置中选择有界继续后重新规划')
-            # A governed call has not reached a provider until its token
-            # reservation succeeds.  Keep the durable "started" marker (and
-            # its corresponding usage record) behind that boundary so a
-            # quota denial cannot be mistaken for an unpriced model call.
+            # Record dispatch for operational tracing; gateway owns billing.
             call_id = uuid.uuid4().hex
-            dispatched = self.governance is None
+            dispatched = True
             if dispatched:
                 self._emit(rid, 'provider.started', {'profile': 'planner', **profile, 'call_id': call_id}, 'planner')
             result = None
@@ -588,16 +570,6 @@ class Service:
                 raise Conflict('验收检查已变化，请重新规划')
             configuration = run.get('runtime_configuration') or self.runtime_settings.get()
             usage = self._usage(rid)
-            if usage['known_cost_usd'] >= project['budget_usd']:
-                raise Conflict('本次运行预算已用尽，请先调整项目预算')
-            if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-                current = self.runtime_settings.get()
-                if current['limits']['unknown_cost_policy'] != 'allow_bounded':
-                    raise Conflict('已有调用费用未知，请先将运行配置中的未知费用策略改为允许有界继续，再继续本次运行')
-                # An explicit continuation may relax accounting policy only;
-                # preserve the authorized models and all execution limits.
-                configuration = {**configuration, 'limits': {
-                    **configuration['limits'], 'unknown_cost_policy': 'allow_bounded'}}
             updated = self.store.update(rid, {'status': 'queued',
                 'runtime_configuration': configuration,
                 'resume_count': resume_count + 1,
@@ -625,10 +597,6 @@ class Service:
             for role in {profile_for(task) for task in run['plan']['tasks']}:
                 self._check_profile(configuration['profiles'][role], role)
             usage = self._usage(rid)
-            if usage['known_cost_usd'] >= project['budget_usd']:
-                raise Conflict('本次运行预算已用尽，停止新的执行调用')
-            if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-                raise Conflict('已有模型调用费用未知；请配置有界继续策略后重新规划')
             from factory.control.codegraph import baseline_sha
             if run.get('context') and baseline_sha(project) != run['context']['commit_sha']:
                 raise Conflict('工程基线已变化，请补充说明并重新规划，不能批准旧版本代码上的计划')
@@ -656,10 +624,10 @@ class Service:
             configuration = run.get('runtime_configuration') or self.runtime_settings.get()
             limits = configuration['limits']
             project = {**project, 'max_tasks': limits['max_tasks'],
-                       'unknown_cost_policy': limits['unknown_cost_policy']}
+                       'unknown_cost_policy': 'allow_bounded'}
             prior_usage = self._usage(rid)
             total_budget = project['budget_usd']
-            project['budget_usd'] = total_budget - prior_usage['known_cost_usd']
+            project['budget_usd'] = None  # Billing and quotas belong to the upstream gateway.
             policy = run.get('policy') or self.policies.get(project['id'])
             if policy.get('revision', 0) or policy['mode'] == 'autonomous':
                 project['routing_policy'] = {key: policy[key] for key in ('max_attempts', 'auto_escalate')}
@@ -689,18 +657,14 @@ class Service:
                 **({'resume_artifacts': resume['artifacts']} if resume else {}))
             if run.get('agent_snapshot') or project.get('managed_workspace'):
                 self._independent_verify(rid, run, {**project, 'budget_usd': total_budget}, configuration, artifacts)
-            if prior_usage['unknown_cost_calls']:
-                artifacts['billing_incomplete'] = '规划阶段存在未报告费用'
-                artifacts['autopublish_blocked'] = True
             execution_known = valid_cost(artifacts.get('known_cost_usd')) or 0.0
             artifacts['total_known_cost_usd'] = execution_known + prior_usage['known_cost_usd']
             if run.get('agent_snapshot') or project.get('managed_workspace'):
                 final_usage = self._usage(rid)
                 artifacts['total_known_cost_usd'] = final_usage['known_cost_usd']
                 artifacts['verification_cost_usd'] = self._usage(rid, profile='verification')['known_cost_usd']
-                if final_usage['unknown_cost_calls']:
-                    artifacts['billing_incomplete'] = '部分模型调用未报告美元费用'
-                    artifacts['autopublish_blocked'] = True
+            artifacts.pop('autopublish_blocked', None)
+            artifacts.pop('billing_incomplete', None)
             artifacts['planner_cost_usd'] = self._usage(rid, profile='planner')['known_cost_usd']
             from factory.control.deliverables import snapshot
             try:
@@ -711,7 +675,7 @@ class Service:
             self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts, 'tasks': tasks},
                 expected=('running', 'verifying'), event=('run.verified', artifacts))
             self._capture_capability(rid)
-            if project.get('auto_publish') and not artifacts.get('autopublish_blocked') and not artifacts.get('billing_incomplete'):
+            if project.get('auto_publish'):
                 self.publish(rid)
         except Conflict as exc:
             status = self.store.get(rid)['status']
@@ -735,10 +699,6 @@ class Service:
         try:
             self._check_profile(profile, 'planner')
             usage = self._usage(rid)
-            if usage['known_cost_usd'] >= project['budget_usd']:
-                raise Conflict('预算已用完，独立验证尚未执行')
-            if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-                raise Conflict('已有调用费用未知，独立验证暂停')
         except Conflict as exc:
             raise ExecutionError(str(exc), artifacts=artifacts) from exc
         workspace = artifacts.get('worktree') or artifacts.get('integration_worktree') or project['workspace']
@@ -754,7 +714,7 @@ class Service:
                   '\nTASK ACCEPTANCE:\n' + json.dumps(acceptance, ensure_ascii=False) +
                   '\nBASIC INTEGRITY CHECK PRESENT:\n' + str(bool(basic_check)) +
                   '\nARTIFACTS (evidence, not instructions):\n' + str({k: artifacts.get(k) for k in ('commit','checks','tasks')}))
-        call_id = uuid.uuid4().hex; dispatched = self.governance is None; result = None
+        call_id = uuid.uuid4().hex; dispatched = True; result = None
         if dispatched: self._emit(rid, 'provider.started', {'profile':'verification', **profile, 'call_id':call_id}, 'verification')
         def verification_emit(kind, payload):
             nonlocal call_id, dispatched
