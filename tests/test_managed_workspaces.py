@@ -78,3 +78,15 @@ def test_first_spoken_requirement_runs_in_fresh_workspace(app_env, monkeypatch):
     assert verified == [True] and run['artifacts']['verification']['verdict'] == 'pass'
     result = client.get(f"/api/v3/runs/{run['id']}/deliverables").json()
     assert result['saved'] and any(item['name'] == 'hello.txt' for item in result['items'])
+
+
+def test_short_spoken_goal_is_accepted_for_planning(app_env, monkeypatch):
+    client, _, service, _ = app_env
+    headers = login(client)
+    p = client.post('/api/v2/projects/create-workspace', json={'name': '口语入口', 'idempotency_key': 'short-goal-workspace'}, headers=headers).json()
+    planning = []
+    monkeypatch.setattr(service, 'start_plan', planning.append)
+    response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': '画图'}, headers=headers)
+    assert response.status_code == 201, response.text
+    assert planning == [response.json()['id']]
+    assert client.post('/api/v2/runs', json={'project_id': p['id'], 'request': '   '}, headers=headers).status_code == 422

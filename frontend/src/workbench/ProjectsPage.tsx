@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import type { Project } from '../workspace/types'
@@ -79,11 +79,12 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
 
 export default function ProjectsPage({ csrfToken, onUnauthorized, user }: PageProps) {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const isAdmin = user?.role !== 'member'
   const [projects, setProjects] = useState<ProjectRecord[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [createOpen, setCreateOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(() => searchParams.get('create') === '1')
 
   useEffect(() => {
     const controller = new AbortController(); setProjects(null); setError(null); setNotice(null)

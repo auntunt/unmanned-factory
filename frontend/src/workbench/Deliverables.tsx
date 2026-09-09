@@ -7,7 +7,7 @@ type Catalog = { saved: boolean; can_collect: boolean; github_configured: boolea
 const labels: Record<string, string> = { installer: '安装包', package: '压缩包 / 软件包', web: '网页', image: '图片', document: '文档', source: '源码 / 文件' }
 function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` }
 
-export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }: { run: Run; csrfToken: string; onUnauthorized: () => void; isAdmin: boolean }) {
+export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin, onPublish, publishing = false }: { run: Run; csrfToken: string; onUnauthorized: () => void; isAdmin: boolean; onPublish?: () => void; publishing?: boolean }) {
   const base = `/api/v3/runs/${encodeURIComponent(String(run.id))}/deliverables`
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [error, setError] = useState('')
@@ -56,6 +56,14 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
         <label>成果类型 <select value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         {!items.length && <p>没有此类文件。安装包需要先完成对应平台的构建，系统不会把源码当作安装包。</p>}
         <div className="wb-deliverable-list">{items.map(item => <article className="wb-deliverable-item" key={item.id}><div><strong>{item.name}</strong><p>{labels[item.kind]} · {sizeLabel(item.size)} · {item.origin === 'commit' ? '验收版本' : '构建产物快照'}</p><details><summary>文件校验值</summary><code>{item.sha256}</code></details></div><div className="wb-detail-actions">{item.preview && <button className="wb-button" disabled={busy} onClick={() => void open(item)}>预览</button>}<a className="wb-button" href={`${base}/files/${item.id}`}>下载</a></div></article>)}</div>
+
+        <details><summary>发布到 GitHub（可选）</summary>
+          {!catalog.github_configured && <p>当前未配置 GitHub 发布凭据。无需 GitHub 也可以继续查看和下载成果。</p>}
+          {catalog.github_configured && run.status === 'published' && <p>本次成果已发布，可在交付记录中查看发布信息。</p>}
+          {catalog.github_configured && run.status === 'publishing' && <p>正在发布，完成后会更新交付记录。</p>}
+          {catalog.github_configured && run.status === 'ready_for_review' && !onPublish && <a href={`/runs/${encodeURIComponent(run.id)}?view=delivery`}>打开交付页面查看发布选项 →</a>}
+          {onPublish && catalog.github_configured && run.status === 'ready_for_review' && <button className="wb-button wb-button-primary" disabled={publishing} onClick={onPublish}>{publishing ? '正在发布…' : '发布到 GitHub'}</button>}
+        </details>
 
         <details><summary>如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
       </>}

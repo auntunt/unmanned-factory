@@ -9,6 +9,13 @@ function run(overrides: Partial<Run> = {}): Run {
 const stoppedCost = 'observed provider cost $3.9453 exceeds budget $3.0000'
 
 describe('runGuidance', () => {
+  it('keeps completed deliverables available when provider billing is incomplete', () => {
+    const guidance = runGuidance(run({ status: 'ready_for_review', artifacts: { billing_incomplete: '费用未返回', commit: 'verified' } }))
+    expect(guidance.kind).toBe('delivery')
+    expect(guidance.primaryLabel).toBe('查看和下载成果')
+    expect(guidance.summary).toContain('不影响领取成果')
+    expect(runGuidance(run({ status: 'needs_human', artifacts: { billing_incomplete: '费用未返回' } })).kind).toBe('billing')
+  })
   it('does not invent a question for a paused run without triage questions', () => {
     const guidance = runGuidance(run({ artifacts: { needs_human: 'manual intervention requested' } }))
     expect(guidance.kind).toBe('paused')

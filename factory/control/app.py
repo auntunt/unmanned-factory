@@ -74,7 +74,7 @@ class NewWorkspace(Body):
 
 class NewRun(Body):
     project_id: str
-    request: str = Field(min_length=5, max_length=50_000)
+    request: str = Field(min_length=1, max_length=50_000)
 
 
 class Clarification(Body):

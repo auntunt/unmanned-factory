@@ -94,6 +94,7 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交、检查和费用记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
   if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划、费用和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
+  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : (billing ? '成果已通过验证，可以查看和下载；部分服务商费用尚未返回，不影响领取成果。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。'), view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
   if (budget) {
     const [, spent, limit] = budget
     return result(run, { kind: 'budget', label: '预算上限已触发', summary: `已记录费用 $${spent} 超过预算 $${limit}；系统已停止新的调用。`, detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看执行与费用', rawEvidence: stopReason })
@@ -114,7 +115,7 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'failed') return result(run, { kind: 'failure', label: '运行失败', summary: failure ? '运行记录了失败原因。请先查看失败和检查证据，再决定是否创建重试。' : '本次执行未形成可继续的结果。请先查看失败和检查证据，再决定是否创建重试。', detail: failure, view: 'verification', stage: 'verify', primaryLabel: '查看失败证据', rawEvidence: failure })
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
   if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '运行没有记录可继续的自动操作；请查看原始停止原因和执行证据，按原因处理后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看停止原因', rawEvidence: stopReason })
-  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
+
   const values: Record<string, Pick<RunGuidance, 'label' | 'summary' | 'view' | 'stage' | 'primaryLabel'>> = {
     received: { label: '需求已接收', summary: '系统将分析目标和执行边界。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求' },
     planning: { label: '正在规划', summary: '正在形成任务分工、依赖关系和验收方式。', view: 'plan', stage: 'plan', primaryLabel: '查看计划' },
