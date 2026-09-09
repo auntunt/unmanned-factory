@@ -108,7 +108,7 @@ def _deadline_checked(fn):
 def _with_execution_budget(fn):
     @wraps(fn)
     def bounded(*args, **kwargs):
-        timeout = kwargs.get('timeout_s', 600)
+        timeout = kwargs.get('timeout_s', 14400)
         budget = _ExecutionBudget(time.monotonic() + float(timeout), timeout, kwargs['cancel'])
         token = _execution_budget.set(budget)
         try:
@@ -475,7 +475,7 @@ def execute_plan(
     emit: Callable[[str, dict, str | None], None],
     cancel: threading.Event,
     max_parallel: int = 2,
-    timeout_s: int = 600,
+    timeout_s: int = 14400,
     resume_artifacts: dict | None = None,
 ) -> dict:
     """Execute and integrate a validated plan, preserving every worktree."""

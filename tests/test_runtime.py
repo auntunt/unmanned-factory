@@ -165,3 +165,13 @@ def test_unknown_cost_defaults_to_bounded_continuation(tmp_path):
     assert config['limits']['unknown_cost_policy'] == 'allow_bounded'
     settings.update({'profiles': _profiles(), 'limits': {**config['limits'], 'unknown_cost_policy': 'stop'}}, config['revision'], 'owner')
     assert _settings(tmp_path).get()['limits']['unknown_cost_policy'] == 'stop'
+
+
+def test_long_task_deadline_supports_hours(tmp_path):
+    settings = _settings(tmp_path)
+    current = settings.get()
+    assert current['limits']['timeout_s'] == 14400
+    changed = settings.update({'profiles': current['profiles'], 'limits': {**current['limits'], 'timeout_s': 86400}}, current['revision'], 'owner')
+    assert changed['limits']['timeout_s'] == 86400
+    with pytest.raises(ValueError):
+        settings.update({'profiles': current['profiles'], 'limits': {**current['limits'], 'timeout_s': 86401}}, changed['revision'], 'owner')

@@ -107,7 +107,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     store = service.store if service else Store(data / 'control.db')
     token = os.getenv('FACTORY_GITHUB_TOKEN', '')
     svc = service or Service(store, publisher=GitHubDelivery(token) if token else None,
-                            timeout_s=int(os.getenv('FACTORY_TASK_TIMEOUT', '600')))
+                            timeout_s=int(os.getenv('FACTORY_TASK_TIMEOUT', '14400')))
     from factory.control.governance import Governance
     governance = Governance(auth, store)
     svc.governance = governance

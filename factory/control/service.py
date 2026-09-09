@@ -24,7 +24,7 @@ def configured_profiles():
 
 class Service:
     def __init__(self, store: Store, *, runner=None, publisher=None, profiles=None,
-                 execute=None, timeout_s=600, max_parallel=2):
+                 execute=None, timeout_s=14400, max_parallel=2):
         from factory.control.providers import SDKRunner
         from factory.control.execution import execute_plan
         from factory.control.runtime import RuntimeSettings
@@ -569,7 +569,11 @@ class Service:
             if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
                 raise Conflict('验收检查已变化，请重新规划')
             configuration = run.get('runtime_configuration') or self.runtime_settings.get()
-            usage = self._usage(rid)
+            # Explicit continuation adopts a longer current deadline only;
+            # preserve the frozen models and all other execution constraints.
+            current_timeout = self.runtime_settings.get()['limits']['timeout_s']
+            configuration = {**configuration, 'limits': {**configuration['limits'],
+                'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
             updated = self.store.update(rid, {'status': 'queued',
                 'runtime_configuration': configuration,
                 'resume_count': resume_count + 1,

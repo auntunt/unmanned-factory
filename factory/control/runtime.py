@@ -28,7 +28,7 @@ from factory.control.store import Conflict, Store, now
 ROLES = ("planner", "cheap", "standard", "strong")
 PROVIDERS = ("claude", "codex", "dsh")
 DEFAULT_LIMITS = {
-    "timeout_s": 600,
+    "timeout_s": 14400,
     "max_parallel": 2,
     "max_tasks": 20,
     "unknown_cost_policy": "allow_bounded",
@@ -133,7 +133,7 @@ def _validate_limits(value: Any, *, complete: bool = True) -> dict[str, Any]:
     if not complete and not set(value).issubset(keys):
         raise ValueError("limits contains an unknown setting")
     result = {**DEFAULT_LIMITS, **dict(value)}
-    for key, low, high in (("timeout_s", 30, 1800), ("max_parallel", 1, 4), ("max_tasks", 1, 20)):
+    for key, low, high in (("timeout_s", 30, 86400), ("max_parallel", 1, 4), ("max_tasks", 1, 20)):
         item = result[key]
         if type(item) is not int or not low <= item <= high:
             raise ValueError(f"{key} must be an integer between {low} and {high}")

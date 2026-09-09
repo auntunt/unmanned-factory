@@ -261,6 +261,8 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    config = svc.runtime_settings.get()
+    svc.runtime_settings.update({'profiles': config['profiles'], 'limits': {**config['limits'], 'timeout_s': 600}}, config['revision'], 'test')
     calls = {'planning': 0, 'execution': 0}
     original = svc.runner.run
     def runner(request, emit, cancel=None):
@@ -273,6 +275,7 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
             (root / 'greeting.txt').write_text('draft')
             (root / 'outside.txt').write_text('outside')
         else:
+            assert request.timeout_s > 7200
             assert '恢复原范围并继续' in request.prompt
             assert (root / 'greeting.txt').read_text() == 'draft'
             (root / 'outside.txt').unlink()
@@ -284,10 +287,14 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
     deadline = time.monotonic() + 5
     while rid in svc.active_jobs and time.monotonic() < deadline:
         time.sleep(.01)
+    config = svc.runtime_settings.get()
+    svc.runtime_settings.update({'profiles': config['profiles'], 'limits': {**config['limits'], 'timeout_s': 14400}}, config['revision'], 'test')
     response = client.post(f'/api/v2/runs/{rid}/continue', json={'answer': '恢复原范围并继续', 'revision': paused['revision']}, headers=headers)
     assert response.status_code == 200, response.text
     done = wait_state(store, rid, {'ready_for_review', 'needs_human'})
     assert done['status'] == 'ready_for_review', done.get('artifacts')
     assert done['revision'] == paused['revision'] and done['plan'] == paused['plan']
+    assert done['runtime_configuration']['profiles'] == paused['runtime_configuration']['profiles']
+    assert done['runtime_configuration']['limits']['timeout_s'] == 14400
     assert calls == {'planning': 1, 'execution': 2}
     assert done['artifacts']['total_known_cost_usd'] == pytest.approx(.03)
