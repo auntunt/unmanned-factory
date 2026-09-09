@@ -236,7 +236,7 @@ def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
                         if child.is_symlink() or (child.is_file() and not _is_generated(rel)):
                             paths.add(rel)
                     continue
-                if not file.is_symlink() and _is_generated(value):
+                if _is_generated(value) and (not file.is_symlink() or any(part in _GENERATED_PARTS for part in PurePosixPath(value).parts)):
                     continue
             # Tracked modifications always remain visible, including caches or
             # metadata accidentally committed by an earlier version.

@@ -265,3 +265,17 @@ def test_autonomous_mode_does_not_allow_forbidden_files(repo, provider_module):
             runner=type('Runner', (), {'run': lambda self, request, emit, cancel=None: (Path(request.workspace, '.env').write_text('test-only'), Result())[1]})(),
             emit=lambda *a: None, cancel=threading.Event())
     assert 'forbidden' in error.value.artifacts['tasks'][0]['error']
+
+
+def test_virtualenv_interpreter_links_are_disposable_untracked_output(repo):
+    from factory.control.execution import _status_paths
+    bindir = repo / '.venv/bin'
+    bindir.mkdir(parents=True)
+    (bindir / 'python').symlink_to(sys.executable)
+    assert not _status_paths(repo, timeout_s=10)
+    # A tracked interpreter link must still be inspected if altered.
+    subprocess.run(['git', 'add', '-f', '.venv/bin/python'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'tracked link'], cwd=repo, check=True)
+    (bindir / 'python').unlink()
+    (bindir / 'python').symlink_to('/different/python')
+    assert '.venv/bin/python' in _status_paths(repo, timeout_s=10)
