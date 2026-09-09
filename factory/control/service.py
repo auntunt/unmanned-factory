@@ -161,6 +161,14 @@ class Service:
             self.wake.set()
 
     def start_plan(self, rid):
+        from factory.control.project_assistants import ProjectAssistants
+        with self.lock:
+            run = self.store.get(rid)
+            frozen = ProjectAssistants(self.store).freeze(run, self.runtime_settings.get())
+            if frozen:
+                self.store.update(rid, frozen, expected=('received',), event=('agent.version_frozen', {
+                    'agent_id': frozen['agent_id'], 'version': frozen['agent_version'],
+                    'project_assistant_revision': frozen['project_assistant_revision']}))
         self._submit(self._plan, rid)
 
     def start_maintenance(self, callback, *, job_id=None, conversation_id='', actor_id=0):

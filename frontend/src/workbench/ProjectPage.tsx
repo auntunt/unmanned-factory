@@ -1,3 +1,4 @@
+import ProjectKnowledge from './ProjectKnowledge'
 import { nextRunAction } from './run-guidance'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
@@ -222,7 +223,8 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
         {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{run.plan?.title || run.request.slice(0, 90)}</Link><small>{formatDate(run.updated_at)}</small></td><td><strong>{guidance.label}</strong><div className="pw-run-reason">{guidance.summary}</div></td><td><Link className="wb-text-link" to={nextRunAction(run).href}>{nextRunAction(run).label} →</Link></td></tr> })}</tbody></table></div>}
       </section>
     </>}
-    {tab === 'agent' && isAdmin && <section className="wb-card wb-agent-card"><div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目知识</span><h2>维护这个项目的知识和代码上下文</h2><p>知识与索引属于当前项目。跨项目复用通过明确的能力绑定完成。</p></div></div><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></section>}
+    {tab === 'agent' && isAdmin && <ProjectKnowledge projectId={project.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
+    {tab === 'agent' && isAdmin && <details className="wb-card wb-agent-card"><summary className="pk-reference-summary">项目档案、知识原文与代码索引</summary><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></details>}
     {tab === 'automation' && isAdmin && <ProjectAutomation key={String(project.id)} projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onPolicySaved={() => setPolicyRefresh((value) => value + 1)} />}
     {tab === 'settings' && isAdmin && <EditSettings project={project} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onSaved={setProject} />}
   </div>

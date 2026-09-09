@@ -58,6 +58,7 @@ class ProjectUpdate(Body):
 
 
 class ConnectProject(Body):
+    agent_id: str | None = None
     candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     name: str | None = Field(default=None, min_length=1, max_length=120)
     checks: dict[str, list[str]] = Field(default_factory=dict)
@@ -67,6 +68,7 @@ class ConnectProject(Body):
 
 
 class NewWorkspace(Body):
+    agent_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
     idempotency_key: str = Field(min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
@@ -292,8 +294,16 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def new_workspace(body: NewWorkspace, request: Request):
         from factory.control.workspaces import create_workspace, WorkspaceError
         try:
-            return create_workspace(store, allowed_root, name=body.name, budget_usd=body.budget_usd,
+            from factory.control.project_assistants import ProjectAssistants
+            helpers = ProjectAssistants(store)
+            if body.agent_id:
+                try: helpers.agents.get(body.agent_id)
+                except KeyError: raise HTTPException(404, '所选职能体不存在') from None
+            project = create_workspace(store, allowed_root, name=body.name, budget_usd=body.budget_usd,
                 actor_id=request.state.user['id'], idempotency_key=body.idempotency_key)
+            if body.agent_id and helpers.binding(project['id'])['revision'] == 0:
+                helpers.bind(project['id'], body.agent_id, 0, request.state.user['id'])
+            return project
         except WorkspaceError as exc:
             raise HTTPException(503, str(exc)) from None
 
@@ -307,7 +317,12 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                 'root_available': allowed_root.is_dir()}
 
     @app.post('/api/v2/projects/connect', status_code=201)
-    def connect_project(body: ConnectProject):
+    def connect_project(body: ConnectProject, request: Request):
+        from factory.control.project_assistants import ProjectAssistants
+        helpers = ProjectAssistants(store)
+        if body.agent_id:
+            try: helpers.agents.get(body.agent_id)
+            except KeyError: raise HTTPException(404, '所选职能体不存在') from None
         from factory.control.project_discovery import discover
         with svc.lock:
             candidate = next((c for c in discover(allowed_root, store.projects()) if c['id'] == body.candidate_id), None)
@@ -317,10 +332,13 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                 raise Conflict('这个工程已经登记，请在项目列表中打开')
             if candidate['repository'].startswith('local/') and (body.auto_publish or body.auto_issues):
                 raise HTTPException(400, '这个工程尚未连接 GitHub；可以先登记并下载成果，连接后再启用 GitHub 自动化')
-            return create_project(Project(name=body.name or candidate['name'][:120],
+            project = create_project(Project(name=body.name or candidate['name'][:120],
                 repository=candidate['repository'], workspace=candidate['workspace'],
                 base_branch=candidate['base_branch'], checks=body.checks,
                 auto_issues=body.auto_issues, auto_publish=body.auto_publish, budget_usd=body.budget_usd))
+            if body.agent_id:
+                helpers.bind(project['id'], body.agent_id, 0, request.state.user['id'])
+            return project
 
     def validate_check_definitions(checks):
         if len(checks) > 20:

@@ -18,6 +18,16 @@ class Message(Body): content:str=Field(min_length=1,max_length=50000)
 class DraftPatch(Body): expected_revision:int=Field(ge=0); patch:dict
 class Apply(Body): expected_revision:int=Field(ge=0); idempotency_key:str|None=None
 class Rollback(Body): version:int=Field(ge=1)
+class ProjectHelper(Body):
+    agent_id: str | None = None
+    expected_revision: int = Field(ge=0)
+class LearningChoice(Body):
+    source_id: str
+    source_revision: int = Field(ge=1)
+    destination: str = Field(pattern='^(standalone|agent)$')
+    agent_id: str | None = None
+    draft_revision: int = Field(default=0, ge=0)
+
 
 def router(store, service):
     api=APIRouter(prefix='/api/v4'); agents=AgentStore(store)
@@ -35,6 +45,46 @@ def router(store, service):
             raw=raw.split('\n',1)[1] if '\n' in raw else raw
             raw=raw.rsplit('```',1)[0].strip()
         return json.loads(raw)
+
+    from factory.control.project_assistants import ProjectAssistants
+    helpers = ProjectAssistants(store)
+
+    @api.get('/projects/{pid}/assistant')
+    def project_assistant(pid: str):
+        return guarded(helpers.binding, pid)
+
+    @api.put('/projects/{pid}/assistant')
+    def bind_assistant(pid: str, body: ProjectHelper, request: Request):
+        return guarded(helpers.bind, pid, body.agent_id, body.expected_revision, actor(request)['id'])
+
+    @api.get('/projects/{pid}/learnings')
+    def project_learnings(pid: str):
+        return {'learnings': guarded(helpers.learnings, pid)}
+
+    @api.post('/projects/{pid}/learnings/settle')
+    def settle_learning(pid: str, body: LearningChoice, request: Request):
+        with service.lock:
+            return guarded(helpers.settle, pid, body.source_id, body.source_revision, body.destination,
+                           body.agent_id, body.draft_revision, actor(request)['id'])
+
+    @api.get('/projects/{pid}/learnings/export')
+    def export_learning(pid: str, source_id: str):
+        from fastapi.responses import Response
+        entries = guarded(helpers.learnings, pid)
+        item = next((e for e in entries if e['id'] == source_id), None)
+        if not item or not item.get('disposition') or item['disposition']['destination'] != 'standalone':
+            raise HTTPException(404, '尚未单独沉淀这条收获')
+        source = item['disposition']['source']
+        import hashlib
+        name = 'project-learning-' + hashlib.sha256(source_id.encode()).hexdigest()[:12]
+        description = json.dumps('适用于：' + source['title'], ensure_ascii=False)
+        content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {source['title']}\n\n{source['content']}\n\n来源项目：{pid}\n来源记录：{source_id} · 修订 {source['revision']}\n"
+        import io, zipfile
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('SKILL.md', content)
+            archive.writestr('source.json', json.dumps({'project_id': pid, 'source_id': source_id, **source}, ensure_ascii=False))
+        return Response(output.getvalue(), media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="{name}.zip"'})
 
     @api.get('/agents')
     def list_agents(): return {'agents':agents.list()}
@@ -61,9 +111,27 @@ def router(store, service):
         return c
     @api.post('/conversations/{cid}/messages',status_code=201)
     def message(cid:str,body:Message,request:Request):
+        return process_message(cid, body, request)
+
+    @api.post('/conversations/{cid}/retry', status_code=201)
+    def retry_maintenance(cid: str, request: Request):
+        c = guarded(agents.conversation, cid)
+        if c.get('actor_id') != actor(request)['id'] and actor(request).get('role') != 'admin':
+            raise HTTPException(403, '无权访问该会话')
+        if c['mode'] != 'maintain':
+            raise Conflict('只有维护对话可以重新整理')
+        jobs = [m for m in c['messages'] if m.get('job_id')]
+        if not jobs or guarded(service.maintenance_status, jobs[-1]['job_id'])['status'] not in ('failed', 'cancelled', 'interrupted'):
+            raise Conflict('当前没有需要重试的维护任务')
+        content = next((m['content'] for m in reversed(c['messages']) if m['role'] == 'user'), None)
+        if not content:
+            raise Conflict('请先提交需要整理的资料')
+        return process_message(cid, Message(content=content), request, retry=True)
+
+    def process_message(cid, body, request, retry=False):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
-        agents.append_message(cid,'user',body.content)
+        if not retry: agents.append_message(cid,'user',body.content)
         c=agents.conversation(cid)
         if c['mode']=='do':
             if not c.get('project_id'):
@@ -162,7 +230,9 @@ def router(store, service):
             def emit(kind,payload):
                 return None
             with tempfile.TemporaryDirectory(prefix='factory-agent-maintain-') as workspace:
-                result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True),emit,cancel)
+                from factory.control.maintenance import run_maintenance
+                result=run_maintenance(runner, ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True),emit,cancel,
+                    lambda attempt: agents.append_message(cid, 'assistant', f'模型服务繁忙，正在重试整理（{attempt}/2）；已保存的资料不受影响。', status='retrying', job_id=job_id))
             if cancel.is_set():
                 agents.append_message(cid,'assistant','维护调用已取消',status='cancelled',job_id=job_id)
                 return {'status':'cancelled'}
@@ -174,7 +244,8 @@ def router(store, service):
             draft=agents.save_draft(c['agent_id'],patch,base_draft['revision'], conflicts=parsed.get('conflicts',[]), explanation=parsed.get('explanation',[]))
             agents.append_message(cid,'assistant',json.dumps({'draft':draft,'explanation':parsed.get('explanation',[]),'conflicts':parsed.get('conflicts',[])},ensure_ascii=False),status='completed',job_id=job_id,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
             return {'status':'completed','draft':draft}
-        maintain.on_error=lambda exc: agents.append_message(cid,'assistant','维护失败：'+str(exc),status='failed',job_id=job_id)
+        from factory.control.maintenance import failure_message
+        maintain.on_error=lambda exc: agents.append_message(cid,'assistant',failure_message(exc),status='failed',job_id=job_id)
         job=service.start_maintenance(maintain, job_id=job_id, conversation_id=cid, actor_id=actor(request)['id'])
         _append_pending(cid, '维护整理已排队', job_id)
         return {'conversation':agents.conversation(cid),'job_id':job['id'],'status':'pending'}

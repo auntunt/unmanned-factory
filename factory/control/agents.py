@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from contextlib import nullcontext
 import json
 import re
 import unicodedata
@@ -200,10 +201,11 @@ class AgentStore:
         if not allow_scope_change and candidate["tool_scope"] != current["tool_scope"]: raise ValueError("维护资料不能改变工具范围")
         if not allow_acceptance_relax and not set(current["acceptance"]).issubset(candidate["acceptance"]): raise ValueError("维护资料不能放松既有验收条件")
         return candidate
-    def save_draft(self, aid, patch, expected_revision, *, conflicts=None, explanation=None, allow_scope_change=False, allow_acceptance_relax=False):
+    def save_draft(self, aid, patch, expected_revision, *, conflicts=None, explanation=None, allow_scope_change=False, allow_acceptance_relax=False, _db=None):
         if type(expected_revision) is not int or expected_revision < 0: raise ValueError("expected_revision 必须是非负整数")
-        with self.store.connect() as db:
-            db.execute("BEGIN IMMEDIATE"); arow = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
+        with (nullcontext(_db) if _db is not None else self.store.connect()) as db:
+            if _db is None: db.execute("BEGIN IMMEDIATE")
+            arow = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
             if not arow: raise KeyError(aid)
             row = db.execute("SELECT data FROM agent_drafts WHERE agent_id=?", (aid,)).fetchone()
             if row: current = self._decode(row)
