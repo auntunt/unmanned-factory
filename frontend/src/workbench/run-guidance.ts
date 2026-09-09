@@ -100,7 +100,7 @@ export function runGuidance(run: Run): RunGuidance {
   const questions = requirements(run)
   const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
-  if (run.status === 'needs_human' && /cost|budget|quota|费用|预算|额度/i.test(stopReason || '')) return result(run, { kind: 'paused', label: '可以继续原任务', summary: '旧计费限制已停用，费用和额度统一由中转站管理。继续执行原计划即可。', view: 'execution', stage: 'build', primaryLabel: '回答并继续执行' })
+  if (run.status === 'needs_human' && /cost|budget|quota|费用|预算|额度/i.test(stopReason || '')) return result(run, { kind: 'paused', label: '可以继续原任务', summary: '旧计费限制已停用，费用和额度统一由中转站管理。继续执行原计划即可。', view: 'execution', stage: 'build', primaryLabel: '查看处理情况' })
 
   // Terminal runs retain their historical billing/budget artifacts without being presented as pending work.
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交和检查记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
@@ -108,8 +108,8 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
   if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。', view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
 
-  if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。在执行页回答后，助手会结合失败证据修正草稿，按原计划继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '回答并继续执行', rawEvidence: stopReason })
-  if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置改动需要处理', summary: '执行助手改动了受保护的测试配置。回答后将继续修正当前草稿，保留原计划与已完成任务。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '回答并继续执行', rawEvidence: stopReason })
+  if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。可直接重试自动处理，无需填写回答；原计划和草稿会保留。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
+  if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置改动需要处理', summary: '执行助手改动了受保护的测试配置。系统会在自动修复中尝试恢复检查配置；无需编写处理指令。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
   if (run.status === 'needs_clarification' || (run.status === 'needs_human' && questions.length > 0) || (run.status === 'awaiting_approval' && questions.length > 0)) {
     const count = questions.length
     return result(run, { kind: 'requirements', label: count ? '需要补充需求' : '需要补充运行边界', summary: count ? `请回答 ${count} 个已记录问题，系统会据此重新规划。` : '当前没有可展示的具体问题；请补充目标、范围或验收标准后重新规划。', detail: questions[0], view: 'requirements', stage: 'intake', primaryLabel: '查看需求与补充', rawEvidence: stopReason })
@@ -124,7 +124,7 @@ export function runGuidance(run: Run): RunGuidance {
   }
   if (run.status === 'failed') return result(run, { kind: 'failure', label: '运行失败', summary: failure ? '运行记录了失败原因。请先查看失败和检查证据，再决定是否创建重试。' : '本次执行未形成可继续的结果。请先查看失败和检查证据，再决定是否创建重试。', detail: failure, view: 'verification', stage: 'verify', primaryLabel: '查看失败证据', rawEvidence: failure })
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
-  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '运行没有记录可继续的自动操作；请查看原始停止原因和执行证据，按原因处理后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '回答并继续执行', rawEvidence: stopReason })
+  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '自动处理尚未完成。原因和已有成果已保存，可查看证据或直接重试。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
 
   const values: Record<string, Pick<RunGuidance, 'label' | 'summary' | 'view' | 'stage' | 'primaryLabel'>> = {
     received: { label: '需求已接收', summary: '系统将分析目标和执行边界。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求' },
@@ -141,7 +141,7 @@ export function runView(value: string | null, fallback: RunView = 'requirements'
 
 export function nextRunAction(run: Run): { label: string; href: string } {
   const guidance = runGuidance(run)
-  if (run.status === 'needs_human') return { label: '回答并继续', href: `/runs/${encodeURIComponent(String(run.id))}?view=execution#run-recovery` }
+  if (run.status === 'needs_human') return { label: '查看处理情况', href: `/runs/${encodeURIComponent(String(run.id))}?view=execution#run-recovery` }
   if (run.status === 'awaiting_approval') return { label: '确认计划并开始执行', href: `/runs/${encodeURIComponent(String(run.id))}?view=plan` }
   if (['ready_for_review', 'published'].includes(run.status)) return { label: '查看和下载成果', href: `/runs/${encodeURIComponent(String(run.id))}?view=delivery#deliverables-title` }
   return { label: guidance.primaryLabel, href: guidance.primaryHref }

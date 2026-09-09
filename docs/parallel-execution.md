@@ -27,3 +27,9 @@ The paused splitter's `.md` inclusion is an example: the prompt file belongs to 
 Untracked standard `*.egg-info` metadata is excluded from scope comparison, even when a project's ignore file is incomplete. Ignored egg-info directories are inspected for unexpected files; source files and symlinks are not exempt. Tracked changes always remain visible, including tracked caches and metadata. Files are never stashed or deleted to make checks pass.
 
 `uv.lock` remains a delivery input: dependency tasks must explicitly declare it, and ordinary scope checks apply. A build-artifact exemption does not authorize `config.py`, dependency changes or unrelated source edits. Adding an ignore rule alone never authorizes a source change.
+
+## Autonomous authorization boundary
+
+For an autonomous project, planned paths are ownership hints for scheduling, not a per-file approval boundary. Workers may make related source, dependency-lock and packaging changes within the project; these are audited as `scope.project_changes`. Supervised execution retains strict declared-path checks. Host isolation, forbidden paths and trusted-check protection still apply in both modes. A rejected test-configuration change can be repaired automatically without accepting the weakened check.
+
+Ordinary engineering failures enter the existing bounded repair loop with saved files/context. Exhausted repairs remain visible instead of being restarted indefinitely. Recovery no longer requires a written answer: supplemental context is optional. Missing business intent and external access remain reasons to ask the owner. This replaces the earlier assumption that all unlisted file edits require human continuation.

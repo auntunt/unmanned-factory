@@ -80,7 +80,7 @@ class NewRun(Body):
 
 
 class Continuation(Body):
-    answer: str = Field(min_length=1, max_length=20000)
+    answer: str = Field(default="", max_length=20000)
     revision: int = Field(ge=1)
     resume_count: int = Field(default=0, ge=0)
 

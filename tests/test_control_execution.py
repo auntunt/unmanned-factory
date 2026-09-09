@@ -238,3 +238,30 @@ def test_generated_metadata_does_not_hide_source_or_lockfile(repo):
     subprocess.run(['git', 'commit', '-qm', 'tracked metadata'], cwd=repo, check=True)
     (metadata / 'PKG-INFO').write_text('changed tracked metadata')
     assert 'src/gongshi.egg-info/PKG-INFO' in _status_paths(repo, timeout_s=10)
+
+
+def test_autonomous_project_scope_accepts_related_source_and_lock(repo, provider_module):
+    runner = FakeRunner({'work': [('base.txt', 'updated'), ('uv.lock', 'version = 1'), ('work.txt', 'done')]})
+    events = []
+    # FakeRunner indexes the original prompt; capture the autonomous prompt separately.
+    class Runner:
+        def run(self, request, emit, cancel=None):
+            assert 'AUTONOMOUS PROJECT EXECUTION' in request.prompt
+            for name, body in runner.writes['work']:
+                Path(request.workspace, name).write_text(body)
+            return Result()
+    result = execute_plan(run_id='autonomous', plan={'tasks': [{'id': 'work', 'prompt': 'work', 'paths': ['work.txt'], 'checks': ['ok']}]},
+        project={**_project(repo), 'autonomous_execution': True}, profiles={'standard': {'provider': 'fake', 'model': 'test'}},
+        runner=Runner(), emit=lambda kind, *args: events.append(kind), cancel=threading.Event())
+    assert result['tasks'][0]['status'] == 'verified'
+    assert 'scope.project_changes' in events
+    assert (Path(result['worktree']) / 'uv.lock').exists()
+
+
+def test_autonomous_mode_does_not_allow_forbidden_files(repo, provider_module):
+    with pytest.raises(ExecutionError) as error:
+        execute_plan(run_id='autonomous-protected', plan={'tasks': [{'id': 'work', 'prompt': 'work', 'paths': ['work.txt'], 'checks': ['ok']}]},
+            project={**_project(repo), 'autonomous_execution': True}, profiles={'standard': {'provider': 'fake', 'model': 'test'}},
+            runner=type('Runner', (), {'run': lambda self, request, emit, cancel=None: (Path(request.workspace, '.env').write_text('test-only'), Result())[1]})(),
+            emit=lambda *a: None, cancel=threading.Event())
+    assert 'forbidden' in error.value.artifacts['tasks'][0]['error']

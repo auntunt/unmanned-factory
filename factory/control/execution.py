@@ -817,7 +817,10 @@ def execute_plan(
                     return finish('failed', error=error, retryable=False, failure_kind='check_configuration',
                                   checks=[{'name': check_name, 'argv': argv, 'exit': None, 'stderr': error}])
             from factory.control.providers import ProviderRequest
-            request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=str(task.get("prompt", "")), workspace=str(child_root), session_id=task.get('_resume_session'), timeout_s=max(1, int(remaining())), read_only=False)
+            worker_prompt = str(task.get('prompt', ''))
+            if project.get('autonomous_execution'):
+                worker_prompt += "\n\nAUTONOMOUS PROJECT EXECUTION: The owner delegates routine engineering decisions. Planned paths describe task ownership, not a file permission whitelist. Make necessary related project changes (including dependency locks and package configuration) to complete this task. Preserve other tasks' interfaces and completed work. Do not weaken trusted tests, modify protected metadata or leave the project workspace. Resolve routine implementation issues yourself; ask only for missing business decisions or external access. Earlier recovery instructions restricting all edits to listed files are superseded by this project authorization."
+            request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=worker_prompt, workspace=str(child_root), session_id=task.get('_resume_session'), timeout_s=max(1, int(remaining())), read_only=False)
             last_assistant_text: str | None = None
             def callback(typ: Any, payload: Any = None, *extra: Any) -> None:
                 # SDK adapters historically used both emit(kind, payload) and
@@ -859,7 +862,10 @@ def execute_plan(
                 out_of_scope = tuple(path for path in out_of_scope if path != 'pyproject.toml')
                 _emit(emit, 'scope.supporting_change', {'path': 'pyproject.toml',
                       'reason': 'add package data for declared resource files'}, task_id)
-            if out_of_scope:
+            if out_of_scope and project.get('autonomous_execution'):
+                _emit(emit, 'scope.project_changes', {'paths': list(out_of_scope),
+                      'reason': 'autonomous project authorization; planned paths are task ownership hints'}, task_id)
+            elif out_of_scope:
                 raise ExecutionError(f"out-of-scope changes: {', '.join(out_of_scope)}")
             _reject_symlinks(child_root, changed)
             judge = _protected_changes(child_root, changed)
@@ -902,7 +908,7 @@ def execute_plan(
             # Scope/metadata guards, cancellation and the shared deadline are
             # control-plane boundaries. A new model cannot be allowed to evade
             # them. A no-change response is the narrowly repairable exception.
-            retryable = str(exc) == "worker produced no changes"
+            retryable = str(exc) == "worker produced no changes" or (bool(project.get("autonomous_execution")) and str(exc).startswith("worker changed test/check infrastructure:"))
             return finish("failed", error=str(exc), retryable=retryable,
                           failure_kind="execution" if retryable else "scope_violation" if str(exc).startswith("out-of-scope changes:") else "policy_or_deadline")
         except Exception as exc:
@@ -967,7 +973,7 @@ def execute_plan(
             snapshot.mkdir()
             for rel in _status_paths(current_root, timeout_s=timeout_s):
                 source = current_root / rel
-                if _within(rel, tuple(task['paths'])) and source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(current_root.resolve()):
+                if (project.get('autonomous_execution') or _within(rel, tuple(task['paths']))) and source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(current_root.resolve()):
                     destination = snapshot / rel
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)

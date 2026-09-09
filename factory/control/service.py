@@ -566,7 +566,8 @@ class Service:
             return updated
 
     def continue_run(self, rid, answer, revision, resume_count, actor):
-        """Resume the same authorized plan; the answer is execution context, not new scope."""
+        """Resume the same authorized plan; optional context is not an approval requirement."""
+        answer = answer.strip() or '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。'
         with self.lock:
             run = self.store.get(rid)
             if run['status'] != 'needs_human' or not run.get('plan'):
@@ -649,6 +650,7 @@ class Service:
             total_budget = project['budget_usd']
             project['budget_usd'] = None  # Billing and quotas belong to the upstream gateway.
             policy = run.get('policy') or self.policies.get(project['id'])
+            project['autonomous_execution'] = policy['mode'] == 'autonomous'
             if policy.get('revision', 0) or policy['mode'] == 'autonomous':
                 project['routing_policy'] = {key: policy[key] for key in ('max_attempts', 'auto_escalate')}
             if run.get('context'):

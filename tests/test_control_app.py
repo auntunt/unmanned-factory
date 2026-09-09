@@ -261,6 +261,8 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
     config = svc.runtime_settings.get()
     svc.runtime_settings.update({'profiles': config['profiles'], 'limits': {**config['limits'], 'timeout_s': 600}}, config['revision'], 'test')
     calls = {'planning': 0, 'execution': 0}
@@ -283,6 +285,8 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
         return ProviderResult('done', cost_usd=.01)
     monkeypatch.setattr(svc.runner, 'run', runner)
     rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    planned = wait_state(store, rid, {'awaiting_approval'})
+    assert client.post(f'/api/v2/runs/{rid}/approve', json={'revision': planned['revision']}, headers=headers).status_code == 200
     paused = wait_state(store, rid, {'needs_human'})
     deadline = time.monotonic() + 5
     while rid in svc.active_jobs and time.monotonic() < deadline:
