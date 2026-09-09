@@ -472,7 +472,7 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     from factory.control.providers import _run_claude
     from factory.control import claude_terminal
     monkeypatch.setattr(claude_terminal, 'available', lambda: True)
-    monkeypatch.setattr(claude_terminal, 'create_server', lambda workspace: {'type': 'sdk', 'name': 'project'})
+    monkeypatch.setattr(claude_terminal, 'create_server', lambda workspace, emit=None: {'type': 'sdk', 'name': 'project'})
 
     mod = types.ModuleType("claude_agent_sdk")
     captured = {}

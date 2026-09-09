@@ -389,7 +389,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
            if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
     if terminal_enabled:
-        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace)}
+        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace, emit)}
         options_kwargs['allowed_tools'] = [claude_terminal.TOOL_NAME]
         emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False})
     elif not req.read_only:
@@ -1214,7 +1214,7 @@ class SDKRunner:
             raise ProviderError("provider worker emitted a non-object JSONL message")
         typ = message.get("type")
         payload = message.get("payload")
-        if typ in {"assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
+        if typ in {"task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
             emit(str(typ), payload if isinstance(payload, dict) else {"value": _safe_json(payload)})
         elif typ not in {"complete", "error"}:
             emit("provider.raw", {"stream": stream, "event": _safe_json(message)})

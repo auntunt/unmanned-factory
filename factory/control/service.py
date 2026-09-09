@@ -372,7 +372,23 @@ class Service:
     def _emit(self, rid, kind, payload, task_id=None):
         self.store.append(rid, kind, payload, task_id)
         if kind == 'execution.checkpoint':
-            self.store.update(rid, {'checkpoint': payload})
+            with self.lock:
+                run = self.store.get(rid)
+                states = {task['id']: task for task in payload.get('tasks', [])}
+                tasks = run.get('tasks') or []
+                for task in tasks:
+                    state = states.get(task.get('id'))
+                    if state:
+                        task.update({key: state[key] for key in ('status', 'waiting_for') if key in state})
+                self.store.update(rid, {'checkpoint': payload, 'tasks': tasks})
+        if task_id and kind == 'task.activity':
+            with self.lock:
+                run = self.store.get(rid)
+                tasks = run.get('tasks') or []
+                for task in tasks:
+                    if task.get('id') == task_id:
+                        task['activity'] = {**payload, 'at': now()}
+                self.store.update(rid, {'tasks': tasks})
         if task_id and kind in ('task.started', 'task.completed', 'task.failed'):
             with self.lock:
                 run = self.store.get(rid)

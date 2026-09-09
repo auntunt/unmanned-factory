@@ -60,7 +60,22 @@ def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
     return argv
 
 
-def run_command(workspace: Path, command: str, timeout: int = 300) -> dict:
+def run_command(workspace, command, timeout=300, emit=None):
+    from factory.control.resources import command_slot
+    import time
+    emit = emit or (lambda *args: None)
+    started = time.monotonic()
+    emit('task.activity', {'phase': 'waiting_capacity'})
+    with command_slot(max(1, min(int(timeout), 3600))) as waited:
+        emit('task.activity', {'phase': 'command', 'wait_s': round(waited, 3)})
+        try:
+            result = _run_command_unlimited(workspace, command, max(1, timeout - waited))
+            return {**result, 'wait_s': round(waited, 3), 'duration_s': round(time.monotonic() - started, 3)}
+        finally:
+            emit('task.activity', {'phase': 'model'})
+
+
+def _run_command_unlimited(workspace: Path, command: str, timeout: int = 300) -> dict:
     from factory.control.store import scrub
     from factory.permission.rules import check_command, Decision
     if not isinstance(command, str) or not command.strip() or len(command) > 20000:
@@ -91,14 +106,14 @@ def run_command(workspace: Path, command: str, timeout: int = 300) -> dict:
                 'timeout': timed_out, 'truncated': size > 30000}
 
 
-def create_server(workspace: Path):
+def create_server(workspace: Path, emit=None):
     from claude_agent_sdk import tool, create_sdk_mcp_server
 
     @tool('run_command', 'Run a shell command inside the project sandbox. Use for dependency installation, tests, builds and local checks. Host home and credentials are hidden. Git commits are handled by webuddy. Default timeout 300 seconds; maximum 3600 seconds.',
           {'type': 'object', 'properties': {'command': {'type': 'string'}, 'timeout_s': {'type': 'integer', 'minimum': 1, 'maximum': 3600}}, 'required': ['command'], 'additionalProperties': False})
     async def terminal(args):
         try:
-            result = await asyncio.to_thread(run_command, workspace, args['command'], args.get('timeout_s', 300))
+            result = await asyncio.to_thread(run_command, workspace, args['command'], args.get('timeout_s', 300), emit)
         except (ValueError, RuntimeError, OSError) as exc:
             result = {'exit_code': None, 'error': str(exc)}
         return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}],

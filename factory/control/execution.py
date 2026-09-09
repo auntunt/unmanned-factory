@@ -318,7 +318,22 @@ def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[
     return out
 
 
-def _run_check(root: Path, name: str, argv: list[str], timeout_s: float, emit: Callable, task_id: str | None, cancel: threading.Event | None = None) -> dict:
+def _run_check(root, name, argv, timeout_s, emit, task_id, cancel=None):
+    from factory.control.resources import command_slot
+    _emit(emit, 'task.activity', {'phase': 'waiting_capacity', 'detail': name}, task_id)
+    try:
+        with command_slot(timeout_s, cancel) as waited:
+            _emit(emit, 'task.activity', {'phase': 'checking', 'detail': name, 'wait_s': round(waited, 3)}, task_id)
+            record = _run_check_unlimited(root, name, argv, max(.001, timeout_s - waited), emit, task_id, cancel)
+            return {**record, 'wait_s': round(waited, 3)}
+    except (TimeoutError, InterruptedError) as exc:
+        record = {'name': name, 'argv': argv, 'exit': None, 'stderr': str(exc),
+                  'timeout': isinstance(exc, TimeoutError), 'cancelled': isinstance(exc, InterruptedError)}
+        _emit(emit, 'check.result', record, task_id)
+        return record
+
+
+def _run_check_unlimited(root: Path, name: str, argv: list[str], timeout_s: float, emit: Callable, task_id: str | None, cancel: threading.Event | None = None) -> dict:
     _emit(emit, "tool/check", {"name": name, "argv": argv}, task_id)
     started = time.monotonic()
     proc = subprocess.Popen(argv, cwd=root, env=check_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -638,6 +653,7 @@ def execute_plan(
         # that point: an exhausted quota must leave no phantom unknown charge.
         provider_dispatched = getattr(runner, "governance", None) is None
         provider_started_emitted = False
+        attempt_started_at = time.monotonic()
 
         def provider_started(call_id: Any = None) -> None:
             nonlocal provider_started_emitted
@@ -703,7 +719,7 @@ def execute_plan(
 
         def finish(status: str, **values: Any) -> dict:
             usage()
-            payload = {**route, "status": status, "cost_usd": cost, **values}
+            payload = {**route, "status": status, "cost_usd": cost, "duration_s": round(time.monotonic() - attempt_started_at, 3), **values}
             _emit(emit, "attempt.completed" if status == "verified" else "attempt.failed", payload, task_id)
             return {"status": status, "cost_usd": cost, "attempt": payload, **values}
 
@@ -734,6 +750,7 @@ def execute_plan(
                     provider_started(event_payload.get("id"))
             if provider_dispatched:
                 provider_started()
+            _emit(emit, 'task.activity', {'phase': 'model'}, task_id)
             result = runner.run(request, callback, cancel=cancel)
             final_text = str(getattr(result, "text", "") or "")
             if final_text and final_text != last_assistant_text:
@@ -848,52 +865,34 @@ def execute_plan(
             current_route = next_route
 
     completed: set[str] = set(restored)
+    finished: set[str] = set(restored)
     failed: str | None = None
     cancelled = False
     stop_reason: str | None = None
     stop_kind: str | None = None
     stop_blocked = False
-    while len(completed) < len(tasks):
-        remaining()
-        if cancel.is_set():
-            for task_id in tasks:
-                if task_id not in completed:
-                    by_id[task_id]["status"] = "cancelled"
-            raise ExecutionError("execution cancelled", artifacts=artifacts)
-        current_block = dispatch_block_reason()
-        if current_block is not None:
-            stop_reason = current_block
-            stop_kind = "unknown_cost" if cost_unknown else "budget"
-        ready = [task for task_id, task in tasks.items() if task_id not in completed and all(dep in completed for dep in task["depends_on"])]
-        if failed is not None:
-            for task in tasks.values():
-                if task["id"] not in completed:
-                    by_id[task["id"]]["status"] = "blocked"
-            raise ExecutionError(f"task {failed} failed", artifacts={**artifacts, "tasks": list(by_id.values())})
-        if stop_reason is not None:
-            for task in tasks.values():
-                if task["id"] not in completed:
-                    by_id[task["id"]]["status"] = "blocked"
-                    stop_blocked = True
-            break
-        if not ready:
-            raise ExecutionError("DAG made no progress", artifacts=artifacts)
-        # Overlapping paths are serialized within a wave.  Independent tasks get
-        # distinct worktrees and are safe to run together.
-        wave: list[dict] = []
-        used: set[str] = set()
-        for task in ready:
-            if len(wave) >= max_parallel or any(_overlaps(tuple(task["paths"]), tuple(other["paths"])) for other in wave):
-                continue
-            wave.append(task)
-            used.update(task["paths"])
-        if not wave:
-            wave = [ready[0]]
-        futures: dict[concurrent.futures.Future, tuple[dict, Path, str, Mapping[str, Any]]] = {}
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="factory-task")
-        pending: set[concurrent.futures.Future] = set()
-        try:
-            for task in wave:
+    futures: dict[concurrent.futures.Future, tuple] = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="factory-task")
+    try:
+        while len(finished) < len(tasks):
+            remaining()
+            if cancel.is_set():
+                cancelled = True
+                break
+            current_block = dispatch_block_reason()
+            if current_block is not None:
+                stop_reason = current_block
+                stop_kind = "unknown_cost" if cost_unknown else "budget"
+            active = [item[0] for item in futures.values()]
+            active_ids = {task['id'] for task in active}
+            ready = [task for tid, task in tasks.items()
+                     if tid not in finished and tid not in active_ids
+                     and all(dep in completed for dep in task['depends_on'])]
+            for task in ([] if stop_reason else ready):
+                if len(futures) >= max_parallel:
+                    break
+                if any(_overlaps(tuple(task['paths']), tuple(item[0]['paths'])) for item in futures.values()):
+                    continue
                 remaining()
                 task_id = task["id"]
                 from factory.control.model_routing import RoutingError, select_profile
@@ -914,19 +913,19 @@ def execute_plan(
                 _emit(emit, "task.started", {**route, "branch": child_branch, "worktree": str(child_path)}, task_id)
                 future = pool.submit(copy_context().run, run_with_retries, task, child_path, child_branch, route)
                 futures[future] = (task, child_path, child_branch, route)
-            done, pending = concurrent.futures.wait(futures, timeout=remaining())
-            if pending:
-                cancel.set()
-                raise ExecutionError(f"task timeout after {timeout_s}s", artifacts=artifacts)
-            for future in done:
-                task, child_path, child_branch, _ = futures[future]
+                checkpoint()
+            if not futures:
+                break
+            done, _ = concurrent.futures.wait(futures, timeout=min(0.25, remaining()),
+                                              return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in sorted(done, key=lambda item: list(tasks).index(futures[item][0]['id'])):
+                task, child_path, child_branch, _ = futures.pop(future)
                 task_id = task["id"]
                 result = future.result()
                 previous_attempts = previous.get(task_id, {}).get('attempts', [])
                 if previous_attempts:
                     result['attempts'] = [*previous_attempts, *[{**attempt, 'attempt': len(previous_attempts) + index + 1} for index, attempt in enumerate(result.get('attempts', []))]]
                 by_id[task_id].update(result)
-                completed.add(task_id)
                 if result.get("status") == "verified":
                     _emit(emit, "task.completed", {"status": "verified", "commit": result.get("commit"), "cost_usd": result.get("cost_usd"), "attempts": result.get("attempts", [])}, task_id)
                 else:
@@ -949,40 +948,46 @@ def execute_plan(
                         cancelled = True
                     else:
                         failed = task_id
-        finally:
-            if pending:
-                cancel.set()
-                pool.shutdown(wait=False, cancel_futures=True)
+                finished.add(task_id)
+                if result.get('status') != 'verified':
+                    checkpoint()
+                    continue
+                commit = by_id[task_id].get("commit")
+                if not commit:
+                    continue
+                rc, _, err = _git(integration_path, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Factory", "-c", "user.email=factory@localhost", "cherry-pick", commit, timeout_s=timeout_s)
+                if rc != 0:
+                    _git(integration_path, "cherry-pick", "--abort", timeout_s=timeout_s)
+                    raise ExecutionError(f"cherry-pick failed for {task_id}: {_clip(err)}", artifacts={**artifacts, "tasks": list(by_id.values())})
+                integrated = _git_ok(integration_path, "rev-parse", "HEAD", timeout_s=timeout_s)
+                completed.add(task_id)
+                checkpoint()
+    finally:
+        if futures:
+            cancel.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+        # Graceful stop must retain the latest retry worktree and any completed
+        # commit, even when cancellation interrupted the scheduler's wait.
+        for future, (task, _, _, _) in futures.items():
+            task_id = task['id']
+            if future.done() and not future.cancelled() and future.exception() is None:
+                by_id[task_id].update(future.result())
+                finished.add(task_id)
             else:
-                pool.shutdown(wait=True, cancel_futures=True)
-        if cancelled:
-            for task in tasks.values():
-                if task["id"] not in completed:
-                    by_id[task["id"]]["status"] = "cancelled"
-            raise ExecutionError("execution cancelled", artifacts={**artifacts, "tasks": list(by_id.values())})
-        if failed is not None:
-            continue
-        # Integrate this completed wave serially, in plan order.
-        for task in wave:
-            task_id = task["id"]
-            commit = by_id[task_id].get("commit")
-            if not commit:
-                continue
-            rc, _, err = _git(integration_path, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Factory", "-c", "user.email=factory@localhost", "cherry-pick", commit, timeout_s=timeout_s)
-            if rc != 0:
-                _git(integration_path, "cherry-pick", "--abort", timeout_s=timeout_s)
-                raise ExecutionError(f"cherry-pick failed for {task_id}: {_clip(err)}", artifacts={**artifacts, "tasks": list(by_id.values())})
-            integrated = _git_ok(integration_path, "rev-parse", "HEAD", timeout_s=timeout_s)
+                by_id[task_id]['status'] = 'cancelled'
         checkpoint()
-        # Dependents must start from the newly integrated commit.
-
+    for task_id, task in tasks.items():
+        if task_id not in finished:
+            dependencies = [dep for dep in task['depends_on'] if dep not in completed]
+            by_id[task_id].update(status='cancelled' if cancelled else 'blocked', waiting_for=dependencies)
+            stop_blocked = stop_blocked or stop_reason is not None
+    checkpoint()
     if cancelled:
         raise ExecutionError("execution cancelled", artifacts={**artifacts, "tasks": list(by_id.values())})
     if failed is not None:
-        for task in tasks.values():
-            if task["id"] not in completed:
-                by_id[task["id"]]["status"] = "blocked"
         raise ExecutionError(f"task {failed} failed", artifacts={**artifacts, "tasks": list(by_id.values())})
+    if len(completed) < len(tasks) and stop_reason is None:
+        raise ExecutionError("DAG made no progress", artifacts={**artifacts, "tasks": list(by_id.values())})
 
     final_checks: list[dict] = []
     integration_repaired = False

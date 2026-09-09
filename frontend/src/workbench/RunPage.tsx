@@ -116,6 +116,25 @@ function CheckEvidence({ check, index, context }: { check: Record<string, unknow
   return <details className="wb-check-detail"><summary><span>{name}</span><strong className={passed ? 'wb-check-pass' : 'wb-check-fail'}>{outcome}</strong></summary><div className="wb-check-meta"><span>退出码：{check.exit === null || check.exit === undefined ? '—' : String(check.exit)}</span><span>超时：{check.timeout === true ? '是' : '否'}</span>{typeof check.duration_s === 'number' && <span>耗时：{check.duration_s}s</span>}</div>{hasOutput && <div className="wb-check-output">{typeof check.stdout === 'string' && <div><span className="wb-artifact-label">stdout</span><pre>{check.stdout}</pre></div>}{typeof check.stderr === 'string' && <div><span className="wb-artifact-label">stderr</span><pre>{check.stderr}</pre></div>}</div>}</details>
 }
 
+export function ExecutionProgress({ run }: { run: Run }) {
+  const live = new Map<string, Record<string, unknown>>()
+  const checkpoint = (run as Run & { checkpoint?: { tasks?: unknown[] } }).checkpoint
+  for (const source of [run.artifacts?.tasks, checkpoint?.tasks, run.tasks]) {
+    if (Array.isArray(source)) for (const task of source) {
+      if (isRecord(task) && typeof task.id === 'string') live.set(task.id, { ...live.get(task.id), ...task })
+    }
+  }
+  const labels: Record<string, string> = { model: '模型处理中', command: '执行项目命令', checking: '运行验收检查', waiting_capacity: '等待服务器执行空位' }
+  return <section className="wb-execution-card" aria-label="任务实时进度"><h2>任务实时进度</h2><p>独立任务并行推进；失败只阻塞依赖它的分支。本地命令与检查排队执行。</p><div className="wb-attempt-groups">{(run.plan?.tasks ?? []).map(task => {
+    const item = live.get(task.id) ?? {}
+    const status = typeof item.status === 'string' ? item.status : 'pending'
+    const activity = isRecord(item.activity) ? item.activity : {}
+    const dependencies = (task.depends_on ?? []).filter(id => !['verified', 'completed'].includes(String(live.get(id)?.status)))
+    const text = status === 'running' ? labels[String(activity.phase)] ?? '正在执行' : ['pending', 'queued', 'blocked'].includes(status) ? dependencies.length ? `等待前置任务：${dependencies.join('、')}` : '等待调度' : statusLabel(status)
+    return <article className="wb-attempt-group" key={task.id}><header><strong>{task.title}</strong><span role="status">{text}</span></header></article>
+  })}</div></section>
+}
+
 interface TaskAttemptGroup {
   id: string
   title: string
@@ -167,7 +186,7 @@ function ExecutionAttempts({ run }: { run: Run }) {
   const groups = attemptGroups(run)
   const active = ['queued', 'running', 'verifying'].includes(run.status)
   if (!groups.length) return <section className="wb-execution-card"><div><span className="wb-eyebrow">执行分工与修复</span><h2>模型调用记录</h2><p className="wb-runtime-note">{active ? '正在执行，尚未收到可持久化的模型尝试记录。' : '本次运行尚未记录模型尝试。'}</p></div></section>
-  return <section className="wb-execution-card" aria-labelledby="execution-attempts-title"><div className="wb-execution-heading"><div><span className="wb-eyebrow">执行分工与修复</span><h2 id="execution-attempts-title">实际模型尝试</h2><p>每次调用和验证结果均来自本次运行的已记录证据。</p></div><span className="wb-execution-total">{groups.reduce((total, group) => total + group.attempts.length, 0)} 次尝试</span></div><div className="wb-attempt-groups">{groups.map((group) => <article className="wb-attempt-group" key={group.id}><header><div><span className="wb-task-id">{group.id}</span><strong>{group.title}</strong></div><span>{group.attempts.length} 次尝试{group.status ? ` · ${statusLabel(group.status)}` : ''}</span></header><div className="wb-attempt-list">{group.attempts.map((attempt, index) => { const state = attemptState(attempt); const evidence = attemptEvidence(attempt); const profile = typeof attempt.profile === 'string' ? attempt.profile : '未记录角色'; const provider = typeof attempt.provider === 'string' ? attempt.provider : '未记录服务'; const model = typeof attempt.model === 'string' ? attempt.model : '未记录模型'; const reason = typeof attempt.reason === 'string' ? attempt.reason : '未记录选择原因'; const number = typeof attempt.attempt === 'number' ? attempt.attempt : index + 1; return <article className="wb-attempt" key={`${group.id}-${number}-${index}`}><div className="wb-attempt-summary"><div><strong>第 {number} 次</strong><span className={`wb-attempt-state ${state.tone}`}>{state.text}</span></div><span>{profile} · {provider} / {model}</span><span>{reason}</span></div>{evidence && <details className="wb-attempt-evidence"><summary>展开错误与检查证据</summary><pre>{evidence}</pre></details>}</article> })}</div></article>)}</div></section>
+  return <><ExecutionProgress run={run} /><section className="wb-execution-card" aria-labelledby="execution-attempts-title"><div className="wb-execution-heading"><div><span className="wb-eyebrow">执行分工与修复</span><h2 id="execution-attempts-title">实际模型尝试</h2><p>每次调用和验证结果均来自本次运行的已记录证据。</p></div><span className="wb-execution-total">{groups.reduce((total, group) => total + group.attempts.length, 0)} 次尝试</span></div><div className="wb-attempt-groups">{groups.map((group) => <article className="wb-attempt-group" key={group.id}><header><div><span className="wb-task-id">{group.id}</span><strong>{group.title}</strong></div><span>{group.attempts.length} 次尝试{group.status ? ` · ${statusLabel(group.status)}` : ''}</span></header><div className="wb-attempt-list">{group.attempts.map((attempt, index) => { const state = attemptState(attempt); const evidence = attemptEvidence(attempt); const profile = typeof attempt.profile === 'string' ? attempt.profile : '未记录角色'; const provider = typeof attempt.provider === 'string' ? attempt.provider : '未记录服务'; const model = typeof attempt.model === 'string' ? attempt.model : '未记录模型'; const reason = typeof attempt.reason === 'string' ? attempt.reason : '未记录选择原因'; const number = typeof attempt.attempt === 'number' ? attempt.attempt : index + 1; return <article className="wb-attempt" key={`${group.id}-${number}-${index}`}><div className="wb-attempt-summary"><div><strong>第 {number} 次</strong><span className={`wb-attempt-state ${state.tone}`}>{state.text}</span></div><span>{profile} · {provider} / {model}</span><span>{reason}{typeof attempt.duration_s === 'number' && <small> · 耗时 {Math.round(attempt.duration_s)} 秒</small>}</span></div>{evidence && <details className="wb-attempt-evidence"><summary>展开错误与检查证据</summary><pre>{evidence}</pre></details>}</article> })}</div></article>)}</div></section></>
 }
 
 function FrozenRuntime({ run }: { run: Run }) {

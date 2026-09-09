@@ -153,3 +153,38 @@ def test_python_project_metadata_allowed_but_test_configuration_protected(repo, 
     with (repo / 'pyproject.toml').open('a') as file:
         file.write('[tool.pytest.ini_options]\naddopts="--ignore=tests"\n')
     assert _protected_changes(repo, ('pyproject.toml',)) == ('pyproject.toml',)
+
+
+def test_scheduler_releases_dependent_before_other_worker_finishes(repo, provider_module):
+    released = threading.Event()
+    class Runner:
+        def run(self, request, emit, cancel=None):
+            name = request.prompt
+            if name == 'slow':
+                assert released.wait(5), 'ready child was held behind unrelated slow task'
+            if name == 'child':
+                assert Path(request.workspace, 'fast.txt').exists()
+                released.set()
+            Path(request.workspace, name + '.txt').write_text(name)
+            return Result()
+    tasks = [{'id': n, 'prompt': n, 'paths': [n + '.txt'], 'checks': ['ok'],
+              'depends_on': ['fast'] if n == 'child' else []} for n in ['fast', 'slow', 'child']]
+    out = execute_plan(run_id='stream', plan={'tasks': tasks}, project=_project(repo),
+                       profiles={'standard': {'provider': 'fake', 'model': 'test'}},
+                       runner=Runner(), emit=lambda *a: None, cancel=threading.Event())
+    assert all(t['status'] == 'verified' for t in out['tasks'])
+
+
+def test_failed_branch_does_not_stop_independent_descendants(repo, provider_module):
+    runner = FakeRunner({'bad': [('outside.txt', 'bad')], 'good': [('good.txt', 'good')],
+                         'child': [('child.txt', 'child')]})
+    tasks = [{'id': n, 'prompt': n, 'paths': [n + '.txt'], 'checks': ['ok'],
+              'depends_on': ['good'] if n == 'child' else ['bad'] if n == 'blocked' else []}
+             for n in ['bad', 'good', 'child', 'blocked']]
+    with pytest.raises(ExecutionError) as error:
+        execute_plan(run_id='branches', plan={'tasks': tasks}, project=_project(repo),
+                     profiles={'standard': {'provider': 'fake', 'model': 'test'}}, runner=runner,
+                     emit=lambda *a: None, cancel=threading.Event())
+    states = {t['id']: t['status'] for t in error.value.artifacts['tasks']}
+    assert states == {'bad': 'failed', 'good': 'verified', 'child': 'verified', 'blocked': 'blocked'}
+    assert 'blocked' not in runner.seen
