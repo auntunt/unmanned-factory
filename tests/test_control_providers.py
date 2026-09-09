@@ -9,6 +9,12 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def no_host_terminal_probe(monkeypatch):
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+
 from factory.control.providers import (
     ProviderCancelled,
     ProviderRequest,
@@ -464,6 +470,9 @@ def test_dsh_rejects_non_completed_finish_reason_and_does_not_duplicate_streams(
 
 def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: True)
+    monkeypatch.setattr(claude_terminal, 'create_server', lambda workspace: {'type': 'sdk', 'name': 'project'})
 
     mod = types.ModuleType("claude_agent_sdk")
     captured = {}
@@ -496,6 +505,8 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
         outside = await hook({"tool_name": "Write", "tool_input": {"file_path": "/tmp/outside.py"}}, "id", {})
         secret = await hook({"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / ".env")}}, "id", {})
         inside = await hook({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "src.py")}}, "id", {})
+        terminal = await hook({'tool_name': 'mcp__project__run_command', 'tool_input': {'command': 'python3 -m unittest'}}, 'id', {})
+        assert terminal['hookSpecificOutput']['permissionDecision'] == 'allow'
         assert outside["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert secret["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert inside["hookSpecificOutput"]["permissionDecision"] == "allow"
@@ -511,6 +522,9 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path)), lambda *_: None)
     assert result.text == "done"
     assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit"]
+    assert captured['allowed_tools'] == ['mcp__project__run_command']
+    assert captured['system_prompt']['preset'] == 'claude_code'
+    assert str(tmp_path) in captured['system_prompt']['append']
 
 
 def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, tmp_path):
@@ -554,3 +568,10 @@ def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, t
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path), read_only=True), lambda *_: None)
     assert result.text == "read"
     assert captured["tools"] == ["Read", "Glob", "Grep"]
+
+
+def test_claude_glob_accepts_absolute_workspace_but_not_escape(tmp_path):
+    from factory.control.providers import _claude_tool_allowed
+    assert _claude_tool_allowed('Glob', {'path': str(tmp_path), 'pattern': '**/*.py'}, tmp_path, False)
+    assert not _claude_tool_allowed('Glob', {'path': str(tmp_path.parent)}, tmp_path, False)
+    assert not _claude_tool_allowed('Glob', {'path': '../'}, tmp_path, False)

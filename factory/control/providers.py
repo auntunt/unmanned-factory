@@ -282,7 +282,7 @@ def _claude_tool_path(tool_name: str, input_data: Mapping[str, Any], workspace: 
     if not isinstance(raw, str) or not raw.strip():
         return None
     candidate = Path(raw)
-    if tool_name == "Glob" and (candidate.is_absolute() or ".." in candidate.parts):
+    if tool_name == "Glob" and ".." in candidate.parts:
         return None
     if not candidate.is_absolute():
         candidate = workspace / candidate
@@ -339,9 +339,16 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         raise ProviderError("claude SDK is not installed; install claude-agent-sdk") from exc
 
     workspace = Path(req.workspace).resolve()
+    from factory.control import claude_terminal
+    terminal_enabled = not req.read_only and claude_terminal.available()
+
+    def allowed(tool_name, input_data):
+        if tool_name == claude_terminal.TOOL_NAME:
+            return terminal_enabled
+        return _claude_tool_allowed(tool_name, input_data, workspace, req.read_only)
 
     async def can_use_tool(tool_name: str, input_data: dict[str, Any], context: Any) -> Any:
-        if _claude_tool_allowed(tool_name, input_data, workspace, req.read_only):
+        if allowed(tool_name, input_data):
             return PermissionResultAllow(updated_input=input_data)
         return PermissionResultDeny(
             message="No approval broker is available in the SDK worker; tool call denied",
@@ -354,14 +361,14 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         tool_input = input_data.get("tool_input")
         if not isinstance(tool_input, Mapping):
             tool_input = {}
-        allowed = _claude_tool_allowed(tool_name, tool_input, workspace, req.read_only)
+        permitted = allowed(tool_name, tool_input)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "allow" if allowed else "deny",
+                "permissionDecision": "allow" if permitted else "deny",
                 "permissionDecisionReason": (
                     "workspace-bounded file operation"
-                    if allowed else "tool or path denied by SDK worker policy"
+                    if permitted else "tool or path denied by SDK worker policy"
                 ),
             }
         }
@@ -377,6 +384,16 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         "setting_sources": [],
         "strict_mcp_config": True,
     }
+    options_kwargs['system_prompt'] = {'type': 'preset', 'preset': 'claude_code', 'append':
+        f'Your actual project working directory is {workspace}. Use relative paths or this exact directory; do not invent /workspace or /home/user/workspace. '
+        + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
+           if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
+    if terminal_enabled:
+        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace)}
+        options_kwargs['allowed_tools'] = [claude_terminal.TOOL_NAME]
+        emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False})
+    elif not req.read_only:
+        emit('execution.environment', {'terminal': 'unavailable', 'message': 'Isolated project terminal unavailable; file tools only'})
     if req.session_id:
         options_kwargs["resume"] = req.session_id
 
