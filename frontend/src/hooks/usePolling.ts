@@ -36,8 +36,12 @@ export function usePolling<T>(
   // 每次 effect 运行有自己的 generation；旧 generation 的响应一律丢弃。
   const genRef = useRef(0)
   const [manualTick, setManualTick] = useState(0)
+  const gateRef = useRef(createPollingGate(() => fetcherRef.current()))
 
   const refresh = useCallback(() => {
+    // A successful login can explicitly resume polling after a 401. Normal
+    // interval ticks stay stopped until then, avoiding an auth failure storm.
+    gateRef.current.resume()
     setManualTick((n) => n + 1)
   }, [])
 
@@ -48,7 +52,9 @@ export function usePolling<T>(
 
     const run = async () => {
       try {
-        const next = await fetcherRef.current()
+        const result = await gateRef.current.run()
+        if (result.stopped) return
+        const next = result.value
         if (genRef.current !== gen) return
         setData(next)
         setError(null)
@@ -81,6 +87,30 @@ function toMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   if (typeof err === 'string') return err
   return '未知错误'
+}
+
+export function isUnauthorized(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const value = err as { status?: unknown; response?: { status?: unknown } }
+  return value.status === 401 || value.response?.status === 401
+}
+
+export function createPollingGate<T>(fetcher: () => Promise<T>) {
+  let stopped = false
+  let generation = 0
+  return {
+    async run(): Promise<{ stopped: true } | { stopped: false; value: T }> {
+      if (stopped) return { stopped: true }
+      const current = generation
+      try {
+        return { stopped: false, value: await fetcher() }
+      } catch (error) {
+        if (current === generation && isUnauthorized(error)) stopped = true
+        throw error
+      }
+    },
+    resume() { generation += 1; stopped = false },
+  }
 }
 
 export default usePolling

@@ -6,7 +6,8 @@ import { request } from '../workspace/api'
 import type { WorkbenchProps } from './ui'
 
 const navigation = [
-  { to: '/', label: '工程总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
+  { to: '/', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: true },
+  { to: '/overview', label: '工程总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
   { to: '/runs', label: '运行看板', icon: 'M4 4h16v16H4zM9 4v16M15 4v16M4 10h5M9 14h6M15 8h5', end: false },
   { to: '/projects', label: '项目', icon: 'M3 7V5h6l2 2h10v13H3z', end: false },
   { to: '/capabilities', label: '工作能力', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },

@@ -57,6 +57,15 @@ class ProjectUpdate(Body):
     budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
 
 
+class ConnectProject(Body):
+    candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    checks: dict[str, list[str]] = Field(default_factory=dict)
+    auto_issues: bool = False
+    auto_publish: bool = False
+    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+
+
 class NewRun(Body):
     project_id: str
     request: str = Field(min_length=5, max_length=50_000)
@@ -95,7 +104,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     if not hasattr(svc, 'runtime_settings'):
         svc.runtime_settings = RuntimeSettings(store)
     secret = webhook_secret if webhook_secret is not None else os.getenv('FACTORY_WEBHOOK_SECRET', '')
-    static = Path(static_dir or Path(__file__).resolve().parents[2] / 'frontend' / 'dist').resolve()
+    static = Path(static_dir or os.getenv('FACTORY_STATIC_DIR') or Path(__file__).resolve().parents[2] / 'frontend' / 'dist').expanduser().resolve()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -121,10 +130,23 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(capability_router(store, svc))
     from factory.control.team_routes import router as team_router
     app.include_router(team_router(auth, governance))
+    from factory.control.deliverables import router as deliverables_router
+    app.include_router(deliverables_router(store, svc))
+    from factory.control.agent_routes import router as agent_router
+    app.include_router(agent_router(store, svc))
 
     @app.exception_handler(AuthError)
     async def auth_error(req, exc):
         return JSONResponse({'detail': str(exc)}, status_code=exc.status)
+
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.exception_handlers import request_validation_exception_handler
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(req, exc):
+        if req.url.path == '/api/v2/runtime/probe' and any(e['type'] == 'missing' for e in exc.errors()):
+            return JSONResponse({'detail': '模型检查请求缺少当前配置版本或模型档位。请刷新页面后重试；旧版页面无法发起此检查。'}, status_code=422)
+        return await request_validation_exception_handler(req, exc)
 
     @app.exception_handler(Conflict)
     async def conflict(req, exc):
@@ -139,7 +161,33 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         path = request.url.path
         public_api = path in ('/api/auth/login', '/api/v2/github/webhook')
         is_api = path.startswith('/api/')
-        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/skills', path) is not None
+        # Authenticate and check CSRF before opening the bounded Skill stream;
+        # an unauthenticated upload must not be buffered into memory first.
+        if skill_upload:
+            if request.headers.get('origin') != origin:
+                return JSONResponse({'detail': '请求来源不匹配'}, status_code=403)
+            early_user = auth.authenticate(request.cookies.get(COOKIE, ''))
+            if not early_user:
+                return JSONResponse({'detail': '请先登录'}, status_code=401)
+            if not hmac.compare_digest(request.headers.get('x-csrf-token', ''), early_user['csrf_token']):
+                return JSONResponse({'detail': '会话验证失败，请重新登录'}, status_code=403)
+            if early_user['role'] != 'admin':
+                return JSONResponse({'detail': '此操作需要管理员权限'}, status_code=403)
+        if skill_upload:
+            # Let UploadFile spool multipart parts; do not buffer the archive
+            # again in the control-plane middleware before parsing it.
+            upstream_receive = request._receive
+            upload_size = 0
+            async def limited_receive():
+                nonlocal upload_size
+                message = await upstream_receive()
+                upload_size += len(message.get('body', b''))
+                if upload_size > 21 * 1024 * 1024:
+                    raise HTTPException(413, '请求体过大')
+                return message
+            request._receive = limited_receive
+        if not skill_upload and request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
             chunks, size = [], 0
             async for chunk in request.stream():
                 size += len(chunk)
@@ -189,7 +237,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
-        if is_api:
+        if is_api or response.headers.get('content-type', '').startswith('text/html') or response.status_code == 404:
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -227,6 +275,31 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         validate_check_definitions(body.checks)
         validate_project_git(root, body.base_branch)
         return store.add_project({**body.model_dump(), 'workspace': str(root)})
+
+    @app.get('/api/v2/project-candidates')
+    def project_candidates(request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        from factory.control.project_discovery import discover
+        candidates = discover(allowed_root, store.projects())
+        return {'candidates': [{k: v for k, v in c.items() if k != 'workspace'} for c in candidates],
+                'root_available': allowed_root.is_dir()}
+
+    @app.post('/api/v2/projects/connect', status_code=201)
+    def connect_project(body: ConnectProject):
+        from factory.control.project_discovery import discover
+        with svc.lock:
+            candidate = next((c for c in discover(allowed_root, store.projects()) if c['id'] == body.candidate_id), None)
+            if not candidate:
+                raise HTTPException(409, '工程已发生变化或暂不可用，请刷新工程列表后重新选择')
+            if candidate['registered']:
+                raise Conflict('这个工程已经登记，请在项目列表中打开')
+            if candidate['repository'].startswith('local/') and (body.auto_publish or body.auto_issues):
+                raise HTTPException(400, '这个工程尚未连接 GitHub；可以先登记并下载成果，连接后再启用 GitHub 自动化')
+            return create_project(Project(name=body.name or candidate['name'][:120],
+                repository=candidate['repository'], workspace=candidate['workspace'],
+                base_branch=candidate['base_branch'], checks=body.checks,
+                auto_issues=body.auto_issues, auto_publish=body.auto_publish, budget_usd=body.budget_usd))
 
     def validate_check_definitions(checks):
         if len(checks) > 20:
@@ -397,7 +470,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         except (Conflict, KeyError):
             raise
         except Exception:
-            raise HTTPException(502, '发布未完成，请查看本次运行记录后重试') from None
+            message = (store.get(rid).get('artifacts') or {}).get('publish_error')
+            raise HTTPException(502, message or 'GitHub 发布未完成；本地成果仍可查看和下载。') from None
 
     @app.get('/api/v2/runs/{rid}/events')
     def events(rid: str, after: int = 0):
@@ -511,6 +585,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     @app.get('/api/{path:path}')
     def legacy(path: str, request: Request):
+        if path == 'runtime':
+            raise HTTPException(404, '这是旧版模型配置接口。请刷新页面，使用当前工作台的“运行配置”。')
         if path.startswith('v2/') or path.startswith('auth/'):
             raise HTTPException(404, '接口不存在')
         if path == 'events':

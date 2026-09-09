@@ -1,9 +1,8 @@
 # 看板的公网入口示例。把 HOST 换成你的 IP 或域名。
 #
-# 为什么认证在这一层：dashboard 进程自带的 token + Origin 检查只防 CSRF，
-# 不防未授权读取 —— GET 全部无认证。审计库里有 diff 和模型原始输出，
-# 直接裸在公网上等于把代码和成本数据都公开。所以 basic_auth 是必需的，
-# 不是可选项。生成哈希：caddy hash-password
+# 控制服务自己的登录会话、Cookie 和 CSRF 是应用认证边界；Caddy 的
+# basic_auth（如保留）只是额外的网络入口门槛，不能替代应用登录。生成哈希：
+# caddy hash-password
 #
 # dashboard 固定绑 127.0.0.1（它刻意不提供 --host），只能从本机连上，
 # 全部暴露面都由这份配置决定。

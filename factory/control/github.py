@@ -127,7 +127,7 @@ class GitHubDelivery:
                                 capture_output=True, text=True, timeout=120)
         if result.returncode:
             # HTTP authorization and low-level diagnostics stay out of user-visible logs.
-            raise ValueError('GitHub push 失败；检查凭据权限、网络或远端分支是否发生变化')
+            raise ValueError(push_failure_message(result.stderr))
         owner = repo.split('/')[0]
         response = self.client.get(f'/repos/{repo}/pulls',
                                    params={'head': f'{owner}:{branch}', 'state': 'open',
@@ -232,3 +232,40 @@ class GitHubDelivery:
                 'pr_url': pr_url, 'head_sha': actual_head_sha,
                 'merge_commit_sha': merge_sha, 'base_branch': base_branch,
                 'merged_at': merged_at}
+
+
+def publish_failure_message(exc: Exception) -> str:
+    """Actionable diagnostics without exposing request headers or token-bearing URLs."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        reason = {401: 'GitHub 凭据无效或已过期，请更新凭据',
+                  403: 'GitHub 拒绝访问，请检查仓库写入和 Pull Request 权限或访问限制',
+                  404: 'GitHub 仓库不可见，请检查仓库名及凭据的仓库访问范围',
+                  422: 'GitHub 无法创建 PR，请检查基础分支及是否存在可发布的差异'}.get(code, f'GitHub 服务返回 HTTP {code}，请稍后重试')
+    elif isinstance(exc, (httpx.TimeoutException, subprocess.TimeoutExpired)):
+        reason = '连接 GitHub 超时，请检查服务器网络后重试'
+    elif isinstance(exc, httpx.TransportError):
+        reason = '无法连接 GitHub，请检查服务器网络或代理后重试'
+    elif isinstance(exc, ValueError) and str(exc).startswith(('尚未配置', '无效', '拒绝发布', '验收后', 'GitHub push', '远端 PR')):
+        reason = str(exc)
+    else:
+        reason = 'GitHub 发布失败，请检查发布配置及运行记录'
+    return reason + '。本次验证结果保留，成果仍可查看和下载。'
+
+
+def push_failure_message(stderr: str) -> str:
+    """Classify git output locally; never return raw diagnostics or URLs."""
+    text = (stderr or '').lower()
+    if any(word in text for word in ('authentication failed', 'invalid username', 'could not read username', 'invalid credentials')):
+        return 'GitHub push 失败：凭据无效或已过期，请更新发布凭据'
+    if any(word in text for word in ('permission to', 'write access', '403', 'permission denied')):
+        return 'GitHub push 失败：没有仓库写入权限，请检查凭据的仓库授权'
+    if 'repository not found' in text:
+        return 'GitHub push 失败：仓库不存在或当前凭据不可见，请检查仓库名与访问范围'
+    if any(word in text for word in ('non-fast-forward', 'fetch first', 'stale info')):
+        return 'GitHub push 失败：远端分支已经变化，请核对远端版本后重新验证，不要强制覆盖'
+    if any(word in text for word in ('protected branch', 'repository rule', 'gh013', 'gh006', 'pre-receive hook declined')):
+        return 'GitHub push 失败：仓库规则拒绝提交，请检查分支规则与提交要求'
+    if any(word in text for word in ('could not resolve', 'failed to connect', 'timed out', 'ssl', 'connection reset', 'proxy')):
+        return 'GitHub push 失败：网络、代理或证书连接异常，请检查服务器到 GitHub 的连接'
+    return 'GitHub push 失败；检查凭据权限、网络或远端分支是否发生变化'

@@ -223,3 +223,18 @@
 .wb-detail-page .wb-stop-reason-raw { margin-top: 10px; }
 .wb-detail-page .wb-stop-reason-raw summary { color: var(--detail-muted); cursor: pointer; font-size: 12px; }
 .wb-detail-page .wb-stop-reason-raw code { display: block; margin-top: 6px; border-radius: 6px; background: #f4f6f4; padding: 8px; overflow-wrap: anywhere; color: #30413b; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.wb-deliverables-heading, .wb-deliverable-item { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.wb-deliverables p { color: var(--wb-muted, #62736c); line-height: 1.6; }
+.wb-deliverable-list { margin: 18px 0; max-height: 540px; overflow: auto; }
+.wb-deliverable-item { padding: 16px 0; border-bottom: 1px solid #dce5e1; }
+.wb-deliverable-item > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.wb-deliverable-item p { margin: 5px 0; }
+.wb-deliverable-item code { font-size: 12px; overflow-wrap: anywhere; }
+.wb-deliverables select { padding: 8px; border: 1px solid #dce5e1; border-radius: 6px; background: white; }
+.wb-file-preview { margin: 20px 0; padding: 18px; background: #f5f8f6; border: 1px solid #dce5e1; border-radius: 10px; }
+.wb-file-preview pre, .wb-deliverables details pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 500px; overflow: auto; }
+.wb-file-preview iframe { width: 100%; height: 440px; border: 0; background: white; }
+@media (max-width: 640px) { .wb-deliverables-heading, .wb-deliverable-item { align-items: flex-start; flex-direction: column; } }
+
+.wb-deliverable-image { display: block; width: 100%; max-height: 560px; object-fit: contain; background: white; }

@@ -34,6 +34,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败，请稍后重试。'
 }
 
+
 function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps & { project: ProjectRecord; onSaved: (project: ProjectRecord) => void }) {
   const [name, setName] = useState(project.name)
   const [branch, setBranch] = useState(project.base_branch)
@@ -47,22 +48,31 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const location = useLocation()
   const returnRun = search.get('return_run')
   const [error, setError] = useState<string | null>(null)
+  const [conflict, setConflict] = useState<ProjectRecord | null>(null)
+  const [baseRevision, setBaseRevision] = useState(project.revision ?? 1)
+  const dirtyRef = useRef(false)
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
-  useEffect(() => { setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 10)) }, [project])
+  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 10)); setBaseRevision(project.revision ?? 1) }, [project])
 
   const save = async (event: FormEvent) => {
-    event.preventDefault(); setError(null); setSaved(false)
+    event.preventDefault(); setError(null); setConflict(null); setSaved(false)
     const budgetValue = Number(budget)
     const checksError = validateChecks(checks)
     if (checksError) { setError(checksError); return }
     if (!Number.isFinite(budgetValue) || budgetValue <= 0) { setError('预算需要是大于 0 的数字。'); return }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
     try {
-      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: project.revision ?? 1, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: budgetValue } })
-      if (!controller.signal.aborted) { onSaved(next); setSaved(true) }
-    } catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
+      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: budgetValue } })
+      if (!controller.signal.aborted) { dirtyRef.current = false; setBaseRevision(next.revision ?? baseRevision); onSaved(next); setSaved(true) }
+    } catch (cause) {
+      if (!controller.signal.aborted) {
+        if (cause instanceof WorkspaceApiError && cause.status === 409) {
+          try { const payload = await request<{ projects: ProjectRecord[] }>(`/api/v2/projects`, { onUnauthorized, signal: controller.signal }); const latest = payload.projects.find((item) => String(item.id) === String(project.id)); if (latest) setConflict(latest); setError('项目设置已被其他人更新。请逐项审阅最新版本后，再明确选择如何重试。') } catch (refreshCause) { setError(`保存冲突，且无法读取最新项目设置：${errorText(refreshCause)}`) }
+        } else setError(errorText(cause))
+      }
+    } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
   useEffect(() => {
     const target = location.hash === '#project-budget' ? 'project-budget' : location.hash === '#project-checks' ? 'project-checks' : null
@@ -80,15 +90,16 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
     <form className="wb-card wb-form" onSubmit={save}>
       <div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目设置</span><h2>预算与执行边界</h2><p>以下设置只属于这个项目。保存后用于后续规划和重试，不会自动继续已经暂停的运行。</p></div>{project.revision !== undefined && <span className="wb-revision">修订 {project.revision}</span>}</div>
       <section className="pw-budget-field" id="project-budget" aria-labelledby="project-budget-label">
-        <label htmlFor="project-budget-input" id="project-budget-label">单次运行预算（美元）<input id="project-budget-input" type="number" min="0.01" max="1000" step="0.01" required value={budget} onChange={(event) => { setBudget(event.target.value); setSaved(false) }} /></label>
+        <label htmlFor="project-budget-input" id="project-budget-label">单次运行预算（美元）<input id="project-budget-input" type="number" min="0.01" max="1000" step="0.01" required value={budget} onChange={(event) => { dirtyRef.current = true; setBudget(event.target.value); setSaved(false) }} /></label>
         <small>每条需求分别使用这条费用停止线。服务商已报告的累计费用超过此值后，工厂停止后续派发；它不是充值余额，也不是成员的月度 token 额度。</small>
         <small>正在进行的模型调用可能超过停止线。费用尚未返回时，按工作区的未知费用策略处理。</small>
       </section>
-      <div className="wb-form-grid wb-form-grid-two"><label>项目名称<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label><label>基础分支<input required value={branch} onChange={(event) => setBranch(event.target.value)} /></label><label>仓库<input value={project.repository} readOnly /></label><label>工作区<input value={project.workspace} readOnly /></label></div>
-      <details className="wb-advanced" id="project-checks"><summary>验收检查与自动发布</summary><div className="wb-advanced-body"><ChecksEditor value={checks} onChange={setChecks} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={autoIssues} onChange={(event) => setAutoIssues(event.target.checked)} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={autoPublish} onChange={(event) => setAutoPublish(event.target.checked)} />允许通过验证后自动交付</label></div></div></details>
+      <div className="wb-form-grid wb-form-grid-two"><label>项目名称<input required maxLength={120} value={name} onChange={(event) => { dirtyRef.current = true; setName(event.target.value) }} /></label><label>基础分支<input required value={branch} onChange={(event) => { dirtyRef.current = true; setBranch(event.target.value) }} /></label><label>仓库<input value={project.repository} readOnly /></label><label>工作区<input value={project.workspace} readOnly /></label></div>
+      <details className="wb-advanced" id="project-checks"><summary>验收检查与自动发布</summary><div className="wb-advanced-body"><ChecksEditor value={checks} onChange={(value) => { dirtyRef.current = true; setChecks(value) }} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={autoIssues} onChange={(event) => { dirtyRef.current = true; setAutoIssues(event.target.checked) }} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={autoPublish} onChange={(event) => { dirtyRef.current = true; setAutoPublish(event.target.checked) }} />允许通过验证后自动交付</label></div></div></details>
       {error && <ErrorNotice message={error} />}
+      {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 预算 ${Number(conflict.budget_usd ?? 0).toFixed(2)} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
       {saved && <div className="wb-notice" role="status">项目设置已保存，单次运行预算为 ${Number(project.budget_usd ?? budget).toFixed(2)}。{returnRun ? '返回该运行后，可按新设置重新规划。' : '后续规划和重试将使用新设置。'}</div>}
-      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy}>{busy ? '保存中…' : '保存预算与项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行并重新规划 →' : '返回刚才的运行'}</Link>}</div>
+      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存预算与项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行并重新规划 →' : '返回刚才的运行'}</Link>}</div>
     </form>
     <section className="wb-card"><div className="wb-card-head"><div><span className="wb-eyebrow">配置在哪里</span><h2>预算、额度与模型分别管理什么</h2></div></div>
       <div className="pw-budget-guide"><div><h3>本项目 · 单次费用</h3><p>限制每条需求已报告的累计美元费用，在上方设置。修改后再从暂停的运行发起重试。</p><a className="wb-text-link" href="#project-budget">定位项目预算 ↑</a></div>

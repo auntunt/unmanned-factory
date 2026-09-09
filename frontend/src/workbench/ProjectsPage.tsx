@@ -13,11 +13,13 @@ export interface ProjectRecord extends Project {
   budget_usd?: number
 }
 
+export interface ProjectCandidate { id: string; name: string; repository: string; base_branch: string; registered: boolean; project_id?: string | number | null }
+
+export function availableProjectCandidates(candidates: ProjectCandidate[]): ProjectCandidate[] { return candidates.filter((candidate) => !candidate.registered) }
+
 interface ProjectDraft {
   name: string
-  repository: string
-  workspace: string
-  base_branch: string
+  candidate_id: string
   checks: ChecksMap
   auto_issues: boolean
   auto_publish: boolean
@@ -25,7 +27,7 @@ interface ProjectDraft {
   autonomous: boolean
 }
 
-const blankDraft: ProjectDraft = { name: '', repository: '', workspace: '', base_branch: 'main', checks: {}, auto_issues: false, auto_publish: false, budget_usd: '10', autonomous: true }
+const blankDraft: ProjectDraft = { name: '', candidate_id: '', checks: {}, auto_issues: false, auto_publish: false, budget_usd: '10', autonomous: true }
 
 function errorText(error: unknown): string {
   if (error instanceof WorkspaceApiError) return error.detail
@@ -34,10 +36,15 @@ function errorText(error: unknown): string {
 
 function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps & { onCreated: (project: ProjectRecord, warning?: string) => void; onCancel: () => void }) {
   const [draft, setDraft] = useState<ProjectDraft>(blankDraft)
+  const [candidates, setCandidates] = useState<ProjectCandidate[] | null>(null)
+  const [candidateError, setCandidateError] = useState<string | null>(null)
+  const [rootAvailable, setRootAvailable] = useState(true)
+  const [refresh, setRefresh] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
+  useEffect(() => { const controller = new AbortController(); setCandidates(null); setCandidateError(null); void request<{ candidates: ProjectCandidate[]; root_available: boolean }>('/api/v2/project-candidates', { onUnauthorized, signal: controller.signal }).then((payload) => { if (!controller.signal.aborted) { setCandidates(payload.candidates); setRootAvailable(payload.root_available) } }).catch((cause) => { if (!controller.signal.aborted) setCandidateError(errorText(cause)) }); return () => controller.abort() }, [onUnauthorized, refresh])
   const update = <K extends keyof ProjectDraft>(key: K, value: ProjectDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(null)
@@ -45,11 +52,12 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     if (checksError) { setError(checksError); return }
     const budget = Number(draft.budget_usd)
     if (!Number.isFinite(budget) || budget <= 0) { setError('预算需要是大于 0 的数字。'); return }
+    if (!candidates?.some((item) => item.id === draft.candidate_id && !item.registered)) { setError('请从最新列表中选择工程。'); return }
     setBusy(true)
     controllerRef.current?.abort()
     const controller = new AbortController(); controllerRef.current = controller
     try {
-      const project = await request<ProjectRecord>('/api/v2/projects', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { name: draft.name.trim(), repository: draft.repository.trim(), workspace: draft.workspace.trim(), base_branch: draft.base_branch.trim() || 'main', checks: draft.checks, auto_issues: draft.auto_issues, auto_publish: draft.auto_publish, budget_usd: budget } })
+      const project = await request<ProjectRecord>('/api/v2/projects/connect', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { candidate_id: draft.candidate_id, name: draft.name.trim() || undefined, checks: draft.checks, auto_issues: draft.auto_issues, auto_publish: draft.auto_publish, budget_usd: budget } })
       let warning: string | undefined
       if (draft.autonomous) {
         try {
@@ -67,15 +75,13 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     <div className="wb-card-head"><div><span className="wb-eyebrow">登记项目</span><h2 id="create-project-title">连接一个已有工程</h2><p>项目必须指向服务器上已经存在的 Git 工作区。</p></div><button className="wb-icon-button wb-close-button" type="button" onClick={onCancel} aria-label="关闭">×</button></div>
     <form className="wb-form" onSubmit={submit}>
       <div className="wb-form-grid wb-form-grid-two">
-        <label>项目名称<input required maxLength={120} value={draft.name} onChange={(event) => update('name', event.target.value)} placeholder="支付服务" /></label>
-        <label>仓库（owner/name）<input required pattern="[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*" value={draft.repository} onChange={(event) => update('repository', event.target.value)} placeholder="acme/payments" /></label>
-        <label className="wb-span-two">服务器工作区<input required value={draft.workspace} onChange={(event) => update('workspace', event.target.value)} placeholder="/srv/workspaces/payments" /><small>工作区和仓库注册后不可在这里修改。</small></label>
-        <label>基础分支<input required value={draft.base_branch} onChange={(event) => update('base_branch', event.target.value)} /></label>
+        <label className="wb-span-two">选择工程，系统自动连接<select required value={draft.candidate_id} onChange={(event) => { const candidate = candidates?.find((item) => item.id === event.target.value); update('candidate_id', event.target.value); if (candidate) update('name', candidate.name) }} disabled={!candidates || availableProjectCandidates(candidates).length === 0}><option value="">{candidates ? availableProjectCandidates(candidates).length ? '请选择工程' : '没有发现可登记的工程' : '正在发现工程…'}</option>{candidates && availableProjectCandidates(candidates).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select><small>{rootAvailable ? '工程位置由服务器维护，页面不会要求你填写路径。' : '服务器工程目录当前不可用，请稍后刷新。'}</small></label>
+        <label>项目显示名称<input maxLength={120} value={draft.name} onChange={(event) => update('name', event.target.value)} placeholder="留空使用工程名称" /></label>
         <label>费用停止阈值（美元）<input type="number" min="0.01" max="1000" step="0.01" value={draft.budget_usd} onChange={(event) => update('budget_usd', event.target.value)} /><small>这是已上报费用的停止阈值，不保证供应商侧美元硬上限；未知费用策略在运行配置中设置。</small></label>
       </div>
       <details className="wb-advanced"><summary>检查与自动化设置</summary><div className="wb-advanced-body"><ChecksEditor value={draft.checks} onChange={(checks) => update('checks', checks)} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={draft.autonomous} onChange={(event) => update('autonomous', event.target.checked)} />需求明确后自主执行</label><label className="wb-checkbox"><input type="checkbox" checked={draft.auto_issues} onChange={(event) => update('auto_issues', event.target.checked)} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={draft.auto_publish} onChange={(event) => update('auto_publish', event.target.checked)} />允许通过验证后自动交付</label></div></div></details>
-      {error && <ErrorNotice message={error} />}
-      <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy}>{busy ? '登记中…' : '登记项目'}</button></div>
+      <button type="button" className="wb-button wb-button-secondary" onClick={() => setRefresh((value) => value + 1)} disabled={!candidates && !candidateError}>刷新工程列表</button>{candidateError && <ErrorNotice message={`${candidateError} 可重试发现工程。`} />}{error && <ErrorNotice message={error} />}
+      <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy || !candidates?.some((item) => item.id === draft.candidate_id && !item.registered) || !rootAvailable}>{busy ? '登记中…' : '登记项目'}</button></div>
     </form>
   </section>
 }

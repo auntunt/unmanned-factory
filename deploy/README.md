@@ -58,6 +58,19 @@ serve` directly. If its command differs, prepare a targeted unit adjustment
 that preserves the external EnvironmentFile and all actual deployment paths.
 Never replace an existing environment file with the example or an empty file.
 
+## Static build source and cache
+
+Build into an isolated staging directory and publish only through the reviewed
+control service's `FACTORY_STATIC_DIR`. Never run a build with the live static
+directory as `--outDir`: Vite's `--emptyOutDir` clears it before writing. For a
+future release, use a versioned staging directory, validate the complete build,
+then atomically switch the configured static path while retaining the previous
+hash for rollback. This repository does not perform that live switch.
+
+On hosts that still contain `/srv/factoryweb` (without the hyphen), treat it as
+legacy residue: inspect its owner and active Caddy references without copying or
+deleting it. Remove or migrate it only during an approved maintenance window.
+
 ## Doctor and connection tests
 
 ```sh

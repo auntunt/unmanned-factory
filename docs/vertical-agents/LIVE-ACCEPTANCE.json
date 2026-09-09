@@ -1,0 +1,47 @@
+{
+  "run_id": "3067e1cd456c4a7dbc99a17db4221868",
+  "agent_id": "02f305005e4349968cbf3f1ad37e49d8",
+  "skill_sha256": "ace6028c7b49aa782362110999e3ce3c1a1f9be2c61260edebd6aaf43ae236f7",
+  "status": "ready_for_review",
+  "frozen_run_version": 2,
+  "rollback_version": 3,
+  "download_matches_git_blob": true,
+  "result_sha256": "01f1ddb528e9047fd5d25a55856d0c8650e3bd7fa8231f3e93cf11c6a036519c",
+  "calls": [
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "run_id": null,
+      "status": "settled",
+      "actual_tokens": 21205
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "run_id": "3067e1cd456c4a7dbc99a17db4221868",
+      "status": "settled",
+      "actual_tokens": 22417
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "run_id": "3067e1cd456c4a7dbc99a17db4221868",
+      "status": "settled",
+      "actual_tokens": 45039
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "run_id": "3067e1cd456c4a7dbc99a17db4221868",
+      "status": "settled",
+      "actual_tokens": 32956
+    }
+  ],
+  "verification": {
+    "verdict": "pass",
+    "reason": "已新增 RESULT.md，包含职能体工作台本地验收说明、“验收通过”及报告标记；README 和已有检查未修改，result 检查已通过。"
+  },
+  "usd_cost": null,
+  "restored_active_version": 4,
+  "restart_history_verified": true
+}
