@@ -106,7 +106,8 @@ def test_large_check_output_is_drained(repo, provider_module):
     assert len(out["checks"][0]["stdout"]) <= 4000
 
 
-def test_continue_keeps_verified_work_and_failed_draft(repo, provider_module):
+@pytest.mark.parametrize('draft_status', ['failed', 'cancelled'])
+def test_continue_keeps_verified_work_and_failed_draft(repo, provider_module, draft_status):
     calls = []
     class Runner:
         def run(self, request, emit, cancel=None):
@@ -134,6 +135,7 @@ def test_continue_keeps_verified_work_and_failed_draft(repo, provider_module):
         execute_plan(run_id='paused', plan=plan, project=_project(repo), profiles={'standard': {'provider': 'test', 'model': 'test'}}, runner=runner, emit=lambda *args: None, cancel=threading.Event())
     prior = failure.value.artifacts
     assert prior['tasks'][0]['status'] == 'verified'
+    prior['tasks'][1]['status'] = draft_status
     continued = execute_plan(run_id='paused-c1', plan=plan, project=_project(repo), profiles={'standard': {'provider': 'test', 'model': 'test'}}, runner=runner, emit=lambda *args: None, cancel=threading.Event(), resume_artifacts=prior)
     assert len(calls) == 3 and calls.count('first') == 1
     assert (Path(continued['worktree']) / 'b.txt').read_text() == 'finished'

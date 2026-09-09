@@ -903,7 +903,7 @@ def execute_plan(
                 child_path = root / f"task-{task_id}"
                 _git_ok(workspace, "worktree", "add", "-q", "-b", child_branch, str(child_path), integration_branch, timeout_s=timeout_s)
                 prior = previous.get(task_id)
-                if prior and prior.get('status') == 'failed' and prior.get('worktree'):
+                if prior and prior.get('status') in ('failed', 'cancelled') and prior.get('worktree'):
                     _restore_draft(workspace, prior, child_path, timeout_s)
                     task = {**task, 'prompt': str(task.get('prompt', '')) +
                             '\n\nContinue the existing draft already present in this workspace. Do not redo completed tasks. Repair the failure while preserving the original declared paths and trusted checks. Python project metadata may be edited, but restore test-selection/configuration changes to their original values.\nFailure evidence: ' + str(prior.get('error') or (prior.get('attempts') or [{}])[-1].get('error', ''))}
