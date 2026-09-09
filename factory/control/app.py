@@ -66,6 +66,12 @@ class ConnectProject(Body):
     budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
 
 
+class NewWorkspace(Body):
+    name: str = Field(min_length=1, max_length=120)
+    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
+
+
 class NewRun(Body):
     project_id: str
     request: str = Field(min_length=5, max_length=50_000)
@@ -275,6 +281,15 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         validate_check_definitions(body.checks)
         validate_project_git(root, body.base_branch)
         return store.add_project({**body.model_dump(), 'workspace': str(root)})
+
+    @app.post('/api/v2/projects/create-workspace', status_code=201)
+    def new_workspace(body: NewWorkspace, request: Request):
+        from factory.control.workspaces import create_workspace, WorkspaceError
+        try:
+            return create_workspace(store, allowed_root, name=body.name, budget_usd=body.budget_usd,
+                actor_id=request.state.user['id'], idempotency_key=body.idempotency_key)
+        except WorkspaceError as exc:
+            raise HTTPException(503, str(exc)) from None
 
     @app.get('/api/v2/project-candidates')
     def project_candidates(request: Request):

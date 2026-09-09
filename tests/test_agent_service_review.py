@@ -79,6 +79,26 @@ def test_verifier_budget_stops_before_dispatch_and_preserves_evidence(app_env, m
     assert exc.value.artifacts == artifacts
 
 
+def test_managed_workspace_verifier_requires_functional_evidence_without_agent(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    p = store.add_project({'name': 'Managed', 'repository': 'owner/managed', 'workspace': str(repo),
+                           'checks': {'workspace-integrity': ['git', 'diff', '--check', 'HEAD']},
+                           'managed_workspace': True, 'budget_usd': 10.0})
+    run, _ = store.create_run(p['id'], '把工作区整理成可交付的文档格式')
+    run['plan'] = {'tasks': [{'acceptance': ['文档能被目标用户打开并保留旧格式']}]}
+    service.cancels[run['id']] = threading.Event()
+    cfg = service.runtime_settings.get(); cfg['agent_verification_profile'] = {'provider': 'codex', 'model': 'review'}
+    calls = []
+    def verify(request, emit, cancel=None):
+        calls.append(request.prompt)
+        return ProviderResult(json.dumps({'verdict': 'fail', 'reason': '没有可核对的文档成果'}), cost_usd=.01, tokens_in=5, tokens_out=4)
+    monkeypatch.setattr(service.runner, 'run', verify)
+    with pytest.raises(ExecutionError):
+        service._independent_verify(run['id'], run, p, cfg, {'worktree': str(repo), 'checks': [{'name': 'workspace-integrity', 'exit': 0}]})
+    assert '文档能被目标用户打开' in calls[0]
+    assert 'workspace-integrity' in calls[0] and 'not functional acceptance' in calls[0]
+
+
 def test_restart_marks_unacknowledged_job_interrupted(app_env):
     _, store, service, _ = app_env
     with store.connect() as db:

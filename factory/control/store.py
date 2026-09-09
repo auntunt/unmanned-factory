@@ -109,17 +109,20 @@ class Store:
         return {**data, 'revision': int(data.get('revision', 1))}
 
     def add_project(self, data):
-        project = {**data, 'id': uuid.uuid4().hex, 'revision': 1, 'created_at': now()}
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            # One registered project per repository gives webhook an unambiguous target.
-            for row in db.execute('SELECT data FROM projects'):
-                if json.loads(row[0])['repository'].casefold() == project['repository'].casefold():
-                    raise Conflict('该仓库已登记')
-            db.execute('INSERT INTO projects VALUES (?,?)', (project['id'], json.dumps(project)))
-            db.execute('INSERT INTO project_settings_audit(project_id,revision,actor,action,data,at) VALUES (?,?,?,?,?,?)',
-                       (project['id'], 1, str(data.get('actor', 'system')), 'created',
-                        json.dumps(project, ensure_ascii=False), project['created_at']))
+            return self._insert_project(db, data)
+
+    def _insert_project(self, db, data):
+        """Insert inside a caller-owned transaction (also used by workspace provisioning)."""
+        project = {**data, 'id': uuid.uuid4().hex, 'revision': 1, 'created_at': now()}
+        for row in db.execute('SELECT data FROM projects'):
+            if json.loads(row[0])['repository'].casefold() == project['repository'].casefold():
+                raise Conflict('该仓库已登记')
+        db.execute('INSERT INTO projects VALUES (?,?)', (project['id'], json.dumps(project)))
+        db.execute('INSERT INTO project_settings_audit(project_id,revision,actor,action,data,at) VALUES (?,?,?,?,?,?)',
+                   (project['id'], 1, str(data.get('actor', 'system')), 'created',
+                    json.dumps(project, ensure_ascii=False), project['created_at']))
         return project
 
     def update_project(self, pid, changes, expected_revision, actor):

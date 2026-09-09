@@ -43,6 +43,13 @@ def test_build_prompt_exposes_only_trusted_checks_and_read_only_boundary():
     assert "Do not implement" in prompt
 
 
+def test_managed_workspace_prompt_infers_acceptance_without_shell_commands():
+    prompt = build_prompt("整理成用户可下载的报告", {**PROJECT, "managed_workspace": True, "checks": {"workspace-integrity": ["git", "diff", "--check", "HEAD"]}})
+    assert "Infer observable acceptance criteria" in prompt
+    assert "not a substitute for functional acceptance" in prompt
+    assert "do not require the owner to provide shell commands" in prompt
+
+
 def test_parse_code_fence_normalizes_paths_and_adds_questions_for_gaps():
     raw = {"title": "Fix", "summary": "Parser", "tasks": [{"id": "t1", "paths": ["./src//parser.py"]}]}
     plan = parse_plan("```json\n" + json.dumps(raw) + "\n```", PROJECT)

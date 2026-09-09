@@ -203,6 +203,11 @@ def build_prompt(request: str, project: dict, history: list[str] | None = None, 
     if context is not None:
         from factory.control.context import context_prompt
         reference = context_prompt(context)
+    managed_guidance = ""
+    if project.get("managed_workspace"):
+        managed_guidance = """This is a managed workspace. Infer observable acceptance criteria from the owner's spoken goal and repository evidence; do not require the owner to provide shell commands. Use the trusted workspace-integrity check only as a baseline Git-diff safety check; it is not a substitute for functional acceptance. Ask a question only when business intent or a necessary outcome is genuinely ambiguous.
+
+"""
     return f"""You are a planning assistant for a single-owner engineering workstation.
 Return ONLY one JSON object (optionally inside a ```json code fence), with this exact shape:
 {{"title": string, "summary": string, "questions": [string], "tasks": [{{"id": string, "title": string, "prompt": string, "acceptance": [string], "paths": [string], "checks": [string], "depends_on": [string], "complexity": "small"|"medium"|"large", "risk": "low"|"medium"|"high"}}]}}
@@ -214,7 +219,7 @@ You may inspect repository files read-only to understand scope. Do not implement
 The owner delegates engineering decisions to you. Inspect the repository and project context to resolve technical details instead of asking the owner to identify files, modules, or an implementation. Ask only for missing business intent, a materially different outcome, or a necessary authorization/configuration that inspection cannot resolve. For an ambiguous request, ask at most three prioritized, concrete questions per round: who uses the result, what observable outcome matters, and which constraints change the solution. Include a short recommended interpretation where useful. Do not repeat answered questions. Once the intent is sufficient, translate it into observable acceptance criteria and a bounded dependency graph. Write titles, summaries and questions in the owner's language. Clearly describe scope and assumptions in summary without exposing private internal reasoning.
 
 Project: {json.dumps(project, ensure_ascii=False, sort_keys=True)}
-Request: {request}
+{managed_guidance}Request: {request}
 Prior planning history:
 {history_text}
 {reference}
