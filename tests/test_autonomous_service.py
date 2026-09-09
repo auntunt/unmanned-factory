@@ -222,8 +222,14 @@ def test_autonomy_stops_above_risk_limit_without_worker_dispatch(control):
     assert runner.worker_calls == 0
 
 
+
+def _require_known_cost(service):
+    config = service.runtime_settings.get()
+    service.runtime_settings.update({'profiles': config['profiles'], 'limits': {**config['limits'], 'unknown_cost_policy': 'stop'}}, config['revision'], 'test')
+
 def test_unknown_planner_cost_is_not_zero_and_prevents_auto_worker_dispatch(control):
     client, store, service, runner, project, headers = control
+    _require_known_cost(service)
     runner.planner_cost = None
     _autonomous(client, project, headers)
     rid = _new_run(client, project, headers)
@@ -407,6 +413,7 @@ def test_recovery_resumes_received_and_preserves_writing_checkpoint(tmp_path):
         "auto_escalate": True, "resume_on_restart": True,
     }, 0, "test")
     service = Service(store, runner=runner, profiles=profiles)
+    _require_known_cost(service)
     try:
         service.recover()
         resumed = _wait(store, received["id"], {"awaiting_approval", "needs_human"})
@@ -443,6 +450,7 @@ def test_same_database_allows_only_one_live_durable_coordinator(control):
 
 def test_existing_known_or_unknown_planner_usage_blocks_new_planner_dispatch(control):
     client, store, service, runner, project, headers = control
+    _require_known_cost(service)
     known, _ = store.create_run(project["id"], "Known planning budget is exhausted")
     store.append(known["id"], "usage.recorded", {"profile": "planner", "cost_usd": project["budget_usd"]})
     service.start_plan(known["id"])

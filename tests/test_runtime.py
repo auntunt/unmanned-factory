@@ -157,3 +157,11 @@ def test_concurrent_settings_cas_has_one_winner(tmp_path):
         results = list(pool.map(lambda _: update(), range(2)))
     assert sorted(map(str, results)) == ['2', 'conflict']
     assert len(settings.history()) == 2
+
+
+def test_unknown_cost_defaults_to_bounded_continuation(tmp_path):
+    settings = _settings(tmp_path)
+    config = settings.get()
+    assert config['limits']['unknown_cost_policy'] == 'allow_bounded'
+    settings.update({'profiles': _profiles(), 'limits': {**config['limits'], 'unknown_cost_policy': 'stop'}}, config['revision'], 'owner')
+    assert _settings(tmp_path).get()['limits']['unknown_cost_policy'] == 'stop'

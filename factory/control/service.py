@@ -583,8 +583,15 @@ class Service:
             if usage['known_cost_usd'] >= project['budget_usd']:
                 raise Conflict('本次运行预算已用尽，请先调整项目预算')
             if usage['unknown_cost_calls'] and configuration['limits']['unknown_cost_policy'] == 'stop':
-                raise Conflict('已有调用费用未知，当前冻结策略不允许继续')
+                current = self.runtime_settings.get()
+                if current['limits']['unknown_cost_policy'] != 'allow_bounded':
+                    raise Conflict('已有调用费用未知，请先将运行配置中的未知费用策略改为允许有界继续，再继续本次运行')
+                # An explicit continuation may relax accounting policy only;
+                # preserve the authorized models and all execution limits.
+                configuration = {**configuration, 'limits': {
+                    **configuration['limits'], 'unknown_cost_policy': 'allow_bounded'}}
             updated = self.store.update(rid, {'status': 'queued',
+                'runtime_configuration': configuration,
                 'resume_count': resume_count + 1,
                 'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
                 'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,

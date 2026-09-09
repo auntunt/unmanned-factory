@@ -31,7 +31,7 @@ DEFAULT_LIMITS = {
     "timeout_s": 600,
     "max_parallel": 2,
     "max_tasks": 20,
-    "unknown_cost_policy": "stop",
+    "unknown_cost_policy": "allow_bounded",
 }
 _PROVIDER_MODULES = {
     "claude": ("claude_agent_sdk", "claude-agent-sdk"),

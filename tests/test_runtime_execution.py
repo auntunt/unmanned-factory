@@ -276,6 +276,10 @@ def test_unknown_cost_never_auto_publishes(tmp_path):
         assert publisher.calls == 0
         assert run["artifacts"]["billing_incomplete"]
         assert run["artifacts"]["autopublish_blocked"] is True
+        catalog = client.get(f"/api/v3/runs/{rid}/deliverables")
+        assert catalog.status_code == 200
+        assert catalog.json()["saved"] is True
+        assert client.get(f"/api/v3/runs/{rid}/deliverables/download").status_code == 200
 
 
 def test_task_count_limit_is_checked_before_execution(tmp_path):

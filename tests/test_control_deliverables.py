@@ -218,3 +218,52 @@ def test_missing_commit_is_not_a_server_error(app_env, sha):
     assert client.get(f"/api/v3/runs/{run['id']}/deliverables/download").status_code == 404
     with pytest.raises(Conflict, match='验收版本'):
         snapshot(store, store.get(run['id']))
+
+
+def test_paused_unknown_cost_can_resume_with_current_bounded_policy(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    run, _ = store.create_run(pid, 'resume delivery', source={'type': 'test'})
+    current = svc.runtime_settings.get()
+    frozen = {**current, 'limits': {**current['limits'], 'unknown_cost_policy': 'stop', 'max_tasks': 3}}
+    from factory.control.codegraph import baseline_sha
+    paused = store.update(run['id'], {
+        'status': 'needs_human', 'plan': {'tasks': []},
+        'runtime_configuration': frozen,
+        'artifacts': {'base_sha': baseline_sha(store.project(pid)), 'tasks': [{'id': 'first'}]},
+    })
+    monkeypatch.setattr(svc, '_usage', lambda rid: {'known_cost_usd': 0, 'unknown_cost_calls': 1})
+    monkeypatch.setattr(svc, '_submit', lambda *args: None)
+    resumed = svc.continue_run(run['id'], '继续完成交付', paused['revision'], 0, 'owner')
+    assert resumed['status'] == 'queued'
+    config = resumed['runtime_configuration']
+    assert config['limits']['unknown_cost_policy'] == 'allow_bounded'
+    assert config['limits']['max_tasks'] == 3
+    assert config['profiles'] == frozen['profiles']
+    assert resumed['execution_resume']['artifacts'] == paused['artifacts']
+
+
+@pytest.mark.parametrize('stop_policy,budget_used', [(True, False), (False, True)])
+def test_continuation_retains_explicit_cost_and_budget_limits(app_env, monkeypatch, stop_policy, budget_used):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    run, _ = store.create_run(pid, 'resume delivery', source={'type': 'test'})
+    current = svc.runtime_settings.get()
+    frozen = {**current, 'limits': {**current['limits'], 'unknown_cost_policy': 'stop', 'max_tasks': 3}}
+    from factory.control.codegraph import baseline_sha
+    paused = store.update(run['id'], {
+        'status': 'needs_human', 'plan': {'tasks': []},
+        'runtime_configuration': frozen,
+        'artifacts': {'base_sha': baseline_sha(store.project(pid)), 'tasks': [{'id': 'first'}]},
+    })
+    monkeypatch.setattr(svc, '_usage', lambda rid: {'known_cost_usd': 0, 'unknown_cost_calls': 1})
+    monkeypatch.setattr(svc, '_submit', lambda *args: None)
+    if stop_policy:
+        svc.runtime_settings.update({'profiles': current['profiles'], 'limits': {**current['limits'], 'unknown_cost_policy': 'stop'}}, current['revision'], 'test')
+    if budget_used:
+        monkeypatch.setattr(svc, '_usage', lambda rid: {'known_cost_usd': store.project(pid)['budget_usd'], 'unknown_cost_calls': 1})
+    with pytest.raises(Conflict):
+        svc.continue_run(run['id'], '继续完成交付', paused['revision'], 0, 'owner')
+    assert store.get(run['id'])['status'] == 'needs_human'
