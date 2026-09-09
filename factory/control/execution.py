@@ -192,9 +192,14 @@ def _relative(path: str) -> str:
     return p.as_posix()
 
 
+_EGG_METADATA = frozenset({'PKG-INFO', 'SOURCES.txt', 'dependency_links.txt',
+    'entry_points.txt', 'requires.txt', 'top_level.txt', 'not-zip-safe', 'zip-safe'})
+
+
 def _is_generated(path: str) -> bool:
     p = PurePosixPath(path)
-    return any(part in _GENERATED_PARTS for part in p.parts) or p.name in _GENERATED_NAMES
+    return (any(part in _GENERATED_PARTS for part in p.parts) or p.name in _GENERATED_NAMES
+            or (p.parent.name.endswith('.egg-info') and p.name in _EGG_METADATA))
 
 
 def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
@@ -221,8 +226,22 @@ def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
                 paths.add(fields[index])
                 index += 1
         else:
+            if xy in ('??', '!!'):
+                file = root / value
+                if value.rstrip('/').endswith('.egg-info') and file.is_dir() and not file.is_symlink():
+                    # Git can collapse ignored directories; inspect their contents
+                    # so an unexpected script cannot hide beside generated metadata.
+                    for child in file.rglob('*'):
+                        rel = child.relative_to(root).as_posix()
+                        if child.is_symlink() or (child.is_file() and not _is_generated(rel)):
+                            paths.add(rel)
+                    continue
+                if not file.is_symlink() and _is_generated(value):
+                    continue
+            # Tracked modifications always remain visible, including caches or
+            # metadata accidentally committed by an earlier version.
             paths.add(value)
-    return tuple(sorted(p for p in paths if p and not _is_generated(p)))
+    return tuple(sorted(p for p in paths if p))
 
 
 @_deadline_checked

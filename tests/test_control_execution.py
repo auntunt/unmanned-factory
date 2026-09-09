@@ -220,3 +220,21 @@ def test_supporting_package_resource_addition(repo, provider_module, extra, allo
         assert 'scope.supporting_change' in events
     resource.with_name('unrelated.md').write_text('not part of the task')
     assert not _supporting_package_data(repo, ('src/gongshi/data/prompt.md',))
+
+
+def test_generated_metadata_does_not_hide_source_or_lockfile(repo):
+    from factory.control.execution import _status_paths
+    metadata = repo / 'src/gongshi.egg-info'
+    metadata.mkdir(parents=True)
+    for name in ('PKG-INFO', 'SOURCES.txt', 'entry_points.txt', 'requires.txt'):
+        (metadata / name).write_text('generated')
+    (repo / 'uv.lock').write_text('version = 1')
+    assert _status_paths(repo, timeout_s=10) == ('uv.lock',)
+    (metadata / 'injected.py').write_text('print(1)')
+    assert 'src/gongshi.egg-info/injected.py' in _status_paths(repo, timeout_s=10)
+    (repo / '.gitignore').write_text('*.egg-info/\n')
+    assert 'src/gongshi.egg-info/injected.py' in _status_paths(repo, timeout_s=10)
+    subprocess.run(['git', 'add', '-f', 'src/gongshi.egg-info/PKG-INFO'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'tracked metadata'], cwd=repo, check=True)
+    (metadata / 'PKG-INFO').write_text('changed tracked metadata')
+    assert 'src/gongshi.egg-info/PKG-INFO' in _status_paths(repo, timeout_s=10)

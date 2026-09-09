@@ -21,3 +21,9 @@ A file list describes primary task ownership, but a resource-producing task may 
 Resource tasks reserve the shared packaging manifest during scheduling to avoid concurrent implicit writes. Planning instructions include supporting packaging files explicitly for future plans. Other out-of-scope changes remain `scope_violation`, distinct from timeout; this policy does not authorize arbitrary dependency, test, CI or deployment changes.
 
 The paused splitter's `.md` inclusion is an example: the prompt file belongs to its declared task, and the sole supporting change includes that file in built packages. Continuation retains the original plan and draft and revalidates it under this rule.
+
+## Generated output versus delivery inputs
+
+Untracked standard `*.egg-info` metadata is excluded from scope comparison, even when a project's ignore file is incomplete. Ignored egg-info directories are inspected for unexpected files; source files and symlinks are not exempt. Tracked changes always remain visible, including tracked caches and metadata. Files are never stashed or deleted to make checks pass.
+
+`uv.lock` remains a delivery input: dependency tasks must explicitly declare it, and ordinary scope checks apply. A build-artifact exemption does not authorize `config.py`, dependency changes or unrelated source edits. Adding an ignore rule alone never authorizes a source change.
