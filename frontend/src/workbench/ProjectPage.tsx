@@ -1,3 +1,4 @@
+import { nextRunAction } from './run-guidance'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -126,6 +127,10 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
   return <section className="wb-card wb-requirement-card"><div className="wb-card-head"><div><span className="wb-eyebrow">需求入口</span><h2>告诉系统要完成什么</h2><p>工作区已准备好。用平常说话的方式描述你想得到什么；验收要求可写可不写，助手会整理完成标准，必要时再向你提问。</p></div></div><form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">需求描述<textarea id="project-requirement" required minLength={1} maxLength={50000} rows={6} value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：为订单服务增加批量取消接口，保留现有单笔取消行为，并补充回归检查。" /></label>{error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || value.trim().length < 1}>{busy ? '提交中…' : '提交需求 →'}</button></div></form></section>
 }
 
+function overviewNextRun(runs: Run[]) {
+  return runs.find(run => ['needs_human', 'needs_clarification', 'awaiting_approval'].includes(run.status)) ?? runs.find(run => ['received', 'planning', 'queued', 'running', 'verifying', 'ready_for_review', 'publishing'].includes(run.status)) ?? runs[0]
+}
+
 export default function ProjectPage({ csrfToken, onUnauthorized, user }: PageProps) {
   const [policyRefresh, setPolicyRefresh] = useState(0)
   const isAdmin = user?.role !== 'member'
@@ -133,9 +138,10 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   const [search, setSearch] = useSearchParams()
   const requestedTab = search.get('tab')
   const tab: ProjectTab = isAdmin && ['automation', 'agent', 'settings'].includes(requestedTab ?? '') ? requestedTab as ProjectTab : 'overview'
-  const selectedStage = projectStage(search.get('stage')).id
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [runs, setRuns] = useState<Run[] | null>(null)
+  const currentRun = overviewNextRun(runs ?? [])
+  const selectedStage = projectStage(search.get('stage') ?? (currentRun ? runGuidance(currentRun).stage : 'intake')).id
   const [overview, setOverview] = useState<OverviewData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [runsError, setRunsError] = useState<string | null>(null)
@@ -165,19 +171,17 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
     const load = async () => {
       if (busy || controller.signal.aborted) return
       busy = true
-      const [runResult, summaryResult] = await Promise.allSettled([
-        request<{ runs: Run[] }>(`/api/v2/runs?project_id=${encodeURIComponent(projectId)}`, { onUnauthorized, signal: controller.signal }),
-        request<OverviewData>(`/api/v3/overview?project_id=${encodeURIComponent(projectId)}`, { onUnauthorized, signal: controller.signal }),
-      ])
-      if (!controller.signal.aborted) {
-        if (runResult.status === 'fulfilled') { setRuns(runResult.value.runs.filter((run) => String(run.project_id) === projectId)); setRunsError(null) } else setRunsError(errorText(runResult.reason))
-        if (summaryResult.status === 'fulfilled' && summaryResult.value.project_id === projectId) { setOverview(summaryResult.value); setOverviewError(null) }
-        else setOverviewError(summaryResult.status === 'rejected' ? errorText(summaryResult.reason) : '项目范围与返回内容不一致，请刷新。')
-      }
+      try {
+        const summary = await request<OverviewData>(`/api/v3/overview?project_id=${encodeURIComponent(projectId)}`, { onUnauthorized, signal: controller.signal })
+        if (!controller.signal.aborted) {
+          if (summary.project_id !== projectId || !Array.isArray(summary.run_snapshots)) throw new Error('项目进度快照不完整，请刷新')
+          setRuns(summary.run_snapshots); setOverview(summary); setRunsError(null); setOverviewError(null)
+        }
+      } catch (cause) { if (!controller.signal.aborted) setOverviewError(`刷新失败，保留上一份完整快照：${errorText(cause)}`) }
       busy = false
     }
     void load()
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load() }, 15000)
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load() }, 5000)
     const unsubscribe = subscribeDataRefresh(() => void load())
     return () => { controller.abort(); window.clearInterval(timer); unsubscribe() }
   }, [onUnauthorized, projectId])
@@ -202,7 +206,9 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
     <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
+      {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务使用同一份快照</p>}
       {overview && overview.runs > 0 && <section className="ov3-summary" aria-label="本项目进展"><div><span>已接收需求</span><strong>{overview.runs}</strong><small>只统计本项目</small></div><div><span>进行中</span><strong>{overview.active_runs}</strong><small>规划、执行或验证</small></div><div className={overview.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{overview.attention_runs}</strong><small>需要处理的具体原因见下方</small></div><div><span>已知累计费用</span><strong>${overview.known_cost_usd.toFixed(2)}</strong><small>{overview.unknown_cost_runs} 次费用未完整返回</small></div></section>}
+      {currentRun && <section className="wb-card"><span className="wb-eyebrow">当前任务 · {runGuidance(currentRun).label}</span><h2>{currentRun.plan?.title || currentRun.request}</h2><p>{runGuidance(currentRun).summary}</p><Link className="wb-button wb-button-primary" to={nextRunAction(currentRun).href}>{nextRunAction(currentRun).label} →</Link></section>}
       {(overview?.attention ?? []).length > 0 && <section className="wb-card pw-attention"><div className="ov3-section-head"><div><span className="wb-eyebrow">本项目 · 待处理</span><h2>让工作继续的下一步</h2></div></div><AttentionList items={overview!.attention!.slice(0, 3)} /></section>}
       {runs?.length === 0 ? requirementForm : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={requirementForm} isAdmin={isAdmin} /> : !overviewError && <div className="wb-card ov3-loading" role="status" aria-label="正在读取本项目闭环"><span /><span /></div>}
       <details className="wb-card pw-preflight"><summary>项目准备与执行边界 · {readiness ? readiness.ready ? '可以开始' : '有配置需要处理' : '读取中'}</summary><div className="pw-preflight-body">
@@ -213,7 +219,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
       </div></details>
       <section className="wb-card pw-runs-list"><div className="wb-card-head"><div><span className="wb-eyebrow">本项目 · 需求档案</span><h2>每条需求的状态与下一步</h2></div><Link className="wb-text-link" to={`/runs?project_id=${encodedId}`}>全部运行 →</Link></div>
         {runs?.length === 0 && <EmptyState title="还没有需求记录" description="在需求澄清阶段提交这个项目的第一个目标。" />}
-        {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{run.plan?.title || run.request.slice(0, 90)}</Link><small>{formatDate(run.updated_at)}</small></td><td><strong>{guidance.label}</strong><div className="pw-run-reason">{guidance.summary}</div></td><td><Link className="wb-text-link" to={guidance.primaryHref}>{guidance.primaryLabel} →</Link></td></tr> })}</tbody></table></div>}
+        {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{run.plan?.title || run.request.slice(0, 90)}</Link><small>{formatDate(run.updated_at)}</small></td><td><strong>{guidance.label}</strong><div className="pw-run-reason">{guidance.summary}</div></td><td><Link className="wb-text-link" to={nextRunAction(run).href}>{nextRunAction(run).label} →</Link></td></tr> })}</tbody></table></div>}
       </section>
     </>}
     {tab === 'agent' && isAdmin && <section className="wb-card wb-agent-card"><div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目知识</span><h2>维护这个项目的知识和代码上下文</h2><p>知识与索引属于当前项目。跨项目复用通过明确的能力绑定完成。</p></div></div><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></section>}

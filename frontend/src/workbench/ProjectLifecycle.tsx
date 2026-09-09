@@ -71,7 +71,7 @@ export default function ProjectLifecycle({ projectId, projectName, engineering, 
   const content = stages.find((item) => item.id === stage.id)!
   const previous = PROJECT_STAGES[Math.max(0, PROJECT_STAGES.findIndex((item) => item.id === stage.id) - 1)]
   return <section className="wb-card pw-cycle" aria-labelledby="project-cycle-title">
-    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>阶段保留已经产生的内容；暂停的运行仍保留方案、代码与检查记录。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行 →</Link></div>
+    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>各阶段统计当前计划已有的记录，不代表完成率；旧计划与尝试保留在运行历史中。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行 →</Link></div>
     <div className="pw-cycle-layout">
       <EngineeringLoop stages={stages} selectedId={stage.id} onSelect={onSelect} />
       <section className="pw-stage-panel" id="ov3-stage-details" aria-labelledby="project-stage-title">

@@ -1,3 +1,4 @@
+import { nextRunAction } from './run-guidance'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request, WorkspaceApiError } from '../workspace/api'
@@ -41,7 +42,7 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
       .catch((cause) => { if (!controller.signal.aborted && !(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) })
       .finally(() => { if (controllerRef.current === controller) { controllerRef.current = null; if (!controller.signal.aborted) setLoading(false) } })
   }, [onUnauthorized])
-  useEffect(() => { load(true); const timer = window.setInterval(() => load(), 15000); return () => { controllerRef.current?.abort(); window.clearInterval(timer) } }, [load])
+  useEffect(() => { load(true); const timer = window.setInterval(() => load(), 5000); return () => { controllerRef.current?.abort(); window.clearInterval(timer) } }, [load])
   useEffect(() => subscribeDataRefresh(() => load(true)), [load])
   const attention = data?.attention ?? []
   const events = (data?.recent_events ?? []).filter((event) => EVENT_LABELS[event.type]).slice(0, 5)
@@ -54,11 +55,12 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
     {error && <ErrorNotice message={data ? `刷新失败，以下为上一份记录：${error}` : error} />}
     {loading && !data && <div className="wb-card ov3-loading" role="status" aria-label="正在读取项目进展"><span /><span /><span /></div>}
     {data && <>
+      {data.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(data.snapshot_at)} · 每 5 秒更新</p>}
       <section className="ov3-summary" aria-label="全部项目摘要">
         <div><span>项目</span><strong>{data.projects}</strong><small>各自拥有独立的工程记录</small></div>
         <div><span>进行中的运行</span><strong>{data.active_runs}</strong><small>正在规划、执行或验证</small></div>
         <div className={data.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{data.attention_runs}</strong><small>原因与处理入口见下方</small></div>
-        <div><span>已发布交付</span><strong>{data.engineering?.published_runs ?? 0}</strong><small>以已记录的发布结果为准</small></div>
+        <div><span>成果已就绪</span><strong>{data.engineering?.verified_runs ?? 0}</strong><small>已验证，可查看或下载</small></div>
       </section>
       {attention.length > 0 && <section className="wb-card pw-attention" aria-labelledby="overview-attention">
         <div className="ov3-section-head"><div><span className="wb-eyebrow">需要处理</span><h2 id="overview-attention">先解决阻止工作继续的问题</h2></div>
@@ -66,10 +68,10 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
         <AttentionList items={attention.slice(0, 4)} />
       </section>}
       <section className="pw-portfolio" aria-labelledby="project-portfolio">
-        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">每个项目，一套完整的工程闭环</h2><p>点击阶段，进入这个项目对应的内容。已产生的记录会持续保留。</p></div></div>
+        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">每个项目，一套完整的工程闭环</h2><p>阶段数量按当前计划记录统计，不等于验证通过数。点击阶段查看同一份进度。</p></div></div>
         {(data.project_summaries ?? []).map((project) => <article className="wb-card pw-project" key={project.id}>
-          <header className="pw-project-heading"><div><Link to={`/projects/${encodeURIComponent(project.id)}`}><h3>{project.name}</h3></Link><p>{project.repository}</p></div>
-            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 →</Link></div>
+          <header className="pw-project-heading"><div><Link to={`/projects/${encodeURIComponent(project.id)}`}><h3>{project.name}</h3></Link><p>{project.repository?.startsWith('local/') ? '系统管理的工作区' : project.repository}</p></div>
+            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 →</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} →</Link>}</div>
           </header>
           <nav className="pw-project-stages" aria-label={`${project.name}的工程阶段`}>{PROJECT_STAGES.map((stage, index) => {
             const record = project.engineering.stages.find((item) => item.id === stage.id)

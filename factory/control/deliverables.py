@@ -43,7 +43,7 @@ def snapshot(store, run):
     artifacts = run.get('artifacts') or {}
     root = Path(artifacts.get('worktree') or '/nonexistent').resolve()
     sha = artifacts.get('commit', '')
-    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+    if not (isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha)):
         raise Conflict('还没有可归档的验收版本，请先完成执行与验证。')
     def git(*args):
         try:
@@ -134,7 +134,7 @@ def router(store, service):
     def location(rid):
         run = store.get(rid)
         sha = (run.get('artifacts') or {}).get('commit', '')
-        if not re.fullmatch(r'[0-9a-f]{40}', sha): return run, None
+        if not (isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha)): return run, None
         return run, Path(store.path).parent / 'deliverables' / run['id'] / sha
     def manifest(rid):
         run, path = location(rid)

@@ -202,3 +202,19 @@ def test_oversized_artifact_does_not_leave_partial_archive(delivery, monkeypatch
 def test_reject_unsafe_archive_paths(name):
     from factory.control.deliverables import safe_path
     assert not safe_path(name)
+
+
+@pytest.mark.parametrize('sha', [None, '', 123, {}, 'invalid'])
+def test_missing_commit_is_not_a_server_error(app_env, sha):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    run, _ = store.create_run(pid, 'paused delivery', source={'type': 'test'})
+    store.update(run['id'], {'status': 'needs_human', 'artifacts': {'commit': sha, 'billing_incomplete': 'unknown cost'}})
+    response = client.get(f"/api/v3/runs/{run['id']}/deliverables")
+    assert response.status_code == 200
+    assert response.json()['items'] == []
+    assert response.json()['can_collect'] is False
+    assert client.get(f"/api/v3/runs/{run['id']}/deliverables/download").status_code == 404
+    with pytest.raises(Conflict, match='验收版本'):
+        snapshot(store, store.get(run['id']))

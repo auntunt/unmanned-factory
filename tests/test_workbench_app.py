@@ -145,3 +145,23 @@ def test_project_create_reports_git_start_errors_as_bad_request(app_env, monkeyp
         "base_branch": "main", "checks": {"python": [sys.executable, "-c", "pass"]},
     }, headers=headers)
     assert response.status_code == 400
+
+
+def test_project_snapshot_and_run_detail_share_current_evidence(app_env):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    r, _ = store.create_run(p['id'], 'snapshot test')
+    store.update(r['id'], {'status': 'running', 'plan': {'title': 'current'}, 'tasks': [{'id': 't', 'status': 'running', 'attempts': [{'status': 'failed', 'error': 'old'}]}]})
+    svc._emit(r['id'], 'attempt.started', {'attempt': 1, 'provider': 'test'}, 't')
+    summary = client.get('/api/v3/overview', params={'project_id': p['id']}).json()
+    detail = client.get(f"/api/v2/runs/{r['id']}").json()
+    assert summary['run_snapshots'][0]['progress'] == detail['progress']
+    assert summary['run_snapshots'][0]['tasks'][0]['attempts'][-1]['status'] == 'running'
+    assert len(detail['tasks'][0]['attempts']) == 2
+    svc._emit(r['id'], 'check.result', {'name': 'check', 'exit': 0}, 't')
+    summary = client.get('/api/v3/overview', params={'project_id': p['id']}).json()
+    detail = client.get(f"/api/v2/runs/{r['id']}").json()
+    assert detail['progress']['checks'] == 'passed'
+    assert summary['run_snapshots'][0]['progress'] == detail['progress']
+    assert next(s for s in summary['engineering']['stages'] if s['id'] == 'verify')['count'] == 1

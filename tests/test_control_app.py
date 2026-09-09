@@ -96,6 +96,8 @@ def test_requirement_to_verified_git_delivery_and_conversation(app_env):
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
     response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update the greeting'}, headers=headers)
     assert response.status_code == 201, response.text
     rid = response.json()['id']

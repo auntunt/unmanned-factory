@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
-import { runEvidence, runGuidance, type RunView } from './run-guidance'
+import { runEvidence, runGuidance, nextRunAction, type RunView } from './run-guidance'
 import { StatusBadge } from './ui'
 import './run-journey.css'
 import './run-guidance.css'
@@ -22,19 +22,19 @@ export default function RunJourney({ run }: { run: Run }) {
   const candidate = typeof rawCandidate === 'string' && rawCandidate ? rawCandidate : null
   const runHref = (view: RunView) => `/runs/${encodeURIComponent(String(run.id))}?view=${view}`
   const recorded = [evidence.requirements, evidence.plan, evidence.execution, evidence.checks !== 'none', evidence.delivery]
-  const complete = [evidence.requirements, evidence.plan, false, evidence.checks === 'passed', run.status === 'published' && evidence.delivery]
+  const complete = [evidence.requirements, evidence.plan, false, evidence.checks === 'passed' && ['ready_for_review', 'publishing', 'published'].includes(run.status), run.status === 'published' && evidence.delivery]
   const labels = [
     evidence.requirements ? '已记录需求' : '未记录',
     evidence.plan ? '已记录计划' : '未记录',
     evidence.execution ? '已记录任务与尝试' : '未记录',
-    evidence.checks === 'passed' ? '检查通过' : evidence.checks === 'failed' ? '检查未通过' : evidence.checks === 'recorded' ? '已记录检查' : '未记录',
+    evidence.checks === 'passed' ? (['ready_for_review', 'publishing', 'published'].includes(run.status) ? '验证通过' : '已有检查记录，待整体验证') : evidence.checks === 'failed' ? '检查未通过' : evidence.checks === 'recorded' ? '已记录检查' : '未记录',
     evidence.delivery ? (run.status === 'published' ? '已发布' : '已记录交付') : '未记录',
   ]
   const terminal = run.status === 'published' || run.status === 'discarded' || run.status === 'cancelled'
   return <section className="wb-run-journey" aria-labelledby="run-journey-title">
     <div className="wb-run-journey-heading">
       <div><span className="wb-eyebrow">本次工程闭环</span><h2 id="run-journey-title">{guidance.summary}</h2></div>
-      <StatusBadge status={run.status} />
+      <div><StatusBadge status={run.status} /> <Link className="wb-button wb-button-primary" to={nextRunAction(run).href}>{nextRunAction(run).label} →</Link></div>
     </div>
     <ol className="wb-run-journey-stages">
       {stages.map(({ name, view }, index) => {

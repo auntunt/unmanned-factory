@@ -81,3 +81,15 @@ def test_versions_do_not_duplicate_capability_or_source_run_and_reuse_requires_f
     assert reuse["count"] == 2
     assert {item["id"] for item in reuse["items"]} == {"cap", "second"}
     assert next(item for item in reuse["items"] if item["id"] == "cap")["title"] == "current"
+
+
+def test_old_events_do_not_mark_current_plan_as_verified():
+    from factory.control.engineering_overview import current_evidence
+    current = {**run('r', 'running'), 'revision': 9, 'plan': {'title': 'current'}, 'tasks': [{'id': 't', 'status': 'running', 'attempts': [{'status': 'running'}]}], 'artifacts': {}}
+    events = {'r': [{'type': 'run.verified', 'payload': {'revision': 6}}, {'type': 'task.completed', 'payload': {'checks': [{'exit': 0}]}}]}
+    summary = by_id(engineering_overview([current], [], {}, events))
+    assert summary['verify']['count'] == 0
+    assert current_evidence(current)['checks'] == 'none'
+    current['tasks'][0]['attempts'] = [{'checks': [{'exit': 1}]}, {'checks': [{'exit': 0}]}]
+    assert current_evidence(current)['checks'] == 'passed'
+    assert by_id(engineering_overview([current], [], {}, events))['verify']['count'] == 1

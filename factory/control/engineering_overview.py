@@ -1,8 +1,8 @@
 """Pure projection for the operations overview's engineering lifecycle.
 
 The lifecycle is an evidence projection, rather than a current-status bucket.
-A run can therefore remain visible in intake, planning, execution, verification
-and delivery after it has been paused or escalated for human attention.
+Current snapshot evidence determines stage counts. Historical events remain
+available in the audit trail but do not advance a newer plan.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ STATUS_DETAILS = {
     "queued": "已排队",
     "running": "正在执行",
     "verifying": "正在验证",
-    "ready_for_review": "已验证，待发布",
+    "ready_for_review": "已验证，可查看成果",
     "publishing": "正在发布",
     "published": "已发布",
     "needs_human": "等待人工处理",
@@ -144,20 +144,33 @@ def _has_build(run: Mapping, events: list[Mapping]) -> bool:
     ) or run.get("status") in {"queued", "running", "verifying"}
 
 
+def current_evidence(run: Mapping) -> dict:
+    """One projection of current snapshot facts for every workbench surface."""
+    artifacts = run.get('artifacts') if isinstance(run.get('artifacts'), Mapping) else {}
+    tasks = run.get('tasks') or artifacts.get('tasks') or []
+    checks = list(artifacts.get('checks') or [])
+    if not checks:
+        for task in tasks:
+            if not isinstance(task, Mapping):
+                continue
+            attempts = task.get('attempts') or []
+            latest = attempts[-1] if attempts else {}
+            checks.extend((latest.get('checks') if attempts else task.get('checks')) or [])
+    checks = [check for check in checks if isinstance(check, Mapping)]
+    def passed(check):
+        if check.get('timeout') or check.get('cancelled') or check.get('exit') not in (None, 0):
+            return False
+        outcome = check.get('outcome', check.get('status'))
+        return outcome in ('passed', 'pass') if outcome is not None else check.get('exit') == 0
+    failure = any(check.get('outcome', check.get('status')) in ('failed', 'fail') or check.get('timeout') or check.get('cancelled') or check.get('exit') not in (None, 0) for check in checks)
+    return {'requirements': bool(str(run.get('request') or '').strip()),
+            'plan': bool(run.get('plan')), 'execution': _has_execution_tasks(tasks),
+            'checks': 'none' if not checks else 'failed' if failure else 'passed' if all(passed(check) for check in checks) else 'recorded',
+            'delivery': bool(artifacts.get('commit') or artifacts.get('pr_url'))}
+
+
 def _has_verify(run: Mapping, events: list[Mapping]) -> bool:
-    artifacts = run.get("artifacts")
-    checks = artifacts.get("checks") if isinstance(artifacts, Mapping) else None
-    tasks = run.get("tasks")
-    artifact_tasks = artifacts.get("tasks") if isinstance(artifacts, Mapping) else None
-    event_checks = any(
-        bool((event.get("payload") or {}).get("checks")) or
-        _has_checks_in_attempts((event.get("payload") or {}).get("attempts"))
-        for event in events if event.get("type") in {"task.completed", "task.failed", "check.completed"}
-    )
-    return (bool(checks) or _has_attempt_checks(tasks) or _has_attempt_checks(artifact_tasks) or event_checks or
-            run.get("status") == "verifying" or any(
-                event.get("type") in {"run.verified", "verification.completed"} for event in events
-            ))
+    return current_evidence(run)['checks'] != 'none' or run.get('status') == 'verifying'
 
 
 def _has_delivery(run: Mapping, events: list[Mapping]) -> bool:
@@ -201,8 +214,8 @@ def engineering_overview(
     """Return lifecycle stages from facts already present in the store.
 
     ``events`` is optional for compatibility with callers and unit tests that
-    only have run snapshots.  The API passes all stored events so historical
-    evidence survives later status changes.
+    only have run snapshots. Historical events are retained by callers for
+    audit, but current stage counts use the current run snapshot only.
     """
     run_list = [run for run in runs if isinstance(run, Mapping)]
     event_map = _event_map(events)
@@ -221,7 +234,7 @@ def engineering_overview(
     for run in run_list:
         run_events = event_map.get(str(run.get("id")), [])
         for stage_id, _, _ in STAGES:
-            if predicates[stage_id](run, run_events):
+            if predicates[stage_id](run, []):
                 grouped[stage_id].append(run)
 
     stages = []
@@ -232,7 +245,7 @@ def engineering_overview(
             "label": label,
             "description": description,
             "count": len(members),
-            "unit": {"intake": "条需求", "plan": "项规划", "build": "项执行", "verify": "项验证", "deliver": "项交付"}[stage_id],
+            "unit": {"intake": "条需求", "plan": "项规划", "build": "项执行", "verify": "项检查记录", "deliver": "项交付"}[stage_id],
             "items": [_run_item(run, project_names, stage_id) for run in members[:6]],
         })
 

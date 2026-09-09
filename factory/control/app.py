@@ -466,7 +466,9 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     @app.get('/api/v2/runs/{rid}')
     def get_run(rid: str):
-        return store.get(rid)
+        from factory.control.engineering_overview import current_evidence
+        run = store.get(rid)
+        return {**run, 'progress': current_evidence(run)}
 
     @app.post('/api/v2/runs/{rid}/clarify')
     def clarify(rid: str, body: Clarification, request: Request):

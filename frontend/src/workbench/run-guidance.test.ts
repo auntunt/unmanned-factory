@@ -75,3 +75,9 @@ it('explains a scope stop using persisted failed-task evidence, including older 
   }
   expect(runGuidance(run({ status: 'running', tasks })).kind).toBe('progress')
 })
+
+it('does not let old budget or billing artifacts override current execution', () => {
+  const active = run({ status: 'running', artifacts: { needs_human: stoppedCost, billing_incomplete: true } })
+  expect(runGuidance(active).kind).toBe('progress')
+  expect(runGuidance(active).label).toBe('正在执行')
+})

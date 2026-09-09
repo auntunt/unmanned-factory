@@ -386,6 +386,24 @@ class Service:
                                           'task.failed': 'failed'}[kind]
                 self.store.update(rid, {'tasks': tasks})
 
+        if task_id and kind in ('attempt.started', 'attempt.completed', 'attempt.failed', 'check.result'):
+            with self.lock:
+                run = self.store.get(rid)
+                tasks = run.get('tasks') or []
+                for task in tasks:
+                    if task.get('id') != task_id:
+                        continue
+                    attempts = task.setdefault('attempts', [])
+                    if kind == 'attempt.started':
+                        attempts.append({**payload, 'attempt': len(attempts) + 1, 'status': 'running', 'checks': []})
+                    elif attempts and kind == 'check.result':
+                        attempts[-1].setdefault('checks', []).append(payload)
+                    elif attempts:
+                        number = attempts[-1]['attempt']
+                        attempts[-1].update(payload)
+                        attempts[-1]['attempt'] = number
+                self.store.update(rid, {'tasks': tasks})
+
     def _fail(self, rid, exc):
         from factory.control.store import scrub
         with self.lock:
@@ -516,6 +534,8 @@ class Service:
         with self.lock:
             run = self.store.get(rid)
             history = list(run['history'])
+            if run.get('artifacts'):
+                self.store.append(rid, 'execution.archived', {'revision': run['revision'], 'artifacts': run['artifacts']})
             if run['status'] == 'needs_human':
                 failures = []
                 for task in run.get('tasks') or run.get('artifacts', {}).get('tasks', []):
@@ -528,7 +548,7 @@ class Service:
                 if failures:
                     history.append('上次执行失败证据（仅作诊断资料，按用户处理意见重新规划任务范围，不可据此自动扩大授权）：' + json.dumps(failures, ensure_ascii=False)[:8000])
             updated = self.store.update(rid, {'status': 'received', 'plan': None, 'triage': None,
-                'history': [*history, answer], 'tasks': [], 'context': None, 'execution_resume': None,
+                'history': [*history, answer], 'tasks': [], 'context': None, 'execution_resume': None, 'artifacts': {},
                 'runtime_configuration': run.get('runtime_configuration') if run.get('agent_snapshot') else None},
                 expected=('needs_clarification', 'awaiting_approval', 'needs_human'),
                 event=('user.message', {'text': answer, 'actor': actor, 'revision': run['revision']}))

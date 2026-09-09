@@ -107,7 +107,7 @@ def _attention(run, events):
     active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed'}
     has_needs_human = bool(artifacts.get('needs_human'))
     has_billing_gap = bool(artifacts.get('billing_incomplete'))
-    billing_attention = status == 'ready_for_review' and has_billing_gap
+    billing_attention = False  # Missing billing does not block collecting verified deliverables.
     if not (active_attention or billing_attention):
         return None
     if has_needs_human:
@@ -136,7 +136,7 @@ def _attention(run, events):
                 questions.append(question.strip())
                 seen_questions.add(question.strip())
     return {
-        'id': run['id'], 'project_id': run.get('project_id'),
+        'id': run['id'], 'project_id': run.get('project_id'), 'run_snapshot': run,
         'title': (run.get('plan') or {}).get('title') or str(run.get('request', ''))[:100],
         'status': run.get('status'), 'project_name': run.get('project_name', '项目'),
         'updated_at': run.get('updated_at', run.get('created_at')), 'reason': str(reason),
@@ -152,7 +152,8 @@ def overview(store, project_id=None):
     if project_id is not None and project_id not in project_by_id:
         raise KeyError(project_id)
     names = {project['id']: project['name'] for project in projects}
-    all_runs = store.all_runs()
+    from factory.control.engineering_overview import current_evidence
+    all_runs = [{**run, 'progress': current_evidence(run)} for run in store.all_runs()]
     all_capabilities = CapabilityStore(store).list()
     run_by_id = {str(run['id']): run for run in all_runs}
 
@@ -247,6 +248,7 @@ def overview(store, project_id=None):
         project_summaries.append({
             'id': project['id'], 'name': project['name'], 'repository': project.get('repository'),
             'budget_usd': project.get('budget_usd'), 'run_count': len(project_runs),
+            'next_run': next(iter(sorted(project_runs, key=lambda run: (run.get('status') not in ('needs_human', 'needs_clarification', 'awaiting_approval'), run.get('status') not in ('received', 'planning', 'queued', 'running', 'verifying', 'ready_for_review', 'publishing'), project_runs.index(run)))), None),
             'active_runs': sum(run.get('status') in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
                                for run in project_runs),
             'attention_runs': project_attention,
@@ -254,6 +256,7 @@ def overview(store, project_id=None):
         })
     return {
         'project_id': project_id, 'project_summaries': project_summaries,
+        'snapshot_at': now(), 'run_snapshots': runs if project_id is not None else [],
         'projects': 1 if project_id is not None else len(projects), 'runs': len(runs),
         'active_runs': sum(r['status'] in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing') for r in runs),
         'attention_runs': attention_runs,
