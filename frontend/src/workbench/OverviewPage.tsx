@@ -1,4 +1,4 @@
-import { nextRunAction } from './run-guidance'
+import { nextRunAction, runGuidance } from './run-guidance'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request, WorkspaceApiError } from '../workspace/api'
@@ -75,8 +75,13 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
           </header>
           <nav className="pw-project-stages" aria-label={`${project.name}的工程阶段`}>{PROJECT_STAGES.map((stage, index) => {
             const record = project.engineering.stages.find((item) => item.id === stage.id)
-            return <Link to={projectStageHref(project.id, stage.id)} key={stage.id}>
-              <span className="pw-stage-number">0{index + 1}</span><strong>{stage.label}</strong>
+            const run = project.next_run
+            const current = Boolean(run && !['cancelled', 'discarded'].includes(run.status) && runGuidance(run).stage === stage.id)
+            const moving = Boolean(run && ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status))
+            const waiting = Boolean(run && ['needs_human', 'needs_clarification', 'awaiting_approval', 'failed'].includes(run.status))
+            const marker = moving ? '正在进行' : waiting ? '待处理' : run?.status === 'published' ? '已交付' : '可领取'
+            return <Link to={projectStageHref(project.id, stage.id)} key={stage.id} aria-current={current ? 'step' : undefined} className={current ? `pw-stage-current ${moving ? 'is-moving' : waiting ? 'is-waiting' : 'is-ready'}` : undefined}>
+              <span className="pw-stage-top"><span className="pw-stage-number">0{index + 1}</span>{current && <span className="pw-stage-marker"><i aria-hidden="true" />{marker}</span>}</span><strong>{stage.label}</strong>
               <span className="pw-stage-count">{record?.count ?? 0}<small>{record?.unit ?? '条记录'}</small></span>
               <small className="pw-stage-link">{stage.action} <span aria-hidden="true">↗</span></small>
             </Link>
