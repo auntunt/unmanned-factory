@@ -64,3 +64,14 @@ describe('runGuidance', () => {
     expect(runView('events')).toBe('requirements')
   })
 })
+
+it('explains a scope stop using persisted failed-task evidence, including older artifact snapshots', () => {
+  const tasks = [{ id: 'scaffold', status: 'failed', attempts: [{ error: 'out-of-scope changes: src/api.py, tests/__init__.py', retryable: false }] }]
+  for (const stopped of [run({ tasks }), run({ artifacts: { tasks } })]) {
+    expect(runGuidance(stopped).label).toBe('修改超出当前任务范围')
+    expect(runGuidance(stopped).rawEvidence).toContain('src/api.py')
+    expect(canGenerateNextPlan(stopped, true)).toBe(true)
+    expect(canGenerateNextPlan(stopped, false)).toBe(false)
+  }
+  expect(runGuidance(run({ status: 'running', tasks })).kind).toBe('progress')
+})

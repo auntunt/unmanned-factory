@@ -124,6 +124,8 @@ def test_clarification_invalidates_approval(app_env):
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
     rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
     first = wait_state(store, rid, {'awaiting_approval'})
     assert client.post(f'/api/v2/runs/{rid}/clarify', json={'answer': 'Also keep the format'}, headers=headers).status_code == 200
@@ -198,3 +200,26 @@ def test_redaction_persistence_and_recovery(tmp_path, monkeypatch):
     with pytest.raises(Exception, match='append-only'):
         with reopened.connect() as db:
             db.execute('DELETE FROM events')
+
+
+def test_paused_clarification_carries_failure_evidence_to_new_plan(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
+    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    first = wait_state(store, rid, {'awaiting_approval'})
+    error = 'out-of-scope changes: src/api.py, tests/__init__.py'
+    store.update(rid, {'status': 'needs_human', 'tasks': [{'id': 'scaffold', 'status': 'failed', 'attempts': [{'error': error}]}]})
+    received = []
+    monkeypatch.setattr(svc, 'start_plan', lambda run_id: received.append(store.get(run_id)))
+    answer = '保持原需求，检查文件所属任务后重新规划'
+    assert client.post(f'/api/v2/runs/{rid}/clarify', json={'answer': answer}).status_code == 403
+    response = client.post(f'/api/v2/runs/{rid}/clarify', json={'answer': answer}, headers=headers)
+    assert response.status_code == 200
+    assert len(received) == 1
+    assert error in received[0]['history'][-2]
+    assert received[0]['history'][-1] == answer
+    assert received[0]['plan'] is None and received[0]['tasks'] == []
+    assert client.post(f'/api/v2/runs/{rid}/approve', json={'revision': first['revision']}, headers=headers).status_code == 409

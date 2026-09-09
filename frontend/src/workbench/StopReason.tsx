@@ -22,9 +22,9 @@ export function StopReason({ run, canConfigure }: { run: Run; canConfigure: bool
       <div className="wb-detail-kicker">当前需要处理</div>
       <h2 id="stop-reason-title">{guidance.label}</h2>
       <p>{guidance.summary}</p>
-      {guidance.kind === 'budget' && <p className="wb-stop-reason-admin-note">这里显示的是本次运行使用的预算。调整项目预算后，可点击“按新配置重试”；保存设置不会自动继续这次运行。</p>}
+      {guidance.kind === 'budget' && <p className="wb-stop-reason-admin-note">这里显示的是本次运行使用的预算。调整项目预算后，可在“处理问题并继续”中创建新运行；保存设置不会自动继续这次运行。</p>}
       <div className="wb-stop-reason-actions">
-        {guidance.kind === 'budget' && canConfigure ? <Link to={budgetHref}>调整项目预算</Link> : <Link to={guidance.primaryHref}>{guidance.primaryLabel}</Link>}
+        {guidance.kind === 'budget' && canConfigure ? <Link to={budgetHref}>调整项目预算</Link> : <Link to={guidance.kind === 'paused' ? `${guidance.primaryHref}#run-recovery` : guidance.primaryHref}>{guidance.primaryLabel}</Link>}
         <Link to={projectHref}>返回项目</Link>
         {canConfigure && adminActions.map((action) => <Link key={action.href} to={action.href}>{action.label}</Link>)}
       </div>

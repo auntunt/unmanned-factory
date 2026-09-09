@@ -39,6 +39,18 @@ function textArtifact(run: Run, key: string): string | undefined {
   const value = run.artifacts?.[key]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
+export function executionFailure(run: Run): string | undefined {
+  const tasks = records(run.tasks).length ? records(run.tasks) : records(run.artifacts?.tasks)
+  for (const task of tasks) {
+    if (task.status !== 'failed') continue
+    const attempts = records(task.attempts)
+    const latest = attempts[attempts.length - 1]
+    const error = latest?.error ?? task.error
+    if (typeof error === 'string' && error.trim()) return error.trim()
+  }
+  return undefined
+}
+
 export function frozenPolicy(run: Run): FrozenRunPolicy | null {
   const policy = (run as Run & { policy?: unknown }).policy
   if (!record(policy) || (policy.mode !== 'supervised' && policy.mode !== 'autonomous') || typeof policy.revision !== 'number') return null
@@ -85,7 +97,7 @@ export function runEvidence(run: Run): RunEvidence {
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
   const questions = requirements(run)
-  const stopReason = textArtifact(run, 'needs_human')
+  const stopReason = textArtifact(run, 'needs_human') ?? executionFailure(run)
   const billing = textArtifact(run, 'billing_incomplete') ?? (run.artifacts?.billing_incomplete === true ? '服务商没有提供完整美元费用。' : undefined)
   const failure = runError(run) ?? stopReason
   const budget = stopReason?.match(BUDGET_PATTERN)
@@ -99,6 +111,7 @@ export function runGuidance(run: Run): RunGuidance {
     const [, spent, limit] = budget
     return result(run, { kind: 'budget', label: '预算上限已触发', summary: `已记录费用 $${spent} 超过预算 $${limit}；系统已停止新的调用。`, detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看执行与费用', rawEvidence: stopReason })
   }
+  if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。请在执行页说明要保留的范围，助手会结合失败证据重新规划。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '处理暂停并重新规划', rawEvidence: stopReason })
   if (billing) return result(run, { kind: 'billing', label: '费用记录不完整', summary: '至少一笔服务商美元费用未完整记录，因此费用总额不能确认；这不等同于 token 用量未知。', detail: billing, view: 'delivery', stage: 'deliver', primaryLabel: '查看费用与交付证据', rawEvidence: billing })
   if (run.status === 'needs_clarification' || (run.status === 'needs_human' && questions.length > 0) || (run.status === 'awaiting_approval' && questions.length > 0)) {
     const count = questions.length
@@ -114,7 +127,7 @@ export function runGuidance(run: Run): RunGuidance {
   }
   if (run.status === 'failed') return result(run, { kind: 'failure', label: '运行失败', summary: failure ? '运行记录了失败原因。请先查看失败和检查证据，再决定是否创建重试。' : '本次执行未形成可继续的结果。请先查看失败和检查证据，再决定是否创建重试。', detail: failure, view: 'verification', stage: 'verify', primaryLabel: '查看失败证据', rawEvidence: failure })
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
-  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '运行没有记录可继续的自动操作；请查看原始停止原因和执行证据，按原因处理后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看停止原因', rawEvidence: stopReason })
+  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '运行没有记录可继续的自动操作；请查看原始停止原因和执行证据，按原因处理后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '处理暂停并重新规划', rawEvidence: stopReason })
 
   const values: Record<string, Pick<RunGuidance, 'label' | 'summary' | 'view' | 'stage' | 'primaryLabel'>> = {
     received: { label: '需求已接收', summary: '系统将分析目标和执行边界。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求' },
