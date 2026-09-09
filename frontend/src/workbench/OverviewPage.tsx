@@ -45,6 +45,8 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
   useEffect(() => { load(true); const timer = window.setInterval(() => load(), 5000); return () => { controllerRef.current?.abort(); window.clearInterval(timer) } }, [load])
   useEffect(() => subscribeDataRefresh(() => load(true)), [load])
   const attention = data?.attention ?? []
+  const completed = (data?.project_summaries ?? []).filter((p) => !p.active_runs && !p.attention_runs && p.next_run && ['ready_for_review', 'published'].includes(p.next_run.status))
+  const currentProjects = (data?.project_summaries ?? []).filter((p) => !completed.includes(p))
   const events = (data?.recent_events ?? []).filter((event) => EVENT_LABELS[event.type]).slice(0, 5)
 
   return <div className="wb-page ov3-page">
@@ -68,8 +70,8 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
         <AttentionList items={attention.slice(0, 4)} />
       </section>}
       <section className="pw-portfolio" aria-labelledby="project-portfolio">
-        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">每个项目，一套完整的工程闭环</h2><p>阶段数量按当前计划记录统计，不等于验证通过数。点击阶段查看同一份进度。</p></div></div>
-        {(data.project_summaries ?? []).map((project) => <article className="wb-card pw-project" key={project.id}>
+        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">当前工作</h2><p>阶段数量按当前计划记录统计，不等于验证通过数。点击阶段查看同一份进度。</p></div></div>
+        {currentProjects.map((project) => <article className="wb-card pw-project" key={project.id}>
           <header className="pw-project-heading"><div><Link to={`/projects/${encodeURIComponent(project.id)}`}><h3>{project.name}</h3></Link><p>{project.repository?.startsWith('local/') ? '系统管理的工作区' : project.repository}</p></div>
             <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 →</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} →</Link>}</div>
           </header>
@@ -86,10 +88,12 @@ export default function OverviewPage({ onUnauthorized, user }: PageProps) {
               <small className="pw-stage-link">{stage.action} <span aria-hidden="true">↗</span></small>
             </Link>
           })}</nav>
-          <footer className="pw-project-footer"><span>需求 → 方案 → 执行 → 验证 → 交付 → 经验回流</span>
+          <footer className="pw-project-footer"><span>需求 → 方案 → 执行 → 验证 → 交付 · 按需沉淀经验</span>
             {user?.role !== 'member' ? <Link to={`/projects/${encodeURIComponent(project.id)}?tab=settings#project-budget`}>单次运行预算 {typeof project.budget_usd === 'number' ? `$${project.budget_usd.toFixed(2)}` : '未返回'} →</Link> : <span>项目配置由管理员维护</span>}
           </footer>
         </article>)}
+        {currentProjects.length === 0 && completed.length > 0 && <p className="wb-runtime-note">当前工作已完成。可以查看下方成果，或进入项目提出新需求。</p>}
+        {completed.length > 0 && <details className="wb-card pw-completed"><summary>已完成的工作 · {completed.length} 个项目 <small>展开查看成果</small></summary><p className="wb-runtime-note">成果已就绪的项目收在这里；有新任务时会自动回到当前工作。能力沉淀可选。</p>{completed.map((project) => <div className="pw-completed-row" key={project.id}><strong>{project.name}</strong><div><Link className="wb-text-link" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 / 新需求 →</Link>{project.next_run && <Link className="wb-button wb-button-secondary" to={nextRunAction(project.next_run).href}>查看成果 →</Link>}</div></div>)}</details>}
         {data.project_summaries?.length === 0 && <div className="wb-card"><EmptyState title="登记第一个项目" description="每个项目会拥有自己的需求、执行记录、交付产物和经验。" action={<Link className="wb-button wb-button-primary" to="/projects">前往项目管理</Link>} /></div>}
         {!data.project_summaries && <div className="wb-card"><EmptyState title="项目进展暂未返回" action={<Link className="wb-button wb-button-secondary" to="/projects">查看项目列表</Link>} /></div>}
       </section>

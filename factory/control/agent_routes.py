@@ -24,7 +24,7 @@ class ProjectHelper(Body):
 class LearningChoice(Body):
     source_id: str
     source_revision: int = Field(ge=1)
-    destination: str = Field(pattern='^(standalone|agent)$')
+    destination: str = Field(pattern='^(standalone|agent|skip)$')
     agent_id: str | None = None
     draft_revision: int = Field(default=0, ge=0)
 

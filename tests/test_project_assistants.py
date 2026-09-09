@@ -143,3 +143,17 @@ def test_workspace_selection_and_standalone_skill_roundtrip(app_env):
         assert json.loads(archive.read('source.json'))['project_id'] == pid
     uploaded = client.post(f"/api/v4/agents/{a['id']}/skills", headers=headers, files={'file': ('learning.zip', exported.content, 'application/zip')})
     assert uploaded.status_code == 201, uploaded.text
+
+
+def test_skip_learning_keeps_source_without_changing_agent(app_env):
+    client, store, service, headers, p, helpers, a = setup_project(app_env)
+    entry = helpers.memory.put_entry(p['id'], {'title': '一次性调整', 'content': '没有通用价值', 'kind': 'decision', 'status': 'candidate'}, 'owner')
+    body = {'source_id': 'knowledge:' + entry['key'], 'source_revision': 1, 'destination': 'skip', 'agent_id': a['id'], 'draft_revision': 0}
+    url = f"/api/v4/projects/{p['id']}/learnings/settle"
+    response = client.post(url, headers=headers, json=body)
+    assert response.status_code == 200
+    assert response.json()['agent_id'] is None
+    assert response.json()['source']['content'] == '没有通用价值'
+    assert client.post(url, headers=headers, json=body).json() == response.json()
+    assert helpers.agents.draft(a['id'])['revision'] == 0
+    assert helpers.learnings(p['id'])[0]['disposition']['destination'] == 'skip'

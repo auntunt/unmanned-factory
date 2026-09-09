@@ -117,3 +117,8 @@
 .pw-stage-current.is-waiting > strong, .pw-stage-current.is-waiting .pw-stage-marker { color: #87540c; }
 @keyframes pw-current-pulse { 0%, 100% { box-shadow: 0 0 0 3px #16776820; } 50% { box-shadow: 0 0 0 7px #16776808; } }
 @media (prefers-reduced-motion: reduce) { .pw-stage-current.is-moving .pw-stage-marker i { animation: none; } }
+
+.pw-completed summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+.pw-completed summary small { margin-left: 12px; font-weight: 400; color: var(--wb-muted); }
+.pw-completed-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-top: 1px solid var(--wb-border); flex-wrap: wrap; }
+.pw-completed-row > div { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }

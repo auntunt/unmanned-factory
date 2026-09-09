@@ -49,9 +49,9 @@ export default function RunJourney({ run }: { run: Run }) {
         </li>
       })}
       <li className={candidate ? 'is-evidenced' : ''}>
-        {candidate ? <Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`} aria-label="能力沉淀：已留草稿"><span className="wb-run-step-number" aria-hidden="true">•</span><strong>能力沉淀</strong><small>已留草稿</small></Link> : <><span className="wb-run-step-number" aria-hidden="true">06</span><strong>能力沉淀</strong><small>未记录</small></>}
+        {candidate ? <Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`} aria-label="能力沉淀：已留草稿"><span className="wb-run-step-number" aria-hidden="true">•</span><strong>能力沉淀（可选）</strong><small>已留草稿</small></Link> : <><span className="wb-run-step-number" aria-hidden="true">06</span><strong>能力沉淀（可选）</strong><small>按需整理</small></>}
       </li>
     </ol>
-    {candidate && <div className="wb-run-journey-feedback"><span>本次经验已保存为能力草稿；验证并启用后才可用于后续需求。</span><Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`}>查看能力草稿 <span aria-hidden="true">→</span></Link></div>}
+    {candidate && <div className="wb-run-journey-feedback"><span>有值得复用的经验时，可查看并启用草稿；不沉淀也不影响本次交付。</span><Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`}>查看能力草稿 <span aria-hidden="true">→</span></Link></div>}
   </section>
 }
