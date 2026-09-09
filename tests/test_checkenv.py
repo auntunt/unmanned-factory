@@ -127,3 +127,9 @@ def test_regression_check_cannot_read_credentials(polluted_env, tmp_path):
 
     done = _sh('echo "VAL=$AWS_SECRET_ACCESS_KEY"', tmp_path, 30)
     assert "aws-leak-4" not in (done.stdout or ""), "凭据值被 check 读到了"
+
+
+def test_host_virtualenv_is_not_inherited_by_worktree(monkeypatch):
+    monkeypatch.setenv('VIRTUAL_ENV', '/host/main-checkout/.venv')
+    assert 'VIRTUAL_ENV' not in check_env()
+    assert check_env({'VIRTUAL_ENV': '/explicit/task/.venv'})['VIRTUAL_ENV'] == '/explicit/task/.venv'

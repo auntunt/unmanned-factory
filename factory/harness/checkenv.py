@@ -28,7 +28,7 @@ _PASSTHROUGH = frozenset({
     "LANG", "LC_ALL", "LC_CTYPE", "TERM",
     # Python
     "PYTHONPATH", "PYTHONHASHSEED", "PYTHONDONTWRITEBYTECODE",
-    "VIRTUAL_ENV", "PYENV_ROOT", "UV_CACHE_DIR",
+    "PYENV_ROOT", "UV_CACHE_DIR",
     # Node / 前端
     "NODE_PATH", "NVM_DIR", "NPM_CONFIG_CACHE",
     # 其他语言的工具链根目录（不含凭据）
@@ -61,6 +61,8 @@ def check_env(extra: dict[str, str] | None = None) -> dict[str, str]:
             continue    # 白名单里本不该有这种，但双重保险
         env[name] = value
 
+    # VIRTUAL_ENV belongs to the host checkout, not a newly created worktree.
+    # Explicit caller overrides remain available through extra.
     # PATH 必须有 —— 空 PATH 下连 sh 都找不到 pytest。
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
 
