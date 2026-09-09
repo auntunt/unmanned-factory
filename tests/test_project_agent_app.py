@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from tests.test_control_app import app_env, login, project, wait_state
+from factory.control.autonomy import DEFAULT_POLICY
 
 
 HEAD_SHA = 'a' * 40
@@ -137,6 +138,7 @@ def test_frozen_context_ignores_candidates_and_preserves_historical_revisions(ap
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
     active = client.post(f"/api/v2/projects/{p['id']}/knowledge", json=_entry(
         title='Greeting architecture', content='Original reviewed guidance.'), headers=headers).json()
     candidate = client.post(f"/api/v2/projects/{p['id']}/knowledge", json=_entry(
@@ -167,6 +169,7 @@ def test_baseline_drift_refuses_approval(app_env):
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
     rid = client.post('/api/v2/runs', json={'project_id': p['id'],
                                             'request': 'Update greeting safely'}, headers=headers).json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
@@ -280,6 +283,7 @@ def test_planning_rejects_checkout_changed_during_provider_readonly_phase(app_en
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
     original = svc.runner.run
 
     def mutating(request, emit, cancel=None):
@@ -306,7 +310,9 @@ def test_long_query_history_with_index_keeps_planning_bounded(app_env):
     indexed = client.post(f"/api/v2/projects/{p['id']}/code-index", headers=headers)
     assert indexed.status_code == 200, indexed.text
     run, _ = store.create_run(p['id'], 'q' * 500)
-    store.update(run['id'], {'history': [f'history-{i}-' + ('x' * 500) for i in range(250)]},
+    store.update(run['id'], {'execution_mode': 'dag',
+                 'policy': {**svc.policies.get(p['id']), 'mode': 'supervised'},
+                 'history': [f'history-{i}-' + ('x' * 500) for i in range(250)]},
                  expected=('received',))
     svc.start_plan(run['id'])
     planned = wait_state(store, run['id'], {'awaiting_approval', 'needs_human'})
@@ -319,6 +325,7 @@ def test_agent_profile_caps_are_bounded_in_frozen_context(app_env):
     client, store, svc, repo = app_env
     headers = login(client)
     p = project(client, repo, headers)
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
     update = {
         'expected_revision': 1, 'name': 'Large Profile', 'mission': 'm' * 2000,
         'architecture_summary': 'a' * 4000,

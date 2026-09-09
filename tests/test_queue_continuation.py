@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_autonomous_service import control, _autonomous, _new_run, _plan, _wait
+from tests.test_autonomous_service import control, _autonomous, _new_dag_run, _plan, _wait
 
 
 def test_answer_arriving_before_prior_worker_releases_slot_is_not_lost(control, monkeypatch):
@@ -23,7 +23,7 @@ def test_answer_arriving_before_prior_worker_releases_slot_is_not_lost(control, 
 
     monkeypatch.setattr(service, '_plan', held_plan)
     try:
-        rid = _new_run(client, project, headers)
+        rid = _new_dag_run(control)
         assert planned.wait(10)
         assert store.get(rid)['status'] == 'needs_clarification'
         response = client.post(f'/api/v2/runs/{rid}/clarify', json={'answer': 'Use hello autonomous.'}, headers=headers)
@@ -50,7 +50,7 @@ def test_replanning_after_failed_execution_keeps_workspace_and_all_costs(control
         return result
 
     monkeypatch.setattr(runner, 'run', fail_first_worker)
-    rid = _new_run(client, project, headers)
+    rid = _new_dag_run(control)
     failed = _wait(store, rid, {'needs_human'})
     prior_workspace = Path(failed['artifacts']['worktree'])
     assert prior_workspace.exists()

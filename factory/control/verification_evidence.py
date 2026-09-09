@@ -13,6 +13,9 @@ def render_evidence(artifacts, max_chars=24000):
                'checks': [check(c) for c in (artifacts.get('checks') or [])],
                'tasks': [], 'omitted_command_details': 0,
                'note': 'Command success is not proof of functional acceptance. Full run evidence is retained separately.'}
+    if artifacts.get('verification_changes'):
+        summary['verification_changes'] = json.dumps(scrub(artifacts['verification_changes']),
+            ensure_ascii=False)[:max(0, min(7000, max_chars // 4))]
     details = []
     for task in tasks:
         commands = task.get('command_evidence') or []

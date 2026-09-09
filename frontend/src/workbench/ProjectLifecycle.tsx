@@ -5,7 +5,7 @@ import EngineeringLoop from './EngineeringLoop'
 import { PROJECT_STAGES, projectStage, projectStageHref } from './project-stages'
 import { formatDate, StatusBadge, statusLabel } from './ui'
 import type { EngineeringSummary } from './v3-types'
-import { checkPassed, runGuidance } from './run-guidance'
+import { checkPassed, runGuidance, verificationScopeNote } from './run-guidance'
 
 interface Props {
   projectId: string | number
@@ -41,8 +41,8 @@ function StagePreview({ stage, run }: { stage: string; run: Run }) {
   </>
   if (stage === 'plan') return <>
     <p>{run.plan?.summary || '正在生成方案，尚未返回完整计划。'}</p>
-    <ul className="pw-record-list">{run.plan?.tasks.slice(0, 3).map((task) => <li key={task.id}><strong>{task.title}</strong><span>{task.depends_on.length ? `依赖 ${task.depends_on.join('、')}` : '可独立执行'}</span></li>)}</ul>
-    {run.plan && <p>{run.plan.tasks.length} 项任务 · 计划版本 {run.revision}</p>}
+    <ul className="pw-record-list">{run.plan?.tasks.slice(0, 3).map((task) => <li key={task.id}><strong>{task.title}</strong><span>{run.execution_mode === 'continuous' ? '持续编码与自测' : task.depends_on.length ? `依赖 ${task.depends_on.join('、')}` : '可独立执行'}</span></li>)}</ul>
+    {run.plan && <p>{run.execution_mode === 'continuous' ? '持续编码目标' : `${run.plan.tasks.length} 项任务`} · 计划版本 {run.revision}</p>}
   </>
   if (stage === 'build') {
     const tasks = taskRecords(run)
@@ -50,10 +50,10 @@ function StagePreview({ stage, run }: { stage: string; run: Run }) {
   }
   if (stage === 'verify') {
     const checks = checkRecords(run)
-    return checks.length ? <ul className="pw-record-list">{checks.slice(0, 5).map((check, index) => {
+    return checks.length ? <><p>{verificationScopeNote(run)}</p><ul className="pw-record-list">{checks.slice(0, 5).map((check, index) => {
       const passed = checkPassed(check)
       return <li key={index}><strong>{String(check.name ?? `检查 ${index + 1}`)}</strong><span className={passed ? 'is-pass' : 'is-fail'}>{passed ? '通过' : check.timeout ? '超时' : '未通过'}</span></li>
-    })}</ul> : <p>正在检查，尚未记录检查输出。结果返回后会显示在这里。</p>
+    })}</ul></> : <p>正在检查，尚未记录检查输出。结果返回后会显示在这里。</p>
   }
   if (stage === 'deliver') return <div className="pw-delivery-values">
     <span>交付状态：{run.status === 'published' ? '已发布' : run.status === 'publishing' ? '正在发布' : '尚未发布'}</span>
@@ -71,7 +71,7 @@ export default function ProjectLifecycle({ projectId, projectName, engineering, 
   const content = stages.find((item) => item.id === stage.id)!
   const previous = PROJECT_STAGES[Math.max(0, PROJECT_STAGES.findIndex((item) => item.id === stage.id) - 1)]
   return <section className="wb-card pw-cycle" aria-labelledby="project-cycle-title">
-    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>各阶段统计当前计划已有的记录，不代表完成率；旧计划与尝试保留在运行历史中。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行 →</Link></div>
+    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>六环组织需求、执行与成果记录，不要求每环单独调用模型；已有记录数不代表完成率。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行 →</Link></div>
     <div className="pw-cycle-layout">
       <EngineeringLoop stages={stages} selectedId={stage.id} onSelect={onSelect} />
       <section className="pw-stage-panel" id="ov3-stage-details" aria-labelledby="project-stage-title">

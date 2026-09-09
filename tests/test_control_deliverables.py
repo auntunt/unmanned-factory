@@ -127,7 +127,7 @@ def test_http_download_survives_worktree_removal_and_github_failure(app_env, cap
     assert client.get(f'{base}/download').status_code == 401
 
 
-def test_auto_publish_failure_preserves_verified_delivery(app_env):
+def test_auto_publish_failure_preserves_verified_delivery(app_env, monkeypatch):
     client, store, svc, repo = app_env
     headers = login(client)
     pid = project(client, repo, headers)['id']
@@ -136,6 +136,15 @@ def test_auto_publish_failure_preserves_verified_delivery(app_env):
         def publish(self, project, run):
             raise httpx.ConnectError('unavailable')
         def close(self): pass
+    from factory.control.providers import ProviderResult
+    original_run = svc.runner.run
+    review_calls = []
+    def with_review(request, emit, cancel=None):
+        if request.read_only and request.prompt.startswith('Return JSON only: {"verdict"'):
+            review_calls.append(request)
+            return ProviderResult('{"verdict":"pass","reason":"Greeting check passed"}', cost_usd=0.01)
+        return original_run(request, emit, cancel)
+    monkeypatch.setattr(svc.runner, 'run', with_review)
     svc.publisher = BrokenPublisher()
     rid = client.post('/api/v2/runs', headers=headers, json={'project_id': pid, 'request': 'Update greeting to hello world'}).json()['id']
     import time
@@ -147,6 +156,8 @@ def test_auto_publish_failure_preserves_verified_delivery(app_env):
     else:
         pytest.fail('automatic publication did not finish')
     for future in list(svc.futures): future.result(timeout=5)
+    assert len(review_calls) == 1 and review_calls[0].read_only
+    assert store.get(rid)['artifacts']['verification']['verdict'] == 'pass'
     assert store.get(rid)['status'] == 'ready_for_review'
     assert client.get(f'/api/v3/runs/{rid}/deliverables/download').status_code == 200
 

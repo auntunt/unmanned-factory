@@ -35,7 +35,7 @@ class Runner:
         self.plans = list(plans)
         self.planner_cost = planner_cost
         self.worker_cost = worker_cost
-        self.planner_calls = self.worker_calls = 0
+        self.planner_calls = self.worker_calls = self.verification_calls = 0
         self.models: list[tuple[bool, str]] = []
 
     def available(self):
@@ -43,6 +43,9 @@ class Runner:
 
     def run(self, request, emit, cancel=None):
         self.models.append((request.read_only, request.model))
+        if request.read_only and request.prompt.startswith('Return JSON only: {"verdict"'):
+            self.verification_calls += 1
+            return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'Greeting check passed'}), cost_usd=0.05, tokens_in=5, tokens_out=2)
         if request.read_only:
             self.planner_calls += 1
             plan = self.plans.pop(0) if len(self.plans) > 1 else self.plans[0]
@@ -119,6 +122,14 @@ def _new_run(client, project, headers, request="Update greeting automatically"):
     return response.json()["id"]
 
 
+def _new_dag_run(control, request="Update greeting automatically"):
+    _, store, service, _, project, _ = control
+    run, _ = store.create_run(project['id'], request, source={'type': 'web', 'actor_id': 1})
+    store.update(run['id'], {'execution_mode': 'dag'})
+    service.start_plan(run['id'])
+    return run['id']
+
+
 def test_projects_without_saved_policy_default_to_autonomous(control):
     client, store, service, runner, project, headers = control
     policy = client.get(f"/api/v3/projects/{project['id']}/policy", headers=headers).json()
@@ -186,22 +197,26 @@ def test_autonomous_clear_request_runs_without_approval_and_freezes_policy_and_c
     run = _wait(store, rid, {"ready_for_review", "needs_human"})
 
     assert run["status"] == "ready_for_review", store.events(rid)
-    assert runner.planner_calls == runner.worker_calls == 1
+    assert runner.planner_calls == 0
+    assert runner.worker_calls == runner.verification_calls == 1
+    assert run["execution_mode"] == "continuous"
+    assert run["artifacts"]["verification"]["verdict"] == "pass"
+    assert run["artifacts"]["checks"][0]["exit"] == 0
     assert run["policy"] == policy
     assert run["runtime_configuration"]["profiles"]["planner"]["model"] == "before-planner"
-    assert run["planner_usage"] == {"known_cost_usd": 0.2, "unknown_cost_calls": 0, "calls": 1}
-    assert run["artifacts"]["planner_cost_usd"] == pytest.approx(0.2)
-    assert run["artifacts"]["total_known_cost_usd"] == pytest.approx(0.5)
+    assert service._usage(rid, profile="planner") == {"known_cost_usd": 0, "unknown_cost_calls": 0, "calls": 0}
+    assert run["artifacts"]["planner_cost_usd"] == pytest.approx(0)
+    assert run["artifacts"]["total_known_cost_usd"] == pytest.approx(0.35)
     types = [event["type"] for event in store.events(rid)]
     assert "policy.authorized" in types and "human.approved" not in types
-    assert run["tasks"][0]["attempts"][0]["profile"] == "cheap"
+    assert run["tasks"][0]["attempts"][0]["profile"] == "standard"
 
 
 def test_autonomy_waits_for_clarification_then_continues(control):
     client, store, service, runner, project, headers = control
     runner.plans = [_plan(questions=["Which greeting should be used?"]), _plan()]
     _autonomous(client, project, headers)
-    rid = _new_run(client, project, headers)
+    rid = _new_dag_run(control)
     first = _wait(store, rid, {"needs_clarification", "needs_human"})
     assert first["status"] == "needs_clarification"
     response = client.post(f"/api/v2/runs/{rid}/clarify", json={"answer": "Use hello autonomous."}, headers=headers)
@@ -215,7 +230,7 @@ def test_autonomy_stops_above_risk_limit_without_worker_dispatch(control):
     client, store, service, runner, project, headers = control
     runner.plans = [_plan(risk="high")]
     _autonomous(client, project, headers, risk="medium")
-    rid = _new_run(client, project, headers)
+    rid = _new_dag_run(control)
     run = _wait(store, rid, {"awaiting_approval", "needs_human"})
     assert run["status"] == "awaiting_approval"
     assert run["triage"]["decision"] != "auto_execute"
@@ -232,7 +247,7 @@ def test_unknown_planner_cost_is_recorded_without_blocking_auto_dispatch(control
     _require_known_cost(service)
     runner.planner_cost = None
     _autonomous(client, project, headers)
-    rid = _new_run(client, project, headers)
+    rid = _new_dag_run(control)
     run = _wait(store, rid, {"needs_human", "ready_for_review"})
     assert run["status"] == "ready_for_review", store.events(rid)
     assert runner.planner_calls == 1 and runner.worker_calls == 1
@@ -451,15 +466,17 @@ def test_same_database_allows_only_one_live_durable_coordinator(control):
 def test_existing_known_or_unknown_planner_usage_does_not_block_dispatch(control):
     client, store, service, runner, project, headers = control
     _require_known_cost(service)
+    _supervised(client, project, headers)
     known, _ = store.create_run(project["id"], "Known planning budget is exhausted")
     store.append(known["id"], "usage.recorded", {"profile": "planner", "cost_usd": project["budget_usd"]})
+    store.update(known["id"], {"execution_mode": "dag"})
     service.start_plan(known["id"])
     known_run = _wait(store, known["id"], {"awaiting_approval", "needs_human"})
     assert runner.planner_calls == 1
     assert any(e["type"] == "provider.started" for e in store.events(known["id"]))
 
     unknown, _ = store.create_run(project["id"], "Clarify must not dispatch after unknown charge")
-    store.update(unknown["id"], {"status": "needs_clarification"})
+    store.update(unknown["id"], {"status": "needs_clarification", "execution_mode": "dag"})
     store.append(unknown["id"], "usage.recorded", {"profile": "planner", "cost_usd": None})
     service.clarify(unknown["id"], "Use a precise greeting", "owner")
     unknown_run = _wait(store, unknown["id"], {"awaiting_approval", "needs_human"})
@@ -475,12 +492,12 @@ def test_retry_double_click_creates_one_linked_successor(control):
     client, store, service, runner, project, headers = control
     prior, _ = store.create_run(project["id"], "Retry this failed run")
     store.update(prior["id"], {"status": "needs_human"}, event=("run.failed", {"message": "verification failed"}))
-    first = service.retry(prior["id"], "owner")
-    second = service.retry(prior["id"], "owner")
+    first = service.retry(prior["id"], "owner", actor_id=1)
+    second = service.retry(prior["id"], "owner", actor_id=1)
     assert first["id"] == second["id"]
     assert len(store.all_runs()) == 2
     successor = _wait(store, first["id"], {"ready_for_review", "needs_human"})
-    assert successor["status"] == "ready_for_review"
+    assert successor["status"] == "ready_for_review", store.events(first["id"])
     assert runner.worker_calls == 1
     assert successor["previous_run_id"] == prior["id"]
     assert len([event for event in store.events(prior["id"]) if event["type"] == "run.retry_linked"]) == 1

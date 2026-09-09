@@ -14,6 +14,7 @@ from .providers import (
     _run_codex,
     _run_dsh,
     _safe_json,
+    failure_metadata,
 )
 
 
@@ -21,6 +22,15 @@ def _write(event_type: str, payload: Any) -> None:
     message = {"type": event_type, "payload": _safe_json(payload)}
     sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def _failure_payload(exc):
+    metadata = failure_metadata(exc)
+    for key in ('transient', 'error_kind', 'status_code'):
+        if getattr(exc, key, None) is not None:
+            metadata[key] = getattr(exc, key)
+    return {'message': str(exc), 'kind': type(exc).__name__,
+            'session_id': getattr(exc, 'session_id', None), **metadata}
 
 
 def main() -> int:
@@ -44,10 +54,10 @@ def main() -> int:
         _write("complete", asdict(result))
         return 0
     except ProviderError as exc:
-        _write("error", {"message": str(exc), "kind": type(exc).__name__})
+        _write("error", _failure_payload(exc))
         return 3
     except Exception as exc:  # SDK exceptions are provider failures, never success.
-        _write("error", {"message": f"provider SDK failure: {exc}", "kind": type(exc).__name__})
+        _write("error", {**_failure_payload(exc), "message": f"provider SDK failure: {exc}"})
         traceback.print_exc(file=sys.stderr)
         return 4
 

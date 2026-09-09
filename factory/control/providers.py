@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import inspect
+import re
+from functools import wraps
 from enum import Enum
 import os
 import selectors
@@ -18,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -45,16 +47,104 @@ class ProviderResult:
 
 
 class ProviderError(RuntimeError):
-    """A provider was unavailable, failed, or returned an invalid result."""
+    """Provider failure, optionally retaining a resumable session and retry category."""
+
+    def __init__(self, message="", *, session_id=None, transient=None, error_kind=None, status_code=None):
+        super().__init__(message)
+        self.session_id = session_id
+        metadata = failure_metadata(message, status_code=status_code)
+        self.transient = metadata['transient'] if transient is None else bool(transient)
+        self.error_kind = error_kind or metadata['error_kind']
+        self.status_code = metadata['status_code']
 
 
 class ProviderTimeout(ProviderError):
-    """The provider exceeded the request timeout."""
+    """The provider exceeded the request timeout; outer orchestration bounds retries."""
+
+    def __init__(self, message="", **kwargs):
+        super().__init__(message, **{'transient': True, 'error_kind': 'timeout', **kwargs})
 
 
 class ProviderCancelled(ProviderError):
-    """The caller cancelled the provider process."""
+    """The caller cancelled the provider process; this is never auto-retryable."""
 
+    def __init__(self, message="", **kwargs):
+        super().__init__(message, **{**kwargs, 'transient': False, 'error_kind': 'cancelled'})
+
+
+
+def failure_metadata(error, *, status_code=None, exception_kind=None):
+    """Classify transport failures, never arbitrary tool exit codes or code errors."""
+    code = status_code or getattr(error, 'status_code', None)
+    if code is None:
+        code = getattr(getattr(error, 'response', None), 'status_code', None)
+    kind = exception_kind or type(error).__name__
+    text = str(error)
+    if code is None:
+        match = re.search(r'(?i)(?:http(?:/\d(?:\.\d)?)?|status(?:_code)?[\"\']?|api(?: error)?|error code)\s*[:=]?\s*(\d{3})\b', text)
+        if match:
+            code = int(match[1])
+    try:
+        code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    if code == 429 or kind == 'RateLimitError':
+        category = 'rate_limit'
+    elif code in {502, 503, 504, 529}:
+        category = 'upstream_unavailable'
+    elif code is not None:
+        category = 'provider_error'
+    elif kind in {'TimeoutError', 'APITimeoutError', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout'}:
+        category = 'timeout'
+    elif kind in {'APIConnectionError', 'ConnectError', 'ReadError', 'WriteError', 'RemoteProtocolError',
+                  'ConnectionError', 'ConnectionResetError', 'ConnectionAbortedError', 'BrokenPipeError'}:
+        category = 'network'
+    elif re.search(r'(?i)\b(?:connection reset by peer|connection timed out|network is unreachable|remote end closed connection|socket hang up|temporary failure in name resolution)\b', text):
+        category = 'network'
+    elif re.search(r'(?i)\b(?:502 bad gateway|503 service unavailable|504 gateway time[ -]?out|529 overloaded)\b', text):
+        category = 'upstream_unavailable'
+    else:
+        category = 'provider_error'
+    return {'transient': category != 'provider_error', 'error_kind': category, 'status_code': code}
+
+
+def _session_events(emit, initial=None):
+    """Session notifications identify continuity; repeats are not progress."""
+    state = {'session_id': initial, 'emitted': None}
+    def tracked(kind, payload):
+        if kind == 'provider.session':
+            sid = payload.get('session_id') if isinstance(payload, dict) else None
+            if not isinstance(sid, str) or not sid.strip() or len(sid) > 4096:
+                return
+            state['session_id'] = sid
+            if sid == state['emitted']:
+                return
+            state['emitted'] = sid
+        emit(kind, payload)
+    return state, tracked
+
+
+def _retain_failure(exc, session_id, *, observed=False):
+    # Preserve native SDK exception classes for callers and worker diagnostics.
+    if observed or not getattr(exc, 'session_id', None):
+        exc.session_id = session_id
+    if not isinstance(exc, ProviderError):
+        for key, value in failure_metadata(exc).items():
+            setattr(exc, key, value)
+    return exc
+
+
+def _session_adapter(fn):
+    @wraps(fn)
+    def wrapped(req, emit):
+        state, tracked = _session_events(emit, req.session_id)
+        try:
+            result = fn(req, tracked)
+            return replace(result, session_id=result.session_id or state['session_id'])
+        except Exception as exc:
+            _retain_failure(exc, state['session_id'], observed=state['emitted'] is not None)
+            raise
+    return wrapped
 
 _PROVIDER_IMPORTS = {
     "claude": ("claude_agent_sdk", "Claude Agent SDK (claude-agent-sdk)"),
@@ -326,6 +416,7 @@ def _claude_tool_allowed(tool_name: str, input_data: Mapping[str, Any], workspac
     return True
 
 
+@_session_adapter
 def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     try:
         from claude_agent_sdk import (  # type: ignore[import-not-found]
@@ -881,6 +972,7 @@ def _verify_codex_isolation(codex: Any, workspace: str) -> None:
         raise ProviderError("Codex isolation verification found active skills")
 
 
+@_session_adapter
 def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
     try:
         from openai_codex import Codex, CodexConfig, Sandbox  # type: ignore[import-not-found]
@@ -967,6 +1059,7 @@ def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
     return ProviderResult(text, session_id, None, tokens_in, tokens_out, cached_input_tokens)
 
 
+@_session_adapter
 def _run_dsh(req: ProviderRequest, emit: Emit) -> ProviderResult:
     if req.read_only:
         raise ProviderError("dsh read_only is refused: DeepSeek Harness SDK has no verified read-only capability")
@@ -1073,6 +1166,15 @@ class SDKRunner:
         emit: Emit,
         cancel: threading.Event | None = None,
     ) -> ProviderResult:
+        state, tracked = _session_events(emit, request.session_id)
+        try:
+            result = self._run(request, tracked, cancel)
+            return replace(result, session_id=result.session_id or state['session_id'])
+        except ProviderError as exc:
+            _retain_failure(exc, state['session_id'], observed=state['emitted'] is not None)
+            raise
+
+    def _run(self, request: ProviderRequest, emit: Emit, cancel=None) -> ProviderResult:
         if request.provider not in _PROVIDER_IMPORTS:
             raise ProviderError(f"unknown provider: {request.provider!r}")
         if not request.model:
@@ -1184,7 +1286,16 @@ class SDKRunner:
             except subprocess.TimeoutExpired as exc:
                 raise ProviderError("provider worker did not exit after termination") from exc
         if error_payload is not None:
-            raise ProviderError(str(error_payload.get("message") or "provider worker failed"))
+            metadata = failure_metadata(error_payload.get("message") or "provider worker failed",
+                status_code=error_payload.get('status_code'), exception_kind=error_payload.get('kind'))
+            # New workers retain structured SDK metadata; old workers still work.
+            if isinstance(error_payload.get('transient'), bool):
+                metadata['transient'] = error_payload['transient']
+            if error_payload.get('error_kind'):
+                metadata['error_kind'] = error_payload['error_kind']
+            error_cls = ProviderTimeout if error_payload.get('kind') == 'ProviderTimeout' else ProviderCancelled if error_payload.get('kind') == 'ProviderCancelled' else ProviderError
+            raise error_cls(str(error_payload.get("message") or "provider worker failed"),
+                session_id=error_payload.get('session_id'), **metadata)
         if rc != 0:
             raise ProviderError(f"provider worker exited with status {rc}")
         if result_payload is None:
@@ -1214,7 +1325,7 @@ class SDKRunner:
             raise ProviderError("provider worker emitted a non-object JSONL message")
         typ = message.get("type")
         payload = message.get("payload")
-        if typ in {"task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
+        if typ in {"command.completed", "task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
             emit(str(typ), payload if isinstance(payload, dict) else {"value": _safe_json(payload)})
         elif typ not in {"complete", "error"}:
             emit("provider.raw", {"stream": stream, "event": _safe_json(message)})

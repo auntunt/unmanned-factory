@@ -91,6 +91,7 @@ export interface Artifacts {
 }
 
 export interface Run {
+  execution_mode?: 'continuous' | 'dag'
   id: string | number
   project_id: string | number
   request: string

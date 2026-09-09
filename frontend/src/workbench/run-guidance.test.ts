@@ -81,3 +81,17 @@ it('does not let old budget or billing artifacts override current execution', ()
   expect(runGuidance(active).kind).toBe('progress')
   expect(runGuidance(active).label).toBe('正在执行')
 })
+
+it('完整性检查不会被介绍成完整业务验收通过', () => {
+  const result = runGuidance(run({ execution_mode: 'continuous', status: 'ready_for_review', artifacts: { checks: [{ name: 'workspace-integrity', exit: 0 }] } }))
+  expect(result.summary).toContain('尚不能据此确认业务功能可用')
+  expect(result.summary).not.toContain('验证已通过')
+  expect(result.label).toContain('成果已生成')
+})
+
+it('持续编码的连接恢复仍是进行中，不要求批准，终态不沿用旧活动', () => {
+  const value = run({ execution_mode: 'continuous', status: 'running', tasks: [{ id: 'coding', status: 'running', activity: { phase: 'reconnecting' } }] })
+  expect(runGuidance(value).kind).toBe('progress')
+  expect(runGuidance(value).label).toBe('正在恢复模型连接')
+  expect(runGuidance({ ...value, status: 'ready_for_review' }).kind).toBe('delivery')
+})

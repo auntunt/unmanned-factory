@@ -171,6 +171,8 @@ def test_team_api_role_assignment_ownership_and_audit(app_env):
     client, store, svc, repo = app_env
     admin_headers = login(client)
     p = project(client, repo, admin_headers)
+    from factory.control.autonomy import DEFAULT_POLICY
+    svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
     member = client.post('/api/v3/team/members', json={'username': 'member', 'password': PASSWORD}, headers=admin_headers).json()
     other = client.post('/api/v3/team/members', json={'username': 'another', 'password': PASSWORD}, headers=admin_headers).json()
     assert member['role'] == 'member'

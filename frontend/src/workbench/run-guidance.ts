@@ -76,6 +76,17 @@ export function checkPassed(check: Record<string, unknown>): boolean {
   return outcome !== undefined ? outcome === 'passed' || outcome === 'pass' : check.exit === 0
 }
 
+export function verificationScopeNote(run: Run): string {
+  const tasks = records(run.tasks).length ? records(run.tasks) : records(run.artifacts?.tasks)
+  const checks = records(run.artifacts?.checks).length ? records(run.artifacts?.checks) : tasks.flatMap((task) => {
+    const attempts = records(task.attempts)
+    return records(task.checks).length ? records(task.checks) : records(attempts[attempts.length - 1]?.checks)
+  })
+  if (!checks.length) return '尚未记录可展示的检查结果，不能据此确认功能可用。'
+  if (checks.every((check) => check.name === 'workspace-integrity')) return '当前仅记录工作区完整性检查，尚不能据此确认业务功能可用。'
+  return '检查结果仅覆盖列出的项目，请结合实际输入输出核对业务验收范围。'
+}
+
 /** Reads only persisted delivery evidence; it never infers a completed stage from a later status. */
 export function runEvidence(run: Run): RunEvidence {
   const progress = (run as Run & { progress?: RunEvidence }).progress
@@ -106,7 +117,7 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交和检查记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
   if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
-  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '已验证，可查看成果', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : '验证已通过。查看或下载本次成果，也可选择推送到 GitHub。', view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
+  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '成果已生成，可查看', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : `查看或下载本次成果，也可选择推送到 GitHub。${verificationScopeNote(run)}`, view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
 
   if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。可直接重试自动处理，无需填写回答；原计划和草稿会保留。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
   if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置改动需要处理', summary: '执行助手改动了受保护的测试配置。系统会在自动修复中尝试恢复检查配置；无需编写处理指令。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
@@ -126,6 +137,10 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
   if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '自动处理尚未完成。原因和已有成果已保存，可查看证据或直接重试。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
 
+  if (run.execution_mode === 'continuous' && ['planning', 'running'].includes(run.status)) {
+    const reconnecting = records(run.tasks).some((task) => task.status === 'running' && record(task.activity) && task.activity.phase === 'reconnecting')
+    return result(run, { kind: 'progress', label: reconnecting ? '正在恢复模型连接' : run.status === 'planning' ? '正在整理执行目标' : '正在持续编码', summary: reconnecting ? '连接暂时中断，系统正在自动恢复，已有工作保留。' : '执行助手围绕当前目标持续修改、运行和修正；六环展示相关记录。', view: run.status === 'planning' ? 'plan' : 'execution', stage: run.status === 'planning' ? 'plan' : 'build', primaryLabel: '查看执行进展' })
+  }
   const values: Record<string, Pick<RunGuidance, 'label' | 'summary' | 'view' | 'stage' | 'primaryLabel'>> = {
     received: { label: '需求已接收', summary: '系统将分析目标和执行边界。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求' },
     planning: { label: '正在规划', summary: '正在形成任务分工、依赖关系和验收方式。', view: 'plan', stage: 'plan', primaryLabel: '查看计划' },
