@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { artifactLinks, draftCanApply, isTerminalRun, unwrapAgentMessageResponse } from './AgentsPage'
+import { feedbackStatusLabel, artifactLinks, draftCanApply, isTerminalRun, unwrapAgentMessageResponse } from './AgentsPage'
 
 describe('职能体聊天接口映射', () => {
   it('解包发送接口的 conversation/run/draft envelope', () => {
@@ -28,4 +28,12 @@ describe('职能体聊天接口映射', () => {
     expect(draftCanApply({ revision: 2, conflicts: ['版本冲突'] })).toBe(false)
     expect(draftCanApply({ revision: 2, conflicts: [] })).toBe(true)
   })
+})
+
+
+it('反馈状态仅依据持久化采用状态展示，不把待处理反馈称为已执行', () => {
+  expect(feedbackStatusLabel('pending')).toContain('自动接续')
+  expect(feedbackStatusLabel('pending')).toContain('人工处理')
+  expect(feedbackStatusLabel('adopted')).toContain('已纳入')
+  expect(feedbackStatusLabel()).toBeNull()
 })

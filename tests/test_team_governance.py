@@ -6,7 +6,7 @@ import pytest
 
 from factory.control.auth import AuthError, AuthStore
 from factory.control.governance import Governance, GovernedRunner, QuotaExceeded
-from factory.control.providers import ProviderRequest, ProviderResult, ProviderError
+from factory.control.providers import ProviderRequest, ProviderResult, ProviderError, ProviderCancelled
 from factory.control.store import Store
 from tests.test_control_app import app_env, login, project, wait_state
 
@@ -127,8 +127,8 @@ def test_revocation_is_checked_at_dispatch_and_system_work_uses_project_and_work
         gov.reserve(system['id'], 'codex', 'test')
 
 
-@pytest.mark.parametrize('incoming,outgoing,actual', [(100, 20, 120), (None, 20, None), (-1, 20, None), (True, 20, None)])
-def test_wrapper_counts_complete_usage_and_retains_invalid_or_missing_usage(team, incoming, outgoing, actual):
+@pytest.mark.parametrize('incoming,outgoing', [(100, 20), (None, 20), (-1, 20), (True, 20)])
+def test_wrapper_preserves_provider_usage_without_local_accounting(team, incoming, outgoing):
     _, _, gov, _, member, _, run = team
 
     class Runner:
@@ -137,14 +137,14 @@ def test_wrapper_counts_complete_usage_and_retains_invalid_or_missing_usage(team
 
     result = GovernedRunner(Runner(), gov, run['id']).run(ProviderRequest('codex', 'test', 'do work', '.'), lambda *_: None)
     assert result.text == 'done'
-    call = gov.summary(member)['calls'][0]
-    assert call['actual_tokens'] == actual  # cached input already part of tokens_in
-    assert call['status'] == ('unknown' if actual is None else 'settled')
+    assert result.tokens_in == incoming and result.tokens_out == outgoing
+    assert result.cached_input_tokens == 80
+    assert gov.summary(member)['calls'] == []  # gateway owns token settlement
 
 
-def test_wrapper_never_starts_provider_on_denial_and_partial_usage_is_not_final(team):
+def test_wrapper_preserves_cancellation_and_provider_errors_without_quota_block(team):
     _, _, gov, _, member, _, run = team
-    entered = []
+    entered, events = [], []
 
     class Runner:
         def run(self, request, emit, cancel=None):
@@ -155,13 +155,16 @@ def test_wrapper_never_starts_provider_on_denial_and_partial_usage_is_not_final(
     wrapper = GovernedRunner(Runner(), gov, run['id'])
     req = ProviderRequest('codex', 'test', 'do work', '.')
     gov.set_limit('member', member['id'], 0, 'owner')
-    with pytest.raises(QuotaExceeded):
-        wrapper.run(req, lambda *_: None)
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(ProviderCancelled):
+        wrapper.run(req, lambda *_: None, cancel=cancelled)
     assert not entered and not gov.summary(member)['calls']
-    gov.set_limit('member', member['id'], 100000, 'owner')
-    with pytest.raises(ProviderError):
-        wrapper.run(req, lambda *_: None)
-    assert gov.summary(member)['calls'][0]['status'] == 'unknown'
+    with pytest.raises(ProviderError, match='interrupted after one turn'):
+        wrapper.run(req, lambda kind, payload: events.append((kind, payload)))
+    assert entered == [True]
+    assert events == [('provider.usage', {'input_tokens': 5, 'output_tokens': 1})]
+    assert not gov.summary(member)['calls']
 
 
 def test_team_api_role_assignment_ownership_and_audit(app_env):
@@ -191,15 +194,15 @@ def test_team_api_role_assignment_ownership_and_audit(app_env):
     assert response.status_code == 422
     response = client.post('/api/v2/runs', json=body, headers=headers)
     assert response.status_code == 201, response.text
-    run = wait_state(store, response.json()['id'], {'needs_human', 'failed'})
+    run = wait_state(store, response.json()['id'], {'awaiting_approval', 'needs_human', 'failed'})
+    assert run['status'] == 'awaiting_approval'
     assert run['source']['actor_id'] == member['id']
-    # A denied reservation is not a model dispatch.  In particular it must
-    # not create the unknown-cost evidence that would poison a later retry.
+    # Local quota fields are legacy audit configuration, not dispatch gates.
     assert not client.get('/api/v3/team').json()['calls']
     event_types = [event['type'] for event in store.events(run['id'])]
     assert 'quota.reserved' not in event_types
-    assert 'provider.started' not in event_types
-    assert 'usage.recorded' not in event_types
+    assert 'provider.started' in event_types
+    assert 'usage.recorded' in event_types
     other_run, _ = store.create_run(p['id'], 'Someone else task', source={'actor_id': other['id']})
     assert client.post(f'/api/v2/runs/{other_run["id"]}/cancel', headers=headers).status_code == 403
     assert client.post(f'/api/v2/runs/{run["id"]}/publish', headers=headers).status_code == 403

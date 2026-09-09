@@ -268,7 +268,117 @@ class AgentStore:
             db.execute("INSERT INTO agent_versions VALUES (?,?,?,?,?)", (data["id"], aid, ver, _json(data), at)); agent.update(active_version=ver, updated_at=at); db.execute("UPDATE agents SET data=? WHERE id=?", (_json(agent), aid))
             db.execute("DELETE FROM agent_drafts WHERE agent_id=?", (aid,))
         return {**agent, "version": data}
-    def conversation(self, cid): return self._row("agent_conversations", "id", cid)
+    def conversation(self, cid):
+        c = self._row("agent_conversations", "id", cid)
+        c['pending_feedback_count'] = sum(m.get('feedback_status') == 'pending' for m in c['messages'])
+        return c
+
+    def adopt_feedback(self, cid):
+        """Atomically consume a feedback batch and link its successor run.
+
+        The transaction is the durable outbox: a crash can leave an unqueued
+        received run, but never consumed feedback without its run or two runs.
+        """
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            c = self._decode(db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone())
+            pending = [m for m in c['messages'] if m.get('feedback_status') == 'pending']
+            if not pending or not c.get('run_id'):
+                return None
+            prior = self._decode(db.execute('SELECT data FROM runs WHERE id=?', (c['run_id'],)).fetchone())
+            applied = set(prior.get('feedback_applied_ids', []))
+            for m in pending:
+                if m['id'] in applied:
+                    m.update(feedback_status='adopted', feedback_run_id=prior['id'])
+            if applied:
+                db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+            pending = [m for m in pending if m['id'] not in applied]
+            if not pending or prior['status'] not in ('ready_for_review', 'published'):
+                return None
+            # Keep each current batch out of the deliberately bounded historical
+            # context. At most 50k characters per successor; larger queues are
+            # retained for subsequent safe boundaries without truncating input.
+            batch, size = [], 0
+            for m in pending:
+                if batch and size + len(m['content']) > 50_000:
+                    break
+                batch.append(m)
+                size += len(m['content'])
+            pending = batch
+            rid, at = uuid.uuid4().hex, now()
+            source = {**prior.get('source', {}), 'type': 'agent', 'conversation_id': cid,
+                      'feedback_of': prior['id']}
+            data = dict(id=rid, project_id=prior['project_id'],
+                request='在上一轮已验证成果基础上完成以下补充需求：\n' + '\n\n'.join(m['content'] for m in pending), history=[*prior.get('history', []), prior['request'],
+                    '用户补充（在上一轮成果基础上继续）：\n' + '\n\n'.join(m['content'] for m in pending)],
+                status='received', revision=0, plan=None, triage=None, tasks=[], artifacts={},
+                root_request=prior.get('root_request', prior['request']),
+                authorization_requests=list(dict.fromkeys([*prior.get('authorization_requests', []), prior['request']])),
+                source=source, created_at=at, updated_at=at, feedback_predecessor_id=prior['id'])
+            for key in ('agent_id', 'agent_version', 'agent_snapshot', 'conversation_id', 'runtime_configuration'):
+                if key in prior:
+                    data[key] = prior[key]
+            db.execute('INSERT INTO runs VALUES (?,?)', (rid, _json(data)))
+            self.store._event(db, rid, 'feedback.adopted', {'previous_run_id': prior['id'],
+                'message_ids': [m['id'] for m in pending]})
+            for m in pending:
+                m.update(feedback_status='adopted', feedback_run_id=rid)
+            c.update(run_id=rid, updated_at=at)
+            c['messages'].append({'id': uuid.uuid4().hex, 'role': 'assistant',
+                'content': '已自动接续补充需求，正在基于上一轮成果继续工作。',
+                'created_at': at, 'status': 'completed', 'run_id': rid})
+            db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+            return data
+
+    def create_retry(self, prior, actor, actor_id, history):
+        """Create the complete retry and move its conversation in one commit."""
+        key = f"retry:{prior['id']}:{prior['revision']}"
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('SELECT run_id FROM deliveries WHERE id=?', (key,)).fetchone()
+            if existing:
+                return self._decode(db.execute('SELECT data FROM runs WHERE id=?', (existing[0],)).fetchone()), False
+            rid, at = uuid.uuid4().hex, now()
+            data = dict(id=rid, project_id=prior['project_id'], request=prior['request'],
+                status='received', revision=0, plan=None, triage=None, tasks=[], artifacts={},
+                history=history, created_at=at, updated_at=at, previous_run_id=prior['id'],
+                source={'type': 'retry', 'actor': actor, 'actor_id': actor_id if actor_id is not None else prior.get('source', {}).get('actor_id'), 'retry_of': prior['id']})
+            for field in ('capability', 'agent_id', 'agent_version', 'agent_snapshot',
+                          'runtime_configuration', 'conversation_id', 'feedback_predecessor_id', 'feedback_applied_ids',
+                          'root_request', 'authorization_requests'):
+                if field in prior:
+                    data[field] = prior[field]
+            cid = prior.get('conversation_id')
+            if cid:
+                c = self._decode(db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone())
+                if c.get('run_id') != prior['id']:
+                    raise Conflict('会话已有后续任务，请在当前任务上继续')
+                c.update(run_id=rid, updated_at=at)
+                db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+            db.execute('INSERT INTO runs VALUES (?,?)', (rid, _json(data)))
+            db.execute('INSERT INTO deliveries VALUES (?,?)', (key, rid))
+            self.store._event(db, rid, 'run.retry_created', {'previous_run_id': prior['id'], 'actor': actor})
+            self.store._event(db, prior['id'], 'run.retry_linked', {'next_run_id': rid, 'actor': actor})
+            return data, True
+
+    def feedback_error(self, cid, message):
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            c = self._decode(db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone())
+            if c.get('feedback_error') != message:
+                c['feedback_error'] = message
+                db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+
+    def settle_feedback(self, cid, rid, message_ids=None):
+        """A direct clarification already includes these pending messages."""
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            c = self._decode(db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone())
+            for m in c['messages']:
+                if m.get('feedback_status') == 'pending' and (message_ids is None or m['id'] in message_ids):
+                    m.update(feedback_status='adopted', feedback_run_id=rid)
+            db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+
     def conversations(self, aid):
         self.get(aid)
         with self.store.connect() as db: return [self._decode(r) for r in db.execute("SELECT data FROM agent_conversations WHERE agent_id=? ORDER BY rowid DESC", (aid,))]

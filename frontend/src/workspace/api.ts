@@ -21,7 +21,8 @@ export interface RequestOptions {
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET'
   const headers: Record<string, string> = { Accept: 'application/json' }
-  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  const multipart = options.body instanceof FormData
+  if (options.body !== undefined && !multipart) headers['Content-Type'] = 'application/json'
   if (options.csrfToken && method !== 'GET' && method !== 'HEAD') headers['X-CSRF-Token'] = options.csrfToken
 
   let response: Response
@@ -31,7 +32,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       cache: method === 'GET' || method === 'HEAD' ? 'no-store' : undefined,
       credentials: 'same-origin',
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.body === undefined ? undefined : multipart ? options.body as FormData : JSON.stringify(options.body),
       signal: options.signal,
     })
   } catch (error) {

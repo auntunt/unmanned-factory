@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ConfigDict
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -176,9 +176,11 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         public_api = path in ('/api/auth/login', '/api/v2/github/webhook')
         is_api = path.startswith('/api/')
         skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/skills', path) is not None
-        # Authenticate and check CSRF before opening the bounded Skill stream;
+        project_upload = request.method == 'POST' and path == '/api/v2/projects/import-zip'
+        bounded_upload = skill_upload or project_upload
+        # Authenticate and check CSRF before opening the bounded upload stream;
         # an unauthenticated upload must not be buffered into memory first.
-        if skill_upload:
+        if bounded_upload:
             if request.headers.get('origin') != origin:
                 return JSONResponse({'detail': '请求来源不匹配'}, status_code=403)
             early_user = auth.authenticate(request.cookies.get(COOKIE, ''))
@@ -188,7 +190,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                 return JSONResponse({'detail': '会话验证失败，请重新登录'}, status_code=403)
             if early_user['role'] != 'admin':
                 return JSONResponse({'detail': '此操作需要管理员权限'}, status_code=403)
-        if skill_upload:
+        if bounded_upload:
             # Let UploadFile spool multipart parts; do not buffer the archive
             # again in the control-plane middleware before parsing it.
             upstream_receive = request._receive
@@ -201,7 +203,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     raise HTTPException(413, '请求体过大')
                 return message
             request._receive = limited_receive
-        if not skill_upload and request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        if not bounded_upload and request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
             chunks, size = [], 0
             async for chunk in request.stream():
                 size += len(chunk)
@@ -306,6 +308,35 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             return project
         except WorkspaceError as exc:
             raise HTTPException(503, str(exc)) from None
+
+    @app.post('/api/v2/projects/import-zip', status_code=201)
+    def import_workspace(request: Request, file: UploadFile = File(...),
+                         name: str = Form(..., min_length=1, max_length=120),
+                         idempotency_key: str = Form(..., min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$'),
+                         budget_usd: float = Form(10.0, gt=0, le=1000), agent_id: str | None = Form(None)):
+        from factory.control.project_import import import_project, ImportError
+        from factory.control.workspaces import WorkspaceError
+        from factory.control.project_assistants import ProjectAssistants
+        import math
+        if not name.strip() or not math.isfinite(budget_usd):
+            raise HTTPException(422, '请填写有效的项目名称和预算')
+        helpers = ProjectAssistants(store)
+        if agent_id:
+            try: helpers.agents.get(agent_id)
+            except KeyError: raise HTTPException(404, '所选职能体不存在') from None
+        try:
+            result = import_project(store, allowed_root, file.file, filename=file.filename,
+                name=name.strip(), budget_usd=budget_usd, actor_id=request.state.user['id'],
+                idempotency_key=idempotency_key, agent_id=agent_id)
+            if agent_id and helpers.binding(result['project']['id'])['revision'] == 0:
+                helpers.bind(result['project']['id'], agent_id, 0, request.state.user['id'])
+            return result
+        except ImportError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except WorkspaceError as exc:
+            raise HTTPException(503, str(exc)) from None
+        finally:
+            file.file.close()
 
     @app.get('/api/v2/project-candidates')
     def project_candidates(request: Request):

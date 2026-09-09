@@ -59,24 +59,28 @@ def test_verifier_uses_separate_profile_readonly_context_and_records_usage(app_e
     assert service._usage(run['id'], profile='verification') == {'known_cost_usd': .03, 'unknown_cost_calls': 0, 'calls': 1}
     with service.governance.connect() as db:
         token_call = db.execute('SELECT * FROM token_calls WHERE run_id=?', (run['id'],)).fetchone()
-        assert token_call['status'] == 'settled' and token_call['actual_tokens'] == 15
+        assert token_call is None  # gateway owns settlement; usage event remains above
     assert artifacts['verification']['verdict'] == 'pass'
 
 
-def test_verifier_budget_stops_before_dispatch_and_preserves_evidence(app_env, monkeypatch):
+def test_verifier_ignores_legacy_budget_and_preserves_evidence(app_env, monkeypatch):
     client, store, service, repo = app_env
     p = project(client, repo, login(client))
     run, _ = store.create_run(p['id'], 'Budget limited verification')
     run['agent_snapshot'] = {}
     service.cancels[run['id']] = threading.Event()
     store.append(run['id'], 'usage.recorded', {'profile': 'standard', 'cost_usd': p['budget_usd']})
-    def forbidden(*args, **kwargs):
-        pytest.fail('budget exhausted, provider must not be called')
-    monkeypatch.setattr(service.runner, 'run', forbidden)
+    calls = []
+    def verify(request, emit, cancel=None):
+        calls.append(request)
+        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'observed evidence'}), cost_usd=None)
+    monkeypatch.setattr(service.runner, 'run', verify)
     artifacts = {'worktree': str(repo), 'commit': 'evidence'}
-    with pytest.raises(ExecutionError) as exc:
-        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
-    assert exc.value.artifacts == artifacts
+    service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+    assert len(calls) == 1 and calls[0].read_only
+    assert artifacts['commit'] == 'evidence'
+    assert artifacts['verification']['verdict'] == 'pass'
+    assert service._usage(run['id'], profile='verification')['unknown_cost_calls'] == 1
 
 
 def test_managed_workspace_verifier_requires_functional_evidence_without_agent(app_env, monkeypatch):
@@ -134,11 +138,12 @@ def test_stage_profiles_are_independent_and_retry_keeps_snapshot(app_env, monkey
     retried = service.retry(run['id'], 'owner', actor_id=1)
     assert retried['agent_snapshot'] == run['agent_snapshot']
     assert retried['runtime_configuration'] == cfg
-    store.update(run['id'], {'status': 'needs_clarification'})
+    store.update(retried['id'], {'status': 'needs_clarification'})
     resumed = client.post(f"/api/v4/conversations/{c['id']}/messages", json={'content': '仅支持现有版本。'}, headers=headers)
     assert resumed.status_code == 201, resumed.text
-    assert resumed.json()['run']['id'] == run['id']
-    continued = store.get(run['id'])
+    assert resumed.json()['run']['id'] == retried['id']
+    continued = store.get(retried['id'])
     assert continued['runtime_configuration'] == cfg
     assert continued['agent_snapshot'] == run['agent_snapshot']
-    assert continued['history'][-1] == '仅支持现有版本。'
+    assert continued['history'][-1] == '也保留历史格式。\n\n仅支持现有版本。'
+    assert resumed.json()['conversation']['pending_feedback_count'] == 0

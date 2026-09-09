@@ -227,15 +227,15 @@ def _require_known_cost(service):
     config = service.runtime_settings.get()
     service.runtime_settings.update({'profiles': config['profiles'], 'limits': {**config['limits'], 'unknown_cost_policy': 'stop'}}, config['revision'], 'test')
 
-def test_unknown_planner_cost_is_not_zero_and_prevents_auto_worker_dispatch(control):
+def test_unknown_planner_cost_is_recorded_without_blocking_auto_dispatch(control):
     client, store, service, runner, project, headers = control
     _require_known_cost(service)
     runner.planner_cost = None
     _autonomous(client, project, headers)
     rid = _new_run(client, project, headers)
     run = _wait(store, rid, {"needs_human", "ready_for_review"})
-    assert run["status"] == "needs_human", store.events(rid)
-    assert runner.planner_calls == 1 and runner.worker_calls == 0
+    assert run["status"] == "ready_for_review", store.events(rid)
+    assert runner.planner_calls == 1 and runner.worker_calls == 1
     usage = [event["payload"] for event in store.events(rid) if event["type"] == "usage.recorded"]
     assert usage[0]["profile"] == "planner" and usage[0]["cost_usd"] is None
     assert run["planner_usage"]["unknown_cost_calls"] == 1
@@ -417,15 +417,15 @@ def test_recovery_resumes_received_and_preserves_writing_checkpoint(tmp_path):
     try:
         service.recover()
         resumed = _wait(store, received["id"], {"awaiting_approval", "needs_human"})
-        resumed_unbilled = _wait(store, planning_unbilled["id"], {"needs_human"})
+        resumed_unbilled = _wait(store, planning_unbilled["id"], {"awaiting_approval", "needs_human"})
         resumed_billed = _wait(store, planning_billed["id"], {"awaiting_approval", "needs_human"})
         resumed_queued = _wait(store, queued["id"], {"ready_for_review", "needs_human"})
         held = _wait(store, writing["id"], {"needs_human"})
         assert resumed["status"] == "awaiting_approval"
-        assert resumed_unbilled["status"] == "needs_human"
+        assert resumed_unbilled["status"] == "awaiting_approval"
         assert resumed_billed["status"] == "awaiting_approval"
         assert resumed_queued["status"] == "ready_for_review"
-        assert runner.planner_calls == 2 and runner.worker_calls == 1
+        assert runner.planner_calls == 3 and runner.worker_calls == 1
         unbilled = [e["payload"] for e in store.events(planning_unbilled["id"])
                     if e["type"] == "usage.recorded" and e["payload"].get("interrupted")]
         billed = [e["payload"] for e in store.events(planning_billed["id"])
@@ -448,24 +448,27 @@ def test_same_database_allows_only_one_live_durable_coordinator(control):
         second.close()
 
 
-def test_existing_known_or_unknown_planner_usage_blocks_new_planner_dispatch(control):
+def test_existing_known_or_unknown_planner_usage_does_not_block_dispatch(control):
     client, store, service, runner, project, headers = control
     _require_known_cost(service)
     known, _ = store.create_run(project["id"], "Known planning budget is exhausted")
     store.append(known["id"], "usage.recorded", {"profile": "planner", "cost_usd": project["budget_usd"]})
     service.start_plan(known["id"])
-    known_run = _wait(store, known["id"], {"needs_human"})
-    assert runner.planner_calls == 0
-    assert not any(e["type"] == "provider.started" for e in store.events(known["id"]))
+    known_run = _wait(store, known["id"], {"awaiting_approval", "needs_human"})
+    assert runner.planner_calls == 1
+    assert any(e["type"] == "provider.started" for e in store.events(known["id"]))
 
     unknown, _ = store.create_run(project["id"], "Clarify must not dispatch after unknown charge")
     store.update(unknown["id"], {"status": "needs_clarification"})
     store.append(unknown["id"], "usage.recorded", {"profile": "planner", "cost_usd": None})
     service.clarify(unknown["id"], "Use a precise greeting", "owner")
-    unknown_run = _wait(store, unknown["id"], {"needs_human"})
-    assert unknown_run["status"] == known_run["status"] == "needs_human"
-    assert runner.planner_calls == 0
-    assert not any(e["type"] == "provider.started" for e in store.events(unknown["id"]))
+    unknown_run = _wait(store, unknown["id"], {"awaiting_approval", "needs_human"})
+    assert unknown_run["status"] == known_run["status"] == "awaiting_approval"
+    assert runner.planner_calls == 2
+    assert any(e["type"] == "provider.started" for e in store.events(unknown["id"]))
+
+    assert service._usage(known['id'], profile='planner')['known_cost_usd'] >= project['budget_usd']
+    assert service._usage(unknown['id'], profile='planner')['unknown_cost_calls'] == 1
 
 
 def test_retry_double_click_creates_one_linked_successor(control):

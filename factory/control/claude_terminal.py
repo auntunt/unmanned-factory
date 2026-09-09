@@ -70,7 +70,17 @@ def run_command(workspace, command, timeout=300, emit=None):
         emit('task.activity', {'phase': 'command', 'wait_s': round(waited, 3)})
         try:
             result = _run_command_unlimited(workspace, command, max(1, timeout - waited))
-            return {**result, 'wait_s': round(waited, 3), 'duration_s': round(time.monotonic() - started, 3)}
+            result = {**result, 'wait_s': round(waited, 3), 'duration_s': round(time.monotonic() - started, 3)}
+            from factory.control.store import scrub
+            emit('command.completed', {
+                'command': scrub(command)[:2000], 'exit_code': result.get('exit_code'),
+                'timeout': bool(result.get('timeout')), 'duration_s': result['duration_s'],
+                'output': scrub(str(result.get('output', '')))[-4000:],
+                'error': scrub(str(result.get('error', '')))[:1000],
+                'truncated': bool(result.get('truncated')) or len(str(result.get('output', ''))) > 4000,
+                'source': 'isolated_project_terminal',
+            })
+            return result
         finally:
             emit('task.activity', {'phase': 'model'})
 

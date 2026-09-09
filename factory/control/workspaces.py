@@ -13,13 +13,13 @@ class WorkspaceError(Exception):
     pass
 
 
-def initialize_repository(path: Path):
+def initialize_repository(path: Path, *, env=None):
     for args in (['init', '--template=', '-q', '-b', 'main'],
                  ['config', 'user.name', 'Factory'],
                  ['config', 'user.email', 'factory@localhost.invalid'],
                  ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
                   'commit', '--allow-empty', '-qm', 'Initialize managed workspace']):
-        subprocess.run(['git', *args], cwd=path, check=True, capture_output=True, timeout=15)
+        subprocess.run(['git', *args], cwd=path, env=env, check=True, capture_output=True, timeout=15)
 
 
 def create_workspace(store, root: Path, *, name: str, budget_usd: float, actor_id: int, idempotency_key: str):

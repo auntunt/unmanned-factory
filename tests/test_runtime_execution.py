@@ -260,7 +260,7 @@ def test_planned_run_uses_frozen_profiles_after_runtime_update(tmp_path):
         assert runner.calls[-1][1] == "new-strong"
 
 
-def test_unknown_cost_never_auto_publishes(tmp_path):
+def test_unknown_cost_is_recorded_without_blocking_authorized_auto_publish(tmp_path):
     runner = ServiceRunner(plans=[_plan(_task("greeting"))], worker_cost=None)
     publisher = Publisher()
     app, store, service, repo = _app_env(tmp_path, runner, publisher=publisher)
@@ -272,10 +272,16 @@ def test_unknown_cost_never_auto_publishes(tmp_path):
         rid = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "publish"}, headers=headers).json()["id"]
         planned = _wait(store, rid, {"awaiting_approval"})
         assert client.post(f"/api/v2/runs/{rid}/approve", json={"revision": planned["revision"]}, headers=headers).status_code == 200
-        run = _wait(store, rid, {"ready_for_review"})
-        assert publisher.calls == 0
-        assert run["artifacts"]["billing_incomplete"]
-        assert run["artifacts"]["autopublish_blocked"] is True
+        run = _wait(store, rid, {"published"})
+        assert publisher.calls == 1
+        assert run["artifacts"]["pr_url"] == "https://github.example/pr/1"
+        assert "billing_incomplete" not in run["artifacts"]
+        assert "autopublish_blocked" not in run["artifacts"]
+        usage = service._usage(rid)
+        assert usage["unknown_cost_calls"] == 1
+        assert usage["known_cost_usd"] == 0.01
+        records = [event['payload'] for event in store.events(rid) if event['type'] == 'usage.recorded']
+        assert any(record.get('cost_usd') is None and record.get('profile') != 'planner' for record in records)
         catalog = client.get(f"/api/v3/runs/{rid}/deliverables")
         assert catalog.status_code == 200
         assert catalog.json()["saved"] is True

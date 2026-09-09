@@ -111,7 +111,8 @@ def router(store, service):
         return c
     @api.post('/conversations/{cid}/messages',status_code=201)
     def message(cid:str,body:Message,request:Request):
-        return process_message(cid, body, request)
+        with service.lock:
+            return process_message(cid, body, request)
 
     @api.post('/conversations/{cid}/retry', status_code=201)
     def retry_maintenance(cid: str, request: Request):
@@ -131,7 +132,11 @@ def router(store, service):
     def process_message(cid, body, request, retry=False):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
-        if not retry: agents.append_message(cid,'user',body.content)
+        prior_run = store.get(c['run_id']) if c.get('run_id') else None
+        queued = (c['mode'] == 'do' and prior_run and prior_run['status'] in
+                  ('received','planning','queued','running','verifying','publishing','ready_for_review','published'))
+        if not retry:
+            agents.append_message(cid, 'user', body.content, **({'feedback_status': 'pending'} if queued else {}))
         c=agents.conversation(cid)
         if c['mode']=='do':
             if not c.get('project_id'):
@@ -163,13 +168,28 @@ def router(store, service):
                 else:
                     prior=None
                 if prior and prior.get('status') in ('awaiting_approval','needs_clarification','needs_human'):
+                    pending_messages = []
+                    pending_chars = 0
+                    for m in c['messages']:
+                        if m.get('feedback_status') != 'pending':
+                            continue
+                        if pending_chars + len(m['content']) + len(body.content) + 100 > 90_000:
+                            break
+                        pending_messages.append(m)
+                        pending_chars += len(m['content'])
+                    pending_ids = [m['id'] for m in pending_messages]
+                    answer = '\n\n'.join([*(m['content'] for m in pending_messages), body.content])
                     continuing = prior['status'] == 'needs_human' and prior.get('plan') and (prior.get('artifacts') or {}).get('tasks')
-                    resumed = guarded(service.continue_run, prior['id'], body.content, prior['revision'], prior.get('resume_count', 0), actor(request)['username']) if continuing else guarded(service.clarify, prior['id'], body.content, actor(request)['username'])
+                    resumed = guarded(service.continue_run, prior['id'], body.content, prior['revision'], prior.get('resume_count', 0), actor(request)['username']) if continuing else guarded(service.clarify, prior['id'], answer, actor(request)['username'], feedback_message_ids=pending_ids)
+                    if not continuing:
+                        agents.settle_feedback(cid, prior['id'], pending_ids)
                     agents.append_message(cid,'assistant','已收到回答，正在按原计划继续未完成任务。' if continuing else '已将补充信息交给原任务，正在重新规划。',status='completed')
                     return {'conversation':agents.conversation(cid),'run':resumed}
-                if prior and prior.get('status') in ('received','planning','queued','running','verifying','publishing'):
-                    agents.append_message(cid,'assistant','补充信息已保存到对话，当前运行尚未采用。请等当前任务结束后发送“继续”，后续任务会使用这些补充。',status='completed')
-                    return {'conversation':agents.conversation(cid),'run':prior,'waiting_for_active_run':True}
+                if prior and prior.get('status') in ('received','planning','queued','running','verifying','publishing','ready_for_review','published'):
+                    agents.append_message(cid,'assistant','补充需求已排队，当前任务完成后会自动接续；如遇需人工判断的问题，会保留补充并提示处理。',status='completed')
+                    service._ensure_scheduler()
+                    service.wake.set()
+                    return {'conversation':agents.conversation(cid),'run':prior,'waiting_for_active_run':True,'feedback_queued':True}
                 version=agents.version(c['agent_id'])
                 conversation_request='\n\n'.join(str(m.get('content','')) for m in c['messages'] if m.get('role')=='user')
                 run,_=store.create_run(c['project_id'],conversation_request,source={'type':'agent','actor_id':actor(request)['id'],'agent_id':c['agent_id'],'agent_version':version['version'],'conversation_id':cid})
@@ -190,6 +210,7 @@ def router(store, service):
                     runtime['agent_verification_profile']=verification
                 store.update(run['id'],{'agent_id':c['agent_id'],'agent_version':version['version'],'agent_snapshot':frozen,'conversation_id':cid,'runtime_configuration':runtime},expected=('received',),event=('agent.version_frozen',{'agent_id':c['agent_id'],'version':version['version'],'configuration_revision':runtime['revision']}))
                 agents.attach_run(cid,run['id'])
+                agents.settle_feedback(cid,run['id'])
             service.start_plan(run['id']); return {'conversation':agents.conversation(cid),'run':store.get(run['id'])}
         # Maintenance calls the configured real provider and persists only a structured draft.
         for item in reversed(c['messages'][:-1]):

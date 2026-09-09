@@ -220,7 +220,7 @@ def test_missing_commit_is_not_a_server_error(app_env, sha):
         snapshot(store, store.get(run['id']))
 
 
-def test_paused_unknown_cost_can_resume_with_current_bounded_policy(app_env, monkeypatch):
+def test_paused_unknown_cost_resumes_without_mutating_legacy_billing_config(app_env, monkeypatch):
     client, store, svc, repo = app_env
     headers = login(client)
     pid = project(client, repo, headers)['id']
@@ -238,14 +238,14 @@ def test_paused_unknown_cost_can_resume_with_current_bounded_policy(app_env, mon
     resumed = svc.continue_run(run['id'], '继续完成交付', paused['revision'], 0, 'owner')
     assert resumed['status'] == 'queued'
     config = resumed['runtime_configuration']
-    assert config['limits']['unknown_cost_policy'] == 'allow_bounded'
+    assert config['limits']['unknown_cost_policy'] == 'stop'  # legacy field is inert, preserved for audit
     assert config['limits']['max_tasks'] == 3
     assert config['profiles'] == frozen['profiles']
     assert resumed['execution_resume']['artifacts'] == paused['artifacts']
 
 
 @pytest.mark.parametrize('stop_policy,budget_used', [(True, False), (False, True)])
-def test_continuation_retains_explicit_cost_and_budget_limits(app_env, monkeypatch, stop_policy, budget_used):
+def test_continuation_ignores_legacy_cost_limits_and_preserves_execution_boundaries(app_env, monkeypatch, stop_policy, budget_used):
     client, store, svc, repo = app_env
     headers = login(client)
     pid = project(client, repo, headers)['id']
@@ -264,6 +264,8 @@ def test_continuation_retains_explicit_cost_and_budget_limits(app_env, monkeypat
         svc.runtime_settings.update({'profiles': current['profiles'], 'limits': {**current['limits'], 'unknown_cost_policy': 'stop'}}, current['revision'], 'test')
     if budget_used:
         monkeypatch.setattr(svc, '_usage', lambda rid: {'known_cost_usd': store.project(pid)['budget_usd'], 'unknown_cost_calls': 1})
-    with pytest.raises(Conflict):
-        svc.continue_run(run['id'], '继续完成交付', paused['revision'], 0, 'owner')
-    assert store.get(run['id'])['status'] == 'needs_human'
+    resumed = svc.continue_run(run['id'], '继续完成交付', paused['revision'], 0, 'owner')
+    assert resumed['status'] == 'queued'
+    assert resumed['runtime_configuration']['profiles'] == frozen['profiles']
+    assert resumed['runtime_configuration']['limits']['max_tasks'] == 3
+    assert resumed['execution_resume']['artifacts'] == paused['artifacts']
