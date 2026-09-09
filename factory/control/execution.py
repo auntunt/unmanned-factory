@@ -415,6 +415,55 @@ def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: fl
     return commit
 
 
+_RESOURCE_SUFFIXES = {'.md', '.txt', '.json', '.toml', '.yaml', '.yml', '.csv', '.svg', '.png', '.jpg', '.html', '.css'}
+
+
+def _supporting_package_data(root: Path, declared: tuple[str, ...]) -> bool:
+    """Permit only additive package-data entries covering declared resource files."""
+    import fnmatch
+    try:
+        rc, raw, _ = _git(root, 'show', 'HEAD:pyproject.toml', timeout_s=30)
+        if rc:
+            return False
+        before, after = tomllib.loads(raw), tomllib.loads((root / 'pyproject.toml').read_text())
+        old = before.get('tool', {}).get('setuptools', {}).pop('package-data', {})
+        new = after.get('tool', {}).get('setuptools', {}).pop('package-data', {})
+        if before != after or old == new or not isinstance(old, dict) or not isinstance(new, dict):
+            return False
+        if any(key not in new or not set(values).issubset(new[key]) for key, values in old.items()):
+            return False
+        mapping = before.get('tool', {}).get('setuptools', {}).get('package-dir', {})
+        for package, patterns in new.items():
+            if not re.fullmatch(r'[A-Za-z_]\w*(\.[A-Za-z_]\w*)*', package) or not isinstance(patterns, list):
+                return False
+            base = root / mapping.get(package, str(Path(mapping.get('', '')) / package.replace('.', '/')))
+            if not base.resolve().is_relative_to(root.resolve()) or not base.is_dir():
+                return False
+            previous_patterns = old.get(package, [])
+            for pattern in set(patterns) - set(previous_patterns):
+                if not isinstance(pattern, str) or Path(pattern).is_absolute() or '..' in Path(pattern).parts or '**' in pattern:
+                    return False
+                matched = [file for file in base.glob(pattern) if file.is_file()]
+                if not matched:
+                    return False
+                for file in matched:
+                    if file.is_symlink() or not file.resolve().is_relative_to(root.resolve()) or file.suffix not in _RESOURCE_SUFFIXES:
+                        return False
+                    relative = file.relative_to(base).as_posix()
+                    if not any(fnmatch.fnmatchcase(relative, prior) for prior in previous_patterns) and not _within(file.relative_to(root).as_posix(), declared):
+                        return False
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _scheduling_paths(task: dict) -> tuple[str, ...]:
+    paths = tuple(task['paths'])
+    # Resource tasks may need the same packaging manifest, so do not schedule
+    # their implicit manifest writes concurrently.
+    return paths + (('pyproject.toml',) if any(len(Path(path).parts) > 1 and Path(path).suffix in _RESOURCE_SUFFIXES for path in paths) else ())
+
+
 def _protected_changes(root: Path, changed: tuple[str, ...]) -> tuple[str, ...]:
     """Project/package metadata is editable; test selection and hooks remain frozen."""
     blocked = list(judge_files_touched(changed))
@@ -787,6 +836,10 @@ def execute_plan(
                 raise ExecutionError("worker changed forbidden metadata or secret path")
             declared = tuple(task["paths"])
             out_of_scope = tuple(p for p in changed if not _within(p, declared))
+            if 'pyproject.toml' in out_of_scope and _supporting_package_data(child_root, declared):
+                out_of_scope = tuple(path for path in out_of_scope if path != 'pyproject.toml')
+                _emit(emit, 'scope.supporting_change', {'path': 'pyproject.toml',
+                      'reason': 'add package data for declared resource files'}, task_id)
             if out_of_scope:
                 raise ExecutionError(f"out-of-scope changes: {', '.join(out_of_scope)}")
             _reject_symlinks(child_root, changed)
@@ -832,7 +885,7 @@ def execute_plan(
             # them. A no-change response is the narrowly repairable exception.
             retryable = str(exc) == "worker produced no changes"
             return finish("failed", error=str(exc), retryable=retryable,
-                          failure_kind="execution" if retryable else "policy_or_deadline")
+                          failure_kind="execution" if retryable else "scope_violation" if str(exc).startswith("out-of-scope changes:") else "policy_or_deadline")
         except Exception as exc:
             usage()
             return finish("failed", error=f"worker error: {type(exc).__name__}: {_clip(exc)}", retryable=True,
@@ -931,7 +984,7 @@ def execute_plan(
             for task in ([] if stop_reason else ready):
                 if len(futures) >= max_parallel:
                     break
-                if any(_overlaps(tuple(task['paths']), tuple(item[0]['paths'])) for item in futures.values()):
+                if any(_overlaps(_scheduling_paths(task), _scheduling_paths(item[0])) for item in futures.values()):
                     continue
                 remaining()
                 task_id = task["id"]

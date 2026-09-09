@@ -188,3 +188,35 @@ def test_failed_branch_does_not_stop_independent_descendants(repo, provider_modu
     states = {t['id']: t['status'] for t in error.value.artifacts['tasks']}
     assert states == {'bad': 'failed', 'good': 'verified', 'child': 'verified', 'blocked': 'blocked'}
     assert 'blocked' not in runner.seen
+
+
+@pytest.mark.parametrize('extra,allowed', [('', True), ('\n[tool.pytest.ini_options]\naddopts="-x"\n', False)])
+def test_supporting_package_resource_addition(repo, provider_module, extra, allowed):
+    from factory.control.execution import _supporting_package_data
+    baseline = '[tool.setuptools.package-dir]\n""="src"\n[tool.setuptools.package-data]\ngongshi=["data/*.toml"]\n'
+    (repo / 'pyproject.toml').write_text(baseline)
+    subprocess.run(['git', 'add', 'pyproject.toml'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'packaging'], cwd=repo, check=True)
+    resource = repo / 'src/gongshi/data/prompt.md'
+    resource.parent.mkdir(parents=True)
+    resource.write_text('prompt')
+    (repo / 'pyproject.toml').write_text(baseline.replace('"data/*.toml"', '"data/*.toml", "data/*.md"') + extra)
+    assert _supporting_package_data(repo, ('src/gongshi/data/prompt.md',)) == allowed
+    if allowed:
+        class ResourceRunner:
+            def run(self, request, emit, cancel=None):
+                root = Path(request.workspace)
+                resource = root / 'src/gongshi/data/prompt.md'
+                resource.parent.mkdir(parents=True, exist_ok=True)
+                resource.write_text('prompt')
+                (root / 'pyproject.toml').write_text(baseline.replace('"data/*.toml"', '"data/*.toml", "data/*.md"'))
+                return Result()
+        events = []
+        out = execute_plan(run_id='resource', plan={'tasks': [{'id': 'prompt', 'prompt': 'add prompt',
+            'paths': ['src/gongshi/data/prompt.md'], 'checks': ['ok']}]}, project=_project(repo),
+            profiles={'standard': {'provider': 'fake', 'model': 'test'}}, runner=ResourceRunner(),
+            emit=lambda kind, *args: events.append(kind), cancel=threading.Event())
+        assert out['tasks'][0]['status'] == 'verified'
+        assert 'scope.supporting_change' in events
+    resource.with_name('unrelated.md').write_text('not part of the task')
+    assert not _supporting_package_data(repo, ('src/gongshi/data/prompt.md',))
