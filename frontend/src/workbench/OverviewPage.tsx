@@ -52,8 +52,9 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
   return <div className="wb-page ov3-page">
     <PageHeader title="工作总览" description="把想法交给伙伴，把注意力留给重要的事。" actions={<>
       <button className="wb-button wb-button-secondary" onClick={() => load(true)}>{loading && data ? '更新中…' : '刷新'}</button>
-      <Link className="wb-button wb-button-primary" to="/projects">管理项目 <span aria-hidden="true">→</span></Link>
+      <Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目 <span aria-hidden="true">→</span></Link>
     </>} />
+    <section className="wb-purpose-band" aria-label="开始新工作"><span className="wb-purpose-symbol" aria-hidden="true">＋</span><div><h2>开始一项新工作</h2><p>直接描述目标，也可以从已有项目继续。</p></div><div className="wb-purpose-actions"><Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目</Link><Link className="wb-button wb-button-secondary" to="/agents">查看职能体 →</Link></div></section>
     {error && <ErrorNotice message={data ? `刷新失败，以下为上一份记录：${error}` : error} />}
     {loading && !data && <div className="wb-card ov3-loading" role="status" aria-label="正在读取项目进展"><span /><span /><span /></div>}
     {data && <>
@@ -93,7 +94,7 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
           </footer>
         </article>)}
         {currentProjects.length === 0 && completed.length > 0 && <p className="wb-runtime-note">当前工作已完成。可以查看下方成果，或进入项目提出新需求。</p>}
-        {completed.length > 0 && <details className="wb-card pw-completed"><summary>已完成的工作 · {completed.length} 个项目 <small>展开查看成果</small></summary><p className="wb-runtime-note">成果已就绪的项目收在这里；有新任务时会自动回到当前工作。能力沉淀可选。</p>{completed.map((project) => <div className="pw-completed-row" key={project.id}><strong>{project.name}</strong><div><Link className="wb-text-link" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 / 新需求 →</Link>{project.next_run && <Link className="wb-button wb-button-secondary" to={nextRunAction(project.next_run).href}>查看成果 →</Link>}</div></div>)}</details>}
+        {completed.length > 0 && <section className="wb-card pw-completed" aria-label="最近成果"><div className="ov3-section-head"><h2>最近成果</h2><span className="wb-runtime-note">{completed.length} 个项目成果已就绪</span></div>{completed.map((project) => <div className="pw-completed-row" key={project.id}><strong>{project.name}</strong><div><Link className="wb-text-link" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 / 新需求 →</Link>{project.next_run && <Link className="wb-button wb-button-secondary" to={nextRunAction(project.next_run).href}>查看成果 →</Link>}</div></div>)}</section>}
         {data.project_summaries?.length === 0 && <div className="wb-card"><EmptyState title="登记第一个项目" description="每个项目会拥有自己的需求、执行记录、交付产物和经验。" action={<Link className="wb-button wb-button-primary" to="/projects">前往项目管理</Link>} /></div>}
         {!data.project_summaries && <div className="wb-card"><EmptyState title="项目进展暂未返回" action={<Link className="wb-button wb-button-secondary" to="/projects">查看项目列表</Link>} /></div>}
       </section>

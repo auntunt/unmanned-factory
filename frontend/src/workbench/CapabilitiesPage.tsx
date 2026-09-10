@@ -156,7 +156,7 @@ export default function CapabilitiesPage({ csrfToken, onUnauthorized, user }: Pa
   useEffect(() => () => detailController.current?.abort(), [])
   const saveCreated = (value: Capability) => { setShowNew(false); setCapabilities((items) => items ? [value, ...items] : [value]); setSearchParams({ selected: value.id }, { replace: true }) }
   return <div className="cl-page">
-    <PageHeader title="工作能力" description="把常做的工作保存下来，下次选择项目即可使用。" actions={isAdmin ? <button className="cl-button cl-button-primary" onClick={() => setShowNew((value) => !value)}>{showNew ? '关闭新建' : '新建工作能力'} <span aria-hidden="true">＋</span></button> : undefined} />
+    <PageHeader title="经验库" description="保留已有工作模板与验收经验，逐步完善可复用的做法。" actions={isAdmin ? <button className="cl-button cl-button-primary" onClick={() => setShowNew((value) => !value)}>{showNew ? '关闭新建' : '新建工作能力'} <span aria-hidden="true">＋</span></button> : undefined} />
     <div className="cl-intro"><div><span className="cl-kicker">怎么开始</span><strong>选一项工作能力 → 选项目 → 描述本次目标 → 开始工作</strong><p>能力会绑定项目的具体版本，运行开始后保留当时的工作说明。当前仍通过代码仓库执行，不代表已经配置云服务或飞书连接。</p></div><Link className="cl-link cl-intro-link" to="/projects">查看项目 →</Link></div>
     {error && <ErrorNotice message={error} />}{showNew && isAdmin && <CapabilityForm csrfToken={csrfToken} onUnauthorized={onUnauthorized} onSaved={saveCreated} onCancel={() => setShowNew(false)} />}
     <div className="cl-toolbar"><label className="cl-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工作名称、场景或分类" aria-label="搜索工作能力" /></label><span className="cl-total">{capabilities?.length ?? '—'} 项工作能力</span></div>

@@ -6,11 +6,11 @@ import { request } from '../workspace/api'
 import type { WorkbenchProps } from './ui'
 
 const navigation = [
-  { to: '/agents', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: true },
+  { to: '/agents', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: false },
   { to: '/', label: '工作总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
   { to: '/runs', label: '运行看板', icon: 'M4 4h16v16H4zM9 4v16M15 4v16M4 10h5M9 14h6M15 8h5', end: false },
   { to: '/projects', label: '项目', icon: 'M3 7V5h6l2 2h10v13H3z', end: false },
-  { to: '/capabilities', label: '工作能力', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },
+  { to: '/capabilities', label: '经验库', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },
   { to: '/costs', label: '调用记录', icon: 'M4 4v16h17M8 15v-4M13 15V7M18 15v-6', end: false },
   { to: '/team', label: '团队', icon: 'M7 20v-2.5A3.5 3.5 0 0 1 10.5 14h3A3.5 3.5 0 0 1 17 17.5V20M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 13a2.5 2.5 0 0 1 2 2.45V18M17 5.5a2.5 2.5 0 0 1 0 4.5', end: false },
 ]
@@ -47,10 +47,10 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
         </div>
         <nav className="wb-nav" aria-label="主导航">
           <span className="wb-nav-label">工作区</span>
-          {navigation.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}>
+          {navigation.map((item, index) => (
+            <div key={item.to} className="wb-nav-entry">{index === 3 && <span className="wb-nav-label wb-nav-group">能力与经验</span>}{index === 6 && <span className="wb-nav-label wb-nav-group">团队管理</span>}<NavLink to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}>
               <span className="wb-nav-icon"><NavIcon path={item.icon} /></span><span>{item.label}</span>
-            </NavLink>
+            </NavLink></div>
           ))}
           {visibleSecondary.length > 0 && <span className="wb-nav-label wb-nav-label-secondary">系统</span>}
           {visibleSecondary.map((item) => <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}><span className="wb-nav-icon"><NavIcon path={item.icon} /></span><span>{item.label}</span></NavLink>)}
