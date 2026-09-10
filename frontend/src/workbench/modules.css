@@ -1,0 +1,36 @@
+.mod-page { min-width:0; }
+.mod-layout.has-composition { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(280px,1fr); gap:28px; align-items:start; }
+.mod-toolbar { margin:0 0 22px; display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+.mod-toolbar input { min-width:120px; flex:1; border:1px solid var(--wb-border); background:white; border-radius:8px; padding:10px 12px; }
+.mod-filters { display:flex; flex-wrap:wrap; gap:3px; }
+.mod-filters button { border:0; background:transparent; padding:11px 12px; color:var(--wb-muted); border-radius:7px; }
+.mod-filters button[aria-pressed=true] { background:var(--wb-teal-soft); color:var(--wb-teal-dark); font-weight:650; }
+.mod-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.mod-card { min-width:0; background:#fff; border:1px solid var(--wb-border); border-radius:12px; padding:23px; display:flex; flex-direction:column; }
+.mod-card.is-selected { border-color:var(--wb-teal); box-shadow:inset 0 0 0 1px var(--wb-teal); }
+.mod-card-head { display:flex; gap:12px; align-items:center; }
+.mod-card-head h2 { font-size:17px; margin:0; flex:1; line-height:1.5; }
+.mod-card-head small { color:var(--wb-muted); font-size:12px; }
+.mod-symbol { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; background:var(--wb-teal-soft); color:var(--wb-teal-dark); border-radius:10px; font-size:27px; }
+.mod-card p,.mod-composition p { color:var(--wb-muted); font-size:14px; line-height:1.8; }
+.mod-card details { margin:2px 0 20px; font-size:13px; color:var(--wb-muted); }
+.mod-card summary { cursor:pointer; }
+.mod-card .mod-instructions { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
+.mod-card footer { display:flex; gap:10px; justify-content:space-between; align-items:center; margin-top:auto; padding-top:18px; }
+.mod-card footer>span { color:var(--wb-muted); font-size:12px; }
+.mod-toggle,.mod-selected-row button { border:0; background:transparent; color:var(--wb-teal-dark); padding:8px; font-size:14px; }
+.mod-toggle[aria-pressed=true] { font-weight:650; }
+.mod-composition { position:sticky; top:28px; background:white; border:1px solid var(--wb-border); padding:26px; border-radius:12px; }
+.mod-composition h2 { font-size:21px; margin:0; }
+.mod-base { padding:20px 0; margin:15px 0; border-block:1px solid var(--wb-border); }
+.mod-base p { margin-bottom:0; }
+.mod-selected-group { margin:23px 0; }.mod-selected-group h3 { color:var(--wb-muted); font-size:13px; font-weight:500; }
+.mod-selected-row { display:flex; justify-content:space-between; gap:8px; padding:12px 0; border-bottom:1px solid #edf1ee; }
+.mod-selected-row span { display:flex; flex-wrap:wrap; gap:9px; align-items:center; }.mod-selected-row strong { font-size:14px; }.mod-selected-row small { color:var(--wb-muted); }
+.mod-save { border-top:1px solid var(--wb-border); margin-top:28px; padding-top:12px; display:grid; gap:12px; }.mod-save p { font-size:13px; }.mod-save a { font-size:13px; text-align:center; color:var(--wb-teal-dark); }
+.mod-library-note { margin-top:24px; font-size:14px; color:var(--wb-muted); }
+.mod-dialog-backdrop { position:fixed; inset:0; background:#20332f66; z-index:60; display:grid; place-items:center; padding:20px; }
+.mod-dialog { background:white; padding:30px; width:min(620px,100%); border-radius:16px; max-height:90vh; overflow:auto; box-shadow:0 20px 80px #20332f30; }
+.mod-dialog h2 { margin-top:0; }.mod-dialog label { display:grid; gap:8px; margin:16px 0; font-size:14px; }.mod-dialog input,.mod-dialog textarea,.mod-dialog select { width:100%; padding:11px; border:1px solid var(--wb-border-strong); border-radius:8px; background:#fff; }.mod-dialog p { font-size:13px; color:var(--wb-muted); }.mod-dialog footer { display:flex; justify-content:flex-end; gap:12px; }
+@media(max-width:1150px) { .mod-layout.has-composition { grid-template-columns:1fr; }.mod-composition { position:static; } }
+@media(max-width:650px) { .mod-grid { grid-template-columns:1fr; }.mod-card,.mod-composition { padding:20px; }.mod-filters button { padding:10px 8px; }.mod-dialog { padding:20px; } }

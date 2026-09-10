@@ -21,6 +21,20 @@ class Rollback(Body): version:int=Field(ge=1)
 class ProjectHelper(Body):
     agent_id: str | None = None
     expected_revision: int = Field(ge=0)
+class ModuleBody(Body):
+    name: str = Field(min_length=1, max_length=120)
+    category: str = Field(pattern='^(style|knowledge|workflow|delivery)$')
+    description: str = Field(default='', max_length=1000)
+    instructions: str = Field(min_length=1, max_length=16000)
+class ModuleUpdate(ModuleBody):
+    expected_revision: int = Field(ge=1, strict=True)
+class ModuleRef(Body):
+    id: str = Field(min_length=1, max_length=128)
+    version: int = Field(ge=1, strict=True)
+class ModuleSelection(Body):
+    modules: list[ModuleRef] = Field(max_length=12)
+    expected_revision: int = Field(ge=0, strict=True)
+
 class LearningChoice(Body):
     source_id: str
     source_revision: int = Field(ge=1)
@@ -48,6 +62,29 @@ def router(store, service):
 
     from factory.control.project_assistants import ProjectAssistants
     helpers = ProjectAssistants(store)
+
+    from factory.control.modules import ModuleStore
+    modules = ModuleStore(store)
+
+    @api.get('/modules')
+    def list_modules():
+        return {'modules': modules.list()}
+
+    @api.post('/modules', status_code=201)
+    def create_module(body: ModuleBody, request: Request):
+        return guarded(modules.save, body.model_dump(), actor(request)['id'])
+
+    @api.put('/modules/{mid}')
+    def update_module(mid: str, body: ModuleUpdate, request: Request):
+        return guarded(modules.save, body.model_dump(exclude={'expected_revision'}), actor(request)['id'], mid, body.expected_revision)
+
+    @api.get('/projects/{pid}/modules')
+    def get_modules(pid: str):
+        return guarded(modules.selection, pid)
+
+    @api.put('/projects/{pid}/modules')
+    def select_modules(pid: str, body: ModuleSelection, request: Request):
+        return guarded(modules.select, pid, [m.model_dump() for m in body.modules], body.expected_revision, actor(request)['id'])
 
     @api.get('/projects/{pid}/assistant')
     def project_assistant(pid: str):

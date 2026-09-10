@@ -50,7 +50,7 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
   const events = (data?.recent_events ?? []).filter((event) => EVENT_LABELS[event.type]).slice(0, 5)
 
   return <div className="wb-page ov3-page">
-    <PageHeader title="工程总览" description="先找到项目，再进入它的需求、方案、执行和交付。" actions={<>
+    <PageHeader title="工作总览" description="把想法交给伙伴，把注意力留给重要的事。" actions={<>
       <button className="wb-button wb-button-secondary" onClick={() => load(true)}>{loading && data ? '更新中…' : '刷新'}</button>
       <Link className="wb-button wb-button-primary" to="/projects">管理项目 <span aria-hidden="true">→</span></Link>
     </>} />
@@ -65,7 +65,7 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
         <div><span>成果已就绪</span><strong>{data.engineering?.verified_runs ?? 0}</strong><small>已验证，可查看或下载</small></div>
       </section>
       {attention.length > 0 && <section className="wb-card pw-attention" aria-labelledby="overview-attention">
-        <div className="ov3-section-head"><div><span className="wb-eyebrow">需要处理</span><h2 id="overview-attention">先解决阻止工作继续的问题</h2></div>
+        <div className="ov3-section-head"><div><span className="wb-eyebrow">需要处理</span><h2 id="overview-attention">需要你看一眼</h2></div>
           <Link className="wb-text-link" to="/runs?filter=attention">全部 {data.attention_runs} 条 →</Link></div>
         <AttentionList items={attention.slice(0, 4)} />
       </section>}

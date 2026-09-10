@@ -6,14 +6,19 @@ import { request } from '../workspace/api'
 import type { WorkbenchProps } from './ui'
 
 const navigation = [
-  { to: '/', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: true },
-  { to: '/overview', label: '工程总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
+  { to: '/agents', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: true },
+  { to: '/', label: '工作总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
   { to: '/runs', label: '运行看板', icon: 'M4 4h16v16H4zM9 4v16M15 4v16M4 10h5M9 14h6M15 8h5', end: false },
   { to: '/projects', label: '项目', icon: 'M3 7V5h6l2 2h10v13H3z', end: false },
   { to: '/capabilities', label: '工作能力', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },
   { to: '/costs', label: '调用记录', icon: 'M4 4v16h17M8 15v-4M13 15V7M18 15v-6', end: false },
   { to: '/team', label: '团队', icon: 'M7 20v-2.5A3.5 3.5 0 0 1 10.5 14h3A3.5 3.5 0 0 1 17 17.5V20M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 13a2.5 2.5 0 0 1 2 2.45V18M17 5.5a2.5 2.5 0 0 1 0 4.5', end: false },
 ]
+
+navigation.push( { to: '/modules', label: '能力模块', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: false })
+
+const navOrder = ['/', '/projects', '/runs', '/modules', '/agents', '/capabilities', '/costs', '/team']
+navigation.sort((a, b) => navOrder.indexOf(a.to) - navOrder.indexOf(b.to))
 
 const secondaryNavigation = [{ to: '/settings/runtime', label: '运行配置', icon: 'M4 7h16M4 17h16M8 4v6M16 14v6', end: false }]
 
@@ -26,7 +31,7 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
   const [environment, setEnvironment] = useState<{ mode: 'preview' | 'live'; label: string } | null>(null)
   const location = useLocation()
   const visibleSecondary = user.role === 'member' ? [] : secondaryNavigation
-  const currentPage = [...navigation, ...visibleSecondary].find((item) => item.end ? location.pathname === item.to : location.pathname.startsWith(item.to))
+  const currentPage = [...navigation, ...visibleSecondary].find((item) => item.end ? (location.pathname === item.to || (item.to === '/' && location.pathname === '/overview')) : location.pathname.startsWith(item.to))
 
   useEffect(() => { setNavOpen(false) }, [location.pathname])
   useEffect(() => { const controller = new AbortController(); void request<{ mode: 'preview' | 'live'; label: string }>('/api/v3/environment', { onUnauthorized: onLogout, signal: controller.signal }).then((value) => { if (!controller.signal.aborted) setEnvironment(value) }).catch(() => undefined); return () => controller.abort() }, [onLogout])
@@ -38,7 +43,7 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
       <aside className={`wb-sidebar ${navOpen ? 'is-open' : ''}`} aria-label="工作台导航">
         <div className="wb-brand-lockup">
           <span className="wb-brand-mark" aria-hidden="true">w</span>
-          <span><strong>webuddy</strong><small>自主工程工作台</small></span>
+          <span><strong>webuddy</strong><small>团队工作伙伴</small></span>
         </div>
         <nav className="wb-nav" aria-label="主导航">
           <span className="wb-nav-label">工作区</span>

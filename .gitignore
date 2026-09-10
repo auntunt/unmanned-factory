@@ -30,3 +30,6 @@ frontend/node_modules/
 
 # Platform browser dependencies are installed from their lockfile.
 runtime/project-browser/node_modules/
+
+# Isolated visual acceptance workspace.
+.factory-preview-ui-modules/

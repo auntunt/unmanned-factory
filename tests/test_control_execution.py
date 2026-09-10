@@ -279,3 +279,22 @@ def test_virtualenv_interpreter_links_are_disposable_untracked_output(repo):
     (bindir / 'python').unlink()
     (bindir / 'python').symlink_to('/different/python')
     assert '.venv/bin/python' in _status_paths(repo, timeout_s=10)
+
+
+def test_ignored_delivery_outputs_do_not_break_source_commit(repo):
+    from factory.control.execution import _status_paths, _commit_tree
+    (repo / '.gitignore').write_text('dist/\nrelease/\nout/\nhidden.py\n')
+    (repo / 'dist').mkdir()
+    (repo / 'dist/index.html').write_text('<h1>built</h1>')
+    (repo / 'main.py').write_text('print("source")')
+    changed = _status_paths(repo, timeout_s=10)
+    assert changed == ('.gitignore', 'main.py')
+    _commit_tree(repo, changed, 'verified source', 10)
+    assert not _status_paths(repo, timeout_s=10)
+    assert (repo / 'dist/index.html').exists()
+    (repo / 'hidden.py').write_text('print("ignored source")')
+    assert 'hidden.py' in _status_paths(repo, timeout_s=10)
+    subprocess.run(['git', 'add', '-f', 'dist/index.html'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'tracked output'], cwd=repo, check=True)
+    (repo / 'dist/index.html').write_text('changed')
+    assert 'dist/index.html' in _status_paths(repo, timeout_s=10)

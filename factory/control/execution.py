@@ -235,6 +235,13 @@ def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
                         and (file.name in {'.env', '.env.local', '.env.production', '.env.development'}
                              or file.suffix == '.log')):
                     continue
+                # The delivery archiver snapshots these conventional output roots
+                # separately. Ignored build output is not a source path to git-add.
+                # Keep tracked files and symlink roots visible to integrity checks.
+                output_root = PurePosixPath(value).parts[0]
+                if (xy == '!!' and output_root in {'dist', 'release', 'out'}
+                        and (root / output_root).is_dir() and not (root / output_root).is_symlink()):
+                    continue
                 if value.rstrip('/').endswith('.egg-info') and file.is_dir() and not file.is_symlink():
                     # Git can collapse ignored directories; inspect their contents
                     # so an unexpected script cannot hide beside generated metadata.

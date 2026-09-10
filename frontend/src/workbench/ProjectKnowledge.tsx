@@ -1,3 +1,4 @@
+import ModulesPage from './ModulesPage'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request } from '../workspace/api'
@@ -53,8 +54,9 @@ export default function ProjectKnowledge({ projectId, csrfToken, onUnauthorized 
   const saved = learnings.filter((item) => item.disposition && item.disposition.destination !== 'skip')
   const skipped = learnings.filter((item) => item.disposition?.destination === 'skip')
   return <div className="pk-workspace">
+    <ModulesPage projectId={projectId} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />
     {error && <ErrorNotice message={error} />}{notice && <p role="status" className="wb-notice">{notice}</p>}
-    <section className="pk-section"><div className="pk-heading"><div><span className="wb-eyebrow">项目的工作方法</span><h2>选择智能体帮助</h2><p>职能体把 Skill、工作步骤和验收经验带入这个项目。</p></div><Link to="/agents">管理职能体 →</Link></div>
+    <section className="pk-section"><div className="pk-heading"><div><span className="wb-eyebrow">项目的工作方法</span><h2>职能体预设（可选）</h2><p>职能体把 Skill、工作步骤和验收经验带入这个项目。</p></div><Link to="/agents">管理职能体 →</Link></div>
       <div className="pk-picker"><label htmlFor="project-helper">负责本项目的职能体</label><select id="project-helper" value={selection} onChange={(event) => setSelection(event.target.value)} disabled={busy || !binding}><option value="">使用平台通用助手</option>{helpers.map((helper) => <option key={helper.id} value={helper.id}>{helper.name}</option>)}</select><button className="wb-button wb-button-primary" disabled={busy || !binding || selection === (binding.agent_id || '')} onClick={() => void saveBinding()}>保存选择</button></div>
       {binding?.agent ? <div className="pk-helper"><div><h3>{binding.agent.name} <small>v{binding.agent.version?.version}</small></h3><p>{binding.agent.purpose || '通过维护对话补充它擅长的工作。'}</p><Link to={`/agents/${binding.agent.id}?mode=maintain`}>维护工作方法与 Skill →</Link></div><div><strong>已采用的 Skill</strong><p>{binding.skills?.filter((skill) => binding.agent?.version?.skill_ids.includes(skill.id)).map((skill) => skill.filename).join('、') || '尚未应用 Skill，可在维护对话中添加。'}</p><details><summary>查看工作步骤与验收条件</summary><p className="pk-text">{binding.agent.version?.instructions || '尚未补充工作步骤'}</p><ul>{binding.agent.version?.acceptance.map((item) => <li key={item}>{item}</li>)}</ul></details></div></div> : <p>尚未关联专门的职能体，项目仍可使用通用助手开始任务。</p>}
     </section>

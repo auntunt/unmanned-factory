@@ -199,7 +199,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   return <div className="wb-page pw-project-page">
     <div className="pw-context"><Link to="/overview">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
     <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <span className="wb-runtime-note">计费由中转站管理</span> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
-    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '项目知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
     <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
