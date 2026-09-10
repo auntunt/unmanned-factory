@@ -58,7 +58,26 @@ export async function createPreviewProxy(allowed) {
       request.pipe(upstream);
     } catch { response.writeHead(403); response.end('Only the authorized project preview is accessible'); }
   });
-  server.on('connect', (_, socket) => { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); });
+  // Chrome tunnels even plain ws:// through an HTTP proxy using CONNECT.
+  // Authorize exactly the same origin and live project listener as HTTP traffic.
+  server.on('connect', async (request, socket, head) => {
+    try {
+      if (!/^(127\.0\.0\.1|localhost):[0-9]+$/.test(request.url)) throw new Error('blocked');
+      const target = previewURL(`http://${request.url}/`);
+      if (!await allowed(target)) throw new Error('blocked');
+      const upstream = net.connect(Number(target.port), '127.0.0.1', () => {
+        upstream.setTimeout(0); // Only bound connection establishment, not idle HMR sessions.
+        socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length) upstream.write(head);
+        socket.pipe(upstream); upstream.pipe(socket);
+      });
+      upstream.setTimeout(30000, () => { upstream.destroy(); socket.destroy(); });
+      upstream.on('error', () => socket.destroy());
+      upstream.on('close', () => socket.destroy());
+      socket.on('error', () => upstream.destroy());
+      socket.on('close', () => upstream.destroy());
+    } catch { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); }
+  });
   server.on('upgrade', async (request, socket, head) => {
     try {
       const target = previewURL(request.url.replace(/^ws:/, 'http:'));
@@ -136,7 +155,7 @@ async function startBridge(socketPath, workspace, chrome) {
     page.on('request', request => {
       const url = request.url();
       let allowed = false;
-      try { allowed = previewURL(url).origin === activeOrigin; } catch { allowed = /^(?:data:|blob:)/.test(url) && !request.isNavigationRequest(); }
+      try { allowed = previewURL(url.replace(/^ws:/, 'http:')).origin === activeOrigin; } catch { allowed = /^(?:data:|blob:)/.test(url) && !request.isNavigationRequest(); }
       if (allowed) void request.continue().catch(()=>{}); else { addError('Blocked external request: ' + url.slice(0,180)); void request.abort().catch(()=>{}); }
     });
     page.on('pageerror', error => addError(error.message));

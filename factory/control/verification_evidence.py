@@ -65,3 +65,59 @@ def render_evidence(artifacts, max_chars=24000):
             summary['omitted_command_details'] += 1
             break
     return encode()
+
+
+def browser_evidence(store, rid):
+    """Keep latest observation per task plus earlier failures, directly from events."""
+    with store.connect() as db:
+        rows = db.execute('SELECT id,task_id,payload,at FROM events WHERE run_id=? AND type=? ORDER BY id DESC LIMIT 100',
+                          (rid, 'browser.observed')).fetchall()
+    latest = {}; failures = []
+    for row in rows:
+        data = json.loads(row['payload'])
+        item = {'event_id': row['id'], 'task_id': row['task_id'], 'at': row['at'],
+                'action': data.get('action'), 'ok': data.get('ok'),
+                'url': str(data.get('url') or '')[:400],
+                'error_count': len(data.get('errors') or []),
+                'errors': [str(e)[:350] for e in (data.get('errors') or [])[:10]],
+                'error': str(data.get('error') or '')[:500],
+                'truncated': bool(data.get('truncated')), 'viewport': data.get('viewport'),
+                'screenshot_path': data.get('screenshot_path')}
+        latest.setdefault(row['task_id'], item)
+        if (item['errors'] or item['error'] or not item['ok']) and len(failures) < 3:
+            failures.append(item)
+    result = scrub({'latest': list(latest.values())[:20], 'recent_failures': failures,
+                    'omitted_task_observations': max(0, len(latest)-20),
+                    'observations_sampled': len(rows), 'sample_limit': 100})
+    # Preserve every current task identity, outcome and error count before
+    # verbose diagnostics. Do not let browser logs drown out functional checks.
+    while len(json.dumps(result, ensure_ascii=False)) > 12000 and result['recent_failures']:
+        result['recent_failures'].pop()
+        result['omitted_failure_details'] = result.get('omitted_failure_details', 0) + 1
+    for item in result['latest']:
+        if len(json.dumps(result, ensure_ascii=False)) <= 12000:
+            break
+        item.update(errors=[e[:120] for e in item['errors'][:2]], error=item['error'][:120],
+                    url=item['url'][:120], screenshot_path=None, viewport=None, truncated=True)
+    return result
+
+
+def browser_review_failure(verdict, evidence):
+    """A pass must explicitly account for observed errors, never infer a clean console."""
+    latest = evidence.get('latest') or []
+    if verdict.get('verdict') != 'pass' or not latest:
+        return None
+    if evidence.get('omitted_task_observations'):
+        return '浏览器任务记录超出摘要范围，需要核对完整观察后验收'
+    review = verdict.get('browser_review')
+    if not isinstance(review, dict) or review.get('event_ids') != [x['event_id'] for x in latest]:
+        return '验收未核对最新浏览器观察记录，不能判定通过'
+    if any(not x['ok'] or x['error'] for x in latest):
+        return '最新浏览器操作失败，需要重新观察关键流程后验收'
+    has_errors = any(x['errors'] or x.get('error_count') or x['truncated'] for x in latest)
+    if has_errors:
+        if review.get('disposition') != 'non_blocking' or not isinstance(review.get('reason'), str) or not review['reason'].strip():
+            return '浏览器仍有错误或证据被截断，需要说明具体影响并提供非阻塞依据'
+    elif review.get('disposition') != 'clean':
+        return '请依据最新浏览器观察明确记录验收结论'
+    return None

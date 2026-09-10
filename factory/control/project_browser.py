@@ -107,6 +107,7 @@ def create_tools(session, emit=None):
                 if emit:
                     emit('browser.observed', {'action': action, 'ok': result.get('ok', False),
                         'url': result.get('url'), 'errors': result.get('errors', []),
+                        'error': result.get('error'), 'truncated': result.get('truncated', False),
                         'screenshot_path': result.get('screenshot_path'), 'wait_s': result.get('wait_s'),
                         'duration_s': result.get('duration_s'), 'viewport': result.get('viewport')})
                 return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}],
