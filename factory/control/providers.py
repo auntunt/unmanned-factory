@@ -431,9 +431,19 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     except ImportError as exc:
         raise ProviderError("claude SDK is not installed; install claude-agent-sdk") from exc
 
+    from factory.control.provider_timing import ProviderTiming
+    timing = ProviderTiming(emit)
+    original_emit = emit
+    def emit(kind, payload):
+        if kind == 'command.completed':
+            timing.command(payload)
+        original_emit(kind, payload)
+
     workspace = Path(req.workspace).resolve()
     from factory.control import claude_terminal
     terminal_enabled = not req.read_only and claude_terminal.available()
+
+    terminal_session = claude_terminal.TerminalSession(workspace) if terminal_enabled else None
 
     def allowed(tool_name, input_data):
         if tool_name == claude_terminal.TOOL_NAME:
@@ -480,12 +490,12 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     }
     options_kwargs['system_prompt'] = {'type': 'preset', 'preset': 'claude_code', 'append':
         f'Your actual project working directory is {workspace}. Use relative paths or this exact directory; do not invent /workspace or /home/user/workspace. '
-        + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
+        + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
            if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
     if terminal_enabled:
-        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace, emit)}
+        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace, emit, session=terminal_session)}
         options_kwargs['allowed_tools'] = [claude_terminal.TOOL_NAME]
-        emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False})
+        emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False, 'persistent_terminal': True, 'terminal_lifetime': 'sdk_execution'})
     elif not req.read_only:
         emit('execution.environment', {'terminal': 'unavailable', 'message': 'Isolated project terminal unavailable; file tools only'})
     if req.session_id:
@@ -504,6 +514,13 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         options = ClaudeAgentOptions(**options_kwargs)
         async for message in query(prompt=req.prompt, options=options):
             name = _event_class(message)
+            blocks = _value(message, 'content', [])
+            blocks = blocks if isinstance(blocks, (list, tuple)) else []
+            tool_result = any(_value(b, 'tool_use_id') is not None for b in blocks)
+            compact = (_value(message, 'subtype') == 'compact_boundary' or any(
+                str(_value(b, 'text', '')).startswith('This session is being continued from a previous conversation')
+                for b in blocks))
+            timing.message(name, tool_result=tool_result, compact=compact)
             if name == "AssistantMessage" or "assistant" in name.lower():
                 content = _value(message, "content", [])
                 for block in content if isinstance(content, (list, tuple)) else [content]:
@@ -569,7 +586,14 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
             else:
                 _emit_generic_event(message, emit)
 
-    asyncio.run(consume())
+    outcome = 'failed'
+    try:
+        asyncio.run(consume())
+        outcome = 'failed' if result is None or bool(_value(result, 'is_error', False)) else 'completed'
+    finally:
+        if terminal_session is not None:
+            terminal_session.close()
+        timing.finish(outcome)
     if result is not None and bool(_value(result, "is_error", False)):
         detail = _value(result, "result") or _value(result, "errors") or "Claude returned an error"
         raise ProviderError(str(detail))
@@ -1328,7 +1352,7 @@ class SDKRunner:
             raise ProviderError("provider worker emitted a non-object JSONL message")
         typ = message.get("type")
         payload = message.get("payload")
-        if typ in {"command.completed", "task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
+        if typ in {"provider.timing", "command.completed", "task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
             emit(str(typ), payload if isinstance(payload, dict) else {"value": _safe_json(payload)})
         elif typ not in {"complete", "error"}:
             emit("provider.raw", {"stream": stream, "event": _safe_json(message)})

@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import selectors
 
 TOOL_NAME = 'mcp__project__run_command'
 
@@ -60,7 +62,108 @@ def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
     return argv
 
 
-def run_command(workspace, command, timeout=300, emit=None):
+
+# The supervisor remains PID 1's child for the whole SDK execution. Each shell
+# gets its own process group, but normal completion leaves preview children alive.
+_SUPERVISOR = r"""
+import json, os, signal, subprocess, sys, tempfile
+for line in sys.stdin:
+    request = json.loads(line)
+    with tempfile.TemporaryFile() as output:
+        child = subprocess.Popen(['/bin/bash', '--noprofile', '--norc', '-c', request['command']],
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        timed_out = False
+        try:
+            child.wait(timeout=request['timeout'])
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try: os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            child.wait()
+        output.seek(0, os.SEEK_END)
+        size = output.tell()
+        output.seek(max(0, size - 30000))
+        result = dict(exit_code=child.returncode, output=output.read().decode('utf-8', errors='replace'),
+            timeout=timed_out, truncated=size > 30000)
+    print(json.dumps(result), flush=True)
+"""
+
+
+class TerminalSession:
+    """One isolated process/tmp lifetime per SDK execution, never host execution."""
+    def __init__(self, workspace):
+        self.workspace = Path(workspace).resolve()
+        self.lock = threading.RLock()
+        self.proc = None
+        self.scratch = None
+        self.closed = False
+
+    def _start(self):
+        if self.closed:
+            raise RuntimeError('Project terminal session is closed')
+        if self.proc is not None:
+            if self.proc.poll() is not None:
+                raise RuntimeError('Project terminal session ended; restart execution to restore services')
+            return
+        if not available():
+            raise RuntimeError('Project terminal requires working bubblewrap; unisolated execution is disabled')
+        self.scratch = tempfile.TemporaryDirectory(prefix='webuddy-session-')
+        argv = command_argv(self.workspace, Path(self.scratch.name), '')
+        argv = argv[:-5] + ['/usr/bin/python3', '-u', '-c', _SUPERVISOR]
+        try:
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env={'PATH': '/usr/local/bin:/usr/bin:/bin'}, close_fds=True)
+        except Exception:
+            self.scratch.cleanup()
+            self.scratch = None
+            raise
+
+    def run(self, command, timeout):
+        from factory.permission.rules import check_command, Decision
+        from factory.control.store import scrub
+        if not isinstance(command, str) or not command.strip() or len(command) > 20000:
+            raise ValueError('command must be non-empty and at most 20000 characters')
+        ruling = check_command(command)
+        if ruling.decision != Decision.ALLOW:
+            return {'exit_code': None, 'error': ruling.reason, 'rule': ruling.rule}
+        with self.lock:
+            self._start()
+            timeout = max(1, min(float(timeout), 3600))
+            try:
+                self.proc.stdin.write((json.dumps({'command': command, 'timeout': timeout}) + '\n').encode())
+                self.proc.stdin.flush()
+                with selectors.DefaultSelector() as ready:
+                    ready.register(self.proc.stdout, selectors.EVENT_READ)
+                    if not ready.select(timeout + 10):
+                        self.close()
+                        raise RuntimeError('Project terminal supervisor did not respond; session closed')
+                line = self.proc.stdout.readline(200000)
+                if not line or not line.endswith(b'\n'):
+                    raise RuntimeError('Project terminal session ended without a command result')
+                result = json.loads(line)
+                result['output'] = scrub(result.get('output', ''))
+                return result
+            except Exception:
+                self.close()
+                raise
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            if self.proc is not None:
+                if self.proc.poll() is None:
+                    self.proc.terminate()
+                    try: self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+                        self.proc.wait()
+                self.proc.stdin.close()
+                self.proc.stdout.close()
+            if self.scratch is not None:
+                self.scratch.cleanup()
+
+
+def run_command(workspace, command, timeout=300, emit=None, session=None):
     from factory.control.resources import command_slot
     import time
     emit = emit or (lambda *args: None)
@@ -69,12 +172,15 @@ def run_command(workspace, command, timeout=300, emit=None):
     with command_slot(max(1, min(int(timeout), 3600))) as waited:
         emit('task.activity', {'phase': 'command', 'wait_s': round(waited, 3)})
         try:
-            result = _run_command_unlimited(workspace, command, max(1, timeout - waited))
+            result = (session.run(command, max(1, timeout - waited)) if session is not None
+                      else _run_command_unlimited(workspace, command, max(1, timeout - waited)))
             result = {**result, 'wait_s': round(waited, 3), 'duration_s': round(time.monotonic() - started, 3)}
             from factory.control.store import scrub
             emit('command.completed', {
                 'command': scrub(command)[:2000], 'exit_code': result.get('exit_code'),
                 'timeout': bool(result.get('timeout')), 'duration_s': result['duration_s'],
+                'wait_s': result['wait_s'],
+                'execution_s': round(max(0, result['duration_s'] - waited), 3),
                 'output': scrub(str(result.get('output', '')))[-4000:],
                 'error': scrub(str(result.get('error', '')))[:1000],
                 'truncated': bool(result.get('truncated')) or len(str(result.get('output', ''))) > 4000,
@@ -116,14 +222,14 @@ def _run_command_unlimited(workspace: Path, command: str, timeout: int = 300) ->
                 'timeout': timed_out, 'truncated': size > 30000}
 
 
-def create_server(workspace: Path, emit=None):
+def create_server(workspace: Path, emit=None, session=None):
     from claude_agent_sdk import tool, create_sdk_mcp_server
 
-    @tool('run_command', 'Run a shell command inside the project sandbox. Use for dependency installation, tests, builds and local checks. Host home and credentials are hidden. Git commits are handled by webuddy. Default timeout 300 seconds; maximum 3600 seconds.',
+    @tool('run_command', 'Run a shell command inside the project sandbox. Use for dependency installation, tests, builds and local checks. Within this execution, background services and /tmp persist across calls. Shell cwd and exports do not persist: use explicit paths. They reset when execution ends or restarts; save durable evidence in the project. Host home and credentials are hidden. Git commits are handled by webuddy. Default timeout 300 seconds; maximum 3600 seconds.',
           {'type': 'object', 'properties': {'command': {'type': 'string'}, 'timeout_s': {'type': 'integer', 'minimum': 1, 'maximum': 3600}}, 'required': ['command'], 'additionalProperties': False})
     async def terminal(args):
         try:
-            result = await asyncio.to_thread(run_command, workspace, args['command'], args.get('timeout_s', 300), emit)
+            result = await asyncio.to_thread(run_command, workspace, args['command'], args.get('timeout_s', 300), emit, session)
         except (ValueError, RuntimeError, OSError) as exc:
             result = {'exit_code': None, 'error': str(exc)}
         return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}],

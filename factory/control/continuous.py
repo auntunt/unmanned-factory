@@ -49,6 +49,15 @@ or successful build alone is not functional acceptance. Use the project terminal
 Write useful regression examples and report actual commands, outputs and limitations.
 Keep a concise progress note at .webuddy/coding-progress.md for recovery after context
 compaction. Do not commit or modify Git metadata; the platform archives the final result.
+Delivery stopping rule: finish when the requested user flows work with representative
+real inputs, relevant checks pass, and any observed blocking defects are repaired.
+After a passing check, repeat or broaden it only for changed code, a new failure, or
+an unresolved requirement. Do not invent stress workloads, future-proof refactors,
+or additional features to postpone delivery. Fix overflow for actual supported
+content; do not repeatedly multiply arbitrary strings unless requested.
+Report optional polish and future improvements separately, then return the result.
+Keep evidence concise; inspect representative screenshots rather than repeatedly
+loading near-identical images. Use targeted reads instead of rereading whole files.
 Only ask for a business decision or an action outside the authorized scope.
 """
 
