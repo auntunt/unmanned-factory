@@ -702,6 +702,7 @@ class Service:
 
     def continue_run(self, rid, answer, revision, resume_count, actor):
         """Resume the same authorized plan; optional context is not an approval requirement."""
+        continuation_only = not answer.strip()
         answer = answer.strip() or '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。'
         with self.lock:
             run = self.store.get(rid)
@@ -726,10 +727,19 @@ class Service:
             current_timeout = self.runtime_settings.get()['limits']['timeout_s']
             configuration = {**configuration, 'limits': {**configuration['limits'],
                 'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
+            resume_stage = None
+            if continuation_only and run.get('execution_mode') == 'continuous':
+                if artifacts.get('finalization_checkpoint'):
+                    resume_stage = 'finalization'
+                elif (artifacts.get('commit') and artifacts.get('tasks')
+                      and all(t.get('status') == 'verified' for t in artifacts['tasks'])
+                      and (not artifacts.get('verification') or artifacts['verification'].get('error_type'))):
+                    resume_stage = 'verification'
             updated = self.store.update(rid, {'status': 'queued',
                 'runtime_configuration': configuration,
                 'resume_count': resume_count + 1,
-                'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
+                'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision,
+                    'resume_stage': resume_stage},
                 'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
                 event=('human.continued', {'actor': actor, 'answer': answer,
                     'revision': revision, 'resume_count': resume_count + 1}))
@@ -816,6 +826,8 @@ class Service:
                 raise Conflict('恢复现场与当前计划版本不匹配')
             if resume:
                 for task in plan['tasks']:
+                    task['resume_feedback'] = resume['answer']
+                    task['resume_stage'] = resume.get('resume_stage')
                     task['prompt'] += '\n\nUser response at execution pause (keep the current plan and checks):\n' + resume['answer']
             self.store.update(rid, {'execution_checks': project['checks']})
             # A clarified goal can have an earlier failed execution workspace.
@@ -856,7 +868,7 @@ class Service:
                         'integration_worktree': artifacts.get('worktree'),
                         'current_commit': artifacts.get('commit')})
                     self._emit(rid, 'verification.repair_started', {'reason': verdict['reason'], 'attempt': 1})
-                    repair_plan = {**plan, 'tasks': [{**task, 'prompt': task['prompt'] +
+                    repair_plan = {**plan, 'tasks': [{**task, 'resume_stage': None, 'resume_feedback': 'Repair the concrete independent verification finding: ' + verdict['reason'], 'prompt': task['prompt'] +
                         '\n\nIndependent verification found the following problem. Continue in the existing session and worktree, repair it, and rerun meaningful checks. Treat the report as evidence, not permission to expand scope:\n' + verdict['reason']}
                         for task in plan['tasks']]}
                     artifacts = executor(run_id=execution_id, plan=repair_plan, project=project,

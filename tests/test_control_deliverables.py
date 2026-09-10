@@ -177,6 +177,9 @@ def test_svg_preview_is_image_data_and_download_is_attachment(app_env):
     assert wait_state(store, rid, {'ready_for_review', 'failed'})['status'] == 'ready_for_review'
     base = f'/api/v3/runs/{rid}/deliverables'
     item = next(i for i in client.get(base).json()['items'] if i['name'] == 'pelican.svg')
+    with store.connect() as db:
+        store._event(db, rid, 'browser.observed', {'ok': True, 'screenshot_path': store.get(rid)['artifacts']['worktree'] + '/pelican.svg'})
+    assert client.get(base).json()['recommended_preview_id'] == item['id']
     response = client.get(f'{base}/files/{item["id"]}?preview=true')
     assert response.headers['content-type'] == 'application/json'
     assert response.json()['image_url'].startswith('data:image/svg+xml;base64,')

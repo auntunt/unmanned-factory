@@ -112,7 +112,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             raise ExecutionError('continuous recovery task changed')
         artifacts.pop('verification', None)
         artifacts.pop('error', None)
-        artifacts['checks'] = []
+        # Preserve successful checks for validated finalization-only recovery.
     else:
         parent = Path(tempfile.mkdtemp(prefix=f'.factory-{run_part}-', dir=workspace.parent))
         root = parent / 'coding'
@@ -152,14 +152,56 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         _guard_workspace(root, before, changed)
         return changed
 
+    def finalize(changed, attempt):
+        commit = (_commit_tree(root, changed, 'webuddy: ' + task.get('title', task_id), timeout_s)
+                  if changed else _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s))
+        artifacts['commit'] = commit
+        artifacts['workspace_guard'] = _guard_snapshot(_baseline(root))
+        state.update(status='verified', commit=commit)
+        attempt.update(status='verified', commit=commit)
+        if _status_paths(root, timeout_s=timeout_s):
+            raise ExecutionError('worktree dirty after commit')
+        artifacts.pop('finalization_checkpoint', None)
+        _emit(emit, 'git.commit', {'commit': commit, 'branch': artifacts['branch']}, task_id)
+        _emit(emit, 'attempt.completed', dict(attempt), task_id)
+        _emit(emit, 'task.completed', {'status': 'verified', 'commit': commit}, task_id)
+        checkpoint()
+        return artifacts
+
     _emit(emit, 'task.started', {**route, 'worktree': str(root), 'branch': artifacts['branch'],
                                'execution_mode': 'continuous'}, task_id)
     checkpoint()
-    prompt = str(task['prompt']) + '\n\n' + _INSTRUCTIONS
+    full_prompt = str(task['prompt']) + '\n\n' + _INSTRUCTIONS
+    prompt = full_prompt
+    if resume_artifacts and artifacts.get('session_id'):
+        prompt = ('Continue the existing task in this session and workspace. Keep completed work and previously supplied project context. '
+                  'Background servers may need restarting; inspect the current state before acting. Do not rebuild the project or repeat completed checks without a concrete reason.\n'
+                  + str(task.get('resume_feedback') or 'Complete the remaining work from the saved progress.') + '\n' + _INSTRUCTIONS)
+    _emit(emit, 'execution.context_delivery', {'session_resumed': bool(artifacts.get('session_id')),
+        'full_prompt_chars': len(full_prompt), 'sent_prompt_chars': len(prompt)}, task_id)
+
     reconnects = 0
     repairs = 0
     max_repairs = max(0, min(2, int((project.get('routing_policy') or {}).get('max_attempts', 3)) - 1))
     try:
+        if resume_artifacts and task.get('resume_stage') == 'verification':
+            if artifacts.get('commit') != _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s) or guard():
+                raise ExecutionError('source changed after successful execution; cannot resume verification only')
+            if not artifacts.get('checks') or any(c.get('exit') != 0 for c in artifacts['checks']):
+                raise ExecutionError('successful checks missing for verification-only recovery')
+            state['status'] = 'verified'
+            _emit(emit, 'execution.reused', {'stage': 'verification', 'message': '源码与已验证提交一致，直接恢复独立验收'}, task_id)
+            checkpoint()
+            return artifacts
+        pending = artifacts.get('finalization_checkpoint')
+        if resume_artifacts and task.get('resume_stage') == 'finalization' and pending:
+            changed = guard()
+            if list(changed) != pending['paths'] or _working_hash(root, changed, timeout_s=timeout_s) != pending['signature']:
+                raise ExecutionError('source changed after checks; cannot resume finalization only')
+            artifacts['checks'] = pending['checks']; state['checks'] = pending['checks']
+            _emit(emit, 'execution.reused', {'stage': 'finalization', 'message': '已通过检查的源码未变化，直接恢复提交与归档'}, task_id)
+            return finalize(changed, state['attempts'][-1])
+        artifacts.pop('finalization_checkpoint', None)
         while True:
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
@@ -267,7 +309,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                     if cancel.wait(min(2 ** reconnects, max(0, _remaining_budget() - 1))):
                         raise ExecutionError('execution cancelled')
                     prompt = ('The previous connection failed temporarily. Continue the same task and existing '
-                              'workspace from your latest progress; do not redo completed work.\n' + str(task['prompt']) + '\n' + _INSTRUCTIONS)
+                              'workspace from your latest progress; do not redo completed work.\n' +
+                              (str(task.get('resume_feedback') or '') if artifacts.get('session_id') else str(task['prompt'])) + '\n' + _INSTRUCTIONS)
                     continue
                 raise ExecutionError('coding provider failed: ' + str(failure)) from failure
             if cancel.is_set():
@@ -312,20 +355,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                           'Preserve regression coverage.\n' + json.dumps(scrub(failed), ensure_ascii=False) + '\n' + _INSTRUCTIONS)
                 checkpoint()
                 continue
-            commit = (_commit_tree(root, changed, 'webuddy: ' + task.get('title', task_id), timeout_s)
-                      if changed else _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s))
-            # No-op maintenance can be valid, but its evidence still faces the final reviewer.
-            artifacts['commit'] = commit
-            artifacts['workspace_guard'] = _guard_snapshot(_baseline(root))
-            state.update(status='verified', commit=commit)
-            attempt.update(status='verified', commit=commit)
-            if _status_paths(root, timeout_s=timeout_s):
-                raise ExecutionError('worktree dirty after commit')
-            _emit(emit, 'git.commit', {'commit': commit, 'branch': artifacts['branch']}, task_id)
-            _emit(emit, 'attempt.completed', dict(attempt), task_id)
-            _emit(emit, 'task.completed', {'status': 'verified', 'commit': commit}, task_id)
+            artifacts['finalization_checkpoint'] = {'paths': list(changed), 'signature': signature, 'checks': records}
             checkpoint()
-            return artifacts
+            return finalize(changed, attempt)
     except Exception as exc:
         state['status'] = 'cancelled' if cancel.is_set() else 'failed'
         state['error'] = scrub(str(exc))[:2000]

@@ -363,7 +363,7 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const act = async (kind: 'clarify' | 'continue' | 'approve' | 'cancel' | 'discard' | 'publish') => {
     if (!run || !runId) return
     setBusy(kind); setError(null)
-    const body = kind === 'continue' ? { answer: answer.trim() || '继续自动处理当前工程问题，保留已有成果；自行完成必要的实现、配套配置和验证，不重新规划。', revision: run.revision, resume_count: (run as Run & { resume_count?: number }).resume_count ?? 0 } : kind === 'clarify' ? { answer: answer.trim() } : kind === 'approve' ? { revision: run.revision } : undefined
+    const body = kind === 'continue' ? { answer: answer.trim(), revision: run.revision, resume_count: (run as Run & { resume_count?: number }).resume_count ?? 0 } : kind === 'clarify' ? { answer: answer.trim() } : kind === 'approve' ? { revision: run.revision } : undefined
     try { const next = await request<Run>(`/api/v2/runs/${encodeURIComponent(runId)}/${kind}`, { method: 'POST', csrfToken, onUnauthorized, body }); setRun(next); notifyDataChanged(); if (kind === 'clarify' || kind === 'continue') setAnswer(''); if (kind === 'approve' || kind === 'continue') navigate(`/runs/${encodeURIComponent(runId)}?view=execution`, { replace: true }) } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(actionError(cause)) } finally { setBusy(null) }
   }
 

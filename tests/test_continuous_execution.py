@@ -29,7 +29,7 @@ def repo(tmp_path):
 def run(repo, runner, **kwargs):
     return execute_continuous(run_id=kwargs.pop('run_id', 'continuous'),
         plan={'tasks': [{'id': 'coding', 'title': 'Double a number', 'prompt': 'Build double CLI',
-                         'complexity': 'medium', 'risk': 'low', 'paths': ['src'], 'checks': ['behavior']}]},
+                         'complexity': 'medium', 'risk': 'low', 'paths': ['src'], 'checks': ['behavior'], **kwargs.pop('task_fields', {})}]},
         project=repo, profiles={'standard': {'provider': 'claude', 'model': 'model'}},
         runner=runner, cancel=kwargs.pop('cancel', threading.Event()),
         emit=kwargs.pop('emit', lambda *_: None), **kwargs)
@@ -189,3 +189,46 @@ def test_terminal_command_evidence_survives_checkpoint_and_final_artifact(repo):
     assert 'python main.py' in render_evidence(result)
     checkpoints = [e[1]['continuous_artifacts'] for e in events if e[0] == 'execution.checkpoint']
     assert checkpoints[-1]['tasks'][0]['attempts'][0]['command_evidence'] == evidence
+
+
+def test_commit_failure_resumes_finalization_without_model_or_checks(repo, monkeypatch):
+    import factory.control.continuous as module
+    original=module._commit_tree
+    monkeypatch.setattr(module,'_commit_tree',lambda *a,**k: (_ for _ in ()).throw(ExecutionError('git add failed')))
+    runner=Writer()
+    with pytest.raises(ExecutionError) as failure:run(repo,runner)
+    saved=failure.value.artifacts
+    assert saved['finalization_checkpoint']['checks'][0]['exit']==0
+    monkeypatch.setattr(module,'_commit_tree',original)
+    events=[]
+    result=run(repo,runner,resume_artifacts=saved,task_fields={'resume_stage':'finalization'},emit=lambda *e:events.append(e))
+    assert len(runner.requests)==1
+    assert result['tasks'][0]['status']=='verified'
+    assert not any(e[0]=='check.result' for e in events)
+
+
+def test_recovery_rejects_source_changed_after_checks(repo, monkeypatch):
+    import factory.control.continuous as module
+    monkeypatch.setattr(module,'_commit_tree',lambda *a,**k: (_ for _ in ()).throw(ExecutionError('git add failed')))
+    runner=Writer()
+    with pytest.raises(ExecutionError) as failure:run(repo,runner)
+    saved=failure.value.artifacts
+    Path(saved['worktree'],'main.py').write_text('def double(n): return 0')
+    with pytest.raises(ExecutionError,match='source changed after checks'):
+        run(repo,runner,resume_artifacts=saved,task_fields={'resume_stage':'finalization'})
+    assert len(runner.requests)==1
+
+
+def test_verification_only_recovery_does_not_rerun_developer(repo):
+    runner=Writer();saved=run(repo,runner)
+    result=run(repo,runner,resume_artifacts=saved,task_fields={'resume_stage':'verification'})
+    assert len(runner.requests)==1
+    assert result['commit']==saved['commit']
+
+
+def test_session_continuation_sends_feedback_not_full_context(repo):
+    runner=Writer();saved=run(repo,runner)
+    run(repo,runner,resume_artifacts=saved,task_fields={'prompt':'FULL_CONTEXT_MARKER'*1000,'resume_feedback':'Fix the requested rounding behavior'})
+    assert runner.requests[-1].session_id=='session-1'
+    assert 'Fix the requested rounding behavior' in runner.requests[-1].prompt
+    assert 'FULL_CONTEXT_MARKER' not in runner.requests[-1].prompt

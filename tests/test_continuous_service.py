@@ -290,3 +290,19 @@ def test_review_precancel_does_not_report_an_unmade_provider_call(app_env, monke
         svc._independent_verify(rid, store.get(rid), p, svc.runtime_settings.get(), {'worktree': p['workspace']})
     assert not [event for event in all_events(store, rid)
         if event['type'] in ('provider.started', 'usage.recorded') and event['payload'].get('profile') == 'verification']
+
+
+@pytest.mark.parametrize('stage', ['finalization', 'verification'])
+def test_plain_continue_resumes_failed_platform_stage_but_new_feedback_runs_model(app_env, monkeypatch, stage):
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    run = store.get(rid)
+    artifacts = {'base_sha':run['context']['commit_sha'], 'commit':run['context']['commit_sha'],
+                 'tasks':[{'id':'coding','status':'verified'}]}
+    if stage=='finalization':artifacts['finalization_checkpoint']={'paths':[]}
+    store.update(rid, {'status':'needs_human','artifacts':artifacts})
+    svc.continue_run(rid, '', run['revision'], 0, 'owner')
+    assert store.get(rid)['execution_resume']['resume_stage']==stage
+    store.update(rid, {'status':'needs_human'})
+    svc.continue_run(rid, '增加一个导出功能', run['revision'], 1, 'owner')
+    assert store.get(rid)['execution_resume']['resume_stage'] is None

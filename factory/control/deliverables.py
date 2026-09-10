@@ -154,7 +154,22 @@ def router(store, service):
                 from factory.control.github import publish_failure_message
                 error = publish_failure_message(ValueError(json.loads(event['payload']).get('message', '')))
         project = store.project(run['project_id'])
-        return {**result, 'saved': saved, 'can_collect': run['status'] in ('ready_for_review', 'published'),
+        recommended = None
+        # Prefer the most recent screenshot actually recorded by the browser,
+        # rather than the first UUID-sorted image or an empty JavaScript shell.
+        with store.connect() as db:
+            observations = db.execute('SELECT payload FROM events WHERE run_id=? AND type=? ORDER BY id DESC LIMIT 100',
+                                      (rid, 'browser.observed')).fetchall()
+        workspace = str((run.get('artifacts') or {}).get('worktree') or '').rstrip('/')
+        for observation in observations:
+            image = json.loads(observation['payload']).get('screenshot_path')
+            if not isinstance(image, str) or not workspace or not image.startswith(workspace + '/'):
+                continue
+            name = image[len(workspace)+1:]
+            candidate = next((item for item in result['items'] if item['name'] == name and item['kind'] == 'image' and item['preview']), None)
+            if candidate:
+                recommended = candidate['id']; break
+        return {**result, 'recommended_preview_id': recommended, 'saved': saved, 'can_collect': run['status'] in ('ready_for_review', 'published'),
                 'github_configured': bool(service.publisher),
                 'github_repository': project['repository'],
                 'github_repository_bound': not project['repository'].startswith('local/'),
@@ -182,6 +197,12 @@ def router(store, service):
             if not item['preview']: raise HTTPException(415, '此文件请下载后查看')
             with zipfile.ZipFile(path / 'files.zip') as archive:
                 raw = archive.read(item['name'])
+                if item['kind'] == 'web':
+                    from factory.control.static_preview import static_preview
+                    try:
+                        return {'name': item['name'], 'content': static_preview(archive, item['name']), 'kind': 'web'}
+                    except ValueError as exc:
+                        raise HTTPException(413, str(exc)) from None
             mime = IMAGES.get(Path(item['name']).suffix.lower())
             if mime:
                 return {'name': item['name'], 'content': '', 'kind': 'image',
