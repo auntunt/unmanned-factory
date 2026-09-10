@@ -16,6 +16,7 @@ import { notifyDataChanged, subscribeDataRefresh } from './data-refresh'
 import './run-guidance.css'
 import RunJourney from './RunJourney'
 import Deliverables from './Deliverables'
+import { safeRepositoryUrl } from './GithubDelivery'
 
 type RunPageProps = PageProps
 
@@ -230,7 +231,7 @@ function DeliveryEvidence({ run }: { run: Run }) {
       <div className="wb-artifact-list">
         <div className="wb-artifact"><span className="wb-artifact-label">基线 SHA</span><span className="wb-sha">{shortSha(baseSha)}</span></div>
         <div className="wb-artifact"><span className="wb-artifact-label">交付 commit SHA</span><span className="wb-sha">{shortSha(commit)}</span></div>
-        <div className="wb-artifact"><span className="wb-artifact-label">来源 PR</span>{safeGithubPr(prUrl) ? <a href={prUrl} target="_blank" rel="noreferrer">在 GitHub 打开 PR ↗</a> : <span>{typeof prUrl === 'string' && prUrl ? '已记录链接，但不是受支持的 GitHub PR 地址' : '尚未生成 PR'}</span>}</div>
+        {artifacts?.publication_type === 'initial' ? <div className="wb-artifact"><span className="wb-artifact-label">首次上传{typeof artifacts.published_branch === 'string' && artifacts.published_branch ? ` · ${artifacts.published_branch}` : ''}</span>{safeRepositoryUrl(artifacts.repository_url) ? <a href={safeRepositoryUrl(artifacts.repository_url)!} target="_blank" rel="noreferrer">在 GitHub 打开仓库 ↗</a> : <span>已记录首次上传</span>}</div> : <div className="wb-artifact"><span className="wb-artifact-label">来源 PR</span>{safeGithubPr(prUrl) ? <a href={prUrl} target="_blank" rel="noreferrer">在 GitHub 打开 PR ↗</a> : <span>{typeof prUrl === 'string' && prUrl ? '已记录链接，但不是受支持的 GitHub PR 地址' : '尚未生成 PR'}</span>}</div>}
 
 
         {checkItems.length > 0 && <div className="wb-artifact"><span className="wb-artifact-label">检查结果</span><div className="wb-checks">{checkItems.map((check, index) => <CheckEvidence check={check} index={index} key={`${String(check.name ?? 'check')}-${index}`} />)}</div></div>}

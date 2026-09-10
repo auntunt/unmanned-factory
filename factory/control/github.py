@@ -96,6 +96,98 @@ class GitHubDelivery:
     def close(self):
         self.client.close()
 
+    def account(self):
+        if not self.token:
+            raise ValueError('尚未配置 FACTORY_GITHUB_TOKEN')
+        response = self.client.get('/user')
+        response.raise_for_status()
+        user = response.json()
+        login = user.get('login') if isinstance(user, dict) else None
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*', login):
+            raise ValueError('GitHub 账户响应无效')
+        return {'login': login, 'html_url': f'https://github.com/{login}',
+                'avatar_url': user.get('avatar_url')}
+
+    @staticmethod
+    def _repo_view(value, *, require_push=True):
+        if not isinstance(value, dict):
+            raise ValueError('GitHub 仓库响应无效')
+        full_name = _repository(value.get('full_name'))
+        if require_push and not (value.get('permissions') or {}).get('push'):
+            raise ValueError('GitHub 仓库没有写入权限')
+        if value.get('archived') or value.get('disabled'):
+            raise ValueError('GitHub 仓库已归档或停用')
+        if type(value.get('id')) is not int or value['id'] <= 0:
+            raise ValueError('GitHub 仓库编号无效')
+        return {'id': value['id'], 'full_name': full_name, 'name': full_name.split('/')[1],
+                'private': bool(value.get('private')), 'default_branch': value.get('default_branch') or 'main',
+                'html_url': f'https://github.com/{full_name}', 'permissions': {'push': True}}
+
+    def repositories(self, *, page=1, per_page=50):
+        if not self.token:
+            raise ValueError('尚未配置 FACTORY_GITHUB_TOKEN')
+        if type(page) is not int or page < 1 or type(per_page) is not int or not 1 <= per_page <= 100:
+            raise ValueError('GitHub 仓库分页无效')
+        response = self.client.get('/user/repos', params={'page': page, 'per_page': per_page,
+            'sort': 'updated', 'direction': 'desc', 'affiliation': 'owner,collaborator,organization_member'})
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise ValueError('GitHub 仓库列表响应无效')
+        writable = [self._repo_view(row) for row in rows if isinstance(row, dict)
+            and (row.get('permissions') or {}).get('push') and not row.get('archived') and not row.get('disabled')]
+        return {'repositories': writable, 'page': page, 'has_more': len(rows) == per_page}
+
+    def repository(self, full_name):
+        repo = _repository(full_name)
+        if not self.token:
+            raise ValueError('尚未配置 FACTORY_GITHUB_TOKEN')
+        response = self.client.get(f'/repos/{repo}')
+        response.raise_for_status()
+        result = self._repo_view(response.json())
+        if not _same_repository(result['full_name'], repo):
+            raise ValueError('GitHub 仓库身份已变化，请重新选择')
+        return result
+
+    def create_repository(self, *, name, private=True, description=''):
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', name):
+            raise ValueError('GitHub 仓库名称只能使用字母、数字、连字符、下划线和点，最多 100 字符')
+        if type(private) is not bool or not isinstance(description, str) or len(description) > 350:
+            raise ValueError('GitHub 仓库配置无效')
+        owner = self.account()['login']
+        expected = f'{owner}/{name}'
+        # A prior successful POST with a lost response is ambiguous. Never infer
+        # ownership of a creation attempt from a matching name alone: select the
+        # existing repo explicitly, or use the caller's durable success receipt.
+        existing = self.client.get(f'/repos/{expected}')
+        if existing.status_code != 404:
+            existing.raise_for_status()
+            raise ValueError('GitHub 同名仓库已存在，请选择已有仓库；不会覆盖或重新创建')
+        response = self.client.post('/user/repos', json={'name': name, 'private': private,
+            'description': description, 'auto_init': False})
+        response.raise_for_status()
+        result = self._repo_view(response.json(), require_push=False)
+        if not _same_repository(result['full_name'], expected):
+            raise ValueError('GitHub 新仓库身份不匹配，请核对账户后选择已有仓库')
+        return result
+
+    def _git_env(self):
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        header = base64.b64encode(f'x-access-token:{self.token}'.encode()).decode()
+        env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+            GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {header}',
+            GIT_CONFIG_KEY_1='core.hooksPath', GIT_CONFIG_VALUE_1='/dev/null')
+        return env
+
+    @staticmethod
+    def _git(root, args, env, *, timeout=120):
+        result = subprocess.run(['git', *args], cwd=root, env=env,
+            capture_output=True, text=True, timeout=timeout)
+        if result.returncode:
+            raise ValueError(push_failure_message(result.stderr))
+        return result.stdout.strip()
+
     def publish(self, project: dict, run: dict) -> dict:
         if not self.token:
             raise ValueError('尚未配置 FACTORY_GITHUB_TOKEN')
@@ -104,7 +196,7 @@ class GitHubDelivery:
         branch, sha = artifacts['branch'], artifacts['commit']
         if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
             raise ValueError('无效验收提交 SHA')
-        if not re.fullmatch(r'factory/[A-Za-z0-9_-]+', branch):
+        if not isinstance(branch, str) or not re.fullmatch(r'factory/[A-Za-z0-9_-]+', branch):
             raise ValueError('拒绝发布非工厂交付分支')
         root = Path(artifacts['worktree'])
         current = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root,
@@ -113,25 +205,45 @@ class GitHubDelivery:
             capture_output=True, text=True, check=True, timeout=30).stdout.strip()
         if current != sha or dirty:
             raise ValueError('验收后工作区已变化，拒绝发布；请重新验证')
-        env = os.environ.copy()
-        for key in list(env):
-            if key.startswith('GIT_CONFIG_'):
-                env.pop(key)
-        header = base64.b64encode(f'x-access-token:{self.token}'.encode()).decode()
-        env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='2',
-                   GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
-                   GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {header}',
-                   GIT_CONFIG_KEY_1='core.hooksPath', GIT_CONFIG_VALUE_1='/dev/null')
-        result = subprocess.run(['git', 'push', f'https://github.com/{repo}.git',
-                                 f'{sha}:refs/heads/{branch}'], cwd=root, env=env,
-                                capture_output=True, text=True, timeout=120)
-        if result.returncode:
-            # HTTP authorization and low-level diagnostics stay out of user-visible logs.
-            raise ValueError(push_failure_message(result.stderr))
+        env = self._git_env()
+        checked_branch = self._git(root, ['symbolic-ref', '--short', 'HEAD'], env, timeout=30)
+        if checked_branch != branch:
+            raise ValueError('验收后工作区分支已变化，拒绝发布；请重新验证')
+        base = project.get('github_base_branch') or project.get('base_branch', 'main')
+        if not isinstance(base, str) or not base or base.startswith('-'):
+            raise ValueError('无效 GitHub 基础分支')
+        self._git(root, ['check-ref-format', '--branch', base], env, timeout=30)
+        remote = f'https://github.com/{repo}.git'
+        refs_text = self._git(root, ['ls-remote', '--refs', remote], env)
+        refs = {}
+        for line in refs_text.splitlines():
+            fields = line.split('\t')
+            if len(fields) != 2 or not SHA.fullmatch(fields[0]):
+                raise ValueError('GitHub 远端引用响应无效')
+            refs[fields[1]] = fields[0]
+        base_ref = f'refs/heads/{base}'
+        if not refs or refs.get(base_ref) == sha:
+            if not refs:
+                # No force flags: a concurrent incompatible initial push is rejected.
+                self._git(root, ['push', remote, f'{sha}:{base_ref}'], env)
+            observed = self._git(root, ['ls-remote', '--refs', remote, base_ref], env)
+            if observed != f'{sha}\t{base_ref}':
+                raise ValueError('GitHub 首次上传后的提交不匹配，请重新核对远端状态')
+            return {'publication_type': 'initial', 'repository_url': f'https://github.com/{repo}',
+                    'repository': repo, 'commit': sha, 'branch': branch, 'published_branch': base}
+        remote_base = refs.get(base_ref)
+        if not remote_base:
+            raise ValueError('GitHub 基础分支不存在，请选择仓库的实际默认分支')
+        self._git(root, ['fetch', '--no-tags', '--no-write-fetch-head', remote, base_ref], env)
+        relation = subprocess.run(['git', 'merge-base', sha, remote_base], cwd=root, env=env,
+            capture_output=True, text=True, timeout=30)
+        if relation.returncode or not SHA.fullmatch(relation.stdout.strip()):
+            raise ValueError('GitHub 仓库与当前成果没有共同历史，请选择空仓库或创建新仓库；不会覆盖已有项目')
+        self._git(root, ['push', remote, f'{sha}:refs/heads/{branch}'], env)
         owner = repo.split('/')[0]
         response = self.client.get(f'/repos/{repo}/pulls',
                                    params={'head': f'{owner}:{branch}', 'state': 'open',
-                                           'base': project['base_branch']})
+                                           'base': base})
         response.raise_for_status()
         prs = response.json()
         if prs:
@@ -140,8 +252,9 @@ class GitHubDelivery:
                 raise ValueError('远端 PR head 与验收提交不一致')
             pr_number = _pr_number(existing, repo, allow_url_fallback=True)
             pr_url = _canonical_pr_url(existing, repo, pr_number)
-            return {'pr_url': pr_url, 'pr_number': pr_number, 'repository': repo,
-                    'commit': sha, 'branch': branch}
+            return {'publication_type': 'pull_request', 'repository_url': f'https://github.com/{repo}',
+                    'pr_url': pr_url, 'pr_number': pr_number, 'repository': repo,
+                    'commit': sha, 'branch': branch, 'published_branch': base}
         plan = run['plan']
         issue = run.get('source', {}).get('issue_number')
         body = f"{plan['summary']}\n\nRun: `{run['id']}` · Plan revision: {run['revision']}\n\n"
@@ -150,15 +263,16 @@ class GitHubDelivery:
             body += f'\n\nRefs #{int(issue)}'
         response = self.client.post(f'/repos/{repo}/pulls', json={
             'title': plan['title'][:200], 'body': body, 'head': branch,
-            'base': project['base_branch'], 'draft': False})
+            'base': base, 'draft': False})
         response.raise_for_status()
         created = response.json()
         # GitHub normally supplies ``number``. Keep the same strict URL-only
         # fallback as reconciliation for older/test doubles that do not.
         pr_number = _pr_number(created, repo, allow_url_fallback=True)
         pr_url = _canonical_pr_url(created, repo, pr_number)
-        return {'pr_url': pr_url, 'pr_number': pr_number, 'repository': repo,
-                'commit': sha, 'branch': branch}
+        return {'publication_type': 'pull_request', 'repository_url': f'https://github.com/{repo}',
+                    'pr_url': pr_url, 'pr_number': pr_number, 'repository': repo,
+                'commit': sha, 'branch': branch, 'published_branch': base}
 
     def observe_merge(self, project: dict, run: dict) -> dict:
         """Independently verify the registered run's GitHub PR merge state.
@@ -169,7 +283,7 @@ class GitHubDelivery:
         if not self.token:
             raise ValueError('尚未配置 FACTORY_GITHUB_TOKEN')
         repo = _repository(project['repository'])
-        base_branch = project.get('base_branch')
+        base_branch = project.get('github_base_branch') or project.get('base_branch')
         if not isinstance(base_branch, str) or not base_branch:
             raise ValueError('无效基线分支')
         artifacts = run.get('artifacts')
@@ -246,7 +360,7 @@ def publish_failure_message(exc: Exception) -> str:
         reason = '连接 GitHub 超时，请检查服务器网络后重试'
     elif isinstance(exc, httpx.TransportError):
         reason = '无法连接 GitHub，请检查服务器网络或代理后重试'
-    elif isinstance(exc, ValueError) and str(exc).startswith(('尚未配置', '无效', '拒绝发布', '验收后', 'GitHub push', '远端 PR')):
+    elif isinstance(exc, ValueError) and str(exc).startswith(('尚未配置', '无效', '拒绝发布', '验收后', 'GitHub push', 'GitHub 仓库', 'GitHub 基础', 'GitHub 首次', 'GitHub 同名', '远端 PR')):
         reason = str(exc)
     else:
         reason = 'GitHub 发布失败，请检查发布配置及运行记录'

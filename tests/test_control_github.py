@@ -52,16 +52,21 @@ def test_publish_verified_head_and_reconcile_existing_pr(tmp_path, monkeypatch):
     run = subprocess.run
     run(['git', 'init', '-q', '-b', 'main'], cwd=work, check=True)
     run(['git', 'init', '-q', '--bare', str(remote)], check=True)
+    (work / 'README.md').write_text('baseline')
+    run(['git', 'add', '.'], cwd=work, check=True)
+    run(['git', '-c', 'user.name=Test', '-c', 'user.email=t@example.com', 'commit', '-qm', 'baseline'], cwd=work, check=True)
+    run(['git', 'push', str(remote), 'main'], cwd=work, check=True, capture_output=True)
+    run(['git', 'checkout', '-qb', 'factory/abc'], cwd=work, check=True)
     (work / 'result.txt').write_text('verified')
     run(['git', 'add', 'result.txt'], cwd=work, check=True)
     run(['git', '-c', 'user.name=Test', '-c', 'user.email=t@example.com', 'commit', '-qm', 'verified'], cwd=work, check=True)
     sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=work, text=True).strip()
     seen = []
     def local_push(args, **kwargs):
-        if args[:2] == ['git', 'push']:
-            assert args[2] == 'https://github.com/test/repo.git'
-            assert '--force' not in args
-            args = [*args[:2], str(remote), *args[3:]]
+        if args[1] in ('push', 'fetch', 'ls-remote'):
+            assert 'https://github.com/test/repo.git' in args
+            assert not any(str(arg).startswith('--force') for arg in args)
+            args = [str(remote) if arg == 'https://github.com/test/repo.git' else arg for arg in args]
         return run(args, **kwargs)
     monkeypatch.setattr('factory.control.github.subprocess.run', local_push)
     def api(request):

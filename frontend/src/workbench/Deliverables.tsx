@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
 import { request } from '../workspace/api'
 import type { Run } from '../workspace/types'
+import GithubDelivery, { githubPublicationLabel } from './GithubDelivery'
 
 type Item = { id: number; name: string; kind: string; size: number; sha256: string; origin: string; preview: boolean }
-type Catalog = { saved: boolean; can_collect: boolean; github_configured: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string }
+type Catalog = { saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string }
 const labels: Record<string, string> = { installer: '安装包', package: '压缩包 / 软件包', web: '网页', image: '图片', document: '文档', source: '源码 / 文件' }
 function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` }
 
-export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin, onPublish, publishing = false }: { run: Run; csrfToken: string; onUnauthorized: () => void; isAdmin: boolean; onPublish?: () => void; publishing?: boolean }) {
+export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }: { run: Run; csrfToken: string; onUnauthorized: () => void; isAdmin: boolean; onPublish?: () => void; publishing?: boolean }) {
   const base = `/api/v3/runs/${encodeURIComponent(String(run.id))}/deliverables`
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [error, setError] = useState('')
@@ -42,11 +43,11 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin, 
   }
   const items = (catalog?.items ?? []).filter(item => !filter || item.kind === filter)
   return <section className="wb-detail-card wb-deliverables" aria-labelledby="deliverables-title">
-    <div className="wb-deliverables-heading"><div><span className="wb-eyebrow">本次成果</span><h2 id="deliverables-title">查看、下载与使用</h2><p>先拿到可用的成果，再选择是否发布到 GitHub。</p></div>{catalog?.saved && <a className="wb-button wb-button-primary" href={`${base}/download`}>下载全部成果 ZIP</a>}</div>
+    <div className="wb-deliverables-heading"><div><span className="wb-eyebrow">本次成果</span><h2 id="deliverables-title">查看、下载与使用</h2><p>先拿到可用的成果，再选择是否发布到 GitHub。</p></div>{catalog?.saved && <div className="wb-detail-actions"><a className="wb-button wb-button-primary" href={`${base}/download`}>下载全部成果 ZIP</a><GithubDelivery run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} configured={catalog.github_configured} /></div>}</div>
     {error && <div role="alert" className="wb-billing-warning">{error}</div>}
     {!catalog && !error && <p role="status">正在读取成果…</p>}
     {catalog && <>
-      <div className="wb-notice">成果：{catalog.saved ? `已保存 · ${catalog.items.length} 个文件` : '尚未保存'} · GitHub：{run.status === 'published' ? '已创建 PR' : !catalog.github_configured ? '未配置发布凭据' : '尚未发布'}</div>
+      <div className="wb-notice">成果：{catalog.saved ? `已保存 · ${catalog.items.length} 个文件` : '尚未保存'} · GitHub：{githubPublicationLabel(run, catalog.github_configured, catalog.github_repository_bound)}</div>
       {catalog.publish_error && <p role="alert">{catalog.publish_error}</p>}
       {!catalog.github_configured && <p>如需推送仓库，请联系管理员配置 GitHub 发布凭据；查看和下载成果不依赖 GitHub。</p>}
       {!catalog.saved && <><p>{catalog.collection_error || (catalog.can_collect ? '这次运行尚未归档实际文件，保存后即可预览和下载。' : '执行与验证完成后，系统会自动保存成果。')}</p>{catalog.can_collect && (isAdmin ? <button className="wb-button wb-button-primary" disabled={busy} onClick={() => void collect()}>{busy ? '正在保存…' : '保存本次成果'}</button> : <p>请管理员保存本次成果后即可下载。</p>)}</>}
@@ -56,14 +57,6 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin, 
         <label>成果类型 <select value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         {!items.length && <p>没有此类文件。安装包需要先完成对应平台的构建，系统不会把源码当作安装包。</p>}
         <div className="wb-deliverable-list">{items.map(item => <article className="wb-deliverable-item" key={item.id}><div><strong>{item.name}</strong><p>{labels[item.kind]} · {sizeLabel(item.size)} · {item.origin === 'commit' ? '验收版本' : '构建产物快照'}</p><details><summary>文件校验值</summary><code>{item.sha256}</code></details></div><div className="wb-detail-actions">{item.preview && <button className="wb-button" disabled={busy} onClick={() => void open(item)}>预览</button>}<a className="wb-button" href={`${base}/files/${item.id}`}>下载</a></div></article>)}</div>
-
-        <details><summary>发布到 GitHub（可选）</summary>
-          {!catalog.github_configured && <p>当前未配置 GitHub 发布凭据。无需 GitHub 也可以继续查看和下载成果。</p>}
-          {catalog.github_configured && run.status === 'published' && <p>本次成果已发布，可在交付记录中查看发布信息。</p>}
-          {catalog.github_configured && run.status === 'publishing' && <p>正在发布，完成后会更新交付记录。</p>}
-          {catalog.github_configured && run.status === 'ready_for_review' && !onPublish && <a href={`/runs/${encodeURIComponent(run.id)}?view=delivery`}>打开交付页面查看发布选项 →</a>}
-          {onPublish && catalog.github_configured && run.status === 'ready_for_review' && <button className="wb-button wb-button-primary" disabled={publishing} onClick={onPublish}>{publishing ? '正在发布…' : '发布到 GitHub'}</button>}
-        </details>
 
         <details><summary>如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
       </>}

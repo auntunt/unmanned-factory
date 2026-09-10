@@ -153,8 +153,15 @@ def router(store, service):
             if event and event['type'] == 'github.publish_failed':
                 from factory.control.github import publish_failure_message
                 error = publish_failure_message(ValueError(json.loads(event['payload']).get('message', '')))
+        project = store.project(run['project_id'])
         return {**result, 'saved': saved, 'can_collect': run['status'] in ('ready_for_review', 'published'),
                 'github_configured': bool(service.publisher),
+                'github_repository': project['repository'],
+                'github_repository_bound': not project['repository'].startswith('local/'),
+                'project_revision': project['revision'],
+                'repository_url': (run.get('artifacts') or {}).get('repository_url'),
+                'publication_type': (run.get('artifacts') or {}).get('publication_type'),
+                'baseline_sync': (run.get('artifacts') or {}).get('baseline_sync'),
                 'publish_error': error,
                 'collection_error': (run.get('artifacts') or {}).get('collection_error')}
     @api.post('/collect')

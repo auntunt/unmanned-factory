@@ -181,6 +181,8 @@ _DESKTOP_CODEX_ENV_KEYS = {
 
 Emit = Callable[[str, dict[str, Any]], None]
 _MAX_JSONL_LINE = 1_048_576
+# Screenshot/tool messages can exceed the SDK default 1 MiB before normalization.
+_CLAUDE_MAX_BUFFER_SIZE = 16 * 1024 * 1024
 
 
 def _reasoning_type(value: Any) -> bool:
@@ -466,6 +468,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
 
     options_kwargs: dict[str, Any] = {
         "model": req.model or None,
+        "max_buffer_size": _CLAUDE_MAX_BUFFER_SIZE,
         "cwd": str(workspace),
         "tools": ["Read", "Glob", "Grep"] if req.read_only else ["Read", "Glob", "Grep", "Write", "Edit"],
         "permission_mode": "default",

@@ -521,6 +521,7 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path)), lambda *_: None)
     assert result.text == "done"
+    assert captured["max_buffer_size"] == 16 * 1024 * 1024
     assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit"]
     assert captured['allowed_tools'] == ['mcp__project__run_command']
     assert captured['system_prompt']['preset'] == 'claude_code'

@@ -12,6 +12,7 @@ import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -22,6 +23,15 @@ from factory.control.auth import AuthError, AuthStore
 from factory.control.github import GitHubDelivery, REPOSITORY, verify_signature
 from factory.control.service import Service
 from factory.control.store import Conflict, Store, now, scrub
+
+class GitHubPublishRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mode: Literal['existing', 'create', 'bound']
+    repository: str | None = Field(default=None, max_length=240)
+    name: str | None = Field(default=None, max_length=100)
+    private: Literal[True] = True
+    expected_project_revision: int = Field(ge=1)
+
 
 COOKIE = 'factory_session'
 
@@ -538,6 +548,31 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     @app.post('/api/v2/runs/{rid}/discard')
     def discard(rid: str, request: Request):
         return svc.discard(rid, request.state.user['username'])
+
+    @app.get('/api/v3/runs/{rid}/github-options')
+    def github_options(rid: str, request: Request, page: int = 1):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        if not 1 <= page <= 100:
+            raise HTTPException(422, '页码无效')
+        try:
+            return svc.github_options(rid, page=page)
+        except (Conflict, KeyError):
+            raise
+        except Exception:
+            raise HTTPException(502, '无法读取 GitHub 仓库，请检查凭据权限后重试。') from None
+
+    @app.post('/api/v3/runs/{rid}/github-publish')
+    def github_publish(rid: str, body: GitHubPublishRequest, request: Request):
+        try:
+            return svc.publish_github(rid, **body.model_dump(), actor=request.state.user['username'])
+        except (Conflict, KeyError):
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except Exception:
+            message = (store.get(rid).get('artifacts') or {}).get('publish_error')
+            raise HTTPException(502, message or 'GitHub 发布未完成；本地成果仍可查看和下载。请刷新仓库列表后重试。') from None
 
     @app.post('/api/v2/runs/{rid}/publish')
     def publish(rid: str):

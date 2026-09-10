@@ -974,13 +974,32 @@ class Service:
         if verdict['verdict'] != 'pass':
             raise ExecutionError('独立验证未通过：' + verdict['reason'], artifacts=artifacts)
 
+    def github_options(self, rid, *, page=1):
+        from factory.control.github_publication import GitHubPublication
+        return GitHubPublication(self).options(rid, page)
+
+    def bind_github_repository(self, rid, repository, expected_project_revision, actor):
+        from factory.control.github_publication import GitHubPublication
+        return GitHubPublication(self).bind(rid, repository, expected_project_revision, actor)
+
+    def publish_github(self, rid, **kwargs):
+        from factory.control.github_publication import GitHubPublication
+        return GitHubPublication(self).publish(rid, **kwargs)
+
     def publish(self, rid):
         if not self.publisher:
             raise Conflict('尚未配置 GitHub 发布凭据；请联系管理员配置 FACTORY_GITHUB_TOKEN。成果仍可查看和下载。')
+        project = self.store.project(self.store.get(rid)['project_id'])
+        if project['repository'].startswith('local/'):
+            raise Conflict('请先在成果页选择 GitHub 仓库，再发布成果。')
         run = self.store.update(rid, {'status': 'publishing'}, expected=('ready_for_review',),
                                 event=('github.publish_started', {}))
         try:
             delivery = self.publisher.publish(self.store.project(run['project_id']), run)
+            from factory.control.github_publication import GitHubPublication
+            sync = GitHubPublication(self).sync_initial_baseline({**run, 'artifacts': {**run['artifacts'], **delivery}})
+            if sync:
+                delivery['baseline_sync'] = sync
             return self.store.update(rid, {'status': 'published', 'artifacts': {**run['artifacts'], **delivery, 'publish_error': None}},
                 expected=('publishing',), event=('github.published', delivery))
         except Exception as exc:
