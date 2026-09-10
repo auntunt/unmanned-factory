@@ -228,6 +228,13 @@ def _status_paths(root: Path, *, timeout_s: float) -> tuple[str, ...]:
         else:
             if xy in ('??', '!!'):
                 file = root / value
+                # Runtime-only files deliberately ignored by the project must not
+                # be staged or mistaken for source changes. Tracked configs and
+                # ignored executable source still go through all integrity guards.
+                if (xy == '!!' and file.is_file() and not file.is_symlink()
+                        and (file.name in {'.env', '.env.local', '.env.production', '.env.development'}
+                             or file.suffix == '.log')):
+                    continue
                 if value.rstrip('/').endswith('.egg-info') and file.is_dir() and not file.is_symlink():
                     # Git can collapse ignored directories; inspect their contents
                     # so an unexpected script cannot hide beside generated metadata.

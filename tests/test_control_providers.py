@@ -472,7 +472,7 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     from factory.control.providers import _run_claude
     from factory.control import claude_terminal
     monkeypatch.setattr(claude_terminal, 'available', lambda: True)
-    monkeypatch.setattr(claude_terminal, 'create_server', lambda workspace, emit=None, session=None: {'type': 'sdk', 'name': 'project'})
+    monkeypatch.setattr(claude_terminal, 'create_server', lambda workspace, emit=None, session=None, browser_session=None: {'type': 'sdk', 'name': 'project'})
 
     mod = types.ModuleType("claude_agent_sdk")
     captured = {}
@@ -508,11 +508,14 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
         terminal = await hook({'tool_name': 'mcp__project__run_command', 'tool_input': {'command': 'python3 -m unittest'}}, 'id', {})
         assert terminal['hookSpecificOutput']['permissionDecision'] == 'allow'
         assert outside["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert secret["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert secret["hookSpecificOutput"]["permissionDecision"] == "allow"
         assert inside["hookSpecificOutput"]["permissionDecision"] == "allow"
         yield AssistantMessage()
         yield ResultMessage()
 
+    class AgentDefinition:
+        def __init__(self, **kwargs): self.__dict__.update(kwargs)
+    mod.AgentDefinition = AgentDefinition
     mod.ClaudeAgentOptions = ClaudeAgentOptions
     mod.HookMatcher = HookMatcher
     mod.PermissionResultAllow = PermissionResult
@@ -521,9 +524,16 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path)), lambda *_: None)
     assert result.text == "done"
+    researcher = captured['agents']['webuddy-research']
+    assert researcher.tools == ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch']
+    assert researcher.maxTurns == 12 and researcher.effort == 'medium'
+    assert researcher.mcpServers == [] and 'Bash' in researcher.disallowedTools
     assert captured["max_buffer_size"] == 16 * 1024 * 1024
-    assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit"]
-    assert captured['allowed_tools'] == ['mcp__project__run_command']
+    assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch", "Agent"]
+    assert captured["effort"] == "medium"
+    assert 'mcp__project__run_command' in captured['allowed_tools']
+    assert 'mcp__project__browser_open' in captured['allowed_tools']
+    assert captured['permission_mode'] == 'acceptEdits'
     assert captured['system_prompt']['preset'] == 'claude_code'
     assert str(tmp_path) in captured['system_prompt']['append']
 

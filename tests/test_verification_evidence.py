@@ -25,3 +25,14 @@ def test_review_redacts_credentials_and_retains_timeout(monkeypatch):
         {'command': 'test', 'exit_code': -9, 'timeout': True, 'output': 'sample-private-secret'}]}]})
     assert 'sample-private-secret' not in result
     assert json.loads(result)['command_details'][0]['timeout'] is True
+
+
+def test_compact_review_preserves_actual_check_output_and_marks_worker_claims_untrusted():
+    rendered = render_evidence({'checks': [{'name': 'convert', 'exit': 1, 'stderr': 'Expected 12 rows, got 11'}],
+        'review_focus_paths': ['src/converter.py'], 'tasks': [{'id': 'coding', 'attempts': [
+            {'result_summary': 'README says all conversions work'}]}]}, max_chars=16000)
+    result = json.loads(rendered)
+    assert result['checks'][0]['stderr'] == 'Expected 12 rows, got 11'
+    assert result['review_focus_paths'] == ['src/converter.py']
+    assert result['tasks'][0]['worker_report_untrusted'] == 'README says all conversions work'
+    assert len(rendered) <= 16000

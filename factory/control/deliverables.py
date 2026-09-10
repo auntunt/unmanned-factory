@@ -25,7 +25,7 @@ def safe_path(name):
     path = PurePosixPath(name)
     return bool(name) and '\\' not in name and ':' not in name and not any(ord(c) < 32 for c in name) and not path.is_absolute() and '..' not in path.parts and not any(
         part in {'.git', '.ssh', 'node_modules', '__pycache__', '.venv'} or
-        part == '.env' or part.startswith('.env.') or part.endswith(('.pem', '.key'))
+        part == '.env' or (part.startswith('.env.') and part not in {'.env.example', '.env.sample', '.env.template'}) or part.endswith(('.pem', '.key'))
         for part in path.parts)
 
 

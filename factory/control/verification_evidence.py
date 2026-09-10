@@ -6,12 +6,14 @@ from factory.control.store import scrub
 
 def render_evidence(artifacts, max_chars=24000):
     def check(item):
-        return {key: item.get(key) for key in ('name', 'exit', 'timeout')}
+        return {**{key: item.get(key) for key in ('name', 'exit', 'timeout', 'cancelled', 'duration_s')},
+                **{key: str(item[key])[-1200:] for key in ('stdout', 'stderr') if item.get(key)}}
 
     tasks = artifacts.get('tasks') or []
     summary = {'commit': artifacts.get('commit'),
                'checks': [check(c) for c in (artifacts.get('checks') or [])],
                'tasks': [], 'omitted_command_details': 0,
+               'review_focus_paths': [str(path)[:300] for path in artifacts.get('review_focus_paths', [])][:30],
                'note': 'Command success is not proof of functional acceptance. Full run evidence is retained separately.'}
     if artifacts.get('verification_changes'):
         summary['verification_changes'] = json.dumps(scrub(artifacts['verification_changes']),
@@ -20,6 +22,10 @@ def render_evidence(artifacts, max_chars=24000):
     for task in tasks:
         commands = task.get('command_evidence') or []
         summary['tasks'].append({key: task.get(key) for key in ('id', 'status', 'commit')})
+        attempts = task.get('attempts') or []
+        latest = attempts[-1] if attempts else {}
+        if latest.get('result_summary'):
+            summary['tasks'][-1]['worker_report_untrusted'] = str(latest['result_summary'])[-1500:]
         summary['tasks'][-1].update(checks=[check(c) for c in task.get('checks', [])],
             observed_commands=len(commands),
             unsuccessful_commands=sum(c.get('exit_code') != 0 or bool(c.get('timeout')) for c in commands))
@@ -43,6 +49,8 @@ def render_evidence(artifacts, max_chars=24000):
 
     # Task/check identities take precedence over verbose output. Platform plans
     # bound their count; the fallback also bounds malformed legacy records.
+    while len(encode()) > max_chars and summary['review_focus_paths']:
+        summary['review_focus_paths'].pop()
     while len(encode()) > max_chars and summary['tasks']:
         summary['tasks'].pop()
         summary['omitted_tasks'] = summary.get('omitted_tasks', 0) + 1

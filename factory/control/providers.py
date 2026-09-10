@@ -386,30 +386,21 @@ def _claude_tool_path(tool_name: str, input_data: Mapping[str, Any], workspace: 
 
 
 def _claude_tool_allowed(tool_name: str, input_data: Mapping[str, Any], workspace: Path, read_only: bool) -> bool:
-    # These are Claude Code's local inspection tools.  Anything that can write,
-    # execute, or reach an external service remains denied without an approval
-    # broker supplied by the root orchestrator.
-    if tool_name not in {"Read", "Glob", "Grep", "Write", "Edit"}:
+    # Source permissions match the project terminal: workspace writes are allowed,
+    # Git metadata and paths outside the workspace remain coordinator-owned.
+    if tool_name not in {'Read', 'Glob', 'Grep', 'Write', 'Edit'}:
         return False
-    if read_only and tool_name not in {"Read", "Glob", "Grep"}:
+    if read_only and tool_name not in {'Read', 'Glob', 'Grep'}:
         return False
     path = _claude_tool_path(tool_name, input_data, workspace)
     if path is None:
         return False
-    if tool_name in {"Write", "Edit"}:
-        # Keep source workspaces usable while preventing VCS metadata and
-        # credential/config tampering. This runs for hook and callback paths.
+    if tool_name in {'Write', 'Edit'}:
         try:
-            relative_parts = path.relative_to(workspace).parts
+            parts = path.relative_to(workspace).parts
         except ValueError:
             return False
-        parts = {part.lower() for part in relative_parts}
-        name = path.name.lower()
-        if ".git" in parts or name == ".git" or name == ".env" or name.startswith(".env."):
-            return False
-        if any(token in name for token in ("credential", "secret", "password")):
-            return False
-        if path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}:
+        if any(part.lower() == '.git' for part in parts):
             return False
     try:
         path.relative_to(workspace)
@@ -439,14 +430,23 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
             timing.command(payload)
         original_emit(kind, payload)
 
+    from factory.control import claude_capabilities as capabilities
+    import claude_agent_sdk as claude_sdk
+    effective_effort = capabilities.effort()
+    researcher_available = not req.read_only and hasattr(claude_sdk, 'AgentDefinition')
     workspace = Path(req.workspace).resolve()
-    from factory.control import claude_terminal
+    from factory.control import claude_terminal, project_browser
     terminal_enabled = not req.read_only and claude_terminal.available()
 
     terminal_session = claude_terminal.TerminalSession(workspace) if terminal_enabled else None
+    browser_session = project_browser.BrowserSession(workspace, terminal_session) if terminal_enabled else None
 
     def allowed(tool_name, input_data):
-        if tool_name == claude_terminal.TOOL_NAME:
+        if not req.read_only and tool_name in capabilities.WEB_TOOLS:
+            return capabilities.web_tool_allowed(tool_name, input_data)
+        if tool_name == 'Agent':
+            return researcher_available and capabilities.researcher_allowed(input_data)
+        if tool_name == claude_terminal.TOOL_NAME or tool_name in project_browser.TOOL_NAMES:
             return terminal_enabled
         return _claude_tool_allowed(tool_name, input_data, workspace, req.read_only)
 
@@ -479,9 +479,10 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     options_kwargs: dict[str, Any] = {
         "model": req.model or None,
         "max_buffer_size": _CLAUDE_MAX_BUFFER_SIZE,
+        "effort": effective_effort,
         "cwd": str(workspace),
-        "tools": ["Read", "Glob", "Grep"] if req.read_only else ["Read", "Glob", "Grep", "Write", "Edit"],
-        "permission_mode": "default",
+        "tools": capabilities.READ_TOOLS if req.read_only else [*capabilities.READ_TOOLS, "Write", "Edit", *capabilities.WEB_TOOLS, *(["Agent"] if researcher_available else [])],
+        "permission_mode": "default" if req.read_only else "acceptEdits",
         "can_use_tool": can_use_tool,
         "hooks": {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use])]},
         # Ignore ambient user/project settings and MCP/plugin configuration.
@@ -490,14 +491,28 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     }
     options_kwargs['system_prompt'] = {'type': 'preset', 'preset': 'claude_code', 'append':
         f'Your actual project working directory is {workspace}. Use relative paths or this exact directory; do not invent /workspace or /home/user/workspace. '
-        + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
+        + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. The platform browser tools open/snapshot/click/fill/screenshot are preinstalled: start your preview bound to 127.0.0.1, then use browser_open instead of installing browser dependencies or writing a custom driver. npm/pip/uv dependency caches persist per project across executions. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Use WebSearch/WebFetch for public documentation. Use the webuddy-research Agent only for bounded independent read-only questions, foreground only, without a model override. Project development files including environment templates are writable; do not put real credentials into deliverables. Keep runtime .env files ignored and provide placeholder .env.example. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
            if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
+    if researcher_available:
+        options_kwargs['agents'] = {capabilities.RESEARCH_AGENT: claude_sdk.AgentDefinition(
+            description='Bounded read-only code or public-document research; return concise findings with file references.',
+            prompt='Research only the delegated question. Read project files or public documentation; do not modify files, run commands, publish, or delegate again. Return concise evidence and uncertainties, then stop.',
+            tools=[*capabilities.READ_TOOLS, *capabilities.WEB_TOOLS],
+            disallowedTools=['Write', 'Edit', 'Bash', 'Agent', 'Task', claude_terminal.TOOL_NAME],
+            mcpServers=[], model=req.model, maxTurns=12, effort=effective_effort)}
     if terminal_enabled:
-        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace, emit, session=terminal_session)}
-        options_kwargs['allowed_tools'] = [claude_terminal.TOOL_NAME]
+        options_kwargs['mcp_servers'] = {'project': claude_terminal.create_server(workspace, emit, session=terminal_session, browser_session=browser_session)}
+        options_kwargs['allowed_tools'] = [claude_terminal.TOOL_NAME, *sorted(project_browser.TOOL_NAMES)]
         emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False, 'persistent_terminal': True, 'terminal_lifetime': 'sdk_execution'})
     elif not req.read_only:
         emit('execution.environment', {'terminal': 'unavailable', 'message': 'Isolated project terminal unavailable; file tools only'})
+    emit('provider.configuration', {'provider': 'claude', 'model': req.model,
+        'effort': effective_effort, 'tools': options_kwargs['tools'],
+        'project_tools': options_kwargs.get('allowed_tools', []),
+        'permission_mode': options_kwargs['permission_mode'],
+        'research_agent': researcher_available, 'setting_sources': [],
+        'terminal_lifetime': 'sdk_execution' if terminal_enabled else None,
+        'max_buffer_size': _CLAUDE_MAX_BUFFER_SIZE})
     if req.session_id:
         options_kwargs["resume"] = req.session_id
 
@@ -591,6 +606,8 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         asyncio.run(consume())
         outcome = 'failed' if result is None or bool(_value(result, 'is_error', False)) else 'completed'
     finally:
+        if browser_session is not None:
+            browser_session.close()
         if terminal_session is not None:
             terminal_session.close()
         timing.finish(outcome)
@@ -1352,7 +1369,7 @@ class SDKRunner:
             raise ProviderError("provider worker emitted a non-object JSONL message")
         typ = message.get("type")
         payload = message.get("payload")
-        if typ in {"provider.timing", "command.completed", "task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
+        if typ in {"browser.observed", "provider.configuration", "provider.timing", "command.completed", "task.activity", "execution.environment", "assistant.message", "tool.call", "tool.result", "provider.session", "provider.usage", "provider.raw"}:
             emit(str(typ), payload if isinstance(payload, dict) else {"value": _safe_json(payload)})
         elif typ not in {"complete", "error"}:
             emit("provider.raw", {"stream": stream, "event": _safe_json(message)})

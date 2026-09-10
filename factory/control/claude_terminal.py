@@ -7,6 +7,8 @@ Git integration remains coordinator-owned, so shared Git metadata is read-only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import stat
 import json
 import os
 from pathlib import Path
@@ -27,6 +29,29 @@ def available() -> bool:
     return probe()
 
 
+def dependency_cache(workspace: Path) -> tuple[Path, Path]:
+    """Private per-repository caches, shared only by that repository's worktrees."""
+    from factory.harness.sandbox_linux import git_dir
+    workspace = workspace.resolve()
+    root = Path(os.getenv('WEBUDDY_DEPENDENCY_CACHE_ROOT',
+                          str(Path.home() / '.cache/webuddy/dependencies'))).expanduser()
+    if not root.is_absolute() or root.is_symlink():
+        raise ValueError('Dependency cache root must be an absolute dedicated directory, not a symlink')
+    root = root.resolve()
+    if root == Path.home().resolve() or root == Path('/') or workspace == root or workspace.is_relative_to(root) or root.is_relative_to(workspace):
+        raise ValueError('Dependency cache must be separate from the project workspace and host home')
+    common = git_dir(workspace)
+    identity = 'git:' + str(common.resolve()) if common else 'workspace:' + str(workspace)
+    project = root / hashlib.sha256(identity.encode()).hexdigest()
+    for path in (root, project, *(project / name for name in ('npm', 'pip', 'uv'))):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise PermissionError('Dependency cache must be a private directory owned by the service user')
+        path.chmod(0o700)
+    return root, project
+
+
 def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
     from factory.harness.sandbox_linux import SANDBOX_BINARY, git_dir
     workspace, scratch = workspace.resolve(), scratch.resolve()
@@ -38,7 +63,11 @@ def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
     for path in ('/home', '/root', '/tmp', '/var/tmp', '/run'):
         if Path(path).exists():
             argv += ['--tmpfs', path]
-    argv += ['--bind', str(scratch), '/tmp', '--bind', str(workspace), str(workspace)]
+    cache_root, project_cache = dependency_cache(workspace)
+    # Hide the whole host cache tree, exposing only this repository's cache.
+    argv += ['--tmpfs', str(cache_root), '--bind', str(scratch), '/tmp',
+             '--bind', str(workspace), str(workspace),
+             '--bind', str(project_cache), '/tmp/.webuddy-cache']
     if Path('/etc/resolv.conf').exists():
         resolved_dns = str(Path('/etc/resolv.conf').resolve())
         argv += ['--ro-bind', resolved_dns, resolved_dns]
@@ -56,7 +85,11 @@ def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
         argv += ['--ro-bind', str(Path(uv).resolve()), '/tmp/.webuddy-bin/uv']
     argv += ['--clearenv', '--setenv', 'PATH', '/tmp/.webuddy-bin:/usr/local/bin:/usr/bin:/bin',
              '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp',
-             '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'UV_CACHE_DIR', '/tmp/uv-cache',
+             '--setenv', 'LANG', 'C.UTF-8',
+             '--setenv', 'WEBUDDY_DEPENDENCY_CACHE', '/tmp/.webuddy-cache',
+             '--setenv', 'npm_config_cache', '/tmp/.webuddy-cache/npm',
+             '--setenv', 'PIP_CACHE_DIR', '/tmp/.webuddy-cache/pip',
+             '--setenv', 'UV_CACHE_DIR', '/tmp/.webuddy-cache/uv',
              '--setenv', 'PIP_DISABLE_PIP_VERSION_CHECK', '1',
              '--chdir', str(workspace), '--', '/bin/bash', '--noprofile', '--norc', '-c', command]
     return argv
@@ -222,10 +255,10 @@ def _run_command_unlimited(workspace: Path, command: str, timeout: int = 300) ->
                 'timeout': timed_out, 'truncated': size > 30000}
 
 
-def create_server(workspace: Path, emit=None, session=None):
+def create_server(workspace: Path, emit=None, session=None, browser_session=None):
     from claude_agent_sdk import tool, create_sdk_mcp_server
 
-    @tool('run_command', 'Run a shell command inside the project sandbox. Use for dependency installation, tests, builds and local checks. Within this execution, background services and /tmp persist across calls. Shell cwd and exports do not persist: use explicit paths. They reset when execution ends or restarts; save durable evidence in the project. Host home and credentials are hidden. Git commits are handled by webuddy. Default timeout 300 seconds; maximum 3600 seconds.',
+    @tool('run_command', 'Run a shell command inside the project sandbox. Use for dependency installation, tests, builds and local checks. Within this execution, background services and /tmp persist across calls. Shell cwd and exports do not persist: use explicit paths. Temporary files reset when execution ends or restarts; save durable evidence in the project. Dependency caches persist across retries for this project only: npm_config_cache, PIP_CACHE_DIR and UV_CACHE_DIR point into /tmp/.webuddy-cache. Host home and credentials are hidden. Git commits are handled by webuddy. Default timeout 300 seconds; maximum 3600 seconds.',
           {'type': 'object', 'properties': {'command': {'type': 'string'}, 'timeout_s': {'type': 'integer', 'minimum': 1, 'maximum': 3600}}, 'required': ['command'], 'additionalProperties': False})
     async def terminal(args):
         try:
@@ -235,4 +268,6 @@ def create_server(workspace: Path, emit=None, session=None):
         return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}],
                 'is_error': result.get('exit_code') != 0}
 
-    return create_sdk_mcp_server('project', tools=[terminal])
+    from factory.control.project_browser import create_tools
+    browser_tools = create_tools(browser_session, emit) if browser_session is not None else []
+    return create_sdk_mcp_server('project', tools=[terminal, *browser_tools])

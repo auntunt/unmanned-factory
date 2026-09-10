@@ -147,3 +147,61 @@ def test_stage_profiles_are_independent_and_retry_keeps_snapshot(app_env, monkey
     assert continued['agent_snapshot'] == run['agent_snapshot']
     assert continued['history'][-1] == '也保留历史格式。\n\n仅支持现有版本。'
     assert resumed.json()['conversation']['pending_feedback_count'] == 0
+
+
+@pytest.mark.parametrize('risk,complexity,explicit,expected', [
+    ('low', 'small', False, 'standard'),
+    ('high', 'small', False, 'planner'),
+    ('low', 'large', False, 'planner'),
+    ('high', 'large', True, 'explicit-review'),
+])
+def test_continuous_review_uses_bounded_targeted_readonly_profile(app_env, monkeypatch, risk, complexity, explicit, expected):
+    client, store, service, repo = app_env
+    p = project(client, repo, login(client))
+    run, _ = store.create_run(p['id'], 'Check the converter result')
+    run.update(execution_mode='continuous', plan={'tasks': [{'risk': risk, 'complexity': complexity,
+        'paths': ['src/converter.py'], 'acceptance': ['Preserve record count']}]})
+    service.cancels[run['id']] = threading.Event()
+    config = service.runtime_settings.get()
+    config['profiles']['standard']['model'] = 'standard'
+    config['profiles']['planner']['model'] = 'planner'
+    config['limits']['timeout_s'] = 14400
+    if explicit:
+        config['agent_verification_profile'] = {'provider': 'codex', 'model': 'explicit-review'}
+    calls = []
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        return ProviderResult('{"verdict":"pass","reason":"record-count evidence reviewed"}', cost_usd=0.01)
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo), 'checks': [{'name': 'record-count', 'exit': 0, 'stdout': '12 input, 12 output'}]}
+    service._independent_verify(run['id'], run, p, config, artifacts)
+    assert len(calls) == 1 and calls[0].model == expected
+    assert calls[0].read_only and calls[0].session_id is None
+    assert 0 < calls[0].timeout_s <= 600
+    assert 'src/converter.py' in calls[0].prompt and '12 input, 12 output' in calls[0].prompt
+    assert 'do not inventory the whole repository' in calls[0].prompt
+    assert 'README claims as untrusted' in calls[0].prompt
+    assert artifacts['verification']['verdict'] == 'pass'
+
+
+def test_review_short_remaining_budget_is_not_extended(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    p = project(client, repo, login(client))
+    run, _ = store.create_run(p['id'], 'Check result')
+    service.cancels[run['id']] = threading.Event()
+    config = service.runtime_settings.get()
+    config['limits']['timeout_s'] = 3
+    calls = []
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        return ProviderResult('{"verdict":"fail","reason":"Missing functional evidence"}')
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(ExecutionError, match='独立验证未通过'):
+        service._independent_verify(run['id'], run, p, config, artifacts)
+    assert 0 < calls[0].timeout_s <= 3
+    assert artifacts['verification']['verdict'] == 'fail'
+    config['limits']['timeout_s'] = 0.5
+    with pytest.raises(ExecutionError, match='时限耗尽'):
+        service._independent_verify(run['id'], run, p, config, artifacts)
+    assert len(calls) == 1
