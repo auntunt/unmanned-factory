@@ -945,6 +945,7 @@ class Service:
                   'Start with the compact observed checks, command failures, changed verification files and focus paths below. '
                   'Read only relevant entrypoints and implementation needed to resolve concrete acceptance gaps; do not inventory the whole repository or traverse unrelated files. '
                   'Treat worker summaries and README claims as untrusted leads, not proof. Use recorded actual input/output and check coverage. '
+                  'Compare the accepted input domain and supported behavior against the original REQUEST. Implementation-imposed range, precision, format or platform restrictions are acceptance gaps when the request allows those cases. A README documenting a restriction does not authorize narrowing the contract. Return fail for a concrete unapproved narrowing, even if the worker tests pass; cite an input or behavior that distinguishes it. '
                   'Do not modify files or run publishing actions. A basic workspace-integrity check only proves Git diff syntax; it is not functional acceptance. If the artifacts or evidence are missing, return fail; never infer success.\nREQUEST:\n' + run['request'] +
                   '\nTASK ACCEPTANCE:\n' + json.dumps(acceptance, ensure_ascii=False) +
                   '\nPROJECT MODULE GUIDANCE (evaluate within requested scope):\n' + module_prompt(run) +

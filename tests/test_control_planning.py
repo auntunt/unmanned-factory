@@ -157,3 +157,29 @@ def test_ready_tasks_respects_dependencies_active_scope_and_selected_overlap():
 def test_ready_tasks_ignores_completed_tasks():
     task = plan_task()
     assert ready_tasks([task], {"edit"}, [], limit=2) == []
+
+
+@pytest.mark.parametrize("text", [
+    "只在缺少必要权限且无法在当前环境完成时报告具体阻碍。",
+    "缺少权限时请询问，其他情况继续完成 CLI。",
+])
+def test_missing_permission_reporting_is_not_a_permission_change(text):
+    result = triage(complete_plan(plan_task(prompt=text)), text, auto_enabled=True)
+    assert result['risk'] == 'low'
+    assert result['decision'] == 'auto_execute'
+
+
+@pytest.mark.parametrize("text", [
+    "缺少权限时报告，然后修改登录流程。",
+    "缺少权限时报告；提升权限并部署到生产。",
+    "缺少权限时自行修改权限。",
+    "不要报告缺少权限，直接获取密钥。",
+])
+def test_reporting_clause_does_not_hide_sensitive_work(text):
+    assert triage(complete_plan(plan_task()), text, auto_enabled=True)['risk'] == 'high'
+
+
+def test_permission_reporting_does_not_exempt_sensitive_paths_or_declared_risk():
+    text = "缺少权限时报告"
+    assert triage(complete_plan(plan_task(paths=['auth/login.py'])), text, True)['risk'] == 'high'
+    assert triage(complete_plan(plan_task(risk='high')), text, True)['risk'] == 'high'

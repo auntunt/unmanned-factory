@@ -398,6 +398,15 @@ def _check_cycles(tasks: list[dict[str, Any]]) -> None:
         visit(task_id)
 
 
+# An explicit instruction to report missing access is not a request to alter it.
+# Mask only this noun phrase; do not suppress the rest of the sentence, paths,
+# declared risk, or other sensitive signals. Unknown phrasing stays conservative.
+_MISSING_ACCESS_REPORT = re.compile(
+    r"(?:缺少|缺乏)(?:必要|所需)?权限"
+    r"(?=(?:时|且无法(?:在当前环境)?完成时)(?:请)?(?:报告|说明|询问))"
+)
+
+
 def _high_risk_text(plan: dict[str, Any], request: str) -> bool:
     chunks = [request]
     for field in ("title", "summary"):
@@ -414,8 +423,9 @@ def _high_risk_text(plan: dict[str, Any], request: str) -> bool:
                     chunks.append(value)
             paths = task.get("paths")
             if isinstance(paths, list):
-                chunks.extend(item for item in paths if isinstance(item, str))
-    return any(_HIGH_RISK_RE.search(chunk) for chunk in chunks)
+                if any(_HIGH_RISK_RE.search(item) for item in paths if isinstance(item, str)):
+                    return True
+    return any(_HIGH_RISK_RE.search(_MISSING_ACCESS_REPORT.sub("", chunk)) for chunk in chunks)
 
 
 def _unresolved_questions(plan: dict[str, Any]) -> list[str]:

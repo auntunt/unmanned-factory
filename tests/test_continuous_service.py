@@ -142,6 +142,7 @@ def test_real_continuous_executor_gets_one_coding_turn_and_one_review(app_env, m
         calls.append(request)
         if request.read_only:
             assert 'verdict' in request.prompt
+            assert 'A README documenting a restriction does not authorize narrowing the contract' in request.prompt
             return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'greeting check passed'}), cost_usd=.01)
         (Path(request.workspace) / 'greeting.txt').write_text('hello world')
         return ProviderResult('done', cost_usd=.01, session_id='persistent-session')
