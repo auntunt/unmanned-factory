@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "input": "person,hours\nAlice,3.5\nBob,not-a-number",
+  "observed": "exit=0, total_hours=3.5",
+  "expected": "nonzero exit, diagnostic on stderr, no success output",
+  "holdout": "person,hours\nAlice,3.5\nBob,6.5",
+  "holdout_expected": {
+    "total_hours": 10
+  }
+}

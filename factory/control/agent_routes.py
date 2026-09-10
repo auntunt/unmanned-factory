@@ -66,6 +66,18 @@ def router(store, service):
     from factory.control.modules import ModuleStore
     modules = ModuleStore(store)
 
+    from factory.control.agent_packs import install_builtins, pack_zip
+    install_builtins(store)
+
+    @api.get('/builtin-packs/{slug}/download')
+    def download_builtin_pack(slug: str):
+        from fastapi.responses import Response
+        raw = guarded(pack_zip, slug)
+        return Response(raw, media_type='application/zip', headers={
+            'Content-Disposition': f'attachment; filename="{slug}.zip"',
+            'X-Content-Type-Options': 'nosniff',
+        })
+
     @api.get('/modules')
     def list_modules():
         return {'modules': modules.list()}

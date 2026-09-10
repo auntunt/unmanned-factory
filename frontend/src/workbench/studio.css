@@ -46,3 +46,5 @@
 .agent-catalog-card footer { display:flex; flex-wrap:wrap; gap:10px; }.agent-catalog-card footer a { flex:1; white-space:nowrap; }.agent-back { display:inline-block; margin-bottom:20px; }
 @media(max-width:1200px) { .agent-catalog { grid-template-columns:repeat(2,minmax(0,1fr)); }.wb-purpose-band { flex-wrap:wrap; }.wb-purpose-actions { width:100%; padding-left:80px; } }
 @media(max-width:700px) { .agent-catalog { grid-template-columns:1fr; }.agent-catalog-card { padding:22px; }.wb-purpose-band { padding:20px; gap:14px; }.wb-purpose-symbol { width:42px; height:42px; font-size:23px; }.wb-purpose-band h2 { font-size:18px; }.wb-purpose-band>div:first-of-type { flex-basis:calc(100% - 56px); }.wb-purpose-actions { padding-left:0; }.wb-shell .ov3-summary { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }.wb-shell .ov3-summary>div,.wb-shell .ov3-summary>div:first-child { padding:16px; }.wb-purpose-band>.wb-text-link { margin-left:56px; } }
+
+.agent-pack-download { display:block; border-top:1px solid var(--wb-border); margin-top:18px; padding-top:16px; font-size:13px; }
