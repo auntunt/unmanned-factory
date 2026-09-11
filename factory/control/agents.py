@@ -318,9 +318,35 @@ class AgentStore:
             for key in ('agent_id', 'agent_version', 'agent_snapshot', 'conversation_id', 'runtime_configuration'):
                 if key in prior:
                     data[key] = prior[key]
+            # A feedback successor gets a fresh run, branch, worktree and
+            # artifact ledger.  The only execution state that may cross this
+            # verified boundary is the provider session identity.  The
+            # executor validates provider compatibility again before using it.
+            # A model change within the same provider remains resumable and is
+            # recorded by the execution event; a provider change falls back to
+            # full context.
+            artifacts = prior.get('artifacts') or {}
+            session_id = artifacts.get('session_id')
+            session_profile = artifacts.get('session_profile') or {}
+            if (artifacts.get('execution_mode') == 'continuous'
+                    and all(artifacts.get(key) for key in ('worktree', 'branch', 'commit'))
+                    and isinstance(session_id, str) and 0 < len(session_id.strip()) <= 512
+                    and isinstance(session_profile, dict)
+                    and all(isinstance(session_profile.get(key), str)
+                            and session_profile[key].strip()
+                            for key in ('provider', 'model'))):
+                data['feedback_session'] = {
+                    'session_id': session_id.strip(),
+                    'session_profile': {
+                        'provider': session_profile['provider'].strip(),
+                        'model': session_profile['model'].strip(),
+                    },
+                    'previous_run_id': prior['id'],
+                }
             db.execute('INSERT INTO runs VALUES (?,?)', (rid, _json(data)))
             self.store._event(db, rid, 'feedback.adopted', {'previous_run_id': prior['id'],
-                'message_ids': [m['id'] for m in pending]})
+                'message_ids': [m['id'] for m in pending],
+                'session_continuation_available': bool(data.get('feedback_session'))})
             for m in pending:
                 m.update(feedback_status='adopted', feedback_run_id=rid)
             c.update(run_id=rid, updated_at=at)

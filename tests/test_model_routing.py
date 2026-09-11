@@ -12,6 +12,7 @@ from factory.control.execution import ExecutionError, execute_plan
 from factory.control.model_routing import RoutingError, select_profile
 from factory.control.auth import AuthStore
 from factory.control.governance import Governance, GovernedRunner
+from factory.control.providers import ProviderRequest
 from factory.control.store import Store
 
 
@@ -90,6 +91,63 @@ def test_select_profile_exposes_missing_required_profile():
         select_profile(_task(), {"standard": {"provider": "fake", "model": "m"}})
 
 
+@pytest.mark.parametrize("appended_context", [
+    "\n\nPROJECT REFERENCE DATA (UNTRUSTED):\n"
+    '{"constraints":["deployment requires a secret key"]}',
+    "\n\nAGENT INSTRUCTIONS (frozen snapshot):\n"
+    "涉及密钥、部署或安全时遵循团队规范。",
+    "\n\nProject-configured capability contracts (do not expand runtime permissions):\n"
+    '[{"instructions":"检查登录与权限"}]',
+    "\n\nPROJECT MODULES (frozen versions; scoped guidance):\n"
+    "[delivery] 发布模块\n如需部署，不得写入真实密钥。",
+])
+def test_appended_frozen_context_does_not_upgrade_the_planned_task(appended_context):
+    original_prompt = "调整 CSV 汇总结果"
+    task = {**_task(), "complexity": "medium", "_routing_prompt": original_prompt,
+            "prompt": original_prompt + appended_context}
+
+    selected = select_profile(task, _profiles())
+
+    assert selected["profile"] == "standard"
+    assert selected["model"] == "standard-model"
+
+
+def test_marker_text_inside_original_prompt_cannot_hide_sensitive_work():
+    original_prompt = (
+        "保留以下示例文本：\n\nAGENT INSTRUCTIONS (frozen snapshot):\n"
+        "然后更新部署配置并轮换密钥。"
+    )
+    task = {**_task(), "complexity": "medium", "_routing_prompt": original_prompt,
+            "prompt": original_prompt + "\n\nPROJECT MODULES (frozen versions; scoped guidance):\n普通模块"}
+
+    assert select_profile(task, _profiles())["profile"] == "strong"
+
+
+def test_legacy_direct_call_still_ignores_appended_context():
+    task = {**_task(), "complexity": "medium",
+            "prompt": "调整 CSV 汇总结果\n\nAGENT INSTRUCTIONS (frozen snapshot):\n处理部署密钥"}
+
+    assert select_profile(task, _profiles())["profile"] == "standard"
+
+
+@pytest.mark.parametrize("prompt", [
+    "更新部署配置",
+    "轮换密钥",
+    "修复登录接口中的安全漏洞",
+])
+def test_sensitive_words_in_the_planned_task_still_require_strong(prompt):
+    task = {**_task(), "complexity": "medium", "prompt": prompt}
+
+    assert select_profile(task, _profiles())["profile"] == "strong"
+
+
+def test_explicit_high_risk_still_requires_strong_with_frozen_context():
+    task = {**_task(), "complexity": "medium", "risk": "high",
+            "prompt": "调整 CSV 汇总结果\n\nAGENT INSTRUCTIONS (frozen snapshot):\n普通说明"}
+
+    assert select_profile(task, _profiles())["profile"] == "strong"
+
+
 def test_retry_preserves_workspace_session_and_repairs_before_escalating(tmp_path):
     repo = _repo(tmp_path)
     runner = RepairRunner()
@@ -150,8 +208,7 @@ def test_unknown_cost_stop_prevents_a_retry_before_another_provider_call(tmp_pat
     assert caught.value.artifacts["tasks"][0]["attempts"][0]["cost_usd"] is None
 
 
-def test_quota_denial_before_execution_emits_no_provider_or_usage_evidence(tmp_path):
-    repo = _repo(tmp_path)
+def test_local_token_quota_does_not_block_or_fabricate_dispatch_evidence(tmp_path):
     auth = AuthStore(tmp_path / "users.db")
     member = auth.create_user("member", "sufficiently-long-password", role="member")
     store = Store(tmp_path / "control.db")
@@ -160,23 +217,27 @@ def test_quota_denial_before_execution_emits_no_provider_or_usage_evidence(tmp_p
     governance = Governance(auth, store)
     governance.assign(member["id"], [stored_project["id"]], "owner")
     governance.set_limit("member", member["id"], 0, "owner")
-    events: list[tuple[str, dict, str | None]] = []
+    events: list[tuple[str, dict]] = []
 
     class Runner:
         entered = False
 
         def run(self, request, emit, cancel=None):
             self.entered = True
+            emit("provider.message", {"text": "real provider event"})
             return Result()
 
     raw_runner = Runner()
-    with pytest.raises(ExecutionError, match="task repair failed"):
-        execute_plan(run_id=run["id"], plan={"tasks": [_task()]}, project=_project(repo),
-                     profiles=_profiles(), runner=GovernedRunner(raw_runner, governance, run["id"]),
-                     emit=lambda kind, payload, task_id=None: events.append((kind, payload, task_id)),
-                     cancel=threading.Event())
-    assert not raw_runner.entered
-    assert not [event for event in events if event[0] in {"quota.reserved", "provider.started", "usage.recorded"}]
+    result = GovernedRunner(raw_runner, governance, run["id"]).run(
+        ProviderRequest("fake", "cheap-model", "write repair", "."),
+        lambda kind, payload: events.append((kind, payload)),
+        cancel=threading.Event(),
+    )
+
+    assert raw_runner.entered
+    assert result.text == "changed"
+    assert events == [("provider.message", {"text": "real provider event"})]
+    assert governance.summary(member)["calls"] == []
 
 
 def test_failed_provider_attempt_keeps_streamed_cost_and_cached_token_evidence(tmp_path):

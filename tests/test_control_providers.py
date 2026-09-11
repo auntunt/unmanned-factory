@@ -522,13 +522,15 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     mod.PermissionResultDeny = PermissionResult
     mod.query = query
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
-    result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path)), lambda *_: None)
+    result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path),
+        max_budget_usd=3.25), lambda *_: None)
     assert result.text == "done"
     researcher = captured['agents']['webuddy-research']
     assert researcher.tools == ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch']
     assert researcher.maxTurns == 12 and researcher.effort == 'medium'
     assert researcher.mcpServers == [] and 'Bash' in researcher.disallowedTools
     assert captured["max_buffer_size"] == 16 * 1024 * 1024
+    assert captured["max_budget_usd"] == 3.25
     assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch", "Agent"]
     assert captured["effort"] == "medium"
     assert 'mcp__project__run_command' in captured['allowed_tools']
@@ -579,6 +581,67 @@ def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, t
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path), read_only=True), lambda *_: None)
     assert result.text == "read"
     assert captured["tools"] == ["Read", "Glob", "Grep"]
+    assert "max_budget_usd" not in captured
+
+
+def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monkeypatch, tmp_path):
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+    mod = types.ModuleType("claude_agent_sdk")
+    captured = {}
+
+    class Options:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.__dict__.update(kwargs)
+
+    class ResultMessage:
+        subtype = "error_max_budget_usd"
+        is_error = True
+        result = "Maximum budget reached"
+        errors = None
+        session_id = "budget-session"
+        total_cost_usd = 1.5
+        usage = {"input_tokens": 100, "output_tokens": 20}
+        model_usage = None
+
+    async def query(*, prompt, options):
+        yield ResultMessage()
+
+    mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+    events = []
+    with pytest.raises(ProviderError, match="USD budget") as stopped:
+        _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path),
+            read_only=True, max_budget_usd=1.5), lambda *event: events.append(event))
+    assert captured["max_budget_usd"] == 1.5
+    assert stopped.value.error_kind == "budget_exhausted"
+    assert stopped.value.transient is False
+    assert stopped.value.session_id == "budget-session"
+    assert ("provider.usage", {"input_tokens": 100, "output_tokens": 20,
+        "cached_input_tokens": None, "cost_usd": 1.5}) in events
+
+
+def test_claude_rejects_non_positive_call_budget_before_sdk_query(monkeypatch, tmp_path):
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+    mod = types.ModuleType("claude_agent_sdk")
+    class Options:
+        def __init__(self, **kwargs): self.__dict__.update(kwargs)
+    async def query(*, prompt, options):
+        pytest.fail("invalid call budget must not reach the SDK query")
+        yield
+    mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+    with pytest.raises(ProviderError, match="finite positive") as stopped:
+        _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path),
+            read_only=True, max_budget_usd=0), lambda *_: None)
+    assert stopped.value.error_kind == "budget_configuration"
 
 
 def test_claude_glob_accepts_absolute_workspace_but_not_escape(tmp_path):

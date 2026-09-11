@@ -406,6 +406,15 @@ _MISSING_ACCESS_REPORT = re.compile(
     r"(?=(?:时|且无法(?:在当前环境)?完成时)(?:请)?(?:报告|说明|询问))"
 )
 
+# Only an explicit request for an invalid input to fail safely is ordinary
+# correctness work.  A bare ``安全诊断``/``安全退出`` or safe handling of
+# credentials and accounts remains security-sensitive.
+_SAFE_INVALID_INPUT_FAILURE = re.compile(
+    r"(?:(?:无效|非法|错误|异常|溢出|超限)(?:的)?(?:输入|值|数值|数据|参数|格式)"
+    r"|(?:输入|值|数值|数据|参数|格式)(?:无效|非法|错误|异常|溢出|超限))"
+    r"[^。！？\n]{0,32}?安全(?:地)?(?:报错|失败)"
+)
+
 
 def _high_risk_text(plan: dict[str, Any], request: str) -> bool:
     chunks = [request]
@@ -425,7 +434,12 @@ def _high_risk_text(plan: dict[str, Any], request: str) -> bool:
             if isinstance(paths, list):
                 if any(_HIGH_RISK_RE.search(item) for item in paths if isinstance(item, str)):
                     return True
-    return any(_HIGH_RISK_RE.search(_MISSING_ACCESS_REPORT.sub("", chunk)) for chunk in chunks)
+    return any(
+        _HIGH_RISK_RE.search(
+            _SAFE_INVALID_INPUT_FAILURE.sub("", _MISSING_ACCESS_REPORT.sub("", chunk))
+        )
+        for chunk in chunks
+    )
 
 
 def _unresolved_questions(plan: dict[str, Any]) -> list[str]:

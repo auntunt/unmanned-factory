@@ -162,6 +162,8 @@ def test_ready_tasks_ignores_completed_tasks():
 @pytest.mark.parametrize("text", [
     "只在缺少必要权限且无法在当前环境完成时报告具体阻碍。",
     "缺少权限时请询问，其他情况继续完成 CLI。",
+    "对无效输入安全报错，但不得拒绝正常有限小数。",
+    "输入溢出时安全地失败。",
 ])
 def test_missing_permission_reporting_is_not_a_permission_change(text):
     result = triage(complete_plan(plan_task(prompt=text)), text, auto_enabled=True)
@@ -174,6 +176,12 @@ def test_missing_permission_reporting_is_not_a_permission_change(text):
     "缺少权限时报告；提升权限并部署到生产。",
     "缺少权限时自行修改权限。",
     "不要报告缺少权限，直接获取密钥。",
+    "修复登录接口中的安全漏洞。",
+    "执行安全审计并修改鉴权配置。",
+    "对极端输入给出安全诊断。",
+    "安全处理凭证并记录异常。",
+    "安全退出当前账户。",
+    "无效输入安全报错，同时安全处理密钥。",
 ])
 def test_reporting_clause_does_not_hide_sensitive_work(text):
     assert triage(complete_plan(plan_task()), text, auto_enabled=True)['risk'] == 'high'

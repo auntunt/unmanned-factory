@@ -108,7 +108,8 @@ def test_cost_subtotal_overflow_fails_without_nonfinite_json(tmp_path):
     runner = ExecutionRunner({'first': 1e308, 'second': 1e308})
     with pytest.raises(execution.ExecutionError, match='subtotal overflowed') as caught:
         execution.execute_plan(run_id='cost-overflow',
-            plan={'tasks': [_task('first'), _task('second')]}, project=_project(repo),
+            plan={'tasks': [_task('first'), _task('second')]},
+            project={**_project(repo), 'budget_usd': None},
             profiles=_profiles(), runner=runner, emit=lambda *_: None, cancel=threading.Event())
     artifacts = caught.value.artifacts
     assert artifacts['observed_cost_usd'] is None

@@ -15,6 +15,21 @@ class RoutingError(ValueError):
     """A required configured model profile cannot safely be dispatched."""
 
 
+_APPENDED_CONTEXT_MARKERS = (
+    "\n\nPROJECT REFERENCE DATA (UNTRUSTED):",
+    "\n\nAGENT INSTRUCTIONS (frozen snapshot):",
+    "\n\nProject-configured capability contracts",
+    "\n\nPROJECT MODULES (frozen versions;",
+)
+
+
+def _original_task_prompt(prompt: str) -> str:
+    """Remove service-added frozen context before applying routing policy."""
+    boundaries = [position for marker in _APPENDED_CONTEXT_MARKERS
+                  if (position := prompt.find(marker)) >= 0]
+    return prompt[:min(boundaries)] if boundaries else prompt
+
+
 def _base_profile(task: Mapping[str, Any]) -> tuple[str, str]:
     """Return the compatible initial role and a durable selection reason."""
     from factory.control.planning import profile_for
@@ -22,15 +37,17 @@ def _base_profile(task: Mapping[str, Any]) -> tuple[str, str]:
     normalized = dict(task)
     normalized["paths"] = list(task.get("paths") or ())
     normalized["checks"] = list(task.get("checks") or ())
-    # Execution appends fixed context/capability reference data to the worker
-    # prompt. Those instructions explicitly cannot change models or budgets;
-    # treating words such as "permissions" in that data as task risk would
-    # silently turn every bounded task into a strong-model dispatch.
-    prompt = normalized.get("prompt")
-    if isinstance(prompt, str):
-        for marker in ("\n\nPROJECT REFERENCE DATA (UNTRUSTED):", "\n\nProject-configured capability contracts"):
-            prompt = prompt.split(marker, 1)[0]
-        normalized["prompt"] = prompt
+    # Execution appends frozen reference, agent, capability, and module text to
+    # the worker prompt. Those instructions cannot change models or budgets;
+    # routing must continue to describe the planned task that precedes them.
+    original_prompt = task.get("_routing_prompt")
+    if isinstance(original_prompt, str):
+        normalized["prompt"] = original_prompt
+    else:
+        # Compatibility for callers that predate the trusted routing field.
+        prompt = normalized.get("prompt")
+        if isinstance(prompt, str):
+            normalized["prompt"] = _original_task_prompt(prompt)
     profile = str(profile_for(normalized))
     if profile == "strong":
         if task.get("risk") == "high":

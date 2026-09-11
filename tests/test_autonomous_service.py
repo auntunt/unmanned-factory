@@ -463,7 +463,7 @@ def test_same_database_allows_only_one_live_durable_coordinator(control):
         second.close()
 
 
-def test_existing_known_or_unknown_planner_usage_does_not_block_dispatch(control):
+def test_known_budget_blocks_planner_but_unknown_cost_behavior_is_preserved(control):
     client, store, service, runner, project, headers = control
     _require_known_cost(service)
     _supervised(client, project, headers)
@@ -472,16 +472,17 @@ def test_existing_known_or_unknown_planner_usage_does_not_block_dispatch(control
     store.update(known["id"], {"execution_mode": "dag"})
     service.start_plan(known["id"])
     known_run = _wait(store, known["id"], {"awaiting_approval", "needs_human"})
-    assert runner.planner_calls == 1
-    assert any(e["type"] == "provider.started" for e in store.events(known["id"]))
+    assert known_run["status"] == "needs_human"
+    assert runner.planner_calls == 0
+    assert not any(e["type"] == "provider.started" for e in store.events(known["id"]))
 
     unknown, _ = store.create_run(project["id"], "Clarify must not dispatch after unknown charge")
     store.update(unknown["id"], {"status": "needs_clarification", "execution_mode": "dag"})
     store.append(unknown["id"], "usage.recorded", {"profile": "planner", "cost_usd": None})
     service.clarify(unknown["id"], "Use a precise greeting", "owner")
     unknown_run = _wait(store, unknown["id"], {"awaiting_approval", "needs_human"})
-    assert unknown_run["status"] == known_run["status"] == "awaiting_approval"
-    assert runner.planner_calls == 2
+    assert unknown_run["status"] == "awaiting_approval"
+    assert runner.planner_calls == 1
     assert any(e["type"] == "provider.started" for e in store.events(unknown["id"]))
 
     assert service._usage(known['id'], profile='planner')['known_cost_usd'] >= project['budget_usd']

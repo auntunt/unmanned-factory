@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import inspect
+import math
 import re
 from functools import wraps
 from enum import Enum
@@ -34,6 +35,11 @@ class ProviderRequest:
     session_id: str | None = None
     timeout_s: int = 600
     read_only: bool = False
+    # Provider-side ceiling for this one paid call.  The control layer derives
+    # it from durable project usage immediately before dispatch.  Providers
+    # without a native dollar ceiling ignore it and remain protected by the
+    # outer between-call budget gate.
+    max_budget_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -489,6 +495,22 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         "setting_sources": [],
         "strict_mcp_config": True,
     }
+    if req.max_budget_usd is not None:
+        try:
+            max_budget_usd = float(req.max_budget_usd)
+        except (TypeError, ValueError, OverflowError):
+            raise ProviderError(
+                "Claude call budget must be a finite positive USD amount",
+                transient=False,
+                error_kind="budget_configuration",
+            ) from None
+        if not math.isfinite(max_budget_usd) or max_budget_usd <= 0:
+            raise ProviderError(
+                "Claude call budget must be a finite positive USD amount",
+                transient=False,
+                error_kind="budget_configuration",
+            )
+        options_kwargs["max_budget_usd"] = max_budget_usd
     options_kwargs['system_prompt'] = {'type': 'preset', 'preset': 'claude_code', 'append':
         f'Your actual project working directory is {workspace}. Use relative paths or this exact directory; do not invent /workspace or /home/user/workspace. '
         + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. The platform browser tools open/snapshot/click/fill/screenshot are preinstalled: start your preview bound to 127.0.0.1, then use browser_open instead of installing browser dependencies or writing a custom driver. npm/pip/uv dependency caches persist per project across executions. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Use WebSearch/WebFetch for public documentation. Use the webuddy-research Agent only for bounded independent read-only questions, foreground only, without a model override. Project development files including environment templates are writable; do not put real credentials into deliverables. Keep runtime .env files ignored and provide placeholder .env.example. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
@@ -512,7 +534,8 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         'permission_mode': options_kwargs['permission_mode'],
         'research_agent': researcher_available, 'setting_sources': [],
         'terminal_lifetime': 'sdk_execution' if terminal_enabled else None,
-        'max_buffer_size': _CLAUDE_MAX_BUFFER_SIZE})
+        'max_buffer_size': _CLAUDE_MAX_BUFFER_SIZE,
+        'max_budget_usd': options_kwargs.get('max_budget_usd')})
     if req.session_id:
         options_kwargs["resume"] = req.session_id
 
@@ -611,6 +634,13 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         if terminal_session is not None:
             terminal_session.close()
         timing.finish(outcome)
+    if (result is not None and bool(_value(result, "is_error", False))
+            and str(_value(result, "subtype", "")).lower() == "error_max_budget_usd"):
+        raise ProviderError(
+            "Claude stopped this call after reaching its USD budget; the session and workspace were preserved for continuation",
+            transient=False,
+            error_kind="budget_exhausted",
+        )
     if result is not None and bool(_value(result, "is_error", False)):
         detail = _value(result, "result") or _value(result, "errors") or "Claude returned an error"
         raise ProviderError(str(detail))

@@ -6,7 +6,7 @@ import time
 import pytest
 
 from factory.control.execution import ExecutionError
-from factory.control.providers import ProviderResult
+from factory.control.providers import ProviderError, ProviderResult
 from factory.control.service import Service
 from factory.control.store import Conflict
 from tests.test_control_app import login, project
@@ -49,38 +49,75 @@ def test_verifier_uses_separate_profile_readonly_context_and_records_usage(app_e
     calls = []
     def verify(request, emit, cancel=None):
         calls.append(request)
-        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'observed evidence'}), cost_usd=.03, tokens_in=10, tokens_out=5)
+        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'observed evidence'}), cost_usd=.03, tokens_in=10, tokens_out=5, cached_input_tokens=7)
     monkeypatch.setattr(service.runner, 'run', verify)
     artifacts = {'worktree': str(repo), 'checks': [{'name': 'check', 'exit': 0}]}
     service._independent_verify(run['id'], run, p, cfg, artifacts)
     assert calls[0].model == 'independent-review'
     assert calls[0].read_only and calls[0].session_id is None
+    assert calls[0].max_budget_usd == p['budget_usd']
     assert 'Keep compatibility' in calls[0].prompt
     assert service._usage(run['id'], profile='verification') == {'known_cost_usd': .03, 'unknown_cost_calls': 0, 'calls': 1}
+    usage_event = next(event for event in iter(store.events(run['id']))
+                       if event['type'] == 'usage.recorded')
+    assert usage_event['payload']['cached_input_tokens'] == 7
     with service.governance.connect() as db:
         token_call = db.execute('SELECT * FROM token_calls WHERE run_id=?', (run['id'],)).fetchone()
         assert token_call is None  # gateway owns settlement; usage event remains above
     assert artifacts['verification']['verdict'] == 'pass'
 
 
-def test_verifier_ignores_legacy_budget_and_preserves_evidence(app_env, monkeypatch):
+def test_verifier_budget_stops_before_dispatch_and_preserves_evidence(app_env, monkeypatch):
     client, store, service, repo = app_env
     p = project(client, repo, login(client))
     run, _ = store.create_run(p['id'], 'Budget limited verification')
     run['agent_snapshot'] = {}
     service.cancels[run['id']] = threading.Event()
     store.append(run['id'], 'usage.recorded', {'profile': 'standard', 'cost_usd': p['budget_usd']})
+    def verify(request, emit, cancel=None):
+        pytest.fail('an exhausted recorded budget must stop before provider dispatch')
+    monkeypatch.setattr(service.runner, 'run', verify)
+    artifacts = {'worktree': str(repo), 'commit': 'evidence'}
+    with pytest.raises(ExecutionError, match='预算已用尽') as caught:
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+    assert caught.value.artifacts is artifacts
+    assert artifacts['commit'] == 'evidence'
+    assert artifacts['budget_exhausted'] is True
+    assert '预算已用尽' in artifacts['needs_human']
+    assert artifacts['total_known_cost_usd'] == p['budget_usd']
+    assert service._usage(run['id'], profile='verification')['calls'] == 0
+
+
+def test_verifier_sdk_budget_stop_records_cost_and_resumable_session(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    p = project(client, repo, login(client))
+    run, _ = store.create_run(p['id'], 'Budget bounded verification')
+    run['agent_snapshot'] = {}
+    service.cancels[run['id']] = threading.Event()
     calls = []
     def verify(request, emit, cancel=None):
         calls.append(request)
-        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'observed evidence'}), cost_usd=None)
+        emit('provider.session', {'session_id': 'verification-budget-session'})
+        emit('provider.usage', {'cost_usd': request.max_budget_usd,
+                                'input_tokens': 50, 'output_tokens': 5,
+                                'cached_input_tokens': 40})
+        raise ProviderError('USD budget reached', session_id='verification-budget-session',
+                            transient=False, error_kind='budget_exhausted')
     monkeypatch.setattr(service.runner, 'run', verify)
     artifacts = {'worktree': str(repo), 'commit': 'evidence'}
-    service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
-    assert len(calls) == 1 and calls[0].read_only
-    assert artifacts['commit'] == 'evidence'
-    assert artifacts['verification']['verdict'] == 'pass'
-    assert service._usage(run['id'], profile='verification')['unknown_cost_calls'] == 1
+    with pytest.raises(ExecutionError, match='剩余预算') as stopped:
+        service._independent_verify(run['id'], run, p,
+                                    service.runtime_settings.get(), artifacts)
+    assert stopped.value.artifacts is artifacts
+    assert calls[0].max_budget_usd == p['budget_usd']
+    assert artifacts['verification_session_id'] == 'verification-budget-session'
+    assert artifacts['budget_exhausted'] is True
+    assert '剩余预算' in artifacts['needs_human']
+    usage_event = next(event for event in iter(store.events(run['id']))
+                       if event['type'] == 'usage.recorded')
+    assert usage_event['payload']['cached_input_tokens'] == 40
+    assert service._usage(run['id'], profile='verification') == {
+        'known_cost_usd': p['budget_usd'], 'unknown_cost_calls': 0, 'calls': 1}
 
 
 def test_managed_workspace_verifier_requires_functional_evidence_without_agent(app_env, monkeypatch):

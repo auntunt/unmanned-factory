@@ -111,7 +111,27 @@ export function runGuidance(run: Run): RunGuidance {
   const questions = requirements(run)
   const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
-  if (run.status === 'needs_human' && /cost|budget|quota|费用|预算|额度/i.test(stopReason || '')) return result(run, { kind: 'paused', label: '可以继续原任务', summary: '旧计费限制已停用，费用和额度统一由中转站管理。继续执行原计划即可。', view: 'execution', stage: 'build', primaryLabel: '查看处理情况' })
+  const budgetStopped = run.artifacts?.budget_exhausted === true || /\bbudget\b|预算/i.test(stopReason || '')
+  if (run.status === 'needs_human' && budgetStopped) return result(run, {
+    kind: 'budget',
+    label: '已达到项目单次运行预算',
+    summary: '预算会按已报告费用停止后续模型调用；已在途调用仍可能使费用越过预算。现有成果已保留，管理员调整项目预算后，可从暂停任务继续或重试；账户级计费与额度仍由中转站管理。',
+    detail: stopReason,
+    view: 'execution',
+    stage: 'build',
+    primaryLabel: '调整预算后继续',
+    rawEvidence: stopReason,
+  })
+  if (run.status === 'needs_human' && /quota|余额|额度|rate.?limit|限流/i.test(stopReason || '')) return result(run, {
+    kind: 'billing',
+    label: '中转站额度或限流已暂停调用',
+    summary: '账户级余额、额度和限流由中转站管理。处理对应账户或通道后，可返回当前任务继续；现有成果和运行记录已保留。',
+    detail: stopReason,
+    view: 'execution',
+    stage: 'build',
+    primaryLabel: '查看调用记录',
+    rawEvidence: stopReason,
+  })
 
   // Terminal runs retain their historical billing/budget artifacts without being presented as pending work.
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交和检查记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,12 +11,14 @@ from pathlib import Path
 import pytest
 
 from factory.control.execution import ExecutionError, execute_plan
+from factory.control.providers import ProviderError
 
 
 @dataclass
 class Result:
     text: str = "done"
     cost_usd: float | None = 0.0
+    session_id: str | None = None
 
 
 class Request:
@@ -70,6 +73,130 @@ def test_dag_order_and_final_content(repo, provider_module):
     integrated = Path(out["worktree"])
     assert (integrated / "a.txt").read_text() == "a\n"
     assert (integrated / "b.txt").read_text() == "b\n"
+
+
+def test_dag_passes_decreasing_remaining_budget_to_dependent_calls(repo, provider_module):
+    calls = []
+    class BudgetRunner:
+        def run(self, request, emit, cancel=None):
+            calls.append(request)
+            Path(request.workspace, request.prompt + '.txt').write_text(request.prompt)
+            return Result(cost_usd=.2)
+    plan = {'tasks': [
+        {'id': 'a', 'prompt': 'a', 'paths': ['a.txt'], 'checks': ['ok']},
+        {'id': 'b', 'prompt': 'b', 'paths': ['b.txt'], 'checks': ['ok'],
+         'depends_on': ['a']},
+    ]}
+    execute_plan(run_id='budgeted-dag', plan=plan,
+        project={**_project(repo), 'budget_usd': 1.0},
+        profiles={'standard': {'provider': 'claude', 'model': 'test'}},
+        runner=BudgetRunner(), emit=lambda *_: None, cancel=threading.Event())
+    assert [request.max_budget_usd for request in calls] == pytest.approx([1.0, .8])
+
+
+def test_budgeted_independent_dag_calls_are_serial_and_share_remaining_budget(repo, provider_module):
+    calls = []
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class BudgetRunner:
+        def run(self, request, emit, cancel=None):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+                calls.append(request)
+            time.sleep(.05)
+            Path(request.workspace, request.prompt + '.txt').write_text(request.prompt)
+            with state_lock:
+                active -= 1
+            return Result(cost_usd=.2)
+
+    plan = {'tasks': [
+        {'id': 'a', 'prompt': 'a', 'paths': ['a.txt'], 'checks': ['ok']},
+        {'id': 'b', 'prompt': 'b', 'paths': ['b.txt'], 'checks': ['ok']},
+    ]}
+    execute_plan(run_id='parallel-budgeted-dag', plan=plan,
+        project={**_project(repo), 'budget_usd': 1.0},
+        profiles={'standard': {'provider': 'claude', 'model': 'test'}},
+        runner=BudgetRunner(), emit=lambda *_: None, cancel=threading.Event(),
+        max_parallel=2)
+    assert max_active == 1
+    assert [request.max_budget_usd for request in calls] == pytest.approx([1.0, .8])
+
+
+def test_unbudgeted_independent_dag_calls_remain_parallel(repo, provider_module):
+    rendezvous = threading.Barrier(2)
+
+    class ParallelRunner:
+        def run(self, request, emit, cancel=None):
+            rendezvous.wait(timeout=2)
+            Path(request.workspace, request.prompt + '.txt').write_text(request.prompt)
+            return Result(cost_usd=.2)
+
+    plan = {'tasks': [
+        {'id': 'a', 'prompt': 'a', 'paths': ['a.txt'], 'checks': ['ok']},
+        {'id': 'b', 'prompt': 'b', 'paths': ['b.txt'], 'checks': ['ok']},
+    ]}
+    project = {**_project(repo), 'budget_usd': None}
+    execute_plan(run_id='parallel-unbudgeted-dag', plan=plan, project=project,
+        profiles={'standard': {'provider': 'claude', 'model': 'test'}},
+        runner=ParallelRunner(), emit=lambda *_: None, cancel=threading.Event(),
+        max_parallel=2)
+
+
+@pytest.mark.parametrize(('callback_session', 'error_session', 'expected'), [
+    ('callback-session', None, 'callback-session'),
+    (None, 'error-session', 'error-session'),
+])
+def test_transient_provider_error_resumes_retained_session(
+        repo, provider_module, callback_session, error_session, expected):
+    calls = []
+
+    class RetryRunner:
+        def run(self, request, emit, cancel=None):
+            calls.append(request)
+            if len(calls) == 1:
+                if callback_session:
+                    emit('provider.session', {'session_id': callback_session})
+                emit('provider.usage', {'cost_usd': .1})
+                raise ProviderError('temporary outage', session_id=error_session, transient=True)
+            assert request.session_id == expected
+            Path(request.workspace, 'a.txt').write_text('done')
+            return Result(cost_usd=.1, session_id=expected)
+
+    plan = {'tasks': [
+        {'id': 'a', 'prompt': 'a', 'paths': ['a.txt'], 'checks': ['ok']},
+    ]}
+    result = execute_plan(run_id=f'resume-{expected}', plan=plan,
+        project={**_project(repo), 'routing_policy': {'max_attempts': 2, 'auto_escalate': False}},
+        profiles={'standard': {'provider': 'claude', 'model': 'test'}},
+        runner=RetryRunner(), emit=lambda *_: None, cancel=threading.Event())
+    task = result['tasks'][0]
+    assert [request.session_id for request in calls] == [None, expected]
+    assert task['attempts'][0]['session_id'] == expected
+    assert task['session_id'] == expected
+
+
+def test_provider_budget_stop_preserves_exception_session(repo, provider_module):
+    class BudgetRunner:
+        def run(self, request, emit, cancel=None):
+            emit('provider.usage', {'cost_usd': request.max_budget_usd})
+            raise ProviderError('call budget reached', session_id='budget-session',
+                                transient=False, error_kind='budget_exhausted')
+
+    plan = {'tasks': [
+        {'id': 'a', 'prompt': 'a', 'paths': ['a.txt'], 'checks': ['ok']},
+    ]}
+    with pytest.raises(ExecutionError, match='task a failed') as caught:
+        execute_plan(run_id='budget-session', plan=plan,
+            project={**_project(repo), 'budget_usd': .5},
+            profiles={'standard': {'provider': 'claude', 'model': 'test'}},
+            runner=BudgetRunner(), emit=lambda *_: None, cancel=threading.Event())
+    task = caught.value.artifacts['tasks'][0]
+    assert task['session_id'] == 'budget-session'
+    assert task['attempts'][0]['session_id'] == 'budget-session'
 
 
 def test_out_of_scope_change_fails_and_keeps_worktree(repo, provider_module):

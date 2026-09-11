@@ -126,6 +126,29 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                      'session_id': None, 'session_profile': dict(route),
                      'execution_checks': project['checks'], 'workspace_guard': _guard_snapshot(_baseline(root)),
                      'known_cost_usd': 0.0, 'observed_cost_usd': 0.0}
+        feedback_session = task.get('_feedback_session')
+        if isinstance(feedback_session, dict):
+            previous_profile = feedback_session.get('session_profile') or {}
+            previous_session_id = feedback_session.get('session_id')
+            same_provider = (isinstance(previous_session_id, str)
+                and 0 < len(previous_session_id.strip()) <= 512
+                and isinstance(previous_profile, dict)
+                and previous_profile.get('provider') == route.get('provider'))
+            previous_model = (previous_profile.get('model')
+                if isinstance(previous_profile, dict) else None)
+            current_model = route.get('model')
+            if same_provider:
+                artifacts['session_id'] = previous_session_id.strip()
+                state['session_id'] = artifacts['session_id']
+            _emit(emit, 'execution.session_continuation', {
+                'source': 'feedback_predecessor',
+                'previous_run_id': feedback_session.get('previous_run_id'),
+                'reused': same_provider,
+                'previous_model': previous_model,
+                'current_model': current_model,
+                'model_changed': previous_model != current_model,
+                **({} if same_provider else {'reason': 'provider_changed'}),
+            }, task_id)
     _execution_budget.get().artifacts = artifacts
     # This subtotal belongs only to this invocation; service adds historic usage.
     artifacts['known_cost_usd'] = 0.0
@@ -173,16 +196,30 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
     checkpoint()
     full_prompt = str(task['prompt']) + '\n\n' + _INSTRUCTIONS
     prompt = full_prompt
-    if resume_artifacts and artifacts.get('session_id'):
-        prompt = ('Continue the existing task in this session and workspace. Keep completed work and previously supplied project context. '
+    if artifacts.get('session_id'):
+        prompt = ('Continue the existing project task in this session. The platform has prepared the current working directory from saved project state; '
+                  'use this current directory and do not rely on an earlier absolute path. Keep completed behavior and previously supplied project context. '
                   'Background servers may need restarting; inspect the current state before acting. Do not rebuild the project or repeat completed checks without a concrete reason.\n'
                   + str(task.get('resume_feedback') or 'Complete the remaining work from the saved progress.') + '\n' + _INSTRUCTIONS)
     _emit(emit, 'execution.context_delivery', {'session_resumed': bool(artifacts.get('session_id')),
+        'session_source': ('execution_resume' if resume_artifacts else
+            'feedback_predecessor' if artifacts.get('session_id') else None),
         'full_prompt_chars': len(full_prompt), 'sent_prompt_chars': len(prompt)}, task_id)
 
     reconnects = 0
     repairs = 0
     max_repairs = max(0, min(2, int((project.get('routing_policy') or {}).get('max_attempts', 3)) - 1))
+
+    def dispatch_budget():
+        from factory.control.budget import BudgetConfigurationError, dollar_budget
+        try:
+            return dollar_budget(project.get('budget_usd'), {
+                'known_cost_usd': artifacts['known_cost_usd'],
+                'unknown_cost_calls': int(artifacts['observed_cost_usd'] is None),
+            })
+        except BudgetConfigurationError as exc:
+            raise ExecutionError(str(exc), artifacts=artifacts) from None
+
     try:
         if resume_artifacts and task.get('resume_stage') == 'verification':
             if artifacts.get('commit') != _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s) or guard():
@@ -205,6 +242,14 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         while True:
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
+            call_budget = dispatch_budget()
+            # Hosted coding permits a bounded continuation when a provider
+            # omits dollar cost. An explicit ``stop`` still blocks.
+            blocked = call_budget.block_reason(
+                unknown_cost_policy=project.get('unknown_cost_policy', 'allow_bounded'))
+            if blocked:
+                artifacts.update(needs_human=blocked, autopublish_blocked=True)
+                raise ExecutionError('coding provider call not dispatched: ' + blocked)
             remaining = _remaining_budget()
             attempt = {**route, 'attempt': len(state['attempts']) + 1, 'status': 'running',
                        'worktree': str(root), 'branch': artifacts['branch'], 'command_evidence': []}
@@ -252,7 +297,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             try:
                 result = runner.run(ProviderRequest(provider=route['provider'], model=route['model'],
                     prompt=prompt, workspace=str(root), session_id=artifacts.get('session_id'),
-                    timeout_s=max(1, int(remaining)), read_only=False), callback, cancel=cancel)
+                    timeout_s=max(1, int(remaining)), read_only=False,
+                    max_budget_usd=call_budget.remaining_usd), callback, cancel=cancel)
                 if getattr(result, 'session_id', None):
                     artifacts['session_id'] = result.session_id
                     state['session_id'] = result.session_id
@@ -298,6 +344,12 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                     raise failure
                 if cancel.is_set() or isinstance(failure, ProviderCancelled):
                     raise ExecutionError('execution cancelled') from failure
+                if getattr(failure, 'error_kind', None) == 'budget_exhausted':
+                    reason = ('Claude reached the remaining project budget during this call; '
+                              'the coding session, worktree and checkpoint are preserved')
+                    artifacts.update(needs_human=reason, budget_exhausted=True,
+                                     autopublish_blocked=True)
+                    raise ExecutionError('coding stopped at project budget: ' + reason) from failure
                 if getattr(failure, 'transient', False) and reconnects < 2 and _remaining_budget() > 10:
                     guard()
                     reconnects += 1

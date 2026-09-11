@@ -39,6 +39,56 @@ def test_concurrent_adoption_creates_one_successor_with_frozen_identity(tmp_path
     assert all(m['feedback_run_id'] == successor['id'] for m in agents.conversation(cid)['messages'] if m['role'] == 'user')
 
 
+def test_feedback_successor_carries_only_verified_continuous_session_seed(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': '  prior-session  ',
+        'session_profile': {
+            'profile': 'strong', 'provider': 'claude', 'model': 'claude-opus-5',
+            'reason': 'previous routing decision',
+        },
+        'checks': [{'name': 'tests', 'exit': 0}],
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['artifacts'] == {}
+    assert successor['feedback_session'] == {
+        'session_id': 'prior-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-opus-5'},
+        'previous_run_id': rid,
+    }
+    event = next(item for item in store.events(successor['id'])
+                 if item['type'] == 'feedback.adopted')
+    assert event['payload']['session_continuation_available'] is True
+    assert 'checks' not in successor['feedback_session']
+    assert 'worktree' not in successor['feedback_session']
+
+
+def test_feedback_successor_does_not_seed_incomplete_provider_session(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'prior-session',
+        'session_profile': {'provider': 'claude'},
+    }})
+
+    successor = agents.adopt_feedback(cid)
+
+    assert 'feedback_session' not in successor
+    event = next(item for item in store.events(successor['id'])
+                 if item['type'] == 'feedback.adopted')
+    assert event['payload']['session_continuation_available'] is False
+
+
 @pytest.mark.parametrize('status', ['running', 'verifying', 'publishing', 'awaiting_approval',
     'needs_clarification', 'needs_human', 'cancelled', 'failed'])
 def test_does_not_bypass_active_or_blocked_run(tmp_path, status):
@@ -158,6 +208,54 @@ def test_successor_context_uses_verified_parent_not_main(tmp_path):
 
 from tests.test_workbench_app import app_env
 from tests.test_control_app import login, project as create_project
+
+
+def test_service_forwards_feedback_session_without_predecessor_artifacts(app_env, monkeypatch):
+    import threading
+
+    client, store, svc, repo = app_env
+    p = create_project(client, repo, login(client))
+    run, _ = store.create_run(p['id'], 'Apply only the current feedback',
+        source={'type': 'agent', 'actor_id': 1})
+    seed = {
+        'session_id': 'prior-session',
+        'session_profile': {'provider': 'claude', 'model': 'model'},
+        'previous_run_id': 'verified-parent',
+    }
+    task = {'id': 'coding', 'title': 'Apply feedback', 'prompt': 'full task context',
+        'acceptance': ['feedback works'], 'paths': ['src'],
+        'checks': list(p['checks']), 'depends_on': [], 'complexity': 'small', 'risk': 'low'}
+    store.update(run['id'], {
+        'status': 'queued', 'revision': 1, 'execution_mode': 'continuous',
+        'feedback_predecessor_id': 'verified-parent', 'feedback_session': seed,
+        'plan': {'summary': 'Apply feedback', 'questions': [], 'tasks': [task]},
+        'tasks': [{**task, 'status': 'pending'}],
+        'runtime_configuration': svc.runtime_settings.get(),
+    })
+    svc.cancels[run['id']] = threading.Event()
+    monkeypatch.setattr(svc, '_project_for_run', lambda _run: p)
+    captured = []
+
+    def execute(**kwargs):
+        captured.append(kwargs)
+        return {'execution_mode': 'continuous', 'worktree': p['workspace'],
+            'branch': p['base_branch'], 'commit': 'a' * 40, 'tasks': [], 'checks': [],
+            'known_cost_usd': 0.0, 'observed_cost_usd': 0.0,
+            'session_id': 'prior-session'}
+
+    svc.continuous_execute = execute
+    monkeypatch.setattr(svc, '_independent_verify',
+        lambda _rid, _run, _project, _configuration, artifacts:
+            artifacts.update(verification={'verdict': 'pass', 'reason': 'verified'}))
+    monkeypatch.setattr(svc, '_capture_capability', lambda _rid: None)
+
+    svc._run(run['id'])
+
+    assert len(captured) == 1
+    forwarded = captured[0]['plan']['tasks'][0]
+    assert forwarded['_feedback_session'] == seed
+    assert forwarded['resume_feedback'] == 'Apply only the current feedback'
+    assert 'resume_artifacts' not in captured[0]
 
 
 def test_message_during_execution_is_automatically_planned_at_completion(app_env):
