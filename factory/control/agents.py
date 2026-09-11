@@ -22,6 +22,175 @@ MODEL_STAGES = frozenset(("default", "planning", "analysis", "execution", "verif
 MODEL_PARAMETERS = frozenset(("temperature", "top_p", "max_tokens", "reasoning_effort"))
 PATCH_FIELDS = frozenset(("instructions", "model_settings", "tool_scope", "acceptance", "delivery", "skill_ids"))
 
+# A provider session is an optimization, not the source of project truth.  If
+# Claude has already reread a large conversation without a single prompt-cache
+# hit, carrying that transcript into the next feedback run makes every tool
+# turn slower and more expensive.  Start from the verified commit and bounded
+# owner history instead.  The threshold is deliberately conservative: small
+# sessions retain conversational continuity, and unknown cache telemetry never
+# triggers a destructive inference.
+_CLAUDE_UNCACHED_SESSION_INPUT_LIMIT = 500_000
+_CLAUDE_CACHE_USAGE_SCHEMA = 'separate_read_write_v1'
+_CLAUDE_SESSION_ORIGIN_SCHEMA = 'stable_dynamic_sections_v1'
+_CODING_MODEL_PROFILES = frozenset(('cheap', 'standard', 'strong'))
+
+
+def _valid_claude_session_origin(value: Any, *, durable: bool) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    if (value.get('provider') != 'claude'
+            or value.get('schema') != _CLAUDE_SESSION_ORIGIN_SCHEMA):
+        return None
+    origin = {'provider': 'claude', 'schema': _CLAUDE_SESSION_ORIGIN_SCHEMA}
+    if durable:
+        for key in ('origin_run_id', 'origin_session_id'):
+            item = value.get(key)
+            if not isinstance(item, str) or not item.strip() or len(item) > 512:
+                return None
+            origin[key] = item.strip()
+    return origin
+
+
+def _claude_session_origin(db, prior: Mapping[str, Any],
+                           session_profile: Mapping[str, Any],
+                           session_id: str) -> dict[str, str] | None:
+    """Prove that the current session began with the stable prompt schema.
+
+    A configuration emitted while resuming is never enough: it describes the
+    current client, not the prompt that created the remote session. Fresh calls
+    establish the marker. Later feedback runs inherit it from their durable
+    feedback seed only while their provider event proves that lineage resumed.
+    """
+    inherited = None
+    feedback_session = prior.get('feedback_session')
+    if isinstance(feedback_session, Mapping):
+        inherited = _valid_claude_session_origin(
+            feedback_session.get('session_origin'), durable=True)
+    rows = db.execute(
+        "SELECT payload FROM events WHERE run_id=? AND type='provider.configuration' ORDER BY id",
+        (prior['id'],),
+    ).fetchall()
+    origin = None
+    observed_coding_configuration = False
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (not isinstance(payload, dict)
+                or payload.get('provider') != 'claude'
+                or payload.get('model') != session_profile.get('model')
+                or payload.get('read_only') is not False):
+            continue
+        first_coding_configuration = not observed_coding_configuration
+        observed_coding_configuration = True
+        strategy = payload.get('session_strategy')
+        if strategy == 'fresh':
+            marker = _valid_claude_session_origin(
+                payload.get('session_origin'), durable=False)
+            origin = ({**marker, 'origin_run_id': str(prior['id']),
+                       'origin_session_id': session_id}
+                      if marker is not None else None)
+        elif strategy == 'resume':
+            if first_coding_configuration:
+                origin = inherited
+        else:
+            # An unversioned configuration cannot prove how the session began.
+            origin = None
+    return origin if observed_coding_configuration else None
+
+
+def _feedback_session_strategy(db, prior: Mapping[str, Any], session_profile: Mapping[str, Any],
+                               session_origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Choose resume versus a fresh model context from durable billed usage."""
+    prior_id = str(prior['id'])
+    default = {'strategy': 'resume', 'reason': 'verified_session_available'}
+    if session_profile.get('provider') != 'claude':
+        return default
+    if _valid_claude_session_origin(session_origin, durable=True) is None:
+        return {
+            'strategy': 'cold_start',
+            'reason': 'legacy_claude_session_origin_unknown',
+            'previous_run_id': prior_id,
+            'required_origin_schema': _CLAUDE_SESSION_ORIGIN_SCHEMA,
+        }
+    task_records = [*((prior.get('plan') or {}).get('tasks') or []),
+                    *((prior.get('artifacts') or {}).get('tasks') or [])]
+    coding_task_ids = {item.get('id') for item in task_records
+                       if isinstance(item, Mapping)
+                       and isinstance(item.get('id'), str) and item.get('id')}
+    rows = db.execute(
+        "SELECT id,task_id,payload FROM events WHERE run_id=? AND type='usage.recorded' ORDER BY id",
+        (prior_id,),
+    ).fetchall()
+    grouped: dict[tuple[str, Any], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row['payload'])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (not isinstance(payload, dict)
+                or payload.get('provider') != session_profile.get('provider')
+                or payload.get('model') != session_profile.get('model')
+                or payload.get('profile') not in _CODING_MODEL_PROFILES):
+            continue
+        if not coding_task_ids or row['task_id'] not in coding_task_ids:
+            # Old events without a task identity, or an unexpected task using
+            # the same model, cannot safely establish coding-session volume.
+            return {**default, 'reason': 'cache_telemetry_untrusted'}
+        call_id = payload.get('call_id')
+        key = (('call', call_id) if isinstance(call_id, str) and call_id
+               else ('event', row['id']))
+        grouped.setdefault(key, []).append(payload)
+
+    matched = []
+    for (kind, _), payloads in grouped.items():
+        trusted = None
+        seen_trusted = False
+        for payload in payloads:
+            schema = payload.get('cache_usage_schema')
+            incoming = payload.get('input_tokens')
+            cached = payload.get('cached_input_tokens')
+            valid = (schema == _CLAUDE_CACHE_USAGE_SCHEMA
+                     and type(incoming) is int and incoming >= 0
+                     and type(cached) is int and cached >= 0)
+            if valid:
+                usage = (incoming, cached)
+                if trusted is not None and usage != trusted:
+                    # Two invoices for one call disagree about the context
+                    # volume. Never choose whichever happens to be last.
+                    return {**default, 'reason': 'cache_telemetry_untrusted'}
+                trusted = usage
+                seen_trusted = True
+                continue
+            provisional = (schema is None
+                and payload.get('input_tokens') is None
+                and payload.get('cached_input_tokens') is None)
+            if kind == 'event' or not provisional or seen_trusted:
+                # Unknown -> known is a supported reconciliation. A later
+                # unknown row, a legacy schema, or partial token data is not.
+                return {**default, 'reason': 'cache_telemetry_untrusted'}
+        if trusted is None:
+            return {**default, 'reason': 'cache_telemetry_untrusted'}
+        matched.append(trusted)
+    if not matched:
+        return default
+    input_tokens = sum(item[0] for item in matched)
+    cached_input_tokens = sum(item[1] for item in matched)
+    if (input_tokens >= _CLAUDE_UNCACHED_SESSION_INPUT_LIMIT
+            and cached_input_tokens == 0):
+        return {
+            'strategy': 'cold_start',
+            'reason': 'large_uncached_claude_session',
+            'previous_run_id': prior_id,
+            'input_tokens': input_tokens,
+            'cached_input_tokens': 0,
+            'input_limit': _CLAUDE_UNCACHED_SESSION_INPUT_LIMIT,
+        }
+    return {**default, 'input_tokens': input_tokens,
+            'cached_input_tokens': cached_input_tokens,
+            'input_limit': _CLAUDE_UNCACHED_SESSION_INPUT_LIMIT}
+
 
 def _json(value: Any) -> str:
     return json.dumps(scrub(value), ensure_ascii=False, separators=(",", ":"))
@@ -328,6 +497,7 @@ class AgentStore:
             artifacts = prior.get('artifacts') or {}
             session_id = artifacts.get('session_id')
             session_profile = artifacts.get('session_profile') or {}
+            session_strategy = {'strategy': 'unavailable', 'reason': 'verified_session_unavailable'}
             if (artifacts.get('execution_mode') == 'continuous'
                     and all(artifacts.get(key) for key in ('worktree', 'branch', 'commit'))
                     and isinstance(session_id, str) and 0 < len(session_id.strip()) <= 512
@@ -335,18 +505,29 @@ class AgentStore:
                     and all(isinstance(session_profile.get(key), str)
                             and session_profile[key].strip()
                             for key in ('provider', 'model'))):
-                data['feedback_session'] = {
-                    'session_id': session_id.strip(),
-                    'session_profile': {
-                        'provider': session_profile['provider'].strip(),
-                        'model': session_profile['model'].strip(),
-                    },
-                    'previous_run_id': prior['id'],
+                reusable_profile = {
+                    'provider': session_profile['provider'].strip(),
+                    'model': session_profile['model'].strip(),
                 }
+                session_origin = (_claude_session_origin(
+                    db, prior, reusable_profile, session_id.strip())
+                    if reusable_profile['provider'] == 'claude' else None)
+                session_strategy = _feedback_session_strategy(
+                    db, prior, reusable_profile, session_origin)
+                if session_strategy['strategy'] == 'resume':
+                    data['feedback_session'] = {
+                        'session_id': session_id.strip(),
+                        'session_profile': reusable_profile,
+                        'previous_run_id': prior['id'],
+                    }
+                    if session_origin is not None:
+                        data['feedback_session']['session_origin'] = session_origin
+            data['feedback_session_strategy'] = session_strategy
             db.execute('INSERT INTO runs VALUES (?,?)', (rid, _json(data)))
             self.store._event(db, rid, 'feedback.adopted', {'previous_run_id': prior['id'],
                 'message_ids': [m['id'] for m in pending],
-                'session_continuation_available': bool(data.get('feedback_session'))})
+                'session_continuation_available': bool(data.get('feedback_session')),
+                'session_strategy': session_strategy})
             for m in pending:
                 m.update(feedback_status='adopted', feedback_run_id=rid)
             c.update(run_id=rid, updated_at=at)

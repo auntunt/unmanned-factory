@@ -239,6 +239,6 @@ def test_review_short_remaining_budget_is_not_extended(app_env, monkeypatch):
     assert 0 < calls[0].timeout_s <= 3
     assert artifacts['verification']['verdict'] == 'fail'
     config['limits']['timeout_s'] = 0.5
-    with pytest.raises(ExecutionError, match='时限耗尽'):
+    with pytest.raises(ExecutionError, match='预算已用尽'):
         service._independent_verify(run['id'], run, p, config, artifacts)
     assert len(calls) == 1

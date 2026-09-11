@@ -58,6 +58,7 @@ def test_worker_env_removes_desktop_control_channels_but_keeps_codex_home_and_pr
     monkeypatch.setenv("WORKSPACE_LABEL", "自动化构建")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
     monkeypatch.setenv("OPENAI_API_KEY", "provider-auth")
+    monkeypatch.setenv("DISABLE_PROMPT_CACHING", "1")
 
     env = _worker_env()
 
@@ -65,6 +66,7 @@ def test_worker_env_removes_desktop_control_channels_but_keeps_codex_home_and_pr
     assert "CODEX_PERMISSION_PROFILE" not in env
     assert "CODEX_SESSION_ID" not in env
     assert "_" not in env
+    assert "DISABLE_PROMPT_CACHING" not in env
     assert env["CODEX_HOME"] == "/tmp/codex-home"
     assert env["WORKSPACE_LABEL"] == "自动化构建"
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:7897"
@@ -522,22 +524,34 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     mod.PermissionResultDeny = PermissionResult
     mod.query = query
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+    events = []
     result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path),
-        max_budget_usd=3.25), lambda *_: None)
+        max_budget_usd=3.25), lambda *event: events.append(event))
     assert result.text == "done"
     researcher = captured['agents']['webuddy-research']
     assert researcher.tools == ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch']
-    assert researcher.maxTurns == 12 and researcher.effort == 'medium'
+    assert researcher.maxTurns == 12 and researcher.effort == 'low'
     assert researcher.mcpServers == [] and 'Bash' in researcher.disallowedTools
     assert captured["max_buffer_size"] == 16 * 1024 * 1024
     assert captured["max_budget_usd"] == 3.25
     assert captured["tools"] == ["Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch", "Agent"]
-    assert captured["effort"] == "medium"
+    assert captured["effort"] == "low"
+    assert captured['extra_args'] == {
+        'system-prompt-snapshot': 'on',
+        'exclude-dynamic-system-prompt-sections': None,
+    }
     assert 'mcp__project__run_command' in captured['allowed_tools']
     assert 'mcp__project__browser_open' in captured['allowed_tools']
     assert captured['permission_mode'] == 'acceptEdits'
     assert captured['system_prompt']['preset'] == 'claude_code'
-    assert str(tmp_path) in captured['system_prompt']['append']
+    assert 'current working directory supplied by the runtime' in captured['system_prompt']['append']
+    assert str(tmp_path) not in captured['system_prompt']['append']
+    configuration = next(payload for kind, payload in events
+                         if kind == 'provider.configuration')
+    assert configuration['read_only'] is False
+    assert configuration['session_strategy'] == 'fresh'
+    assert configuration['session_origin'] == {
+        'provider': 'claude', 'schema': 'stable_dynamic_sections_v1'}
 
 
 def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, tmp_path):
@@ -578,10 +592,20 @@ def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, t
     mod.PermissionResultDeny = PermissionResult
     mod.query = query
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
-    result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path), read_only=True), lambda *_: None)
+    events = []
+    result = _run_claude(ProviderRequest(
+        "claude", "model", "prompt", str(tmp_path),
+        session_id='predeployment-session', read_only=True),
+        lambda *event: events.append(event))
     assert result.text == "read"
     assert captured["tools"] == ["Read", "Glob", "Grep"]
     assert "max_budget_usd" not in captured
+    assert captured['resume'] == 'predeployment-session'
+    configuration = next(payload for kind, payload in events
+                         if kind == 'provider.configuration')
+    assert configuration['read_only'] is True
+    assert configuration['session_strategy'] == 'resume'
+    assert 'session_origin' not in configuration
 
 
 def test_claude_reports_cache_writes_separately_from_cache_hits(monkeypatch, tmp_path):
@@ -672,6 +696,109 @@ def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monke
         "cached_input_tokens": None, "cache_creation_input_tokens": None,
         "cache_usage_schema": "separate_read_write_v1",
         "cost_usd": 1.5}) in events
+
+
+def test_claude_sdk_budget_exception_is_recoverable_and_retains_session(monkeypatch, tmp_path):
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+    mod = types.ModuleType("claude_agent_sdk")
+
+    class Options:
+        def __init__(self, **kwargs): self.__dict__.update(kwargs)
+
+    class SystemMessage:
+        data = {'session_id': 'sdk-budget-session'}
+
+    async def query(*, prompt, options):
+        yield SystemMessage()
+        raise RuntimeError(
+            'Claude Code returned an error result: '
+            'Reached maximum budget ($10) (exit code: 1)')
+
+    mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+    events = []
+
+    with pytest.raises(ProviderError) as stopped:
+        _run_claude(ProviderRequest(
+            "claude", "model", "prompt", str(tmp_path),
+            read_only=True, max_budget_usd=10),
+            lambda *event: events.append(event))
+
+    assert stopped.value.error_kind == 'budget_exhausted'
+    assert stopped.value.transient is False
+    assert stopped.value.session_id == 'sdk-budget-session'
+    assert ('provider.session', {'session_id': 'sdk-budget-session'}) in events
+
+
+def test_claude_structured_budget_exception_preserves_its_session(monkeypatch, tmp_path):
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+    mod = types.ModuleType("claude_agent_sdk")
+
+    class Options:
+        def __init__(self, **kwargs): self.__dict__.update(kwargs)
+
+    class StructuredBudgetError(RuntimeError):
+        subtype = 'error_max_budget_usd'
+        session_id = 'structured-budget-session'
+        data = {'subtype': 'error_max_budget_usd',
+                'session_id': 'structured-budget-session'}
+
+    async def query(*, prompt, options):
+        if False:
+            yield None
+        raise StructuredBudgetError('SDK changed its human-readable wording')
+
+    mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+
+    with pytest.raises(ProviderError) as stopped:
+        _run_claude(ProviderRequest(
+            "claude", "model", "prompt", str(tmp_path),
+            read_only=True, max_budget_usd=10), lambda *_: None)
+
+    assert stopped.value.error_kind == 'budget_exhausted'
+    assert stopped.value.session_id == 'structured-budget-session'
+
+
+def test_claude_nonbudget_structured_error_never_uses_legacy_text_fallback():
+    from factory.control.providers import _claude_sdk_budget_exhausted
+
+    class StructuredOtherError(RuntimeError):
+        subtype = 'authentication_error'
+        data = {'subtype': 'authentication_error'}
+
+    error = StructuredOtherError(
+        'Claude Code returned an error result: '
+        'Reached maximum budget ($10) (exit code: 1)')
+    assert _claude_sdk_budget_exhausted(error, 10) is False
+
+    class StructuredBudgetError(RuntimeError):
+        subtype = 'error_max_budget_usd'
+        data = {'subtype': 'error_max_budget_usd'}
+
+    mismatched = StructuredBudgetError('Reached maximum budget ($10)')
+    assert _claude_sdk_budget_exhausted(mismatched, 8) is False
+
+
+@pytest.mark.parametrize(('message', 'max_budget'), [
+    ('Claude Code returned an error result: Reached maximum budget ($10) (exit code: 1)', None),
+    ('Claude Code returned an error result: Reached maximum budget ($10) (exit code: 1)', 8),
+    ('Reached maximum budget ($10) but retrying', 10),
+    ('Request budget exceeded ($10)', 10),
+    ('Reached maximum budget ($NaN)', 10),
+])
+def test_claude_sdk_budget_exception_match_is_strict(message, max_budget):
+    from factory.control.providers import _claude_sdk_budget_exhausted
+
+    assert _claude_sdk_budget_exhausted(RuntimeError(message), max_budget) is False
 
 
 def test_claude_rejects_non_positive_call_budget_before_sdk_query(monkeypatch, tmp_path):

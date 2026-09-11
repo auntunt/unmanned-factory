@@ -108,9 +108,12 @@ def test_review_repair_is_bounded_and_reuses_executor_session(app_env, monkeypat
     svc.continuous_execute = executor
     monkeypatch.setattr(svc, '_independent_verify', verify)
     svc._run(rid)
+    assert calls[0]['project']['budget_usd'] == pytest.approx(8.0)
     if failure == 'verdict':
         assert store.get(rid)['status'] == 'ready_for_review'
         assert len(calls) == len(reviews) == 2
+        assert calls[1]['project']['budget_usd'] == pytest.approx(8.0)
+        assert calls[1]['project']['verification_budget_reserved_usd'] == pytest.approx(2.0)
         assert calls[1]['run_id'] == calls[0]['run_id']
         assert calls[1]['resume_artifacts']['session_id'] == 'same-session'
         assert 'missing CSV' in calls[1]['plan']['tasks'][0]['prompt']
@@ -194,10 +197,61 @@ def test_continuous_restart_queues_same_session_but_never_replays_publish(app_en
         resumed = store.get(rid)
         assert resumed['status'] == 'queued'
         assert resumed['execution_resume']['artifacts']['session_id'] == 'durable-session'
+        assert resumed['execution_resume']['resume_stage'] is None
         assert resumed['revision'] == run['revision']
         assert resumed['resume_count'] == 1
         assert store.get(publishing['id'])['status'] == 'needs_human'
         svc.queue.reset(rid)
+
+
+@pytest.mark.parametrize(('changes', 'expected_stage'), [
+    ({'finalization_checkpoint': {'paths': ['greeting.txt'], 'checks': []}},
+     'finalization'),
+    ({'budget_exhausted': True, 'tasks': [{'id': 'coding', 'status': 'failed',
+        'attempts': [{'command_evidence': [{'command': 'pytest -q',
+            'exit_code': 0, 'output': '1 passed'}]}]}]}, 'budget_finalization'),
+    ({'commit': 'durable-commit',
+      'tasks': [{'id': 'coding', 'status': 'verified'}],
+      'verification': {'verdict': 'fail', 'error_type': 'invalid_response'}},
+     'verification'),
+    ({'budget_exhausted': True,
+      'finalization_checkpoint': {'paths': ['greeting.txt'], 'checks': []},
+      'checks': [{'name': 'tests', 'exit': 1, 'timeout': False,
+                  'cancelled': False}],
+      'tasks': [{'id': 'coding', 'status': 'failed', 'attempts': [{
+          'command_evidence': [{'command': 'pytest -q', 'exit_code': 0}]}]}]},
+     None),
+    ({'budget_exhausted': True,
+      'tasks': [{'id': 'coding', 'status': 'failed', 'attempts': []}]}, None),
+], ids=['finalization', 'budget-finalization', 'verification',
+        'failed-check', 'insufficient-evidence'])
+def test_continuous_restart_derives_safe_resume_stage(
+        app_env, monkeypatch, changes, expected_stage):
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    run = store.get(rid)
+    checkpoint = {
+        'base_sha': run['context']['commit_sha'],
+        'worktree': p['workspace'],
+        'session_id': 'durable-session',
+        'commit': None,
+        'tasks': [{'id': 'coding', 'status': 'running'}],
+        **changes,
+    }
+    store.update(rid, {'status': 'running'})
+    store.append(rid, 'execution.checkpoint', {
+        'execution_mode': 'continuous',
+        'continuous_artifacts': checkpoint,
+    })
+    monkeypatch.setattr(svc, '_ensure_scheduler', lambda: None)
+
+    svc.recover()
+
+    resumed = store.get(rid)
+    assert resumed['status'] == 'queued'
+    assert resumed['execution_resume']['artifacts'] == checkpoint
+    assert resumed['execution_resume']['resume_stage'] == expected_stage
+    svc.queue.reset(rid)
 
 
 def test_real_continuous_executor_gets_one_coding_turn_and_one_review(app_env, monkeypatch):
@@ -223,7 +277,7 @@ def test_real_continuous_executor_gets_one_coding_turn_and_one_review(app_env, m
     assert len(calls) == 2
     assert [call.read_only for call in calls] == [False, True]
     assert [call.max_budget_usd for call in calls] == pytest.approx(
-        [p['budget_usd'], p['budget_usd'] - .01])
+        [8.0, p['budget_usd'] - .01])
     assert run['artifacts']['session_id'] == 'persistent-session'
     assert Path(p['workspace'], 'greeting.txt').read_text() == 'hello'
 
@@ -255,6 +309,251 @@ def test_coding_call_over_budget_preserves_delivery_but_does_not_start_review(ap
     assert stopped['artifacts']['commit']
     assert stopped['artifacts']['budget_exhausted'] is True
     assert stopped['artifacts']['total_known_cost_usd'] == pytest.approx(18.73)
+
+
+def test_reserved_review_budget_finishes_after_coding_provider_stops_at_its_ceiling(app_env, monkeypatch):
+    import json
+    from pathlib import Path
+    from factory.control.providers import ProviderError, ProviderResult
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    calls = []
+
+    def runner(request, emit, cancel=None):
+        calls.append(request)
+        if request.read_only:
+            return ProviderResult(json.dumps({
+                'verdict': 'pass', 'reason': 'trusted greeting check and diff reviewed'}),
+                cost_usd=.01)
+        assert request.max_budget_usd == pytest.approx(8.0)
+        Path(request.workspace, 'greeting.txt').write_text('hello world')
+        emit('provider.session', {'session_id': 'coding-budget-session'})
+        emit('command.completed', {'source': 'isolated_project_terminal',
+            'command': 'pytest -q', 'exit_code': 0, 'output': '50 passed'})
+        emit('provider.usage', {'cost_usd': request.max_budget_usd})
+        raise ProviderError('max budget while writing final note',
+            session_id='coding-budget-session', transient=False,
+            error_kind='budget_exhausted')
+
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    svc._plan(rid)
+    svc._run(rid)
+    completed = store.get(rid)
+    assert completed['status'] == 'ready_for_review', completed
+    assert [call.read_only for call in calls] == [False, True]
+    assert calls[1].max_budget_usd == pytest.approx(2.0)
+    assert completed['artifacts']['commit']
+    assert completed['artifacts']['coding_budget_reached'] is True
+    assert completed['artifacts']['verification']['verdict'] == 'pass'
+    assert completed['artifacts']['verification_budget_reserved_usd'] == pytest.approx(2.0)
+
+
+def test_unknown_coding_cost_holds_its_ceiling_but_preserves_review_reserve(app_env, monkeypatch):
+    import json
+    from pathlib import Path
+    from factory.control.providers import ProviderResult
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    calls = []
+
+    def runner(request, emit, cancel=None):
+        calls.append(request)
+        if request.read_only:
+            return ProviderResult(json.dumps({
+                'verdict': 'pass', 'reason': 'saved source independently reviewed'}),
+                cost_usd=.05)
+        Path(request.workspace, 'greeting.txt').write_text('hello world')
+        return ProviderResult('done with unresolved billing', cost_usd=None,
+                              session_id='unknown-cost-session')
+
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    svc._plan(rid)
+    svc._run(rid)
+    completed = store.get(rid)
+    assert completed['status'] == 'ready_for_review', completed
+    assert [request.max_budget_usd for request in calls] == pytest.approx([8.0, 2.0])
+    ledger = svc._budget_usage(rid, p)
+    assert ledger['unknown_cost_reserved_usd'] == pytest.approx(8.0)
+    assert ledger['known_cost_usd'] == pytest.approx(.05)
+
+
+def test_service_cancel_cannot_cross_atomic_commit_boundary(app_env, monkeypatch):
+    import json
+    from pathlib import Path
+    from factory.control import continuous as continuous_module
+    from factory.control.providers import ProviderResult
+    from factory.control.service import _RunCancellation
+    from factory.control.store import Conflict
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    svc.cancels[rid] = _RunCancellation()
+
+    def runner(request, emit, cancel=None):
+        if request.read_only:
+            return ProviderResult(json.dumps({
+                'verdict': 'pass', 'reason': 'atomic delivery reviewed'}), cost_usd=.01)
+        Path(request.workspace, 'greeting.txt').write_text('hello world')
+        return ProviderResult('done', cost_usd=.01)
+
+    original_commit = continuous_module._commit_tree
+    cancel_results = []
+    def cancel_at_commit_entry(*args, **kwargs):
+        with pytest.raises(Conflict, match='原子归档'):
+            svc.cancel(rid, 'owner')
+        cancel_results.append('rejected')
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    monkeypatch.setattr(continuous_module, '_commit_tree', cancel_at_commit_entry)
+    svc._run(rid)
+    completed = store.get(rid)
+    assert cancel_results == ['rejected']
+    assert completed['status'] == 'ready_for_review'
+    assert completed['artifacts']['commit']
+    assert not [event for event in store.events(rid)
+                if event['type'] == 'run.cancelled']
+
+
+def test_legacy_exhausted_run_finalizes_locally_then_resumes_only_review_after_budget_increase(app_env, monkeypatch):
+    import json
+    from pathlib import Path
+    from factory.control.providers import ProviderError, ProviderResult
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    calls = []
+
+    def runner(request, emit, cancel=None):
+        calls.append(request)
+        if request.read_only:
+            return ProviderResult(json.dumps({
+                'verdict': 'pass', 'reason': 'saved change independently reviewed'}),
+                cost_usd=.01)
+        Path(request.workspace, 'greeting.txt').write_text('hello world')
+        emit('provider.session', {'session_id': 'legacy-session'})
+        # Simulate the old runtime: it preserved the successful command but did
+        # not yet know how to run platform checks and finalize after this error.
+        emit('provider.usage', {'cost_usd': p['budget_usd'] + .21})
+        raise ProviderError('max budget after tests', session_id='legacy-session',
+            transient=False, error_kind='budget_exhausted')
+
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    svc._plan(rid)
+    svc._run(rid)
+    stopped = store.get(rid)
+    assert stopped['status'] == 'needs_human'
+    assert stopped['artifacts']['commit'] is None
+    artifacts = stopped['artifacts']
+    artifacts['tasks'][0]['attempts'][0]['command_evidence'] = [{
+        'command': 'python -m pytest', 'exit_code': 0, 'output': '50 passed'}]
+    store.update(rid, {'artifacts': artifacts})
+
+    # The total budget is already exceeded. A blank continuation may still run
+    # configured local checks and Git finalization, but cannot call a reviewer.
+    current = store.get(rid)
+    svc.continue_run(rid, '', current['revision'], current.get('resume_count', 0), 'owner')
+    assert store.get(rid)['execution_resume']['resume_stage'] == 'budget_finalization'
+    svc._run(rid)
+    locally_finalized = store.get(rid)
+    assert locally_finalized['status'] == 'needs_human'
+    assert locally_finalized['artifacts']['commit']
+    assert locally_finalized['artifacts']['checks'][0]['exit'] == 0
+    assert [call.read_only for call in calls] == [False]
+
+    # Increasing the project cap supplies only the missing reviewer call. The
+    # committed source and successful platform check are reused unchanged.
+    current_project = store.project(p['id'])
+    store.update_project(p['id'], {'budget_usd': 12.0},
+                         current_project['revision'], 'owner')
+    current = store.get(rid)
+    svc.continue_run(rid, '', current['revision'], current.get('resume_count', 0), 'owner')
+    assert store.get(rid)['execution_resume']['resume_stage'] == 'verification'
+    svc._run(rid)
+    completed = store.get(rid)
+    assert completed['status'] == 'ready_for_review', completed
+    assert [call.read_only for call in calls] == [False, True]
+    assert completed['artifacts']['verification']['verdict'] == 'pass'
+
+
+def test_production_legacy_claude_budget_error_recovers_only_local_finalization(app_env, monkeypatch):
+    from pathlib import Path
+    from factory.control.providers import ProviderError
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    exact_error = ('provider SDK failure: Claude Code returned an error result: '
+                   f'Reached maximum budget (${p["budget_usd"]:g}) (exit code: 1)')
+
+    def legacy_failure(request, emit, cancel=None):
+        Path(request.workspace, 'greeting.txt').write_text('completed before final response')
+        emit('provider.session', {'session_id': 'production-legacy-session'})
+        emit('command.completed', {'source': 'isolated_project_terminal',
+            'command': 'pytest -q', 'exit_code': 0, 'output': '50 passed'})
+        emit('provider.usage', {'cost_usd': p['budget_usd'] + .21})
+        raise ProviderError(exact_error, session_id='production-legacy-session')
+
+    monkeypatch.setattr(svc.runner, 'run', legacy_failure)
+    svc._run(rid)
+    stopped = store.get(rid)
+    assert stopped['status'] == 'needs_human'
+    assert stopped['artifacts'].get('budget_exhausted') is not True
+    assert stopped['artifacts']['error'].startswith('coding provider failed:')
+    assert stopped['artifacts']['tasks'][0]['attempts'][0]['error'] == exact_error
+
+    svc.continue_run(rid, '', stopped['revision'], stopped.get('resume_count', 0), 'owner')
+    resumed = store.get(rid)
+    assert resumed['execution_resume']['resume_stage'] == 'budget_finalization'
+    assert resumed['execution_resume']['artifacts']['budget_exhausted'] is True
+
+
+def test_failed_platform_check_requires_coding_budget_and_carries_evidence(app_env, monkeypatch):
+    from factory.control.autonomy import all_events
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    run = store.get(rid)
+    failed = {'name': 'behavior', 'argv': ['pytest', '-q'], 'exit': 1,
+              'timeout': False, 'cancelled': False,
+              'stdout': '', 'stderr': 'expected 14, got 9'}
+    artifacts = {'execution_mode': 'continuous',
+        'base_sha': run['context']['commit_sha'], 'worktree': p['workspace'],
+        'branch': p['base_branch'], 'commit': None, 'budget_exhausted': True,
+        'verification_budget_reserved_usd': 2.0, 'checks': [failed],
+        'tasks': [{'id': 'coding', 'status': 'failed', 'attempts': [{
+            'status': 'failed', 'command_evidence': [{
+                'command': 'pytest -q', 'exit_code': 0, 'output': 'tests ran'}]}]}]}
+    store.append(rid, 'usage.recorded', {'profile': 'standard',
+        'call_id': 'unknown-coding', 'cost_usd': None,
+        'max_budget_usd': p['budget_usd'] - 2.0})
+    store.update(rid, {'status': 'needs_human', 'artifacts': artifacts})
+
+    current = store.get(rid)
+    svc.continue_run(rid, '', current['revision'], current.get('resume_count', 0), 'owner')
+    queued = store.get(rid)
+    assert queued['execution_resume']['resume_stage'] is None
+    assert 'expected 14, got 9' in queued['execution_resume']['answer']
+    svc.continuous_execute = lambda **kwargs: pytest.fail(
+        'exhausted continuation must not run local checks or a paid model')
+    svc._run(rid)
+    still_stopped = store.get(rid)
+    assert still_stopped['status'] == 'needs_human'
+    assert '独立验收' in still_stopped['artifacts']['needs_human']
+    assert not [event for event in all_events(store, rid)
+        if event['type'] == 'execution.reused'
+        and event['payload'].get('stage') == 'budget_finalization']
+
+    current_project = store.project(p['id'])
+    store.update_project(p['id'], {'budget_usd': p['budget_usd'] + 4.0},
+                         current_project['revision'], 'owner')
+    captured = []
+    def repaired(**kwargs):
+        captured.append(kwargs)
+        return {'worktree': p['workspace'], 'tasks': [], 'checks': [],
+                'commit': run['context']['commit_sha'], 'known_cost_usd': 0}
+    svc.continuous_execute = repaired
+    monkeypatch.setattr(svc, '_independent_verify', lambda *args: None)
+    current = store.get(rid)
+    svc.continue_run(rid, '', current['revision'], current.get('resume_count', 0), 'owner')
+    svc._run(rid)
+    assert len(captured) == 1
+    assert captured[0]['project']['budget_usd'] == pytest.approx(4.0)
+    assert captured[0]['project']['verification_budget_reserved_usd'] == pytest.approx(2.0)
+    assert captured[0]['plan']['tasks'][0]['resume_stage'] is None
+    assert 'expected 14, got 9' in captured[0]['plan']['tasks'][0]['prompt']
 
 
 def test_recorded_budget_exhaustion_blocks_a_new_planning_call(app_env, monkeypatch):
@@ -421,11 +720,16 @@ def test_review_reconnect_failure_is_bounded_and_cancel_does_not_retry(app_env, 
     monkeypatch.setattr(svc.runner, 'run', review)
     svc._run(rid)
     assert len(executions) == 1
-    assert len(reviews) == (1 if cancel_first else 2)
+    # A transport failure with unknown cost holds the full provider ceiling;
+    # cancellation and pessimistic budget accounting both forbid a second call.
+    assert len(reviews) == 1
     assert store.get(rid)['status'] == ('cancelled' if cancel_first else 'needs_human')
     usage = [event for event in all_events(store, rid)
         if event['type'] == 'usage.recorded' and event['payload'].get('profile') == 'verification']
     assert len(usage) == len(reviews)
+    assert usage[0]['payload']['max_budget_usd'] == pytest.approx(p['budget_usd'])
+    assert svc._budget_usage(rid, p)['unknown_cost_reserved_usd'] == pytest.approx(
+        p['budget_usd'])
 
 
 def test_review_precancel_does_not_report_an_unmade_provider_call(app_env, monkeypatch):
@@ -438,6 +742,42 @@ def test_review_precancel_does_not_report_an_unmade_provider_call(app_env, monke
         svc._independent_verify(rid, store.get(rid), p, svc.runtime_settings.get(), {'worktree': p['workspace']})
     assert not [event for event in all_events(store, rid)
         if event['type'] in ('provider.started', 'usage.recorded') and event['payload'].get('profile') == 'verification']
+
+
+def test_unknown_cost_hold_is_replaced_by_later_call_reconciliation(app_env, monkeypatch):
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    store.append(rid, 'usage.recorded', {'profile': 'standard', 'call_id': 'call-1',
+        'cost_usd': None, 'max_budget_usd': 3.0})
+    held = svc._budget_usage(rid, p)
+    assert held['known_cost_usd'] == 0
+    assert held['unknown_cost_reserved_usd'] == pytest.approx(3.0)
+    assert svc._usage(rid) == {
+        'known_cost_usd': 0, 'unknown_cost_calls': 1, 'calls': 1}
+    assert svc._dollar_budget(rid, p).remaining_usd == pytest.approx(
+        p['budget_usd'] - 3.0)
+
+    store.append(rid, 'usage.recorded', {'profile': 'standard', 'call_id': 'call-1',
+        'cost_usd': .25, 'max_budget_usd': 3.0, 'reconciled': True})
+    reconciled = svc._budget_usage(rid, p)
+    assert reconciled['known_cost_usd'] == pytest.approx(.25)
+    assert reconciled['unknown_cost_calls'] == 0
+    assert reconciled['unknown_cost_reserved_usd'] == 0
+    assert svc._usage(rid) == {
+        'known_cost_usd': pytest.approx(.25), 'unknown_cost_calls': 0, 'calls': 1}
+    assert svc._dollar_budget(rid, p).remaining_usd == pytest.approx(
+        p['budget_usd'] - .25)
+
+    store.append(rid, 'usage.recorded', {'profile': 'standard', 'call_id': 'call-1',
+        'cost_usd': .30, 'max_budget_usd': 3.0, 'reconciled': True})
+    assert svc._usage(rid) == {
+        'known_cost_usd': pytest.approx(.30), 'unknown_cost_calls': 0, 'calls': 1}
+
+    # Historical rows without a logical id remain distinct calls.
+    store.append(rid, 'usage.recorded', {'profile': 'planner', 'cost_usd': .10})
+    store.append(rid, 'usage.recorded', {'profile': 'planner', 'cost_usd': None,
+                                         'max_budget_usd': .20})
+    assert svc._usage(rid, profile='planner') == {
+        'known_cost_usd': pytest.approx(.10), 'unknown_cost_calls': 1, 'calls': 2}
 
 
 @pytest.mark.parametrize('stage', ['finalization', 'verification'])

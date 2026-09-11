@@ -171,6 +171,11 @@ _STRIPPED_ENV_KEYS = {
     "FACTORY_WEBHOOK_SECRET",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    # Webuddy always lets Claude Code request prompt caching.  An ambient
+    # service/user setting must not silently disable it for every teammate.
+    # Actual reads still depend on the configured API intermediary and are
+    # reported from provider usage rather than assumed here.
+    "DISABLE_PROMPT_CACHING",
 }
 # These are Codex Desktop host-control channels, not provider credentials.
 # Inheriting them makes a standalone SDK app-server attach to the desktop
@@ -316,6 +321,41 @@ def _cache_creation_input_tokens(usage: Any) -> int | None:
 
 
 _CACHE_USAGE_SCHEMA = "separate_read_write_v1"
+_CLAUDE_SESSION_ORIGIN_SCHEMA = "stable_dynamic_sections_v1"
+_CLAUDE_SDK_BUDGET_ERROR = re.compile(
+    r"Claude Code returned an error result: "
+    r"Reached maximum budget \(\$(?P<amount>(?:0|[1-9]\d*)(?:\.\d+)?)\)"
+    r" \(exit code: 1\)"
+)
+_CLAUDE_BUDGET_AMOUNT = re.compile(
+    r"Reached maximum budget \(\$(?P<amount>(?:0|[1-9]\d*)(?:\.\d+)?)\)")
+
+
+def _claude_sdk_budget_exhausted(exc: BaseException,
+                                 max_budget_usd: Any) -> bool:
+    """Recognize only Claude Code's exact SDK budget failure contract."""
+    if (type(max_budget_usd) not in (int, float)
+            or not math.isfinite(float(max_budget_usd))
+            or float(max_budget_usd) <= 0):
+        return False
+    message = str(exc).strip()
+    subtype = getattr(exc, 'subtype', None)
+    data = getattr(exc, 'data', None)
+    if subtype is None and isinstance(data, Mapping):
+        subtype = data.get('subtype')
+    if subtype == 'error_max_budget_usd':
+        amount = _CLAUDE_BUDGET_AMOUNT.search(message)
+        return (amount is None
+                or math.isclose(float(amount.group('amount')), float(max_budget_usd),
+                                rel_tol=1e-9, abs_tol=1e-9))
+    if subtype is not None:
+        return False
+    # Compatibility for the exact error emitted by the deployed older SDK.
+    # Do not classify arbitrary RuntimeErrors containing the word "budget".
+    match = _CLAUDE_SDK_BUDGET_ERROR.fullmatch(message)
+    return (match is not None
+            and math.isclose(float(match.group('amount')), float(max_budget_usd),
+                             rel_tol=1e-9, abs_tol=1e-9))
 
 
 def _claude_model_usage_totals(model_usage: Any) -> tuple[int | None, int | None, int | None, int | None, float | None]:
@@ -450,7 +490,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
 
     from factory.control import claude_capabilities as capabilities
     import claude_agent_sdk as claude_sdk
-    effective_effort = capabilities.effort()
+    effective_effort = capabilities.effort(read_only=req.read_only)
     researcher_available = not req.read_only and hasattr(claude_sdk, 'AgentDefinition')
     workspace = Path(req.workspace).resolve()
     from factory.control import claude_terminal, project_browser
@@ -506,6 +546,14 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         # Ignore ambient user/project settings and MCP/plugin configuration.
         "setting_sources": [],
         "strict_mcp_config": True,
+        # The default Claude Code prompt contains machine-specific sections,
+        # and using an append otherwise disables its snapshot.  Keep the
+        # cacheable system prefix byte-stable across tool turns and resumes;
+        # Claude Code moves the current cwd/environment into the user turn.
+        "extra_args": {
+            "system-prompt-snapshot": "on",
+            "exclude-dynamic-system-prompt-sections": None,
+        },
     }
     if req.max_budget_usd is not None:
         try:
@@ -524,7 +572,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
             )
         options_kwargs["max_budget_usd"] = max_budget_usd
     options_kwargs['system_prompt'] = {'type': 'preset', 'preset': 'claude_code', 'append':
-        f'Your actual project working directory is {workspace}. Use relative paths or this exact directory; do not invent /workspace or /home/user/workspace. '
+        'Your actual project working directory is the current working directory supplied by the runtime. Use relative paths from it; do not invent /workspace or /home/user/workspace. '
         + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. The platform browser tools open/snapshot/click/fill/screenshot are preinstalled: start your preview bound to 127.0.0.1, then use browser_open instead of installing browser dependencies or writing a custom driver. npm/pip/uv dependency caches persist per project across executions. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Use WebSearch/WebFetch for public documentation. Use the webuddy-research Agent only for bounded independent read-only questions, foreground only, without a model override. Project development files including environment templates are writable; do not put real credentials into deliverables. Keep runtime .env files ignored and provide placeholder .env.example. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
            if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
     if researcher_available:
@@ -540,14 +588,30 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         emit('execution.environment', {'terminal': 'bubblewrap', 'workspace': str(workspace), 'host_home_visible': False, 'persistent_terminal': True, 'terminal_lifetime': 'sdk_execution'})
     elif not req.read_only:
         emit('execution.environment', {'terminal': 'unavailable', 'message': 'Isolated project terminal unavailable; file tools only'})
-    emit('provider.configuration', {'provider': 'claude', 'model': req.model,
+    provider_configuration = {'provider': 'claude', 'model': req.model,
         'effort': effective_effort, 'tools': options_kwargs['tools'],
         'project_tools': options_kwargs.get('allowed_tools', []),
         'permission_mode': options_kwargs['permission_mode'],
+        'read_only': req.read_only,
         'research_agent': researcher_available, 'setting_sources': [],
         'terminal_lifetime': 'sdk_execution' if terminal_enabled else None,
         'max_buffer_size': _CLAUDE_MAX_BUFFER_SIZE,
-        'max_budget_usd': options_kwargs.get('max_budget_usd')})
+        'prompt_cache': {
+            'request_mode': 'claude_code_managed',
+            'system_prompt_snapshot': 'on',
+            'dynamic_system_sections': 'first_user_message',
+            'actual_hits_source': 'provider_usage',
+        },
+        'session_strategy': 'resume' if req.session_id else 'fresh',
+        'max_budget_usd': options_kwargs.get('max_budget_usd')}
+    if not req.session_id:
+        # This marker describes how the remote session was born. Never emit it
+        # merely because a newer client resumes an older, unversioned session.
+        provider_configuration['session_origin'] = {
+            'provider': 'claude',
+            'schema': _CLAUDE_SESSION_ORIGIN_SCHEMA,
+        }
+    emit('provider.configuration', provider_configuration)
     if req.session_id:
         options_kwargs["resume"] = req.session_id
 
@@ -644,7 +708,18 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
 
     outcome = 'failed'
     try:
-        asyncio.run(consume())
+        try:
+            asyncio.run(consume())
+        except Exception as exc:
+            if _claude_sdk_budget_exhausted(
+                    exc, options_kwargs.get('max_budget_usd')):
+                raise ProviderError(
+                    str(exc),
+                    session_id=(session_id or getattr(exc, 'session_id', None)),
+                    transient=False,
+                    error_kind='budget_exhausted',
+                ) from exc
+            raise
         outcome = 'failed' if result is None or bool(_value(result, 'is_error', False)) else 'completed'
     finally:
         if browser_session is not None:

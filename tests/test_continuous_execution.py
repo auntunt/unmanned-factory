@@ -73,7 +73,24 @@ def test_gateway_governed_passthrough_keeps_usage(repo):
     assert result['known_cost_usd'] == 0.1
 
 
-def test_transient_failure_reuses_session_workspace_and_dependencies(repo, monkeypatch):
+def test_provider_call_keeps_one_stable_logical_id_across_quota_event(repo):
+    class QuotaWriter(Writer):
+        def run(self, request, emit, cancel=None):
+            emit('quota.reserved', {'id': 'gateway-reservation'})
+            return super().run(request, emit, cancel)
+
+    events = []
+    run({**repo, 'budget_usd': 2.0}, QuotaWriter(),
+        emit=lambda *event: events.append(event))
+    started = [payload for kind, payload, *_ in events if kind == 'provider.started']
+    usage = [payload for kind, payload, *_ in events if kind == 'usage.recorded']
+    assert len(started) == len(usage) == 1
+    assert started[0]['call_id'] == usage[0]['call_id']
+    assert started[0]['call_id'] != 'gateway-reservation'
+    assert len(started[0]['call_id']) == 32
+
+
+def test_unknown_cost_transient_failure_preserves_session_but_does_not_reuse_budget(repo, monkeypatch):
     monkeypatch.setattr(threading.Event, 'wait', lambda self, timeout=None: self.is_set())
     class Flaky(Writer):
         def run(self, request, emit, cancel=None):
@@ -92,11 +109,14 @@ def test_transient_failure_reuses_session_workspace_and_dependencies(repo, monke
             return super().run(request, emit, cancel)
     runner = Flaky()
     events = []
-    result = run({**repo, 'budget_usd': 1.0}, runner, emit=lambda *e: events.append(e))
-    assert len(runner.requests) == 2
-    assert [request.max_budget_usd for request in runner.requests] == [1.0, 1.0]
+    with pytest.raises(ExecutionError, match='provider call not dispatched.*exhausted budget') as caught:
+        run({**repo, 'budget_usd': 1.0}, runner, emit=lambda *e: events.append(e))
+    assert len(runner.requests) == 1
+    assert runner.requests[0].max_budget_usd == 1.0
     assert any(e[0] == 'execution.reconnecting' for e in events)
-    assert len(result['tasks'][0]['attempts']) == 2
+    assert caught.value.artifacts['session_id'] == 'session-1'
+    assert caught.value.artifacts['unknown_cost_reserved_usd'] == pytest.approx(1.0)
+    assert caught.value.artifacts['budget_exhausted'] is True
 
 
 def test_final_check_failure_repairs_in_same_session(repo):
@@ -137,7 +157,7 @@ def test_final_check_repair_is_not_dispatched_after_known_budget_is_exhausted(re
     assert caught.value.artifacts['autopublish_blocked'] is True
 
 
-def test_unknown_cost_allow_bounded_still_allows_one_bounded_repair(repo):
+def test_unknown_cost_reserves_ceiling_and_blocks_a_paid_check_repair(repo):
     class UnknownFirstCost(Writer):
         def run(self, request, emit, cancel=None):
             if not self.requests:
@@ -148,10 +168,12 @@ def test_unknown_cost_allow_bounded_still_allows_one_bounded_repair(repo):
             return super().run(request, emit, cancel)
 
     runner = UnknownFirstCost()
-    result = run({**repo, 'budget_usd': 1.0, 'unknown_cost_policy': 'allow_bounded'}, runner)
-    assert len(runner.requests) == 2
-    assert result['observed_cost_usd'] is None
-    assert result['known_cost_usd'] == pytest.approx(0.1)
+    with pytest.raises(ExecutionError, match='provider call not dispatched.*exhausted budget') as caught:
+        run({**repo, 'budget_usd': 1.0, 'unknown_cost_policy': 'allow_bounded'}, runner)
+    assert len(runner.requests) == 1
+    assert caught.value.artifacts['observed_cost_usd'] is None
+    assert caught.value.artifacts['known_cost_usd'] == 0
+    assert caught.value.artifacts['unknown_cost_reserved_usd'] == pytest.approx(1.0)
 
 
 def test_unknown_cost_stop_still_blocks_a_second_paid_call(repo):
@@ -251,6 +273,180 @@ def test_provider_budget_stop_preserves_continuation_checkpoint(repo):
     assert artifacts['known_cost_usd'] == pytest.approx(.5)
     assert Path(artifacts['worktree'], 'main.py').read_text() == 'draft preserved\n'
     assert artifacts['tasks'][0]['attempts'][0]['session_id'] == 'budget-session'
+
+
+def test_provider_budget_stop_after_successful_work_runs_trusted_checks_and_commits(repo):
+    class FinishedBeforeBudgetStop(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n * 2\n')
+            emit('provider.session', {'session_id': 'budget-session'})
+            emit('command.completed', {'source': 'isolated_project_terminal',
+                'command': 'python -m pytest', 'exit_code': 0, 'output': '50 passed'})
+            emit('provider.usage', {'cost_usd': request.max_budget_usd,
+                                    'input_tokens': 100, 'output_tokens': 10})
+            raise ProviderError('call budget reached', session_id='budget-session',
+                                transient=False, error_kind='budget_exhausted')
+
+    runner = FinishedBeforeBudgetStop()
+    events = []
+    result = run({**repo, 'budget_usd': 0.5}, runner,
+                 emit=lambda *event: events.append(event))
+    assert len(runner.requests) == 1
+    assert result['commit']
+    assert result['coding_budget_reached'] is True
+    assert result['checks'][0]['exit'] == 0
+    assert result['tasks'][0]['attempts'][0]['provider_stop'] == 'budget_exhausted'
+    assert result['tasks'][0]['attempts'][0]['status'] == 'verified'
+    assert any(event[0] == 'execution.completed_after_budget_stop' for event in events)
+
+
+def test_provider_budget_stop_never_uses_worker_evidence_instead_of_trusted_checks(repo):
+    class FalsePositiveEvidence(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n + 2\n')
+            emit('command.completed', {'source': 'isolated_project_terminal',
+                'command': 'echo tests passed', 'exit_code': 0, 'output': '50 passed'})
+            emit('provider.usage', {'cost_usd': request.max_budget_usd})
+            raise ProviderError('call budget reached', transient=False,
+                                error_kind='budget_exhausted')
+
+    with pytest.raises(ExecutionError, match='coding stopped at project budget') as stopped:
+        run({**repo, 'budget_usd': 0.5}, FalsePositiveEvidence())
+    artifacts = stopped.value.artifacts
+    assert artifacts['commit'] is None
+    assert artifacts['checks'][0]['exit'] != 0
+    assert artifacts['budget_exhausted'] is True
+
+
+def test_legacy_budget_stop_can_rerun_checks_and_commit_without_model(repo):
+    class OldBudgetStop(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n * 2\n')
+            emit('provider.session', {'session_id': 'old-budget-session'})
+            emit('provider.usage', {'cost_usd': request.max_budget_usd})
+            raise ProviderError('call budget reached', transient=False,
+                                error_kind='budget_exhausted')
+
+    old_runner = OldBudgetStop()
+    with pytest.raises(ExecutionError) as stopped:
+        run({**repo, 'budget_usd': 0.5}, old_runner)
+    saved = json.loads(json.dumps(stopped.value.artifacts))
+    saved['tasks'][0]['attempts'][0]['command_evidence'] = [{
+        'command': 'python -m pytest', 'exit_code': 0, 'output': '50 passed'}]
+
+    class NoModel:
+        def __init__(self):
+            self.requests = []
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            raise AssertionError('budget finalization must not call a model')
+
+    runner = NoModel()
+    events = []
+    result = run({**repo, 'budget_usd': 0.0}, runner, resume_artifacts=saved,
+        task_fields={'resume_stage': 'budget_finalization'},
+        emit=lambda *event: events.append(event))
+    assert runner.requests == []
+    assert result['commit']
+    assert result['checks'][0]['exit'] == 0
+    assert result['tasks'][0]['attempts'][-1]['recovery_stage'] == 'budget_finalization'
+    assert any(event[0] == 'execution.reused'
+               and event[1].get('stage') == 'budget_finalization' for event in events)
+
+
+def test_budget_finalization_rejects_known_failed_platform_checks(repo):
+    class OldBudgetStop(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n + 2\n')
+            emit('provider.session', {'session_id': 'old-budget-session'})
+            raise ProviderError('call budget reached', transient=False,
+                                error_kind='budget_exhausted')
+
+    with pytest.raises(ExecutionError) as stopped:
+        run({**repo, 'budget_usd': 0.5}, OldBudgetStop())
+    saved = json.loads(json.dumps(stopped.value.artifacts))
+    saved['tasks'][0]['attempts'][0]['command_evidence'] = [{
+        'command': 'python -m pytest', 'exit_code': 0, 'output': 'tests ran'}]
+    saved['checks'] = [{'name': 'behavior', 'argv': repo['checks']['behavior'],
+                        'exit': 1, 'stdout': '', 'stderr': 'assertion failed'}]
+    assert saved['checks'][0]['exit'] != 0
+
+    with pytest.raises(ExecutionError, match='known failing configured check'):
+        run({**repo, 'budget_usd': 1.0}, Writer(), resume_artifacts=saved,
+            task_fields={'resume_stage': 'budget_finalization'})
+
+
+def test_cancel_after_recovery_check_never_commits(repo, monkeypatch):
+    class OldBudgetStop(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n * 2\n')
+            emit('provider.session', {'session_id': 'old-budget-session'})
+            raise ProviderError('call budget reached', transient=False,
+                                error_kind='budget_exhausted')
+
+    with pytest.raises(ExecutionError) as stopped:
+        run({**repo, 'budget_usd': 0.5}, OldBudgetStop())
+    saved = json.loads(json.dumps(stopped.value.artifacts))
+    saved['tasks'][0]['attempts'][0]['command_evidence'] = [{
+        'command': 'python -m pytest', 'exit_code': 0, 'output': '50 passed'}]
+    cancel = threading.Event()
+
+    def cancel_after_success(root, name, argv, timeout_s, emit, task_id, event):
+        event.set()
+        return {'name': name, 'argv': argv, 'exit': 0, 'stdout': 'passed',
+                'stderr': '', 'duration_s': 0.01}
+
+    monkeypatch.setattr('factory.control.continuous._run_check', cancel_after_success)
+    with pytest.raises(ExecutionError, match='execution cancelled') as cancelled:
+        run({**repo, 'budget_usd': 0.0}, Writer(), resume_artifacts=saved,
+            task_fields={'resume_stage': 'budget_finalization'}, cancel=cancel)
+    assert cancelled.value.artifacts['commit'] is None
+    assert cancelled.value.artifacts['tasks'][0]['status'] == 'cancelled'
+
+
+def test_cancelled_saved_check_is_never_treated_as_finalization_checkpoint(repo):
+    class Interrupted(Writer):
+        def run(self, request, emit, cancel=None):
+            self.requests.append(request)
+            Path(request.workspace, 'main.py').write_text('def double(n): return n * 2\n')
+            raise ProviderError('interrupted before finalization')
+
+    with pytest.raises(ExecutionError) as stopped:
+        run(repo, Interrupted())
+    saved = json.loads(json.dumps(stopped.value.artifacts))
+    saved['finalization_checkpoint'] = {'paths': ['main.py'], 'signature': 'unused',
+        'checks': [{'name': 'behavior', 'exit': None, 'cancelled': True}]}
+
+    with pytest.raises(ExecutionError, match='failed or cancelled check') as rejected:
+        run(repo, Writer(), resume_artifacts=saved,
+            task_fields={'resume_stage': 'finalization'})
+    assert rejected.value.artifacts['commit'] is None
+
+
+def test_cancel_at_commit_entry_preserves_uncommitted_work(repo, monkeypatch):
+    from factory.control import continuous as continuous_module
+    cancel = threading.Event()
+    original_commit = continuous_module._commit_tree
+
+    def cancel_at_entry(*args, **kwargs):
+        cancel.set()
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(continuous_module, '_commit_tree', cancel_at_entry)
+    base = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                   cwd=repo['workspace'], text=True).strip()
+    with pytest.raises(ExecutionError, match='execution cancelled') as stopped:
+        run(repo, Writer(), cancel=cancel)
+    worktree = stopped.value.artifacts['worktree']
+    assert subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                   cwd=worktree, text=True).strip() == base
+    assert Path(worktree, 'main.py').read_text() == 'def double(n): return n * 2\n'
+    assert stopped.value.artifacts['commit'] is None
 
 
 def test_terminal_command_evidence_survives_checkpoint_and_final_artifact(repo):

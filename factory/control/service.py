@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import threading
 import time
 import uuid
@@ -18,6 +19,132 @@ _AGENT_FEEDBACK_PREFIXES = (
     '在上一轮已验证成果基础上完成以下补充需求：',
     '用户补充（在上一轮成果基础上继续）：',
 )
+_LEGACY_CLAUDE_BUDGET_ERROR = re.compile(
+    r'provider SDK failure: Claude Code returned an error result: '
+    r'Reached maximum budget \(\$(\d+(?:\.\d+)?)\) \(exit code: 1\)')
+
+
+class _RunCancellation:
+    """Event-compatible cancellation with an atomic Git-finalization gate."""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._finalization_lock = threading.RLock()
+        self._finalizing = False
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def wait(self, timeout=None):
+        return self._event.wait(timeout)
+
+    def set(self):
+        # Internal shutdown/deadline signals wait for an in-flight atomic
+        # finalization, then become visible to subsequent work.
+        with self._finalization_lock:
+            self._event.set()
+            return True
+
+    def try_cancel(self):
+        # A user cancellation must have one clear ordering against commit. If
+        # finalization already owns the gate, reject the cancellation instead
+        # of returning "cancelled" while a commit is being created.
+        if not self._finalization_lock.acquire(blocking=False):
+            return False
+        try:
+            if self._finalizing:
+                return False
+            self._event.set()
+            return True
+        finally:
+            self._finalization_lock.release()
+
+    def begin_finalization(self):
+        self._finalization_lock.acquire()
+        if self._event.is_set():
+            self._finalization_lock.release()
+            return False
+        self._finalizing = True
+        return True
+
+    def end_finalization(self):
+        self._finalizing = False
+        self._finalization_lock.release()
+
+
+def _verification_reserve_usd(remaining_usd):
+    """Keep a bounded part of a finite run budget for independent review.
+
+    The reserve is deliberately meaningful for the default $10 run while still
+    leaving at least half of very small budgets to the coding turn. It is a
+    provider-side ceiling allocation, not a second charge or a ledger entry.
+    """
+    if remaining_usd is None:
+        return 0.0
+    remaining = float(remaining_usd)
+    return min(2.0, remaining / 2.0, max(0.25, remaining * 0.20))
+
+
+def _has_successful_command_evidence(artifacts):
+    """A legacy budget stop may attempt local checks, but never skip them."""
+    if not isinstance(artifacts, dict):
+        return False
+    for task in artifacts.get('tasks') or []:
+        batches = [task.get('command_evidence') or []]
+        batches.extend(attempt.get('command_evidence') or []
+                       for attempt in task.get('attempts') or [])
+        if any(record.get('exit_code') == 0 and not record.get('timeout')
+               and not record.get('cancelled')
+               for batch in batches for record in batch if isinstance(record, dict)):
+            return True
+    return False
+
+
+def _failed_platform_checks(artifacts):
+    """Return trusted configured checks that did not complete successfully."""
+    if not isinstance(artifacts, dict):
+        return []
+    records = list(artifacts.get('checks') or [])
+    checkpoint = artifacts.get('finalization_checkpoint')
+    if isinstance(checkpoint, dict):
+        records.extend(checkpoint.get('checks') or [])
+    return [record for record in records
+            if isinstance(record, dict) and (record.get('cancelled')
+            or record.get('timeout') or record.get('exit') != 0)]
+
+
+def _continuous_resume_stage(artifacts, *, budget_stop=False):
+    """Choose a safe continuous stage that does not need another coding call."""
+    if not isinstance(artifacts, dict):
+        return None
+    failed_checks = _failed_platform_checks(artifacts)
+    if artifacts.get('finalization_checkpoint') and not failed_checks:
+        return 'finalization'
+    if ((artifacts.get('budget_exhausted') or budget_stop)
+            and not artifacts.get('commit')
+            and _has_successful_command_evidence(artifacts)
+            and not failed_checks):
+        # A provider can hit its dollar ceiling after implementation and tests
+        # but before returning the final assistant message. Only trusted command
+        # evidence permits the platform-owned checks and commit to resume.
+        return 'budget_finalization'
+    if (artifacts.get('commit') and artifacts.get('tasks')
+            and all(task.get('status') == 'verified'
+                    for task in artifacts['tasks'])
+            and (not artifacts.get('verification')
+                 or artifacts['verification'].get('error_type'))):
+        return 'verification'
+    return None
+
+
+def _check_failure_context(artifacts):
+    failures = _failed_platform_checks(artifacts)
+    if not failures:
+        return ''
+    evidence = [scrub({key: record.get(key) for key in
+        ('name', 'argv', 'exit', 'timeout', 'cancelled', 'stdout', 'stderr')})
+        for record in failures[:5]]
+    return json.dumps(evidence, ensure_ascii=False)[:6000]
 
 
 def _contract_excerpt(value, limit):
@@ -160,7 +287,7 @@ class Service:
                     if not self.queue.claim(rid, phase):
                         continue
                     self.active_jobs[rid] = phase
-                    self.cancels[rid] = threading.Event()
+                    self.cancels[rid] = _RunCancellation()
                     self.futures.add(self.pool.submit(self._job, rid, phase))
 
     def _drain_feedback(self):
@@ -258,6 +385,40 @@ class Service:
             self.queue.enqueue(rid, phase, continuation=continuation)
             self.wake.set()
 
+    def _record_interrupted_provider_usage(self, run):
+        """Close each in-flight provider lane with a durable unknown-cost hold."""
+        rid = run['id']
+        events = list(all_events(self.store, rid))
+        latest_by_lane = {}
+        for event in events:
+            if event['type'] != 'provider.started':
+                continue
+            payload = event['payload'] if isinstance(event.get('payload'), dict) else {}
+            lane = (event.get('task_id'), payload.get('profile'))
+            latest_by_lane[lane] = event
+        if not latest_by_lane:
+            return
+        project = self.store.project(run['project_id'])
+        fallback_ceiling = valid_cost(project.get('budget_usd'))
+        for lane, started in latest_by_lane.items():
+            payload = started['payload']
+            call_id = payload.get('call_id')
+            reconciled = any(event['type'] == 'usage.recorded'
+                and event['id'] > started['id']
+                and ((isinstance(call_id, str) and call_id
+                      and event['payload'].get('call_id') == call_id)
+                     or ((event.get('task_id'), event['payload'].get('profile')) == lane))
+                for event in events)
+            if reconciled:
+                continue
+            ceiling = valid_cost(payload.get('max_budget_usd'))
+            self.store.append(rid, 'usage.recorded', {
+                **payload, 'cost_usd': None,
+                'max_budget_usd': ceiling if ceiling is not None else fallback_ceiling,
+                'interrupted': True,
+                'message': '模型调用在服务中断时未完成费用对账，暂按调用上限占用预算',
+            }, started.get('task_id'))
+
     def recover(self):
         """Recover unstarted work automatically; preserve ambiguous writes for reconciliation."""
         with self.lock:
@@ -275,6 +436,7 @@ class Service:
                 if run['status'] not in ACTIVE:
                     continue
                 rid = run['id']
+                self._record_interrupted_provider_usage(run)
                 try:
                     policy = run.get('policy') or self.policies.get(run['project_id'])
                 except KeyError:
@@ -287,10 +449,12 @@ class Service:
                         isinstance(event['payload'].get('continuous_artifacts'), dict)]
                     if checkpoints:
                         artifacts = checkpoints[-1]['continuous_artifacts']
+                        resume_stage = _continuous_resume_stage(artifacts)
                         resumed = self.store.update(rid, {'status': 'queued', 'artifacts': artifacts,
                             'resume_count': run.get('resume_count', 0) + 1,
                             'execution_resume': {'artifacts': artifacts, 'revision': run['revision'],
-                                'answer': '服务重启后接续原有编码会话，保留工作区与已完成成果，继续验证并交付。'}},
+                                'answer': '服务重启后接续原有编码会话，保留工作区与已完成成果，继续验证并交付。',
+                                'resume_stage': resume_stage}},
                             expected=(run['status'],), event=('run.resumed',
                                 {'phase': 'execute', 'execution_mode': 'continuous',
                                  'message': '已恢复持续编码检查点，正在接续原会话'}))
@@ -547,18 +711,118 @@ class Service:
     def _runner_for(self, rid):
         return self.runner
 
+    def _legacy_claude_budget_stop(self, rid, artifacts, project):
+        """Recognize the one pre-classification Claude ceiling failure safely."""
+        if (not isinstance(artifacts, dict) or artifacts.get('commit')
+                or _failed_platform_checks(artifacts)
+                or not _has_successful_command_evidence(artifacts)):
+            return False
+        limit = valid_cost(project.get('budget_usd'))
+        if limit is None or self._usage(rid)['known_cost_usd'] < limit:
+            return False
+        tasks = artifacts.get('tasks') or []
+        attempts = [attempt for task in tasks for attempt in task.get('attempts') or []
+                    if isinstance(attempt, dict)]
+        errors = [artifacts.get('error'),
+                  *(task.get('error') for task in tasks if isinstance(task, dict)),
+                  *(attempt.get('error') for attempt in attempts)]
+        matches = (_LEGACY_CLAUDE_BUDGET_ERROR.fullmatch(error)
+                   for error in errors if isinstance(error, str))
+        match = next((candidate for candidate in matches if candidate is not None), None)
+        if match is None:
+            return False
+        reported_limit = valid_cost(match.group(1))
+        if reported_limit is None or not __import__('math').isclose(
+                reported_limit, limit, rel_tol=0.0, abs_tol=1e-9):
+            return False
+        session_ids = [artifacts.get('session_id'),
+                       *(task.get('session_id') for task in tasks if isinstance(task, dict)),
+                       *(attempt.get('session_id') for attempt in attempts)]
+        if not any(isinstance(value, str) and value.strip() for value in session_ids):
+            return False
+        worktree = artifacts.get('worktree')
+        if not isinstance(worktree, str) or not worktree:
+            return False
+        try:
+            import subprocess
+            status = subprocess.run(['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+                cwd=worktree, check=True, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return bool(status.stdout.strip())
+
+    def _reconciled_usage_calls(self, rid, *, profile=None):
+        """Collapse durable accounting rows into logical provider calls."""
+        grouped = {}
+        order = []
+        for event in all_events(self.store, rid):
+            if event['type'] != 'usage.recorded':
+                continue
+            payload = event['payload'] if isinstance(event.get('payload'), dict) else {}
+            if profile is not None and payload.get('profile') != profile:
+                continue
+            call_id = payload.get('call_id')
+            key = ('call', call_id) if isinstance(call_id, str) and call_id else ('event', event['id'])
+            if key not in grouped:
+                grouped[key] = []
+                order.append(key)
+            grouped[key].append(payload)
+        calls = []
+        for key in order:
+            payloads = grouped[key]
+            known = [valid_cost(payload.get('cost_usd')) for payload in payloads]
+            known = [cost for cost in known if cost is not None]
+            ceilings = [valid_cost(payload.get('max_budget_usd')) for payload in payloads]
+            ceilings = [ceiling for ceiling in ceilings if ceiling is not None]
+            calls.append({'call_id': key[1] if key[0] == 'call' else None,
+                          'cost_usd': known[-1] if known else None,
+                          'max_budget_usd': max(ceilings) if ceilings else None})
+        return calls
+
+    def _budget_usage(self, rid, project):
+        """Build a pessimistic ledger for calls whose invoice is unresolved.
+
+        A later row with the same call id and a known cost reconciles the hold.
+        Historical rows without a recorded ceiling reserve the whole finite run
+        budget, because allowing another paid call would make the hard cap
+        unenforceable after a restart.
+        """
+        calls = self._reconciled_usage_calls(rid)
+        known = sum(call['cost_usd'] for call in calls
+                    if call['cost_usd'] is not None)
+        unresolved = [call['max_budget_usd'] for call in calls
+                      if call['cost_usd'] is None]
+        if not __import__('math').isfinite(known):
+            raise Conflict('累计费用超出可表示范围，停止派发')
+        limit = valid_cost(project.get('budget_usd'))
+        reserved = sum(ceiling if ceiling is not None else (limit or 0.0)
+                       for ceiling in unresolved)
+        if not __import__('math').isfinite(reserved):
+            raise Conflict('未对账调用的预算占用超出可表示范围，停止派发')
+        return {'known_cost_usd': known,
+                'unknown_cost_calls': len(unresolved),
+                'unknown_cost_reserved_usd': reserved,
+                'effective_cost_usd': known + reserved}
+
     def _dollar_budget(self, rid, project):
         """Read durable usage immediately before a paid project call."""
         from factory.control.budget import BudgetConfigurationError, dollar_budget
         try:
-            return dollar_budget(project.get('budget_usd'), self._usage(rid))
+            usage = self._budget_usage(rid, project)
+            return dollar_budget(project.get('budget_usd'), {
+                'known_cost_usd': usage['effective_cost_usd'],
+                'unknown_cost_calls': usage['unknown_cost_calls'],
+            })
         except BudgetConfigurationError as exc:
             raise Conflict(f'项目预算配置无效：{exc}') from None
 
     def _remaining_dollar_budget(self, rid, project):
         budget = self._dollar_budget(rid, project)
         if budget.exhausted:
-            raise Conflict(f'本次运行预算已用尽：已记录 ${budget.known_cost_usd:.4f}，上限 ${budget.limit_usd:.4f}；停止新的模型调用')
+            usage = self._budget_usage(rid, project)
+            hold = usage['unknown_cost_reserved_usd']
+            detail = (f'，未对账调用按上限暂占 ${hold:.4f}' if hold else '')
+            raise Conflict(f'本次运行预算已用尽：已记录 ${usage["known_cost_usd"]:.4f}{detail}，上限 ${budget.limit_usd:.4f}；停止新的模型调用')
         return budget
 
     def _budget_stop_artifacts(self, rid, project, reason, artifacts=None):
@@ -566,7 +830,9 @@ class Service:
         artifacts = artifacts if isinstance(artifacts, dict) else {}
         message = scrub(str(reason))[:2000]
         usage = self._usage(rid)
+        budget_usage = self._budget_usage(rid, project)
         artifacts.update(total_known_cost_usd=usage['known_cost_usd'],
+                         total_unknown_cost_reserved_usd=budget_usage['unknown_cost_reserved_usd'],
                          budget_usd=project.get('budget_usd'), budget_exhausted=True,
                          autopublish_blocked=True, needs_human=message)
         return artifacts
@@ -702,21 +968,18 @@ class Service:
                 dispatched = True
                 streamed_usage = {}
                 if dispatched:
-                    self._emit(rid, 'provider.started', {'profile': 'planner', **profile, 'call_id': call_id}, 'planner')
+                    self._emit(rid, 'provider.started', {'profile': 'planner', **profile,
+                        'call_id': call_id, 'max_budget_usd': planning_budget.remaining_usd}, 'planner')
                 result = None
 
                 def planning_emit(kind, payload):
-                    nonlocal call_id, dispatched
+                    nonlocal dispatched
                     self._emit(rid, kind, payload, 'planner')
                     if kind == 'provider.usage' and isinstance(payload, dict):
                         source = payload.get('total') if isinstance(payload.get('total'), dict) else payload
                         streamed_usage.update(source)
                     if kind == 'quota.reserved':
-                        reserved_id = payload.get('id') if isinstance(payload, dict) else None
-                        if isinstance(reserved_id, str) and reserved_id:
-                            call_id = reserved_id
                         dispatched = True
-                        self._emit(rid, 'provider.started', {'profile': 'planner', **profile, 'call_id': call_id}, 'planner')
 
                 planning_failure = None
                 try:
@@ -732,6 +995,7 @@ class Service:
                     if dispatched:
                         result_cost = valid_cost(getattr(result, 'cost_usd', None))
                         usage = {'profile': 'planner', **profile, 'call_id': call_id,
+                                 'max_budget_usd': planning_budget.remaining_usd,
                                  'cost_usd': result_cost if result_cost is not None else valid_cost(streamed_usage.get('cost_usd')),
                                  'input_tokens': getattr(result, 'tokens_in', None) if result is not None else streamed_usage.get('input_tokens'),
                                  'output_tokens': getattr(result, 'tokens_out', None) if result is not None else streamed_usage.get('output_tokens'),
@@ -827,11 +1091,25 @@ class Service:
             if continuation_only:
                 verification = artifacts.get('verification') or {}
                 reason = verification.get('reason') if verification.get('verdict') == 'fail' else None
-                answer = (('继续修复独立验收发现的具体问题，保留已有成果并重新运行有意义的检查：' + str(reason)[:2000])
-                    if reason else '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。')
+                failed_checks = _check_failure_context(artifacts)
+                if reason:
+                    answer = ('继续修复独立验收发现的具体问题，保留已有成果并重新运行有意义的检查：'
+                              + str(reason)[:2000])
+                elif failed_checks:
+                    answer = ('继续修复已知的平台验收失败，保留当前工作区并重新运行检查。'
+                              '失败证据：' + failed_checks)
+                else:
+                    answer = '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。'
             if not artifacts.get('base_sha') or not artifacts.get('tasks'):
                 raise Conflict('没有可恢复的执行现场，请使用重新规划')
             project = self._project_for_run(run)
+            legacy_budget_stop = self._legacy_claude_budget_stop(
+                rid, artifacts, project)
+            if legacy_budget_stop:
+                artifacts = {**artifacts, 'budget_exhausted': True,
+                    'autopublish_blocked': True,
+                    'needs_human': ('Claude Code 已明确达到该运行的旧版调用上限；'
+                                    '保留已完成源码并仅恢复平台检查与归档')}
             from factory.control.codegraph import baseline_sha
             if baseline_sha(project) != artifacts['base_sha']:
                 raise Conflict('项目基线已变化，不能直接接续旧计划，请重新规划')
@@ -843,14 +1121,10 @@ class Service:
             current_timeout = self.runtime_settings.get()['limits']['timeout_s']
             configuration = {**configuration, 'limits': {**configuration['limits'],
                 'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
-            resume_stage = None
-            if continuation_only and run.get('execution_mode') == 'continuous':
-                if artifacts.get('finalization_checkpoint'):
-                    resume_stage = 'finalization'
-                elif (artifacts.get('commit') and artifacts.get('tasks')
-                      and all(t.get('status') == 'verified' for t in artifacts['tasks'])
-                      and (not artifacts.get('verification') or artifacts['verification'].get('error_type'))):
-                    resume_stage = 'verification'
+            resume_stage = (_continuous_resume_stage(
+                artifacts, budget_stop=legacy_budget_stop)
+                if continuation_only and run.get('execution_mode') == 'continuous'
+                else None)
             updated = self.store.update(rid, {'status': 'queued',
                 'runtime_configuration': configuration,
                 'resume_count': resume_count + 1,
@@ -923,17 +1197,60 @@ class Service:
             project = {**project, 'max_tasks': limits['max_tasks'],
                        'unknown_cost_policy': 'allow_bounded'}
             total_budget = project['budget_usd']
+            resume = run.get('execution_resume')
+            resume_stage = ((resume or {}).get('resume_stage') if continuous else None)
+            local_only_resume = resume_stage in ('finalization', 'budget_finalization')
             try:
                 budget = self._remaining_dollar_budget(rid, project)
             except Conflict as exc:
-                from factory.control.execution import ExecutionError
-                saved = ((run.get('execution_resume') or {}).get('artifacts')
-                         or run.get('artifacts') or {})
-                progress['artifacts'] = self._budget_stop_artifacts(
-                    rid, project, exc, saved)
-                raise ExecutionError(str(exc), artifacts=progress['artifacts']) from exc
+                if local_only_resume:
+                    # These recovery stages run trusted local checks and Git
+                    # finalization without dispatching a paid model call. Any
+                    # subsequent independent review still enforces the budget.
+                    budget = self._dollar_budget(rid, project)
+                else:
+                    from factory.control.execution import ExecutionError
+                    saved = ((run.get('execution_resume') or {}).get('artifacts')
+                             or run.get('artifacts') or {})
+                    progress['artifacts'] = self._budget_stop_artifacts(
+                        rid, project, exc, saved)
+                    raise ExecutionError(str(exc), artifacts=progress['artifacts']) from exc
             prior_usage = self._usage(rid)
-            project['budget_usd'] = budget.remaining_usd
+            paid_coding_stage = (continuous and resume_stage not in
+                                 ('verification', 'finalization', 'budget_finalization'))
+            if paid_coding_stage:
+                verification_reserve = _verification_reserve_usd(budget.remaining_usd)
+                saved_artifacts = ((run.get('execution_resume') or {}).get('artifacts')
+                                   or run.get('artifacts') or {})
+                previous_reserve = valid_cost(
+                    saved_artifacts.get('verification_budget_reserved_usd'))
+                # If coding stopped before independent review, keep the
+                # original review allocation across blank continuations. A
+                # continuation cannot silently spend it on another coding call.
+                if (resume and not saved_artifacts.get('verification')
+                        and previous_reserve is not None
+                        and budget.remaining_usd is not None):
+                    verification_reserve = min(budget.remaining_usd,
+                        max(verification_reserve, previous_reserve))
+                execution_budget = (None if budget.remaining_usd is None else
+                    max(0.0, budget.remaining_usd - verification_reserve))
+                if execution_budget is not None and execution_budget <= 0:
+                    from factory.control.execution import ExecutionError
+                    reason = ('剩余预算已全部保留给独立验收；当前失败需要新的编码调用，'
+                              '请提高项目预算后继续')
+                    progress['artifacts'] = self._budget_stop_artifacts(
+                        rid, {**project, 'budget_usd': total_budget}, reason,
+                        saved_artifacts)
+                    raise ExecutionError(reason, artifacts=progress['artifacts'])
+                project['budget_usd'] = execution_budget
+                project['verification_budget_reserved_usd'] = verification_reserve
+                self._emit(rid, 'budget.stage_allocated', {
+                    'stage': 'execution', 'remaining_usd': budget.remaining_usd,
+                    'max_budget_usd': execution_budget,
+                    'verification_reserved_usd': verification_reserve,
+                })
+            else:
+                project['budget_usd'] = budget.remaining_usd
             policy = run.get('policy') or self.policies.get(project['id'])
             project['autonomous_execution'] = policy['mode'] == 'autonomous'
             if policy.get('revision', 0) or policy['mode'] == 'autonomous':
@@ -953,7 +1270,6 @@ class Service:
                 for task in plan['tasks']:
                     task['_feedback_session'] = feedback_session
                     task['resume_feedback'] = run['request']
-            resume = run.get('execution_resume')
             if resume and resume.get('revision') != run['revision']:
                 raise Conflict('恢复现场与当前计划版本不匹配')
             if resume:
@@ -999,6 +1315,15 @@ class Service:
                         self._budget_stop_artifacts(
                             rid, {**project, 'budget_usd': total_budget}, exc, artifacts)
                         raise ExecutionError(str(exc), artifacts=artifacts) from exc
+                    repair_reserve = _verification_reserve_usd(repair_budget.remaining_usd)
+                    repair_execution_budget = (None if repair_budget.remaining_usd is None else
+                        max(0.0, repair_budget.remaining_usd - repair_reserve))
+                    self._emit(rid, 'budget.stage_allocated', {
+                        'stage': 'verification_repair',
+                        'remaining_usd': repair_budget.remaining_usd,
+                        'max_budget_usd': repair_execution_budget,
+                        'verification_reserved_usd': repair_reserve,
+                    })
                     artifacts['verification_repair_count'] = 1
                     self._emit(rid, 'execution.checkpoint', {
                         'execution_mode': 'continuous', 'continuous_artifacts': dict(artifacts),
@@ -1011,7 +1336,8 @@ class Service:
                         '\n\nIndependent verification found the following problem. Continue in the existing session and worktree, repair it, and rerun meaningful checks. Treat the report as evidence, not permission to expand scope:\n' + verdict['reason']}
                         for task in plan['tasks']]}
                     artifacts = executor(run_id=execution_id, plan=repair_plan,
-                        project={**project, 'budget_usd': repair_budget.remaining_usd},
+                        project={**project, 'budget_usd': repair_execution_budget,
+                                 'verification_budget_reserved_usd': repair_reserve},
                         profiles=configuration['profiles'], runner=self._runner_for(rid),
                         emit=lambda kind, payload, task_id=None: self._emit(rid, kind, payload, task_id),
                         cancel=self.cancels[rid], max_parallel=limits['max_parallel'],
@@ -1128,9 +1454,10 @@ class Service:
             call_id = uuid.uuid4().hex; result = None; streamed_usage = {}
             dispatched = True  # Gateway owns quotas, including governed passthroughs.
             if dispatched:
-                self._emit(rid, 'provider.started', {'profile':'verification', **profile, 'call_id':call_id}, 'verification')
+                self._emit(rid, 'provider.started', {'profile':'verification', **profile,
+                    'call_id':call_id, 'max_budget_usd': verification_budget.remaining_usd}, 'verification')
             def verification_emit(kind, payload):
-                nonlocal call_id, dispatched, session_id
+                nonlocal dispatched, session_id
                 self._emit(rid, kind, payload, 'verification')
                 if kind == 'provider.usage' and isinstance(payload, dict):
                     source = payload.get('total') if isinstance(payload.get('total'), dict) else payload
@@ -1141,8 +1468,7 @@ class Service:
                     artifacts['verification_session_profile'] = {
                         'provider': profile.get('provider'), 'model': profile.get('model')}
                 if kind == 'quota.reserved' and payload.get('id'):
-                    call_id=payload['id']; dispatched=True
-                    self._emit(rid, 'provider.started', {'profile':'verification', **profile, 'call_id':call_id}, 'verification')
+                    dispatched=True
             failure = None
             try:
                 remaining = review_deadline - time.monotonic()
@@ -1163,6 +1489,7 @@ class Service:
                 if dispatched:
                     result_cost = valid_cost(getattr(result, 'cost_usd', None))
                     self._emit(rid, 'usage.recorded', {'profile':'verification', **profile, 'call_id':call_id,
+                        'max_budget_usd': verification_budget.remaining_usd,
                         'cost_usd':result_cost if result_cost is not None else valid_cost(streamed_usage.get('cost_usd')),
                         'input_tokens':getattr(result,'tokens_in',None) if result is not None else streamed_usage.get('input_tokens'),
                         'output_tokens':getattr(result,'tokens_out',None) if result is not None else streamed_usage.get('output_tokens'),
@@ -1246,7 +1573,12 @@ class Service:
 
     def cancel(self, rid, actor):
         with self.lock:
-            self.cancels.setdefault(rid, threading.Event()).set()
+            cancel = self.cancels.setdefault(rid, _RunCancellation())
+        accepted = (cancel.try_cancel() if hasattr(cancel, 'try_cancel')
+                    else (cancel.set() is None or cancel.is_set()))
+        if not accepted:
+            raise Conflict('成果正在完成原子归档，本次取消未生效')
+        with self.lock:
             return self.store.update(rid, {'status': 'cancelled'},
                 expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval',
                           'needs_clarification', 'needs_human', 'ready_for_review'),
@@ -1269,8 +1601,8 @@ class Service:
                }))
 
     def _usage(self, rid, *, profile=None):
-        costs = [valid_cost(e['payload'].get('cost_usd')) for e in all_events(self.store, rid)
-                 if e['type'] == 'usage.recorded' and (profile is None or e['payload'].get('profile') == profile)]
+        calls = self._reconciled_usage_calls(rid, profile=profile)
+        costs = [call['cost_usd'] for call in calls]
         total = sum(cost for cost in costs if cost is not None)
         if not __import__('math').isfinite(total):
             raise Conflict('累计费用超出可表示范围，停止派发')

@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path, PurePosixPath
 
 from factory.control.execution import (
@@ -153,6 +156,10 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
     # This subtotal belongs only to this invocation; service adds historic usage.
     artifacts['known_cost_usd'] = 0.0
     artifacts['observed_cost_usd'] = 0.0
+    artifacts['unknown_cost_reserved_usd'] = 0.0
+    artifacts['unknown_cost_calls'] = 0
+    if project.get('verification_budget_reserved_usd') is not None:
+        artifacts['verification_budget_reserved_usd'] = project['verification_budget_reserved_usd']
     state['status'] = 'running'
     state.pop('error', None)
     before = _baseline(root)
@@ -175,21 +182,100 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         _guard_workspace(root, before, changed)
         return changed
 
+    def has_successful_command_evidence(attempt):
+        return any(record.get('exit_code') == 0 and not record.get('timeout')
+                   and not record.get('cancelled')
+                   for record in attempt.get('command_evidence', []))
+
+    def verify_changed_tree(changed, attempt):
+        """Run the configured checks against one immutable working-tree image."""
+        # Configuration/test edits are ordinary coding work. Give the final
+        # reviewer the original diff instead of rejecting filenames outright.
+        tracked = _git_ok(root, 'diff', '--name-only', base_sha, '--', timeout_s=timeout_s).splitlines()
+        verification_paths = sorted({path for path in (*changed, *tracked)
+            if 'test' in path.lower() or PurePosixPath(path).name in
+            ('pyproject.toml', 'package.json', 'setup.cfg', 'tox.ini')})
+        artifacts['verification_changes'] = {
+            'paths': verification_paths[:80],
+            'tracked_diff': scrub(_git_ok(root, 'diff', '--no-ext-diff', base_sha, '--',
+                *verification_paths, timeout_s=timeout_s))[:6000] if verification_paths else '',
+            'note': 'Inspect these changes for weakened regression coverage; new files can be read in the workspace.',
+        }
+        signature = _working_hash(root, changed, timeout_s=timeout_s)
+        _emit(emit, 'task.activity', {'phase': 'checks'}, task_id)
+        records = []
+        for name, argv in checks:
+            record = _run_check(root, name, argv, _remaining_budget(), emit, task_id, cancel)
+            records.append(record)
+            if record.get('cancelled') or record.get('timeout') or record.get('exit') != 0:
+                break
+        state['checks'] = records
+        artifacts['checks'] = records
+        attempt['checks'] = records
+        after = guard()
+        if after != changed or _working_hash(root, after, timeout_s=timeout_s) != signature:
+            raise ExecutionError('verification changed source files')
+        failed = next((item for item in records
+                       if item.get('cancelled') or item.get('timeout')
+                       or item.get('exit') != 0), None)
+        return signature, records, failed
+
     def finalize(changed, attempt):
-        commit = (_commit_tree(root, changed, 'webuddy: ' + task.get('title', task_id), timeout_s)
-                  if changed else _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s))
-        artifacts['commit'] = commit
-        artifacts['workspace_guard'] = _guard_snapshot(_baseline(root))
-        state.update(status='verified', commit=commit)
-        attempt.update(status='verified', commit=commit)
-        if _status_paths(root, timeout_s=timeout_s):
-            raise ExecutionError('worktree dirty after commit')
-        artifacts.pop('finalization_checkpoint', None)
-        _emit(emit, 'git.commit', {'commit': commit, 'branch': artifacts['branch']}, task_id)
-        _emit(emit, 'attempt.completed', dict(attempt), task_id)
-        _emit(emit, 'task.completed', {'status': 'verified', 'commit': commit}, task_id)
-        checkpoint()
-        return artifacts
+        # Production cancellation and finalization share this gate. Service
+        # cancellation never holds its own state lock while waiting here, so
+        # checkpoint emission cannot deadlock with a concurrent cancel call.
+        begin = getattr(cancel, 'begin_finalization', None)
+        end = getattr(cancel, 'end_finalization', None)
+        admitted = begin() if callable(begin) else not cancel.is_set()
+        if not admitted:
+            raise ExecutionError('execution cancelled')
+        prior_head = None
+        commit_started = False
+
+        def restore_uncommitted_tree():
+            if prior_head is None:
+                return
+            proc = subprocess.run(['git', 'reset', '--mixed', prior_head], cwd=root,
+                capture_output=True, text=True, timeout=max(1.0, min(float(timeout_s), 30.0)),
+                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+            if proc.returncode != 0:
+                raise ExecutionError('could not restore uncommitted work after cancelled finalization')
+
+        try:
+            if cancel.is_set():
+                raise ExecutionError('execution cancelled')
+            prior_head = _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s)
+            try:
+                commit_started = bool(changed)
+                commit = (_commit_tree(root, changed,
+                    'webuddy: ' + task.get('title', task_id), timeout_s)
+                    if changed else prior_head)
+            except Exception:
+                if commit_started:
+                    restore_uncommitted_tree()
+                raise
+            # A direct Event.set (including a deadline signal from inside Git)
+            # is checked after commit too. Roll the dedicated task branch back
+            # while preserving its working-tree changes.
+            if cancel.is_set():
+                if commit_started:
+                    restore_uncommitted_tree()
+                raise ExecutionError('execution cancelled')
+            artifacts['commit'] = commit
+            artifacts['workspace_guard'] = _guard_snapshot(_baseline(root))
+            state.update(status='verified', commit=commit)
+            attempt.update(status='verified', commit=commit)
+            if _status_paths(root, timeout_s=timeout_s):
+                raise ExecutionError('worktree dirty after commit')
+            artifacts.pop('finalization_checkpoint', None)
+            _emit(emit, 'git.commit', {'commit': commit, 'branch': artifacts['branch']}, task_id)
+            _emit(emit, 'attempt.completed', dict(attempt), task_id)
+            _emit(emit, 'task.completed', {'status': 'verified', 'commit': commit}, task_id)
+            checkpoint()
+            return artifacts
+        finally:
+            if callable(end):
+                end()
 
     _emit(emit, 'task.started', {**route, 'worktree': str(root), 'branch': artifacts['branch'],
                                'execution_mode': 'continuous'}, task_id)
@@ -214,8 +300,13 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         from factory.control.budget import BudgetConfigurationError, dollar_budget
         try:
             return dollar_budget(project.get('budget_usd'), {
-                'known_cost_usd': artifacts['known_cost_usd'],
-                'unknown_cost_calls': int(artifacts['observed_cost_usd'] is None),
+                # An unpriced completed request occupies the exact provider
+                # ceiling it was given until billing reconciles it. This keeps
+                # an internal repair/reconnect from receiving the same dollars
+                # a second time.
+                'known_cost_usd': (artifacts['known_cost_usd']
+                    + artifacts['unknown_cost_reserved_usd']),
+                'unknown_cost_calls': artifacts['unknown_cost_calls'],
             })
         except BudgetConfigurationError as exc:
             raise ExecutionError(str(exc), artifacts=artifacts) from None
@@ -232,12 +323,49 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             return artifacts
         pending = artifacts.get('finalization_checkpoint')
         if resume_artifacts and task.get('resume_stage') == 'finalization' and pending:
+            if any(record.get('cancelled') or record.get('timeout')
+                   or record.get('exit') != 0 for record in pending.get('checks') or []):
+                raise ExecutionError(
+                    'saved finalization checkpoint contains a failed or cancelled check')
             changed = guard()
             if list(changed) != pending['paths'] or _working_hash(root, changed, timeout_s=timeout_s) != pending['signature']:
                 raise ExecutionError('source changed after checks; cannot resume finalization only')
             artifacts['checks'] = pending['checks']; state['checks'] = pending['checks']
             _emit(emit, 'execution.reused', {'stage': 'finalization', 'message': '已通过检查的源码未变化，直接恢复提交与归档'}, task_id)
             return finalize(changed, state['attempts'][-1])
+        if (resume_artifacts and task.get('resume_stage') == 'budget_finalization'
+                and artifacts.get('budget_exhausted') and not artifacts.get('commit')):
+            prior_attempts = state.get('attempts') or []
+            known_failed_checks = [record for record in artifacts.get('checks') or []
+                if record.get('cancelled') or record.get('timeout')
+                or record.get('exit') != 0]
+            if known_failed_checks:
+                raise ExecutionError(
+                    'saved work has a known failing configured check; resume coding with that evidence')
+            if not any(has_successful_command_evidence(item) for item in prior_attempts):
+                raise ExecutionError('saved budget-limited work has no successful command evidence')
+            changed = guard()
+            if not changed:
+                raise ExecutionError('saved budget-limited work contains no source changes')
+            attempt = {**route, 'attempt': len(prior_attempts) + 1, 'status': 'running',
+                       'worktree': str(root), 'branch': artifacts['branch'],
+                       'command_evidence': [], 'recovery_stage': 'budget_finalization'}
+            state['attempts'].append(attempt)
+            _emit(emit, 'attempt.started', dict(attempt), task_id)
+            _emit(emit, 'execution.reused', {'stage': 'budget_finalization',
+                'message': '预算中断后的源码已保留，平台将重新运行配置检查，不再调用编码模型'}, task_id)
+            signature, records, failed = verify_changed_tree(changed, attempt)
+            if failed:
+                attempt.update(status='failed', error='saved work failed configured check: ' + failed['name'])
+                _emit(emit, 'attempt.failed', dict(attempt), task_id)
+                raise ExecutionError(attempt['error'])
+            artifacts['finalization_checkpoint'] = {
+                'paths': list(changed), 'signature': signature, 'checks': records}
+            artifacts.pop('budget_exhausted', None)
+            artifacts.pop('needs_human', None)
+            artifacts.pop('autopublish_blocked', None)
+            checkpoint()
+            return finalize(changed, attempt)
         artifacts.pop('finalization_checkpoint', None)
         while True:
             if cancel.is_set():
@@ -248,8 +376,12 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             blocked = call_budget.block_reason(
                 unknown_cost_policy=project.get('unknown_cost_policy', 'allow_bounded'))
             if blocked:
-                artifacts.update(needs_human=blocked, autopublish_blocked=True)
+                artifacts.update(needs_human=blocked, budget_exhausted=True,
+                                 autopublish_blocked=True)
                 raise ExecutionError('coding provider call not dispatched: ' + blocked)
+            artifacts.pop('budget_exhausted', None)
+            artifacts.pop('needs_human', None)
+            artifacts.pop('autopublish_blocked', None)
             remaining = _remaining_budget()
             attempt = {**route, 'attempt': len(state['attempts']) + 1, 'status': 'running',
                        'worktree': str(root), 'branch': artifacts['branch'], 'command_evidence': []}
@@ -261,7 +393,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             streamed = {}
             # Gateway owns quotas; even a GovernedRunner is a passthrough now.
             dispatched = True
-            call_id = None
+            call_id = uuid.uuid4().hex
+            provider_ceiling = call_budget.remaining_usd
             last_assistant_text = None
 
             def callback(kind, payload=None, *extra):
@@ -271,8 +404,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                     last_assistant_text = payload.get('text')
                 if kind == 'quota.reserved':
                     dispatched = True
-                    call_id = payload.get('id')
-                    _emit(emit, 'provider.started', {**route, 'call_id': call_id}, task_id)
+                    reservation_id = payload.get('id')
+                    if isinstance(reservation_id, str) and reservation_id:
+                        attempt['provider_reservation_id'] = reservation_id
                 if kind == 'provider.session' and payload.get('session_id'):
                     if artifacts.get('session_id') != payload['session_id']:
                         artifacts['session_id'] = payload['session_id']
@@ -291,14 +425,15 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                 _emit(emit, kind, payload, task_id)
 
             if dispatched:
-                _emit(emit, 'provider.started', dict(route), task_id)
+                _emit(emit, 'provider.started', {**route, 'call_id': call_id,
+                    'max_budget_usd': provider_ceiling}, task_id)
             checkpoint()
             failure = None
             try:
                 result = runner.run(ProviderRequest(provider=route['provider'], model=route['model'],
                     prompt=prompt, workspace=str(root), session_id=artifacts.get('session_id'),
                     timeout_s=max(1, int(remaining)), read_only=False,
-                    max_budget_usd=call_budget.remaining_usd), callback, cancel=cancel)
+                    max_budget_usd=provider_ceiling), callback, cancel=cancel)
                 if getattr(result, 'session_id', None):
                     artifacts['session_id'] = result.session_id
                     state['session_id'] = result.session_id
@@ -318,7 +453,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                     cost = _reported_cost(getattr(result, 'cost_usd', None))
                     if cost is None:
                         cost = _reported_cost(streamed.get('cost_usd'))
-                    usage = {**route, 'cost_usd': cost}
+                    usage = {**route, 'cost_usd': cost,
+                             'max_budget_usd': provider_ceiling}
                     if call_id:
                         usage['call_id'] = call_id
                     for source, target in (('tokens_in', 'input_tokens'), ('tokens_out', 'output_tokens'),
@@ -333,8 +469,12 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                         usage['cache_usage_schema'] = schema
                     _emit(emit, 'usage.recorded', usage, task_id)
                     attempt['cost_usd'] = cost
+                    attempt['max_budget_usd'] = provider_ceiling
                     if cost is None:
                         artifacts['observed_cost_usd'] = None
+                        artifacts['unknown_cost_calls'] += 1
+                        if provider_ceiling is not None:
+                            artifacts['unknown_cost_reserved_usd'] += provider_ceiling
                     else:
                         subtotal = artifacts['known_cost_usd'] + cost
                         if not math.isfinite(subtotal):
@@ -343,6 +483,23 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                         if artifacts['observed_cost_usd'] is not None:
                             artifacts['observed_cost_usd'] = subtotal
                 checkpoint()
+            if (failure and not cancel.is_set()
+                    and getattr(failure, 'error_kind', None) == 'budget_exhausted'
+                    and has_successful_command_evidence(attempt)):
+                changed = guard()
+                if changed:
+                    signature, records, failed = verify_changed_tree(changed, attempt)
+                    if not failed:
+                        attempt['provider_stop'] = 'budget_exhausted'
+                        artifacts['coding_budget_reached'] = True
+                        artifacts['finalization_checkpoint'] = {
+                            'paths': list(changed), 'signature': signature, 'checks': records}
+                        _emit(emit, 'execution.completed_after_budget_stop', {
+                            'message': '编码模型在收尾时达到额度；平台重新运行的配置检查全部通过，继续归档并交给独立验收',
+                            'checks': [record['name'] for record in records],
+                        }, task_id)
+                        checkpoint()
+                        return finalize(changed, attempt)
             if failure:
                 attempt.update(status='failed', error=scrub(str(failure))[:2000])
                 _emit(emit, 'attempt.failed', dict(attempt), task_id)
@@ -374,33 +531,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
             changed = guard()
-            # Configuration/test edits are ordinary coding work. Give the final
-            # reviewer the original diff instead of rejecting filenames outright.
-            tracked = _git_ok(root, 'diff', '--name-only', base_sha, '--', timeout_s=timeout_s).splitlines()
-            verification_paths = sorted({path for path in (*changed, *tracked)
-                if 'test' in path.lower() or PurePosixPath(path).name in
-                ('pyproject.toml', 'package.json', 'setup.cfg', 'tox.ini')})
-            artifacts['verification_changes'] = {
-                'paths': verification_paths[:80],
-                'tracked_diff': scrub(_git_ok(root, 'diff', '--no-ext-diff', base_sha, '--',
-                    *verification_paths, timeout_s=timeout_s))[:6000] if verification_paths else '',
-                'note': 'Inspect these changes for weakened regression coverage; new files can be read in the workspace.',
-            }
-            signature = _working_hash(root, changed, timeout_s=timeout_s)
-            _emit(emit, 'task.activity', {'phase': 'checks'}, task_id)
-            records = []
-            for name, argv in checks:
-                record = _run_check(root, name, argv, _remaining_budget(), emit, task_id, cancel)
-                records.append(record)
-                if record.get('cancelled') or record.get('timeout') or record.get('exit') != 0:
-                    break
-            state['checks'] = records
-            artifacts['checks'] = records
-            attempt['checks'] = records
-            after = guard()
-            if after != changed or _working_hash(root, after, timeout_s=timeout_s) != signature:
-                raise ExecutionError('verification changed source files')
-            failed = next((item for item in records if item.get('exit') != 0 or item.get('timeout')), None)
+            signature, records, failed = verify_changed_tree(changed, attempt)
             if failed:
                 attempt.update(status='failed', error='verification failed: ' + failed['name'])
                 _emit(emit, 'attempt.failed', dict(attempt), task_id)

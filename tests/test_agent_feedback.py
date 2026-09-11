@@ -9,6 +9,20 @@ from factory.control.service import Service
 from factory.control.store import Store
 
 
+STABLE_CLAUDE_ORIGIN = {
+    'provider': 'claude', 'schema': 'stable_dynamic_sections_v1'}
+
+
+def mark_claude_session_configuration(store, rid, model, *, strategy='fresh'):
+    payload = {
+        'provider': 'claude', 'model': model, 'read_only': False,
+        'session_strategy': strategy,
+    }
+    if strategy == 'fresh':
+        payload['session_origin'] = dict(STABLE_CLAUDE_ORIGIN)
+    store.append(rid, 'provider.configuration', payload, 'coding')
+
+
 def setup(tmp_path, status='running'):
     store = Store(tmp_path / 'state.db')
     agents = AgentStore(store)
@@ -54,6 +68,7 @@ def test_feedback_successor_carries_only_verified_continuous_session_seed(tmp_pa
         'checks': [{'name': 'tests', 'exit': 0}],
         'tasks': [{'id': 'coding', 'status': 'verified'}],
     }})
+    mark_claude_session_configuration(store, rid, 'claude-opus-5')
 
     successor = agents.adopt_feedback(cid)
 
@@ -62,12 +77,96 @@ def test_feedback_successor_carries_only_verified_continuous_session_seed(tmp_pa
         'session_id': 'prior-session',
         'session_profile': {'provider': 'claude', 'model': 'claude-opus-5'},
         'previous_run_id': rid,
+        'session_origin': {
+            **STABLE_CLAUDE_ORIGIN,
+            'origin_run_id': rid,
+            'origin_session_id': 'prior-session',
+        },
     }
+    assert successor['feedback_session_strategy']['strategy'] == 'resume'
     event = next(item for item in store.events(successor['id'])
                  if item['type'] == 'feedback.adopted')
     assert event['payload']['session_continuation_available'] is True
+    assert event['payload']['session_strategy']['reason'] == 'verified_session_available'
     assert 'checks' not in successor['feedback_session']
     assert 'worktree' not in successor['feedback_session']
+
+
+def test_predeployment_claude_session_without_origin_marker_cold_starts_once(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'predeployment-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    # A current client can report that it resumed with the new settings, but
+    # that does not prove which prompt schema created this old remote session.
+    mark_claude_session_configuration(
+        store, rid, 'claude-sonnet-5', strategy='resume')
+    store.append(rid, 'usage.recorded', {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'input_tokens': 2_000_000, 'output_tokens': 20_000,
+        'cached_input_tokens': 1_500_000,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 3.0,
+    }, 'coding')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert 'feedback_session' not in successor
+    assert successor['feedback_session_strategy'] == {
+        'strategy': 'cold_start',
+        'reason': 'legacy_claude_session_origin_unknown',
+        'previous_run_id': rid,
+        'required_origin_schema': 'stable_dynamic_sections_v1',
+    }
+
+
+def test_stable_claude_origin_survives_multiple_feedback_resumes(tmp_path):
+    store, agents, cid, first_id = setup(tmp_path, 'ready_for_review')
+    store.update(first_id, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/first',
+        'branch': 'factory/first',
+        'commit': 'a' * 40,
+        'session_id': 'origin-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+    }})
+    mark_claude_session_configuration(store, first_id, 'claude-sonnet-5')
+    second = agents.adopt_feedback(cid)
+    origin = {
+        **STABLE_CLAUDE_ORIGIN,
+        'origin_run_id': first_id,
+        'origin_session_id': 'origin-session',
+    }
+    assert second['feedback_session']['session_origin'] == origin
+
+    # The SDK is allowed to return a derived session ID after resume. The
+    # origin marker remains attached to the durable lineage, not that ID.
+    store.update(second['id'], {
+        'status': 'ready_for_review',
+        'artifacts': {
+            'execution_mode': 'continuous',
+            'worktree': '/project/worktrees/second',
+            'branch': 'factory/second',
+            'commit': 'b' * 40,
+            'session_id': 'derived-session',
+            'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        },
+    })
+    mark_claude_session_configuration(
+        store, second['id'], 'claude-sonnet-5', strategy='resume')
+    agents.append_message(
+        cid, 'user', 'Apply one more narrow change', feedback_status='pending')
+
+    third = agents.adopt_feedback(cid)
+
+    assert third['feedback_session']['session_id'] == 'derived-session'
+    assert third['feedback_session']['session_origin'] == origin
+    assert third['feedback_session_strategy']['strategy'] == 'resume'
 
 
 def test_feedback_successor_does_not_seed_incomplete_provider_session(tmp_path):
@@ -84,9 +183,268 @@ def test_feedback_successor_does_not_seed_incomplete_provider_session(tmp_path):
     successor = agents.adopt_feedback(cid)
 
     assert 'feedback_session' not in successor
+    assert successor['feedback_session_strategy'] == {
+        'strategy': 'unavailable', 'reason': 'verified_session_unavailable'}
     event = next(item for item in store.events(successor['id'])
                  if item['type'] == 'feedback.adopted')
     assert event['payload']['session_continuation_available'] is False
+
+
+def test_large_uncached_claude_session_cold_starts_from_verified_project_state(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'large-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    store.append(rid, 'usage.recorded', {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'input_tokens': 2_856_526, 'output_tokens': 449_742,
+        'cached_input_tokens': 0, 'cache_creation_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 10.21,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert 'feedback_session' not in successor
+    assert successor['feedback_session_strategy'] == {
+        'strategy': 'cold_start',
+        'reason': 'large_uncached_claude_session',
+        'previous_run_id': rid,
+        'input_tokens': 2_856_526,
+        'cached_input_tokens': 0,
+        'input_limit': 500_000,
+    }
+    # Project truth and the current owner request still cross the boundary.
+    assert successor['feedback_predecessor_id'] == rid
+    assert 'Keep the new output and add CSV' in successor['request']
+    assert 'Build a tool' in successor['history']
+    event = next(item for item in store.events(successor['id'])
+                 if item['type'] == 'feedback.adopted')
+    assert event['payload']['session_continuation_available'] is False
+    assert event['payload']['session_strategy']['strategy'] == 'cold_start'
+
+
+def test_large_claude_session_with_real_cache_hits_remains_resumable(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'cached-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    store.append(rid, 'usage.recorded', {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'input_tokens': 2_000_000, 'output_tokens': 20_000,
+        'cached_input_tokens': 1_500_000, 'cache_creation_input_tokens': 40_000,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 3.0,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'cached-session'
+    assert successor['feedback_session_strategy']['strategy'] == 'resume'
+    assert successor['feedback_session_strategy']['cached_input_tokens'] == 1_500_000
+
+
+def test_planner_usage_never_inflates_coding_session_cache_decision(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'short-coding-session',
+        'session_profile': {'provider': 'claude', 'model': 'shared-model'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    common = {
+        'provider': 'claude', 'model': 'shared-model',
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1',
+    }
+    store.append(rid, 'usage.recorded', {
+        **common, 'profile': 'planner', 'input_tokens': 3_000_000,
+        'output_tokens': 50_000, 'cost_usd': 10.0,
+    }, 'planner')
+    store.append(rid, 'usage.recorded', {
+        **common, 'profile': 'standard', 'input_tokens': 100_000,
+        'output_tokens': 5_000, 'cost_usd': 1.0,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'shared-model')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'short-coding-session'
+    assert successor['feedback_session_strategy']['strategy'] == 'resume'
+    assert successor['feedback_session_strategy']['input_tokens'] == 100_000
+
+
+def test_same_call_usage_duplicate_does_not_double_session_input(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'deduplicated-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    usage = {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'call_id': 'same-call', 'input_tokens': 300_000, 'output_tokens': 10_000,
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 1.0,
+    }
+    store.append(rid, 'usage.recorded', usage, 'coding')
+    store.append(rid, 'usage.recorded', usage, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'deduplicated-session'
+    assert successor['feedback_session_strategy']['strategy'] == 'resume'
+    assert successor['feedback_session_strategy']['input_tokens'] == 300_000
+
+
+def test_same_call_unknown_usage_can_be_reconciled_to_known_usage(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'reconciled-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    identity = {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'call_id': 'reconciled-call',
+    }
+    store.append(rid, 'usage.recorded', {
+        **identity, 'input_tokens': None, 'cached_input_tokens': None,
+        'cost_usd': None, 'max_budget_usd': 3.0, 'interrupted': True,
+    }, 'coding')
+    store.append(rid, 'usage.recorded', {
+        **identity, 'input_tokens': 600_000, 'output_tokens': 20_000,
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 2.0,
+        'reconciled': True,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert 'feedback_session' not in successor
+    assert successor['feedback_session_strategy']['strategy'] == 'cold_start'
+    assert successor['feedback_session_strategy']['input_tokens'] == 600_000
+
+
+@pytest.mark.parametrize('later_payload', [
+    {
+        'input_tokens': 600_000, 'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1',
+    },
+    {'input_tokens': None, 'cached_input_tokens': None},
+])
+def test_same_call_conflict_or_later_unknown_is_conservative(tmp_path, later_payload):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'ambiguous-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    identity = {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'call_id': 'ambiguous-call',
+    }
+    store.append(rid, 'usage.recorded', {
+        **identity, 'input_tokens': 550_000, 'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1',
+    }, 'coding')
+    store.append(rid, 'usage.recorded', {
+        **identity, **later_payload,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'ambiguous-session'
+    assert successor['feedback_session_strategy'] == {
+        'strategy': 'resume', 'reason': 'cache_telemetry_untrusted'}
+
+
+def test_legacy_cache_schema_never_forces_session_cold_start(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'legacy-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-opus-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    store.append(rid, 'usage.recorded', {
+        'profile': 'strong', 'provider': 'claude', 'model': 'claude-opus-5',
+        'input_tokens': 600_000, 'output_tokens': 50_000,
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'legacy_combined_v0', 'cost_usd': 4.0,
+    }, 'coding')
+    store.append(rid, 'usage.recorded', {
+        'profile': 'strong', 'provider': 'claude', 'model': 'claude-opus-5',
+        'input_tokens': 2_400_000, 'output_tokens': 50_000,
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 8.0,
+    }, 'coding')
+    mark_claude_session_configuration(store, rid, 'claude-opus-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'legacy-session'
+    assert successor['feedback_session_strategy']['strategy'] == 'resume'
+    assert successor['feedback_session_strategy']['reason'] == 'cache_telemetry_untrusted'
+
+
+def test_legacy_usage_without_task_identity_conservatively_resumes(tmp_path):
+    store, agents, cid, rid = setup(tmp_path, 'ready_for_review')
+    store.update(rid, {'artifacts': {
+        'execution_mode': 'continuous',
+        'worktree': '/project/worktrees/previous',
+        'branch': 'factory/previous',
+        'commit': 'a' * 40,
+        'session_id': 'legacy-taskless-session',
+        'session_profile': {'provider': 'claude', 'model': 'claude-sonnet-5'},
+        'tasks': [{'id': 'coding', 'status': 'verified'}],
+    }})
+    store.append(rid, 'usage.recorded', {
+        'profile': 'standard', 'provider': 'claude', 'model': 'claude-sonnet-5',
+        'input_tokens': 2_000_000, 'output_tokens': 20_000,
+        'cached_input_tokens': 0,
+        'cache_usage_schema': 'separate_read_write_v1', 'cost_usd': 8.0,
+    })
+    mark_claude_session_configuration(store, rid, 'claude-sonnet-5')
+
+    successor = agents.adopt_feedback(cid)
+
+    assert successor['feedback_session']['session_id'] == 'legacy-taskless-session'
+    assert successor['feedback_session_strategy'] == {
+        'strategy': 'resume', 'reason': 'cache_telemetry_untrusted'}
 
 
 @pytest.mark.parametrize('status', ['running', 'verifying', 'publishing', 'awaiting_approval',

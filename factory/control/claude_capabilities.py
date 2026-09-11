@@ -9,10 +9,22 @@ WEB_TOOLS = ['WebSearch', 'WebFetch']
 RESEARCH_AGENT = 'webuddy-research'
 
 
-def effort():
-    value = os.getenv('WEBUDDY_CLAUDE_EFFORT', 'medium')
+def effort(*, read_only=None):
+    """Return an explicit effort without inheriting a person's CLI setting.
+
+    Coding agents need many short tool turns, so low effort is the useful
+    default there.  Independent review keeps medium effort.  The stage-specific
+    variables take precedence over the legacy global override so operators can
+    tune coding latency without weakening review.
+    """
+    stage_key = ('WEBUDDY_CLAUDE_REVIEW_EFFORT' if read_only
+                 else 'WEBUDDY_CLAUDE_CODING_EFFORT') if read_only is not None else None
+    value = ((os.getenv(stage_key) if stage_key else None)
+             or os.getenv('WEBUDDY_CLAUDE_EFFORT')
+             or ('medium' if read_only is not False else 'low'))
     if value not in {'low', 'medium', 'high', 'xhigh', 'max'}:
-        raise ValueError('WEBUDDY_CLAUDE_EFFORT must be low, medium, high, xhigh or max')
+        label = stage_key or 'WEBUDDY_CLAUDE_EFFORT'
+        raise ValueError(f'{label} must be low, medium, high, xhigh or max')
     return value
 
 

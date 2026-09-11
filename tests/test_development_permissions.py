@@ -39,11 +39,19 @@ def test_research_agent_cannot_override_scope():
 
 def test_effort_is_explicit_and_validated(monkeypatch):
     monkeypatch.delenv('WEBUDDY_CLAUDE_EFFORT', raising=False)
+    monkeypatch.delenv('WEBUDDY_CLAUDE_CODING_EFFORT', raising=False)
+    monkeypatch.delenv('WEBUDDY_CLAUDE_REVIEW_EFFORT', raising=False)
     assert effort() == 'medium'
+    assert effort(read_only=False) == 'low'
+    assert effort(read_only=True) == 'medium'
     monkeypatch.setenv('WEBUDDY_CLAUDE_EFFORT', 'high')
     assert effort() == 'high'
+    assert effort(read_only=False) == 'high'
+    monkeypatch.setenv('WEBUDDY_CLAUDE_CODING_EFFORT', 'low')
+    assert effort(read_only=False) == 'low'
+    assert effort(read_only=True) == 'high'
     monkeypatch.setenv('WEBUDDY_CLAUDE_EFFORT', 'unknown')
-    with pytest.raises(ValueError): effort()
+    with pytest.raises(ValueError): effort(read_only=True)
 
 
 def test_ignored_runtime_files_are_not_staged_but_source_is_inspected(tmp_path):
