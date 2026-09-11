@@ -34,14 +34,30 @@ class GitHubPublication:
             result.update(account=self.service.publisher.account(), **self.service.publisher.repositories(page=page))
         return result
 
-    def _editable(self, db, rid, project, revision):
+    def _editable(self, db, rid, project, revision, target_repository=None):
         if project.get('revision', 1) != revision:
             raise Conflict('项目设置已更新，请刷新成果页后重试')
         if rid in self.service.active_jobs:
             raise Conflict('成果现场仍在保存，请稍后发布')
+        other_active = [active_rid for active_rid in self.service.active_jobs if active_rid != rid]
+        if other_active:
+            active_same_project = db.execute(
+                "SELECT 1 FROM runs WHERE id IN (%s) "
+                "AND json_extract(data, '$.project_id')=? LIMIT 1" %
+                ','.join('?' for _ in other_active),
+                (*other_active, project['id'])).fetchone()
+            if active_same_project:
+                raise Conflict('项目还有正在收尾的运行，暂时不能更换 GitHub 仓库')
+        current_repository = project.get('repository', '')
+        first_binding = current_repository.startswith('local/')
+        same_repository = (isinstance(target_repository, str)
+            and current_repository.casefold() == target_repository.casefold())
+        blocking_statuses = (PROJECT_EDIT_BLOCKING - {'ready_for_review'}
+                             if target_repository is not None and (first_binding or same_repository)
+                             else PROJECT_EDIT_BLOCKING)
         busy = db.execute("SELECT 1 FROM runs WHERE id<>? AND json_extract(data, '$.project_id')=? "
-            "AND json_extract(data, '$.status') IN (%s) LIMIT 1" % ','.join('?' for _ in PROJECT_EDIT_BLOCKING),
-            (rid, project['id'], *sorted(PROJECT_EDIT_BLOCKING))).fetchone()
+            "AND json_extract(data, '$.status') IN (%s) LIMIT 1" % ','.join('?' for _ in blocking_statuses),
+            (rid, project['id'], *sorted(blocking_statuses))).fetchone()
         if busy:
             raise Conflict('项目还有进行中或待交付任务，暂时不能更换 GitHub 仓库')
 
@@ -56,10 +72,10 @@ class GitHubPublication:
             if run['status'] != 'ready_for_review':
                 raise Conflict('请先完成验证，再选择 GitHub 仓库')
             project = json.loads(db.execute('SELECT data FROM projects WHERE id=?', (run['project_id'],)).fetchone()[0])
-            self._editable(db, rid, project, revision)
             repository = metadata['full_name']
             if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or repository.startswith('local/'):
                 raise ValueError('GitHub 仓库名称无效')
+            self._editable(db, rid, project, revision, repository)
             for row in db.execute('SELECT id,data FROM projects WHERE id<>?', (project['id'],)):
                 if json.loads(row['data']).get('repository', '').casefold() == repository.casefold():
                     raise Conflict('该 GitHub 仓库已绑定其他项目')
@@ -123,9 +139,11 @@ class GitHubPublication:
                 self._save(rid, receipt)
             resume_bound = bool(receipt and receipt.get('bound_revision') == project['revision']
                 and project['repository'].casefold() == target.casefold())
-            if not resume_bound:
-                with self.store.connect() as db:
-                    self._editable(db, rid, project, expected_project_revision)
+            # A durable binding receipt lets a retry use the post-binding
+            # revision, but it never bypasses project activity checks.
+            editable_revision = project['revision'] if resume_bound else expected_project_revision
+            with self.store.connect() as db:
+                self._editable(db, rid, project, editable_revision, target)
             if receipt and receipt.get('state') == 'creating' and mode == 'create':
                 raise Conflict('上次创建仓库的结果尚未确认；请刷新仓库列表并选择该已有仓库继续，系统不会重复创建')
             receipt = receipt or {'target': target, 'mode': mode, 'state': 'prepared', 'created_at': now(),

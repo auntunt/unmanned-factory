@@ -74,6 +74,56 @@ def test_project_update_cas_busy_and_immutable_paths(app_env):
                       headers=headers).status_code == 409
 
 
+@pytest.mark.parametrize("active_status", [
+    "received", "planning", "queued", "running", "verifying", "publishing",
+])
+def test_budget_only_increase_ignores_historical_delivery_but_active_work_blocks(
+        app_env, active_status):
+    client, store, _, repo = app_env
+    headers = login(client)
+    created = project(client, repo, headers)
+    historical, _ = store.create_run(created["id"], "already verified")
+    store.update(historical["id"], {"status": "ready_for_review"})
+    paused, _ = store.create_run(created["id"], "resume after adding budget")
+    store.update(paused["id"], {"status": "needs_human"})
+
+    raised = client.put(f"/api/v2/projects/{created['id']}",
+                        json=_settings(created, budget_usd=created["budget_usd"] + 5),
+                        headers=headers)
+    assert raised.status_code == 200, raised.text
+    assert raised.json()["budget_usd"] == created["budget_usd"] + 5
+
+    active, _ = store.create_run(created["id"], "currently executing")
+    store.update(active["id"], {"status": active_status})
+    blocked = client.put(f"/api/v2/projects/{created['id']}",
+                         json=_settings(raised.json(), budget_usd=raised.json()["budget_usd"] + 5),
+                         headers=headers)
+    assert blocked.status_code == 409
+
+
+def test_budget_decrease_and_other_edits_stay_blocked_for_unfinished_runs(app_env):
+    client, store, _, repo = app_env
+    headers = login(client)
+    created = project(client, repo, headers)
+    paused, _ = store.create_run(created["id"], "paused for owner")
+    store.update(paused["id"], {"status": "needs_human"})
+
+    lowered = client.put(f"/api/v2/projects/{created['id']}",
+                         json=_settings(created, budget_usd=created["budget_usd"] - 1),
+                         headers=headers)
+    assert lowered.status_code == 409
+    lowered_and_renamed = client.put(f"/api/v2/projects/{created['id']}",
+        json=_settings(created, budget_usd=created["budget_usd"] - 1, name="Lower and rename"),
+        headers=headers)
+    assert lowered_and_renamed.status_code == 409
+
+    store.update(paused["id"], {"status": "ready_for_review"})
+    renamed = client.put(f"/api/v2/projects/{created['id']}",
+                         json=_settings(created, name="Renamed while delivery waits"),
+                         headers=headers)
+    assert renamed.status_code == 409
+
+
 def test_project_readiness_reports_dirty_head_and_missing_base(app_env):
     client, store, _, repo = app_env
     headers = login(client)

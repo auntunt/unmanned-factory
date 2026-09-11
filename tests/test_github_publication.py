@@ -11,13 +11,14 @@ from tests.test_workbench_app import app_env
 
 class Publisher:
     def __init__(self):
-        self.creates, self.uploads = 0, 0
+        self.creates, self.lookups, self.uploads = 0, 0, 0
         self.fail_create = self.fail_upload = False
 
     def account(self):
         return {'login': 'owner', 'avatar_url': '', 'html_url': 'https://github.com/owner'}
 
     def repository(self, repository):
+        self.lookups += 1
         return {'id': 7, 'full_name': repository, 'name': repository.split('/')[-1],
             'private': True, 'default_branch': 'main', 'html_url': 'https://github.com/' + repository,
             'permissions': {'push': True}}
@@ -78,6 +79,44 @@ def test_existing_repository_bind_publish_and_catalog(app_env):
     assert catalog['repository_url'] == 'https://github.com/owner/result'
 
 
+def test_historical_verified_run_does_not_block_current_first_publication(app_env):
+    client, store, svc, headers, p, rid = setup(app_env)
+    historical, _ = store.create_run(p['id'], 'Older verified delivery')
+    store.update(historical['id'], {'status': 'ready_for_review'})
+
+    result = svc.publish_github(rid, mode='existing', repository='owner/result',
+        expected_project_revision=p['revision'], actor='owner')
+
+    assert result['status'] == 'published'
+    # Publishing is safe, while advancing the local baseline remains explicit
+    # because another verified branch is still waiting for delivery.
+    assert result['artifacts']['baseline_sync']['status'] == 'needs_sync'
+    assert store.get(historical['id'])['status'] == 'ready_for_review'
+    assert store.project(p['id'])['repository'] == 'owner/result'
+
+
+def test_historical_verified_run_allows_same_repository_but_blocks_rebinding(app_env):
+    client, store, svc, headers, p, rid = setup(app_env)
+    with store.connect() as db:
+        bound = json.loads(db.execute('SELECT data FROM projects WHERE id=?', (p['id'],)).fetchone()[0])
+        bound.update(repository='owner/result', github_repository_id=7, github_base_branch='main')
+        db.execute('UPDATE projects SET data=? WHERE id=?', (json.dumps(bound), p['id']))
+    historical, _ = store.create_run(p['id'], 'Older verified delivery')
+    store.update(historical['id'], {'status': 'ready_for_review'})
+
+    result = svc.publish_github(rid, mode='bound', expected_project_revision=p['revision'], actor='owner')
+    assert result['status'] == 'published'
+    assert svc.publisher.lookups == 1
+
+    next_run, _ = store.create_run(p['id'], 'Another verified delivery')
+    store.update(next_run['id'], {'status': 'ready_for_review', 'artifacts': store.get(rid)['artifacts']})
+    from factory.control.store import Conflict
+    with pytest.raises(Conflict, match='待交付'):
+        svc.publish_github(next_run['id'], mode='existing', repository='owner/different',
+            expected_project_revision=store.project(p['id'])['revision'], actor='owner')
+    assert svc.publisher.lookups == 1
+
+
 def test_create_is_idempotent_even_with_stale_revision_after_success(app_env):
     client, store, svc, headers, p, rid = setup(app_env)
     request = dict(mode='create', name='result', private=True, expected_project_revision=p['revision'], actor='owner')
@@ -116,6 +155,40 @@ def test_stale_revision_and_active_project_do_not_create_remote(app_env):
     assert store.project(p['id'])['repository'].startswith('local/')
 
 
+def test_active_job_still_blocks_after_its_durable_status_has_settled(app_env):
+    client, store, svc, headers, p, rid = setup(app_env)
+    settling, _ = store.create_run(p['id'], 'finishing cancellation cleanup')
+    store.update(settling['id'], {'status': 'cancelled'})
+    svc.active_jobs[settling['id']] = 'execute'
+    try:
+        from factory.control.store import Conflict
+        with pytest.raises(Conflict, match='收尾'):
+            svc.publish_github(rid, mode='existing', repository='owner/result',
+                expected_project_revision=p['revision'], actor='owner')
+        assert svc.publisher.lookups == svc.publisher.creates == svc.publisher.uploads == 0
+        assert store.project(p['id'])['repository'].startswith('local/')
+    finally:
+        svc.active_jobs.pop(settling['id'], None)
+
+
+def test_publication_receipt_cannot_change_target_after_failed_upload(app_env):
+    client, store, svc, headers, p, rid = setup(app_env)
+    historical, _ = store.create_run(p['id'], 'Older verified delivery')
+    store.update(historical['id'], {'status': 'ready_for_review'})
+    svc.publisher.fail_upload = True
+    with pytest.raises(RuntimeError, match='network failure'):
+        svc.publish_github(rid, mode='existing', repository='owner/result',
+            expected_project_revision=p['revision'], actor='owner')
+
+    from factory.control.store import Conflict
+    with pytest.raises(Conflict, match='另一仓库'):
+        svc.publish_github(rid, mode='existing', repository='owner/different',
+            expected_project_revision=store.project(p['id'])['revision'], actor='owner')
+
+    assert svc.publisher.uploads == 1
+    assert store.project(p['id'])['repository'] == 'owner/result'
+
+
 def test_failed_upload_preserves_artifacts_and_retry_uses_bound_receipt(app_env):
     client, store, svc, headers, p, rid = setup(app_env)
     svc.publisher.fail_upload = True
@@ -124,6 +197,23 @@ def test_failed_upload_preserves_artifacts_and_retry_uses_bound_receipt(app_env)
     assert first.status_code == 502
     assert store.get(rid)['status'] == 'ready_for_review'
     assert store.get(rid)['artifacts']['commit']
+
+    # A receipt permits the stale pre-binding revision on retry, but cannot
+    # bypass activity which began after the first upload attempt.
+    concurrent, _ = store.create_run(p['id'], 'Concurrent work')
+    store.update(concurrent['id'], {'status': 'running'})
+    assert client.post(f'/api/v3/runs/{rid}/github-publish', json=body,
+                       headers=headers).status_code == 409
+    assert svc.publisher.uploads == 1
+    store.update(concurrent['id'], {'status': 'cancelled'})
+    svc.active_jobs[concurrent['id']] = 'execute'
+    try:
+        assert client.post(f'/api/v3/runs/{rid}/github-publish', json=body,
+                           headers=headers).status_code == 409
+        assert svc.publisher.uploads == 1
+    finally:
+        svc.active_jobs.pop(concurrent['id'], None)
+
     svc.publisher.fail_upload = False
     second = client.post(f'/api/v3/runs/{rid}/github-publish', json=body, headers=headers)
     assert second.status_code == 200, second.text

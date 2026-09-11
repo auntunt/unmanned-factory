@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import re
 import sqlite3
@@ -16,6 +17,8 @@ from factory.redact import redact_text
 
 ACTIVE = ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
 PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
+PROJECT_BUDGET_INCREASE_BLOCKING = PROJECT_EDIT_BLOCKING - {'ready_for_review'}
+PROJECT_BUDGET_DECREASE_BLOCKING = PROJECT_EDIT_BLOCKING | {'needs_human'}
 SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key)$')
 
 
@@ -143,10 +146,28 @@ class Store:
             current = int(project.get('revision', 1))
             if current != expected_revision:
                 raise Conflict('项目设置已更新，请重新加载后再保存')
+            effective = {key: value for key, value in changes.items()
+                         if project.get(key) != value}
+            old_budget, new_budget = project.get('budget_usd'), effective.get('budget_usd')
+            numeric_budget_change = (
+                'budget_usd' in effective
+                and type(old_budget) in (int, float)
+                and type(new_budget) in (int, float)
+                and math.isfinite(float(old_budget))
+                and math.isfinite(float(new_budget)))
+            if numeric_budget_change and new_budget < old_budget:
+                # A paused run may be relying on its current ceiling. Apply this
+                # protection even when the request edits other settings too.
+                blocking_statuses = PROJECT_BUDGET_DECREASE_BLOCKING
+            elif (set(effective) == {'budget_usd'} and numeric_budget_change
+                    and new_budget > old_budget):
+                blocking_statuses = PROJECT_BUDGET_INCREASE_BLOCKING
+            else:
+                blocking_statuses = PROJECT_EDIT_BLOCKING
             busy = db.execute("SELECT 1 FROM runs WHERE json_extract(data, '$.project_id')=? "
                               "AND json_extract(data, '$.status') IN (%s) LIMIT 1" %
-                              ','.join('?' for _ in PROJECT_EDIT_BLOCKING),
-                              (pid, *sorted(PROJECT_EDIT_BLOCKING))).fetchone()
+                              ','.join('?' for _ in blocking_statuses),
+                              (pid, *sorted(blocking_statuses))).fetchone()
             if busy is not None:
                 raise Conflict('项目存在进行中的运行，暂时不能修改设置')
             updated = {**project, **changes, 'revision': current + 1, 'updated_at': now()}
