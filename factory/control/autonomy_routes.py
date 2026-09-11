@@ -59,6 +59,11 @@ def _events(store, run_ids):
         json_extract(payload, '$.model') AS model,
         json_extract(payload, '$.provider') AS provider,
         json_extract(payload, '$.cost_usd') AS cost_usd,
+        json_extract(payload, '$.input_tokens') AS input_tokens,
+        json_extract(payload, '$.output_tokens') AS output_tokens,
+        json_extract(payload, '$.cached_input_tokens') AS cached_input_tokens,
+        json_extract(payload, '$.cache_creation_input_tokens') AS cache_creation_input_tokens,
+        json_extract(payload, '$.cache_usage_schema') AS cache_usage_schema,
         json_extract(payload, '$.attempts') AS attempts,
         json_extract(payload, '$.checks') AS checks,
         json_extract(payload, '$.message') AS message,
@@ -71,7 +76,9 @@ def _events(store, run_ids):
     for row in rows:
         event = {key: row[key] for key in ('id', 'run_id', 'task_id', 'type', 'at')}
         payload = {}
-        for key in ('profile', 'model', 'provider', 'cost_usd', 'attempts', 'checks', 'message', 'error', 'status', 'pr_url'):
+        for key in ('profile', 'model', 'provider', 'cost_usd', 'input_tokens', 'output_tokens',
+                    'cached_input_tokens', 'cache_creation_input_tokens', 'attempts', 'checks',
+                    'cache_usage_schema', 'message', 'error', 'status', 'pr_url'):
             value = _json_projection(row[key])
             if value is not None:
                 payload[key] = value
@@ -182,9 +189,35 @@ def overview(store, project_id=None):
             key = (str(payload.get('profile') or 'unknown'), str(payload.get('model') or '未记录型号'),
                    str(payload.get('provider') or '未记录供应商'))
             item = usage.setdefault(key, {'profile': key[0], 'model': key[1], 'provider': key[2], 'calls': 0,
-                                          'known_cost_usd': 0.0, 'unknown_cost_calls': 0})
+                                          'known_cost_usd': 0.0, 'unknown_cost_calls': 0,
+                                          'input_tokens': 0, 'output_tokens': 0,
+                                          'cached_input_tokens': 0,
+                                          'cache_creation_input_tokens': 0,
+                                          'token_usage_calls': 0, 'cache_usage_calls': 0})
             cost = valid_cost(payload.get('cost_usd'))
             item['calls'] += 1
+            incoming = payload.get('input_tokens')
+            outgoing = payload.get('output_tokens')
+            cache_read = payload.get('cached_input_tokens')
+            cache_created = payload.get('cache_creation_input_tokens')
+            incoming = incoming if type(incoming) is int and incoming >= 0 else None
+            outgoing = outgoing if type(outgoing) is int and outgoing >= 0 else None
+            cache_read = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            cache_created = cache_created if type(cache_created) is int and cache_created >= 0 else None
+            if incoming is not None or outgoing is not None:
+                item['token_usage_calls'] += 1
+                item['input_tokens'] += incoming or 0
+                item['output_tokens'] += outgoing or 0
+            # Older Claude events combined cache creation and cache reads in
+            # cached_input_tokens. Only the explicit schema marker proves a
+            # Claude row uses separate fields; a valid hit may have no cache
+            # creation in that same call.
+            claude_usage = str(payload.get('provider') or '').lower() in {'claude', 'anthropic'}
+            separated = payload.get('cache_usage_schema') == 'separate_read_write_v1'
+            if cache_read is not None and (not claude_usage or separated):
+                item['cache_usage_calls'] += 1
+                item['cached_input_tokens'] += cache_read
+                item['cache_creation_input_tokens'] += cache_created or 0
             accounted.add(rid)
             if cost is None:
                 item['unknown_cost_calls'] += 1

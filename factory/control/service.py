@@ -735,7 +735,9 @@ class Service:
                                  'cost_usd': result_cost if result_cost is not None else valid_cost(streamed_usage.get('cost_usd')),
                                  'input_tokens': getattr(result, 'tokens_in', None) if result is not None else streamed_usage.get('input_tokens'),
                                  'output_tokens': getattr(result, 'tokens_out', None) if result is not None else streamed_usage.get('output_tokens'),
-                                 'cached_input_tokens': getattr(result, 'cached_input_tokens', None) if result is not None else streamed_usage.get('cached_input_tokens')}
+                                 'cached_input_tokens': getattr(result, 'cached_input_tokens', None) if result is not None else streamed_usage.get('cached_input_tokens'),
+                                 'cache_creation_input_tokens': getattr(result, 'cache_creation_input_tokens', None) if result is not None else streamed_usage.get('cache_creation_input_tokens'),
+                                 'cache_usage_schema': getattr(result, 'cache_usage_schema', None) if result is not None else streamed_usage.get('cache_usage_schema')}
                         self._emit(rid, 'usage.recorded', usage, 'planner')
                     self.store.update(rid, {'planner_usage': self._usage(rid, profile='planner')})
                 if planning_failure is not None:
@@ -1164,7 +1166,9 @@ class Service:
                         'cost_usd':result_cost if result_cost is not None else valid_cost(streamed_usage.get('cost_usd')),
                         'input_tokens':getattr(result,'tokens_in',None) if result is not None else streamed_usage.get('input_tokens'),
                         'output_tokens':getattr(result,'tokens_out',None) if result is not None else streamed_usage.get('output_tokens'),
-                        'cached_input_tokens':getattr(result,'cached_input_tokens',None) if result is not None else streamed_usage.get('cached_input_tokens')}, 'verification')
+                        'cached_input_tokens':getattr(result,'cached_input_tokens',None) if result is not None else streamed_usage.get('cached_input_tokens'),
+                        'cache_creation_input_tokens':getattr(result,'cache_creation_input_tokens',None) if result is not None else streamed_usage.get('cache_creation_input_tokens'),
+                        'cache_usage_schema':getattr(result,'cache_usage_schema',None) if result is not None else streamed_usage.get('cache_usage_schema')}, 'verification')
             if failure is None:
                 break
             if getattr(failure, 'error_kind', None) == 'budget_exhausted':

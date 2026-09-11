@@ -322,9 +322,15 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                     if call_id:
                         usage['call_id'] = call_id
                     for source, target in (('tokens_in', 'input_tokens'), ('tokens_out', 'output_tokens'),
-                                           ('cached_input_tokens', 'cached_input_tokens')):
+                                           ('cached_input_tokens', 'cached_input_tokens'),
+                                           ('cache_creation_input_tokens', 'cache_creation_input_tokens')):
                         value = _reported_tokens(getattr(result, source, None))
                         usage[target] = value if value is not None else _reported_tokens(streamed.get(target))
+                    schema = getattr(result, 'cache_usage_schema', None)
+                    if not isinstance(schema, str) or not schema:
+                        schema = streamed.get('cache_usage_schema')
+                    if isinstance(schema, str) and schema:
+                        usage['cache_usage_schema'] = schema
                     _emit(emit, 'usage.recorded', usage, task_id)
                     attempt['cost_usd'] = cost
                     if cost is None:

@@ -50,6 +50,8 @@ class ProviderResult:
     tokens_in: int | None = None
     tokens_out: int | None = None
     cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_usage_schema: str | None = None
 
 
 class ProviderError(RuntimeError):
@@ -296,28 +298,38 @@ def _cached_input_tokens(usage: Any) -> int | None:
     Codex exposes ``cached_input_tokens`` on TokenUsageBreakdown; Claude's
     ModelUsage reports the same fact as ``cacheReadInputTokens``.
     """
-    values = []
-    for field in ("cached_input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+    # These are aliases for cache *reads*.  Do not add them together: an SDK
+    # may expose both its provider-neutral and provider-specific name.
+    for field in ("cached_input_tokens", "cache_read_input_tokens"):
         raw = _value(usage, field)
         if raw is None:
             continue
         value = _token_number(raw)
         if value is not None:
-            values.append(value)
-    return sum(values) if values else None
+            return value
+    return None
 
 
-def _claude_model_usage_totals(model_usage: Any) -> tuple[int | None, int | None, int | None, float | None]:
+def _cache_creation_input_tokens(usage: Any) -> int | None:
+    """Read Claude prompt-cache writes without mislabelling them as hits."""
+    return _token_number(_value(usage, "cache_creation_input_tokens"))
+
+
+_CACHE_USAGE_SCHEMA = "separate_read_write_v1"
+
+
+def _claude_model_usage_totals(model_usage: Any) -> tuple[int | None, int | None, int | None, int | None, float | None]:
     if not isinstance(model_usage, Mapping):
-        return None, None, None, None
-    totals = [0, 0, 0]
-    has = [False, False, False]
+        return None, None, None, None, None
+    totals = [0, 0, 0, 0]
+    has = [False, False, False, False]
     cost = 0.0
     has_cost = False
     for usage in model_usage.values():
         incoming, outgoing = _usage_numbers(usage)
         cached = _cached_input_tokens(usage)
-        for index, value in enumerate((incoming, outgoing, cached)):
+        cache_creation = _cache_creation_input_tokens(usage)
+        for index, value in enumerate((incoming, outgoing, cached, cache_creation)):
             if value is not None:
                 totals[index] += value
                 has[index] = True
@@ -329,7 +341,7 @@ def _claude_model_usage_totals(model_usage: Any) -> tuple[int | None, int | None
         if amount is not None and amount >= 0:
             cost += amount
             has_cost = True
-    return (*(totals[index] if has[index] else None for index in range(3)), cost if has_cost else None)
+    return (*(totals[index] if has[index] else None for index in range(4)), cost if has_cost else None)
 
 
 def _emit_session(emit: Emit, session_id: Any) -> str | None:
@@ -544,11 +556,11 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     text_parts: list[str] = []
     result: Any = None
     session_id: str | None = None
-    tokens_in = tokens_out = cached_input_tokens = None
+    tokens_in = tokens_out = cached_input_tokens = cache_creation_input_tokens = None
     cost_usd: float | None = None
 
     async def consume() -> None:
-        nonlocal result, session_id, tokens_in, tokens_out, cached_input_tokens, cost_usd
+        nonlocal result, session_id, tokens_in, tokens_out, cached_input_tokens, cache_creation_input_tokens, cost_usd
         options = ClaudeAgentOptions(**options_kwargs)
         async for message in query(prompt=req.prompt, options=options):
             name = _event_class(message)
@@ -601,21 +613,27 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
                 direct_usage = _value(message, "usage")
                 tokens_in, tokens_out = _usage_numbers(direct_usage)
                 cached_input_tokens = _cached_input_tokens(direct_usage)
+                cache_creation_input_tokens = _cache_creation_input_tokens(direct_usage)
                 if tokens_in is not None:
-                    tokens_in += cached_input_tokens or 0
-                model_in, model_out, model_cached, model_cost = _claude_model_usage_totals(_value(message, "model_usage"))
+                    tokens_in += (cached_input_tokens or 0) + (cache_creation_input_tokens or 0)
+                model_in, model_out, model_cached, model_created, model_cost = _claude_model_usage_totals(_value(message, "model_usage"))
                 if model_in is not None:
                     # Claude ModelUsage.inputTokens excludes both cache read and
                     # cache creation inputs. Governance reserves total input.
-                    tokens_in = model_in + (model_cached or 0)
+                    tokens_in = model_in + (model_cached or 0) + (model_created or 0)
                 if model_out is not None:
                     tokens_out = model_out
                 if model_cached is not None:
                     cached_input_tokens = model_cached
+                if model_created is not None:
+                    cache_creation_input_tokens = model_created
                 if cost_usd is None and model_cost is not None:
                     cost_usd = model_cost
                 emit("provider.usage", {"input_tokens": tokens_in, "output_tokens": tokens_out,
-                                         "cached_input_tokens": cached_input_tokens, "cost_usd": cost_usd})
+                                         "cached_input_tokens": cached_input_tokens,
+                                         "cache_creation_input_tokens": cache_creation_input_tokens,
+                                         "cache_usage_schema": _CACHE_USAGE_SCHEMA,
+                                         "cost_usd": cost_usd})
             elif name == "SystemMessage" or "systemmessage" in name.lower():
                 data = _value(message, "data", {})
                 sid = _value(data, "session_id")
@@ -649,7 +667,9 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         final = "".join(text_parts)
     if not final:
         raise ProviderError("Claude SDK completed without an assistant result")
-    return ProviderResult(final, session_id, cost_usd, tokens_in, tokens_out, cached_input_tokens)
+    return ProviderResult(final, session_id, cost_usd, tokens_in, tokens_out,
+                          cached_input_tokens, cache_creation_input_tokens,
+                          _CACHE_USAGE_SCHEMA)
 
 
 def _codex_item(item: Any, emit: Emit) -> bool:
@@ -1382,6 +1402,8 @@ class SDKRunner:
                 tokens_in=result_payload.get("tokens_in"),
                 tokens_out=result_payload.get("tokens_out"),
                 cached_input_tokens=result_payload.get("cached_input_tokens"),
+                cache_creation_input_tokens=result_payload.get("cache_creation_input_tokens"),
+                cache_usage_schema=result_payload.get("cache_usage_schema"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError("provider worker returned an invalid result") from exc

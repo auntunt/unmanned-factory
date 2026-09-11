@@ -584,6 +584,53 @@ def test_claude_read_only_tools_exclude_writes_and_glob_traversal(monkeypatch, t
     assert "max_budget_usd" not in captured
 
 
+def test_claude_reports_cache_writes_separately_from_cache_hits(monkeypatch, tmp_path):
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+    mod = types.ModuleType("claude_agent_sdk")
+
+    class Options:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class ResultMessage:
+        subtype = "success"
+        is_error = False
+        result = "done"
+        errors = None
+        session_id = "cache-session"
+        total_cost_usd = 0.25
+        usage = {"input_tokens": 3, "output_tokens": 2,
+                 "cache_creation_input_tokens": 30,
+                 "cache_read_input_tokens": 20}
+        model_usage = {"claude-model": {"inputTokens": 7, "outputTokens": 4,
+                       "cacheCreationInputTokens": 30,
+                       "cacheReadInputTokens": 20, "costUSD": 0.25}}
+
+    async def query(*, prompt, options):
+        yield ResultMessage()
+
+    mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+    events = []
+    result = _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path),
+                         read_only=True), lambda *event: events.append(event))
+
+    # Total input still includes uncached, cache-write and cache-read tokens,
+    # while only actual reads are presented as cache hits.
+    assert result.tokens_in == 57
+    assert result.cached_input_tokens == 20
+    assert result.cache_creation_input_tokens == 30
+    assert result.cache_usage_schema == "separate_read_write_v1"
+    assert ("provider.usage", {"input_tokens": 57, "output_tokens": 4,
+            "cached_input_tokens": 20, "cache_creation_input_tokens": 30,
+            "cache_usage_schema": "separate_read_write_v1",
+            "cost_usd": 0.25}) in events
+
+
 def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monkeypatch, tmp_path):
     from factory.control.providers import _run_claude
     from factory.control import claude_terminal
@@ -622,7 +669,9 @@ def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monke
     assert stopped.value.transient is False
     assert stopped.value.session_id == "budget-session"
     assert ("provider.usage", {"input_tokens": 100, "output_tokens": 20,
-        "cached_input_tokens": None, "cost_usd": 1.5}) in events
+        "cached_input_tokens": None, "cache_creation_input_tokens": None,
+        "cache_usage_schema": "separate_read_write_v1",
+        "cost_usd": 1.5}) in events
 
 
 def test_claude_rejects_non_positive_call_budget_before_sdk_query(monkeypatch, tmp_path):

@@ -784,10 +784,14 @@ def execute_plan(
                 return
             total = payload.get("total")
             source = total if isinstance(total, Mapping) else payload
-            for name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+            for name in ("input_tokens", "output_tokens", "cached_input_tokens",
+                         "cache_creation_input_tokens"):
                 value = _reported_tokens(source.get(name))
                 if value is not None:
                     streamed_usage[name] = value
+            schema = source.get("cache_usage_schema")
+            if isinstance(schema, str) and schema:
+                streamed_usage["cache_usage_schema"] = schema
             value = _reported_cost(source.get("cost_usd"))
             if value is not None:
                 streamed_usage["cost_usd"] = value
@@ -811,12 +815,18 @@ def execute_plan(
                 cost = _reported_cost(streamed_usage.get("cost_usd"))
             payload: dict[str, Any] = {**route, "cost_usd": cost}
             for source, target in (("tokens_in", "input_tokens"), ("tokens_out", "output_tokens"),
-                                   ("cached_input_tokens", "cached_input_tokens")):
+                                   ("cached_input_tokens", "cached_input_tokens"),
+                                   ("cache_creation_input_tokens", "cache_creation_input_tokens")):
                 value = getattr(result, source, None) if result is not None else None
                 if value is None:
                     value = streamed_usage.get(target)
                 if value is not None:
                     payload[target] = value
+            schema = getattr(result, "cache_usage_schema", None) if result is not None else None
+            if not isinstance(schema, str) or not schema:
+                schema = streamed_usage.get("cache_usage_schema")
+            if isinstance(schema, str) and schema:
+                payload["cache_usage_schema"] = schema
             _emit(emit, "usage.recorded", payload, task_id)
             # The event is durable before its charge enters the shared dispatch
             # ledger. Threads may already be in flight, but no later attempt

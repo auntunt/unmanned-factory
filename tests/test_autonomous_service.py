@@ -292,6 +292,36 @@ def test_overview_keeps_cancelled_runs_out_of_attention_but_preserves_received_d
     assert run["id"] in {item["id"] for item in intake["items"]}
 
 
+def test_overview_separates_prompt_cache_creation_from_hits_and_ignores_ambiguous_history(control):
+    client, store, service, runner, project, headers = control
+    run, _ = store.create_run(project["id"], "Inspect prompt cache evidence")
+    common = {"profile": "standard", "provider": "claude", "model": "sonnet"}
+    # Historical Webuddy combined cache creation and reads in this field, so
+    # this row must not be presented as a confirmed hit.
+    store.append(run["id"], "usage.recorded", {**common, "cost_usd": 0.1,
+                 "input_tokens": 100, "output_tokens": 10,
+                 "cached_input_tokens": 80})
+    store.append(run["id"], "usage.recorded", {**common, "cost_usd": 0.2,
+                 "input_tokens": 200, "output_tokens": 20,
+                 "cached_input_tokens": 0, "cache_creation_input_tokens": 150,
+                 "cache_usage_schema": "separate_read_write_v1"})
+    # A later request can hit an existing cache without writing a new entry.
+    # The schema marker, rather than a non-null creation value, makes it trusted.
+    store.append(run["id"], "usage.recorded", {**common, "cost_usd": 0.05,
+                 "input_tokens": 120, "output_tokens": 12,
+                 "cached_input_tokens": 50, "cache_creation_input_tokens": None,
+                 "cache_usage_schema": "separate_read_write_v1"})
+
+    summary = client.get("/api/v3/overview", headers=headers).json()
+    usage = next(item for item in summary["model_usage"]
+                 if item["profile"] == "standard" and item["provider"] == "claude")
+    assert usage["calls"] == 3 and usage["token_usage_calls"] == 3
+    assert usage["input_tokens"] == 420 and usage["output_tokens"] == 42
+    assert usage["cache_usage_calls"] == 2
+    assert usage["cached_input_tokens"] == 50
+    assert usage["cache_creation_input_tokens"] == 150
+
+
 def test_discarded_run_leaves_attention_but_retains_evidence(control):
     client, store, service, runner, project, headers = control
     run, _ = store.create_run(project["id"], "Obsolete stopped task")

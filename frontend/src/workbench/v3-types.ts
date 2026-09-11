@@ -43,7 +43,20 @@ export interface OverviewData {
   unknown_cost_runs: number
   recent_events: Array<{ id: number; run_id: string; task_id?: string | null; type: string; payload: unknown; at: string; project_name?: string; run_title?: string }>
   attention?: Array<{ run_snapshot?: Run; id: string; project_id?: string; project_name?: string; title?: string; status: string; updated_at: string; reason?: string; questions?: string[]; billing_incomplete?: unknown }>
-  model_usage: Array<{ profile: string; provider?: string; model?: string; calls: number; known_cost_usd: number; unknown_cost_calls: number }>
+  model_usage: Array<{
+    profile: string
+    provider?: string
+    model?: string
+    calls: number
+    known_cost_usd: number
+    unknown_cost_calls: number
+    input_tokens: number
+    output_tokens: number
+    cached_input_tokens: number
+    cache_creation_input_tokens: number
+    token_usage_calls: number
+    cache_usage_calls: number
+  }>
   activity: Array<{ date: string; runs: number; delivered: number }>
   capabilities: number
   engineering?: EngineeringSummary
