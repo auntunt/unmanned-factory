@@ -407,12 +407,30 @@ _MISSING_ACCESS_REPORT = re.compile(
 )
 
 # Only an explicit request for an invalid input to fail safely is ordinary
-# correctness work.  A bare ``安全诊断``/``安全退出`` or safe handling of
-# credentials and accounts remains security-sensitive.
+# correctness work. Numeric and input-boundary diagnostics are also ordinary
+# correctness work: "安全" describes a controlled failure there, rather than
+# security scope. A bare ``安全诊断``/``安全退出`` or safe handling of
+# credentials, accounts, systems, and deployments remains security-sensitive.
 _SAFE_INVALID_INPUT_FAILURE = re.compile(
     r"(?:(?:无效|非法|错误|异常|溢出|超限)(?:的)?(?:输入|值|数值|数据|参数|格式)"
     r"|(?:输入|值|数值|数据|参数|格式)(?:无效|非法|错误|异常|溢出|超限))"
     r"[^。！？\n]{0,32}?安全(?:地)?(?:报错|失败)"
+)
+
+# Keep this exemption narrow and clause-local. In particular, do not consume
+# sensitive nouns between the numeric boundary and ``安全诊断``; those phrases
+# must still be escalated by the general high-risk matcher below.
+_SAFE_NUMERIC_BOUNDARY_DIAGNOSTIC = re.compile(
+    r"(?:"
+    r"(?:极端|过大|过小|超长|越界|溢出|上溢|下溢|超限)(?:的)?"
+    r"(?:输入|值|数值|数字|数据|参数|格式|指数|精度|范围|长度)"
+    r"|(?:输入|值|数值|数字|数据|参数|格式|指数|精度|范围|长度)"
+    r"[^。！？\n]{0,32}?(?:技术边界|数值边界|输入边界|计算边界|资源(?:问题|限制|边界)|上限|下限)"
+    r"|(?:技术|数值|输入|计算|精度|指数|资源)(?:边界|限制|上限|下限|问题)"
+    r")"
+    r"(?:(?!(?:凭证|账号|账户|密钥|秘密|认证|鉴权|登录|支付|权限|部署|迁移|漏洞|攻击|系统安全))"
+    r"[^。！？\n]){0,64}?"
+    r"安全(?:地)?(?:诊断|报错|失败)"
 )
 
 
@@ -436,7 +454,9 @@ def _high_risk_text(plan: dict[str, Any], request: str) -> bool:
                     return True
     return any(
         _HIGH_RISK_RE.search(
-            _SAFE_INVALID_INPUT_FAILURE.sub("", _MISSING_ACCESS_REPORT.sub("", chunk))
+            _SAFE_NUMERIC_BOUNDARY_DIAGNOSTIC.sub(
+                "", _SAFE_INVALID_INPUT_FAILURE.sub("", _MISSING_ACCESS_REPORT.sub("", chunk))
+            )
         )
         for chunk in chunks
     )

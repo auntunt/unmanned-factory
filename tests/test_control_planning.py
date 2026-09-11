@@ -5,6 +5,7 @@ import pytest
 from factory.control.planning import (
     PlanError,
     build_prompt,
+    continuous_plan,
     parse_plan,
     profile_for,
     ready_tasks,
@@ -172,16 +173,48 @@ def test_missing_permission_reporting_is_not_a_permission_change(text):
 
 
 @pytest.mark.parametrize("text", [
+    "对极端输入给出安全诊断。",
+    "对极端指数造成的资源问题，应明确技术边界给出安全诊断。",
+    "对极端指数若 Python/JSON 表示会造成资源问题，可以依据实现的明确技术边界给出安全诊断，但不得把正常有限小数一概拒绝。",
+    "输入的指数超出技术边界时安全地失败，并说明支持范围。",
+])
+def test_numeric_boundary_safe_diagnostics_are_ordinary_correctness(text):
+    result = triage(complete_plan(plan_task(prompt=text)), text, auto_enabled=True)
+    assert result['risk'] == 'low'
+    assert result['decision'] == 'auto_execute'
+
+
+def test_full_continuous_prompt_keeps_numeric_boundary_feedback_low_risk():
+    feedback = (
+        "对极端指数若 Python/JSON 表示会造成资源问题，可以依据实现的明确技术边界给出安全诊断，"
+        "但不得把正常有限小数一概拒绝。"
+    )
+    history = [
+        "构建一个读取 CSV 并汇总工时的命令行工具。",
+        "上一轮已完成精确小数计算和输入错误提示。",
+    ]
+    plan = continuous_plan(feedback, PROJECT, history)
+    prompt = plan['tasks'][0]['prompt']
+    assert feedback in prompt
+    assert all(item in prompt for item in history)
+    result = triage(plan, '\n\n'.join([history[0], feedback]), auto_enabled=True)
+    assert result['risk'] == 'low'
+    assert result['decision'] == 'auto_execute'
+
+
+@pytest.mark.parametrize("text", [
     "缺少权限时报告，然后修改登录流程。",
     "缺少权限时报告；提升权限并部署到生产。",
     "缺少权限时自行修改权限。",
     "不要报告缺少权限，直接获取密钥。",
     "修复登录接口中的安全漏洞。",
     "执行安全审计并修改鉴权配置。",
-    "对极端输入给出安全诊断。",
     "安全处理凭证并记录异常。",
     "安全退出当前账户。",
     "无效输入安全报错，同时安全处理密钥。",
+    "对极端指数和账号凭证给出安全诊断。",
+    "对系统安全状态给出诊断。",
+    "部署前给出安全诊断。",
 ])
 def test_reporting_clause_does_not_hide_sensitive_work(text):
     assert triage(complete_plan(plan_task()), text, auto_enabled=True)['risk'] == 'high'
