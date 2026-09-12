@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import hmac
 import json
 import os
@@ -87,6 +88,8 @@ class NewWorkspace(Body):
 class NewRun(Body):
     project_id: str
     request: str = Field(min_length=1, max_length=50_000)
+    operation: Literal["general", "bugfix", "startup", "release", "dependencies"] = "general"
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class Continuation(Body):
@@ -513,9 +516,19 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     @app.post('/api/v2/runs', status_code=201)
     def new_run(body: NewRun, request: Request):
         store.project(body.project_id)
-        run, _ = store.create_run(body.project_id, body.request,
+        from factory.control.operation_presets import operation_request
+        fingerprint = hashlib.sha256(f'{body.operation}\0{body.request}'.encode()).hexdigest()
+        key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
+               if body.idempotency_key else None)
+        run, created = store.create_run(body.project_id, operation_request(body.operation, body.request),
                                  source={'type': 'web', 'actor': request.state.user['username'],
-                                         'actor_id': request.state.user['id']})
+                                         'actor_id': request.state.user['id'],
+                                         'operation': body.operation, 'operation_version': 1,
+                                         'request_fingerprint': fingerprint}, delivery_id=key)
+        if not created:
+            if run['source'].get('request_fingerprint') != fingerprint:
+                raise HTTPException(409, '这次提交已被接收；内容发生变化，请重新提交。')
+            return run
         try:
             svc.start_plan(run['id'])
         except Exception as exc:

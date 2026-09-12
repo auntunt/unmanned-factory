@@ -110,6 +110,15 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
 function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { project: ProjectRecord }) {
   const navigate = useNavigate()
   const [value, setValue] = useState('')
+  const [operation, setOperation] = useState('general')
+  const submission = useRef({ signature: '', key: '' })
+  const presets = [
+    ['general', '新需求', '描述想得到的结果。'],
+    ['bugfix', '修复 Bug', '描述实际表现、预期结果和复现步骤，可附错误信息或页面地址。'],
+    ['startup', '启动排错', '例如：安装后启动失败；请检查依赖、环境配置和端口，修复并实际启动验证。'],
+    ['release', '部署准备', '说明目标环境；助手检查构建、健康检查与回滚方式。缺少服务器连接时会明确说明。'],
+    ['dependencies', '依赖维护', '描述安装错误或兼容性问题；助手定位必要更新并检查回归。'],
+  ]
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
@@ -117,11 +126,21 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(null)
     if (value.trim().length < 1) { setError('请先写下想做的事，简短描述也可以。'); return }
+    if (busy) return
+    const signature = JSON.stringify([project.id, operation, value.trim()])
+    if (submission.current.signature !== signature) submission.current = { signature, key: crypto.randomUUID() }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
-    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim() } }); if (!controller.signal.aborted) { setValue(''); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
+    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { setValue(''); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
     catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
-  return <section className="wb-card wb-requirement-card"><div className="wb-card-head"><div><span className="wb-eyebrow">需求入口</span><h2>告诉系统要完成什么</h2><p>工作区已准备好。用平常说话的方式描述你想得到什么；验收要求可写可不写，助手会整理完成标准，必要时再向你提问。</p></div></div><form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">需求描述<textarea id="project-requirement" required minLength={1} maxLength={50000} rows={6} value={value} onChange={(event) => setValue(event.target.value)} placeholder="例如：为订单服务增加批量取消接口，保留现有单笔取消行为，并补充回归检查。" /></label>{error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || value.trim().length < 1}>{busy ? '提交中…' : '提交需求 →'}</button></div></form></section>
+  const selected = presets.find(([id]) => id === operation)!
+  return <section id="project-work-request" className="wb-card wb-requirement-card">
+    <div className="wb-card-head"><div><span className="wb-eyebrow">需求 · 维护 · 运维</span><h2>接下来让助手做什么</h2><p>选一种工作，补一句具体情况。助手沿用项目配置，执行、自测并提交验收。</p></div></div>
+    <div className="wb-project-tabs" role="group" aria-label="工作类型">{presets.map(([id, label]) => <button type="button" key={id} aria-pressed={operation === id} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => setOperation(id)}>{label}</button>)}</div>
+    <form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">{selected[1]}说明<textarea id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} placeholder={selected[2]} aria-describedby="operation-hint" /></label><p id="operation-hint" className="wb-runtime-note">{selected[2]}</p>
+    {operation === 'bugfix' && <p className="wb-runtime-note">如果是下方已有任务失败，请先打开该任务继续修复，以保留工作成果与会话。</p>}
+    {error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || value.trim().length < 1}>{busy ? '正在接收…' : `开始${selected[1]} →`}</button></div></form>
+  </section>
 }
 
 function overviewNextRun(runs: Run[]) {
@@ -205,9 +224,10 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
       {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务使用同一份快照</p>}
       {overview && overview.runs > 0 && <section className="ov3-summary" aria-label="本项目进展"><div><span>已接收需求</span><strong>{overview.runs}</strong><small>只统计本项目</small></div><div><span>进行中</span><strong>{overview.active_runs}</strong><small>规划、执行或验证</small></div><div className={overview.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{overview.attention_runs}</strong><small>需要处理的具体原因见下方</small></div><div><span>计费方式</span><strong>中转站管理</strong><small>本平台不再计费或限额</small></div></section>}
+      {requirementForm}
       {currentRun && <section className="wb-card"><span className="wb-eyebrow">当前任务 · {runGuidance(currentRun).label}</span><h2>{currentRun.plan?.title || currentRun.request}</h2><p>{runGuidance(currentRun).summary}</p><Link className="wb-button wb-button-primary" to={nextRunAction(currentRun).href}>{nextRunAction(currentRun).label} →</Link></section>}
       {(overview?.attention ?? []).length > 0 && <section className="wb-card pw-attention"><div className="ov3-section-head"><div><span className="wb-eyebrow">本项目 · 待处理</span><h2>让工作继续的下一步</h2></div></div><AttentionList items={overview!.attention!.slice(0, 3)} /></section>}
-      {runs?.length === 0 ? requirementForm : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={requirementForm} isAdmin={isAdmin} /> : !overviewError && <div className="wb-card ov3-loading" role="status" aria-label="正在读取本项目闭环"><span /><span /></div>}
+      {runs?.length === 0 ? null : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={<a className="wb-text-link" href="#project-work-request">提交新需求或维护工作 ↑</a>} isAdmin={isAdmin} /> : !overviewError && <div className="wb-card ov3-loading" role="status" aria-label="正在读取本项目闭环"><span /><span /></div>}
       <details className="wb-card pw-preflight"><summary>项目准备与执行边界 · {readiness ? readiness.ready ? '可以开始' : '有配置需要处理' : '读取中'}</summary><div className="pw-preflight-body">
         <div className="wb-fact-grid"><div><span>基础分支</span><strong>{project.base_branch}</strong></div><div><span>验收检查</span><strong>{Object.keys(project.checks ?? {}).length} 条</strong></div><div><span>运行状态</span><strong>{activeRun ? '有进行中的运行' : '当前无执行任务'}</strong></div></div>
         <p className="wb-runtime-note">{project.workspace}</p>{readinessError && <ErrorNotice message={readinessError} />}

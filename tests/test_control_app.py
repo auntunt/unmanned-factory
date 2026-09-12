@@ -302,3 +302,40 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
     assert done['runtime_configuration']['limits']['timeout_s'] == 14400
     assert calls == {'planning': 1, 'execution': 2}
     assert done['artifacts']['total_known_cost_usd'] == pytest.approx(.03)
+
+
+def test_operation_submission_is_compiled_and_retry_does_not_replan(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    calls = []
+    monkeypatch.setattr(svc, 'start_plan', calls.append)
+    body = {'project_id': p['id'], 'request': '点击保存后报错',
+            'operation': 'bugfix', 'idempotency_key': 'operation-retry-1'}
+    first = client.post('/api/v2/runs', json=body, headers=headers)
+    assert first.status_code == 201
+    run = first.json()
+    assert '回归检查' in run['request']
+    assert run['source']['operation'] == 'bugfix'
+    again = client.post('/api/v2/runs', json=body, headers=headers)
+    assert again.json()['id'] == run['id']
+    assert calls == [run['id']]
+    changed = client.post('/api/v2/runs', json={**body, 'request': '不同问题'}, headers=headers)
+    assert changed.status_code == 409
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('operation', ['startup', 'release', 'dependencies'])
+def test_operation_presets_keep_project_pipeline(app_env, monkeypatch, operation):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    monkeypatch.setattr(svc, 'start_plan', lambda rid: None)
+    response = client.post('/api/v2/runs', json={'project_id': p['id'],
+        'request': '检查并处理当前问题', 'operation': operation}, headers=headers)
+    assert response.status_code == 201
+    assert '沿用项目既有权限' in response.json()['request']
+    assert response.json()['project_id'] == p['id']
+    invalid = client.post('/api/v2/runs', json={'project_id': p['id'],
+        'request': '重启服务器', 'operation': 'arbitrary-shell'}, headers=headers)
+    assert invalid.status_code == 422
