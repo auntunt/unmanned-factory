@@ -6,6 +6,8 @@ webuddy 是可定制的 AI 工作伙伴：先创建工作区，再用自然语�
 
 运行时挂载：[架构核对与优化](docs/runtime-mounting-review-2026-09-12.md)说明职能体、方法模块、数据源与工具的边界；[资料接入说明](docs/reference-source-operations.md)提供 CLI／MCP 文本资源导入、项目槽位绑定和 Claude 按需读取路径。
 
+主动验收：[独立验证现场与逐项证据](docs/active-verification-2026-09-12.md)说明验证工具、源码保护、证据补齐和看板展示。
+
 ## 自主交付工作台（v3）
 
 新增自主运行策略、持久任务队列、模型分级与失败升级、调用记录、Agent 能力版本库、自动交付归档和全量日志导出。工作台包含总览、运行看板、项目、Agent 能力库、模型调用记录；保留 v2 项目知识、SDK 和 GitHub 交付接口。

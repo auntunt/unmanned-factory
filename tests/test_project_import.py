@@ -143,7 +143,9 @@ def test_imported_cli_is_maintained_and_functionally_verified(app_env, monkeypat
         if request.read_only and 'TASK ACCEPTANCE:' in request.prompt:
             output = subprocess.check_output([sys.executable, 'main.py', '7'], cwd=root, text=True).strip()
             observed.append(output)
-            return ProviderResult(json.dumps({'verdict': 'pass' if output == '21' else 'fail', 'reason': '实际运行 CLI 并核对输出'}), cost_usd=.01)
+            from tests.review_helpers import passing_review
+            assert output == '21'
+            return ProviderResult(passing_review(request, '实际运行 CLI 并核对输出为 21'), cost_usd=.01)
         if request.read_only:
             return ProviderResult(json.dumps({'title': '修改倍数', 'summary': '将转换倍数改为三', 'questions': [], 'tasks': [
                 {'id': 'cli', 'title': '维护 CLI', 'prompt': '将 main.py 倍数改成三', 'acceptance': ['输入 7 输出 21'],

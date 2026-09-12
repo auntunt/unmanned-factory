@@ -543,8 +543,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                 if repairs >= max_repairs:
                     raise ExecutionError(attempt['error'])
                 repairs += 1
+                from factory.control.acceptance_ledger import repair_guidance
                 prompt = ('Continue this same task and repair the actual failing check in the existing workspace. '
-                          'Preserve regression coverage.\n' + json.dumps(scrub(failed), ensure_ascii=False) + '\n' + _INSTRUCTIONS)
+                          + repair_guidance(json.dumps(scrub(failed), ensure_ascii=False)) + '\n' + _INSTRUCTIONS)
                 checkpoint()
                 continue
             artifacts['finalization_checkpoint'] = {'paths': list(changed), 'signature': signature, 'checks': records}

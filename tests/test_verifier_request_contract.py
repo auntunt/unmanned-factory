@@ -1,3 +1,4 @@
+from tests.review_helpers import passing_review
 """Regression coverage for the user contract sent to independent review."""
 
 import json
@@ -47,7 +48,7 @@ def test_verifier_receives_root_request_and_latest_clarification(app_env, monkey
     def reviewer(request, emit, cancel=None):
         calls.append(request)
         return ProviderResult(
-            json.dumps({"verdict": "pass", "reason": "contract inspected"}),
+            passing_review(request, 'contract inspected'),
             cost_usd=0.01,
         )
 
@@ -122,7 +123,7 @@ def test_contract_overflow_preserves_bounded_root_and_latest_and_forces_failed_r
     calls = []
     monkeypatch.setattr(service.runner, "run", lambda request, emit, cancel=None: (
         calls.append(request) or ProviderResult(
-            json.dumps({"verdict": "pass", "reason": "model tried to pass"}), cost_usd=0.01)))
+            passing_review(request, 'model tried to pass'), cost_usd=0.01)))
     artifacts = {"worktree": str(repo), "checks": [{"name": "probe", "exit": 0}]}
     with pytest.raises(ExecutionError, match="独立验证未通过"):
         service._independent_verify(run["id"], run, configured_project,

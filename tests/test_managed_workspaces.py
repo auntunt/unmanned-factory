@@ -1,3 +1,4 @@
+from tests.review_helpers import passing_review
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -65,7 +66,7 @@ def test_first_spoken_requirement_runs_in_fresh_workspace(app_env, monkeypatch):
         if request.read_only and 'TASK ACCEPTANCE:' in request.prompt:
             assert (root / 'hello.txt').read_text() == '你好'
             verified.append(True)
-            return ProviderResult(json.dumps({'verdict': 'pass', 'reason': '已核对文件内容'}), cost_usd=.01)
+            return ProviderResult(passing_review(request, '已核对文件内容'), cost_usd=.01)
         if request.read_only:
             return ProviderResult(json.dumps({'title': '写问候文件', 'summary': '生成一份中文问候文件', 'questions': [], 'tasks': [{'id': 'hello', 'title': '创建问候文件', 'prompt': '新增 hello.txt，内容为你好', 'acceptance': ['hello.txt 的内容是你好'], 'paths': ['hello.txt'], 'checks': ['workspace-integrity'], 'depends_on': [], 'complexity': 'small', 'risk': 'low'}]}), cost_usd=.01)
         (root / 'hello.txt').write_text('你好')

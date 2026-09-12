@@ -1,3 +1,4 @@
+from tests.review_helpers import passing_review
 """Hosted execution bypasses model planning, preserves gates and resumes safely."""
 import threading
 
@@ -265,7 +266,7 @@ def test_real_continuous_executor_gets_one_coding_turn_and_one_review(app_env, m
         if request.read_only:
             assert 'verdict' in request.prompt
             assert 'A README documenting a restriction does not authorize narrowing the contract' in request.prompt
-            return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'greeting check passed'}), cost_usd=.01)
+            return ProviderResult(passing_review(request, 'greeting check passed'), cost_usd=.01)
         (Path(request.workspace) / 'greeting.txt').write_text('hello world')
         return ProviderResult('done', cost_usd=.01, session_id='persistent-session')
     monkeypatch.setattr(svc.runner, 'run', runner)
@@ -321,8 +322,7 @@ def test_reserved_review_budget_finishes_after_coding_provider_stops_at_its_ceil
     def runner(request, emit, cancel=None):
         calls.append(request)
         if request.read_only:
-            return ProviderResult(json.dumps({
-                'verdict': 'pass', 'reason': 'trusted greeting check and diff reviewed'}),
+            return ProviderResult(passing_review(request, 'trusted greeting check and diff reviewed'),
                 cost_usd=.01)
         assert request.max_budget_usd == pytest.approx(8.0)
         Path(request.workspace, 'greeting.txt').write_text('hello world')
@@ -357,8 +357,7 @@ def test_unknown_coding_cost_holds_its_ceiling_but_preserves_review_reserve(app_
     def runner(request, emit, cancel=None):
         calls.append(request)
         if request.read_only:
-            return ProviderResult(json.dumps({
-                'verdict': 'pass', 'reason': 'saved source independently reviewed'}),
+            return ProviderResult(passing_review(request, 'saved source independently reviewed'),
                 cost_usd=.05)
         Path(request.workspace, 'greeting.txt').write_text('hello world')
         return ProviderResult('done with unresolved billing', cost_usd=None,
@@ -388,8 +387,7 @@ def test_service_cancel_cannot_cross_atomic_commit_boundary(app_env, monkeypatch
 
     def runner(request, emit, cancel=None):
         if request.read_only:
-            return ProviderResult(json.dumps({
-                'verdict': 'pass', 'reason': 'atomic delivery reviewed'}), cost_usd=.01)
+            return ProviderResult(passing_review(request, 'atomic delivery reviewed'), cost_usd=.01)
         Path(request.workspace, 'greeting.txt').write_text('hello world')
         return ProviderResult('done', cost_usd=.01)
 
@@ -422,8 +420,7 @@ def test_legacy_exhausted_run_finalizes_locally_then_resumes_only_review_after_b
     def runner(request, emit, cancel=None):
         calls.append(request)
         if request.read_only:
-            return ProviderResult(json.dumps({
-                'verdict': 'pass', 'reason': 'saved change independently reviewed'}),
+            return ProviderResult(passing_review(request, 'saved change independently reviewed'),
                 cost_usd=.01)
         Path(request.workspace, 'greeting.txt').write_text('hello world')
         emit('provider.session', {'session_id': 'legacy-session'})
@@ -671,7 +668,7 @@ def test_review_transient_reconnect_keeps_session_and_records_each_call(app_env,
                                     'output_tokens': 1})
             raise ProviderError('504 Gateway Timeout', status_code=504,
                 session_id='review-session' if session_source == 'error' else None)
-        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'checked'}),
+        return ProviderResult(passing_review(request, 'checked'),
             cost_usd=.02, tokens_in=11, tokens_out=5)
     svc.continuous_execute = execute
     monkeypatch.setattr(svc.runner, 'run', review)
@@ -682,7 +679,8 @@ def test_review_transient_reconnect_keeps_session_and_records_each_call(app_env,
     assert len(reviews) == 2
     assert reviews[0].session_id is None
     assert reviews[1].session_id == 'review-session'
-    assert reviews[0].workspace == reviews[1].workspace == p['workspace']
+    assert reviews[0].workspace == reviews[1].workspace != p['workspace']
+    assert reviews[0].verification and reviews[1].verification
     assert reviews[0].model == reviews[1].model
     assert reviews[0].provider == reviews[1].provider
     assert [request.max_budget_usd for request in reviews] == pytest.approx(

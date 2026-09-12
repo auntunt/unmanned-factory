@@ -1,3 +1,4 @@
+from tests.review_helpers import passing_review
 """Integration review probes for the shared runtime, beyond CRUD success."""
 import json
 import threading
@@ -49,7 +50,7 @@ def test_verifier_uses_separate_profile_readonly_context_and_records_usage(app_e
     calls = []
     def verify(request, emit, cancel=None):
         calls.append(request)
-        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'observed evidence'}), cost_usd=.03, tokens_in=10, tokens_out=5, cached_input_tokens=7)
+        return ProviderResult(passing_review(request, 'observed evidence'), cost_usd=.03, tokens_in=10, tokens_out=5, cached_input_tokens=7)
     monkeypatch.setattr(service.runner, 'run', verify)
     artifacts = {'worktree': str(repo), 'checks': [{'name': 'check', 'exit': 0}]}
     service._independent_verify(run['id'], run, p, cfg, artifacts)
@@ -104,7 +105,7 @@ def test_verifier_sdk_budget_stop_records_cost_and_resumable_session(app_env, mo
         raise ProviderError('USD budget reached', session_id='verification-budget-session',
                             transient=False, error_kind='budget_exhausted')
     monkeypatch.setattr(service.runner, 'run', verify)
-    artifacts = {'worktree': str(repo), 'commit': 'evidence'}
+    artifacts = {'worktree': str(repo)}
     with pytest.raises(ExecutionError, match='剩余预算') as stopped:
         service._independent_verify(run['id'], run, p,
                                     service.runtime_settings.get(), artifacts)
@@ -208,7 +209,7 @@ def test_continuous_review_uses_bounded_targeted_readonly_profile(app_env, monke
     calls = []
     def reviewer(request, emit, cancel=None):
         calls.append(request)
-        return ProviderResult('{"verdict":"pass","reason":"record-count evidence reviewed"}', cost_usd=0.01)
+        return ProviderResult(passing_review(request, 'record-count evidence reviewed'), cost_usd=0.01)
     monkeypatch.setattr(service.runner, 'run', reviewer)
     artifacts = {'worktree': str(repo), 'checks': [{'name': 'record-count', 'exit': 0, 'stdout': '12 input, 12 output'}]}
     service._independent_verify(run['id'], run, p, config, artifacts)

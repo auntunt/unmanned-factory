@@ -1,3 +1,4 @@
+from tests.review_helpers import passing_review
 import io
 import json
 import shutil
@@ -142,7 +143,7 @@ def test_auto_publish_failure_preserves_verified_delivery(app_env, monkeypatch):
     def with_review(request, emit, cancel=None):
         if request.read_only and request.prompt.startswith('Return JSON only: {"verdict"'):
             review_calls.append(request)
-            return ProviderResult('{"verdict":"pass","reason":"Greeting check passed"}', cost_usd=0.01)
+            return ProviderResult(passing_review(request, 'Greeting check passed'), cost_usd=0.01)
         return original_run(request, emit, cancel)
     monkeypatch.setattr(svc.runner, 'run', with_review)
     svc.publisher = BrokenPublisher()

@@ -41,6 +41,7 @@ class ProviderRequest:
     # outer between-call budget gate.
     max_budget_usd: float | None = None
     reference_mount: dict | None = None
+    verification: bool = False
 
 
 @dataclass(frozen=True)
@@ -495,7 +496,9 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
     researcher_available = not req.read_only and hasattr(claude_sdk, 'AgentDefinition')
     workspace = Path(req.workspace).resolve()
     from factory.control import claude_terminal, project_browser
-    terminal_enabled = not req.read_only and claude_terminal.available()
+    terminal_enabled = (not req.read_only or req.verification) and claude_terminal.available()
+    if req.verification and (not req.read_only or not terminal_enabled):
+        raise ProviderError('独立验收需要可用的隔离终端', transient=False)
     from factory.control import mounts
     references_enabled = bool(req.reference_mount and req.reference_mount.get('documents'))
 
@@ -580,6 +583,17 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         'Your actual project working directory is the current working directory supplied by the runtime. Use relative paths from it; do not invent /workspace or /home/user/workspace. '
         + ('Use mcp__project__run_command to run tests, install project dependencies and verify changes. The platform browser tools open/snapshot/click/fill/screenshot are preinstalled: start your preview bound to 127.0.0.1, then use browser_open instead of installing browser dependencies or writing a custom driver. npm/pip/uv dependency caches persist per project across executions. Background servers and /tmp persist across command calls in this execution, but reset after execution restart. Shell cwd/exports do not persist; use explicit paths. Save durable evidence in the project, and read screenshots from project paths. Use WebSearch/WebFetch for public documentation. Use the webuddy-research Agent only for bounded independent read-only questions, foreground only, without a model override. Project development files including environment templates are writable; do not put real credentials into deliverables. Keep runtime .env files ignored and provide placeholder .env.example. Git integration is performed by webuddy after independent checks; do not commit or modify Git metadata. '
            if terminal_enabled else 'Only the listed file tools are available in this environment. ')}
+    if req.verification:
+        options_kwargs['system_prompt']['append'] = (
+            'Your actual workspace is the supplied current working directory; use relative paths, never invent a workspace path. '
+            'This is a disposable independent verification workspace, not the developer workspace. '
+            'Use mcp__project__run_command for tests and dependency installation, preferably locked installs that preserve manifests. '
+            'Use the platform browser_open/snapshot/click/fill/screenshot tools to inspect a preview bound to 127.0.0.1. '
+            'Read screenshots from their returned local paths. Temporary files and background servers persist only during this execution. '
+            'Run concrete acceptance probes and browser interactions yourself. Install dependencies if needed. '
+            'Do not repair, modify or delete existing source files, tests, configuration or manifests; source changes invalidate the verdict. '
+            'You may write temporary probes and build outputs. Do not publish or contact production systems. '
+            'Observe screenshots and describe what they demonstrate; their existence alone is not proof. ')
     if researcher_available:
         options_kwargs['agents'] = {capabilities.RESEARCH_AGENT: claude_sdk.AgentDefinition(
             description='Bounded read-only code or public-document research; return concise findings with file references.',
@@ -1170,7 +1184,7 @@ def _run_codex(req: ProviderRequest, emit: Emit) -> ProviderResult:
         from openai_codex import ApprovalMode  # type: ignore[import-not-found]
     except ImportError:
         raise ProviderError("installed codex SDK lacks required ApprovalMode.deny_all")
-    sandbox = Sandbox.read_only if req.read_only else Sandbox.workspace_write
+    sandbox = Sandbox.read_only if req.read_only and not req.verification else Sandbox.workspace_write
     start_kwargs: dict[str, Any] = {
         "model": req.model,
         "sandbox": sandbox,

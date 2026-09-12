@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.review_helpers import passing_review
+
 import io
 import json
 import subprocess
@@ -45,7 +47,7 @@ class Runner:
         self.models.append((request.read_only, request.model))
         if request.read_only and request.prompt.startswith('Return JSON only: {"verdict"'):
             self.verification_calls += 1
-            return ProviderResult(json.dumps({'verdict': 'pass', 'reason': 'Greeting check passed'}), cost_usd=0.05, tokens_in=5, tokens_out=2)
+            return ProviderResult(passing_review(request, 'Greeting check passed'), cost_usd=0.05, tokens_in=5, tokens_out=2)
         if request.read_only:
             self.planner_calls += 1
             plan = self.plans.pop(0) if len(self.plans) > 1 else self.plans[0]
