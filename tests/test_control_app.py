@@ -119,7 +119,10 @@ def test_requirement_to_verified_git_delivery_and_conversation(app_env):
     assert export.status_code == 200 and artifacts['commit'] in export.text
     events = client.get(f'/api/v2/runs/{rid}/events').json()
     assert events['events'][0]['id'] > 0
-    assert client.get(f"/api/v2/runs/{rid}/events?after={events['cursor']}").json()['events'] == []
+    # Archiving can append events after delivery; polling must not repeat old IDs.
+    later = client.get(f"/api/v2/runs/{rid}/events?after={events['cursor']}").json()
+    assert all(item['id'] > events['cursor'] for item in later['events'])
+    assert later['cursor'] >= events['cursor']
 
 
 def test_clarification_invalidates_approval(app_env):
