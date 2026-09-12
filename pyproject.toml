@@ -19,6 +19,7 @@ dependencies = [
 factory = "factory.cli:main"
 factory-web = "factory.control.app:main"
 factory-runtime = "factory.control.runtime_cli:main"
+factory-sources = "factory.control.source_cli:main"
 
 [project.optional-dependencies]
 codex = [

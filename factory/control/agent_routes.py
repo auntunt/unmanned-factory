@@ -26,6 +26,8 @@ class ModuleBody(Body):
     category: str = Field(pattern='^(style|knowledge|workflow|delivery)$')
     description: str = Field(default='', max_length=1000)
     instructions: str = Field(min_length=1, max_length=16000)
+    source_refs: list[dict] = Field(default_factory=list, max_length=12)
+    source_slots: list[str] = Field(default_factory=list, max_length=12)
 class ModuleUpdate(ModuleBody):
     expected_revision: int = Field(ge=1, strict=True)
 class ModuleRef(Body):
@@ -65,6 +67,23 @@ def router(store, service):
 
     from factory.control.modules import ModuleStore
     modules = ModuleStore(store)
+    from factory.control.sources import SourceStore
+    sources = SourceStore(store)
+
+    @api.get('/projects/{pid}/sources')
+    def project_sources(pid: str, request: Request):
+        if service.governance:
+            service.governance.require_project(actor(request)['id'], pid)
+        return {'sources': guarded(sources.list, pid)}
+
+    @api.get('/runs/{rid}/mounts')
+    def run_mounts(rid: str, request: Request):
+        from factory.control.mounts import manifest_summary
+        run = guarded(store.get, rid)
+        if service.governance:
+            service.governance.require_project(actor(request)['id'], run['project_id'])
+        snapshot = run.get('mount_snapshot')
+        return {'mount': manifest_summary(snapshot) if snapshot else None}
 
     from factory.control.agent_packs import install_builtins, pack_zip
     install_builtins(store)

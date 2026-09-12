@@ -370,6 +370,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         while True:
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
+            preflight = getattr(runner, 'preflight', None)
+            if callable(preflight):
+                preflight(route['provider'])
             call_budget = dispatch_budget()
             # Hosted coding permits a bounded continuation when a provider
             # omits dollar cost. An explicit ``stop`` still blocks.

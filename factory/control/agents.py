@@ -552,7 +552,7 @@ class AgentStore:
                 source={'type': 'retry', 'actor': actor, 'actor_id': actor_id if actor_id is not None else prior.get('source', {}).get('actor_id'), 'retry_of': prior['id']})
             for field in ('capability', 'agent_id', 'agent_version', 'agent_snapshot',
                           'runtime_configuration', 'conversation_id', 'feedback_predecessor_id', 'feedback_applied_ids',
-                          'root_request', 'authorization_requests', 'module_snapshot', 'module_selection_revision'):
+                          'root_request', 'authorization_requests', 'module_snapshot', 'module_selection_revision', 'mount_snapshot'):
                 if field in prior:
                     data[field] = prior[field]
             cid = prior.get('conversation_id')

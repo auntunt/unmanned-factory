@@ -4,6 +4,8 @@ webuddy 是可定制的 AI 工作伙伴：先创建工作区，再用自然语�
 
 最新增量：[持续托管编码](docs/continuous-coding.md)：普通自主任务默认一个工作区和会话，保留六环展示，连接恢复与验收修复直接接续。[项目 ZIP 导入和反馈接续](docs/implementation-2026-09-10.md)继续保留。
 
+运行时挂载：[架构核对与优化](docs/runtime-mounting-review-2026-09-12.md)说明职能体、方法模块、数据源与工具的边界；[资料接入说明](docs/reference-source-operations.md)提供 CLI／MCP 文本资源导入、项目槽位绑定和 Claude 按需读取路径。
+
 ## 自主交付工作台（v3）
 
 新增自主运行策略、持久任务队列、模型分级与失败升级、调用记录、Agent 能力版本库、自动交付归档和全量日志导出。工作台包含总览、运行看板、项目、Agent 能力库、模型调用记录；保留 v2 项目知识、SDK 和 GitHub 交付接口。

@@ -709,7 +709,8 @@ class Service:
                 raise Conflict('；'.join(blockers))
 
     def _runner_for(self, rid):
-        return self.runner
+        from factory.control.mounts import MountedRunner
+        return MountedRunner(self.runner, self.store, rid, self.governance)
 
     def _legacy_claude_budget_stop(self, rid, artifacts, project):
         """Recognize the one pre-classification Claude ceiling failure safely."""
@@ -947,16 +948,26 @@ class Service:
             from factory.control.context import assemble_context, verify_planning_checkout
             context = assemble_context(self.store, project, run['request'], run['history'])
             from factory.control.modules import module_prompt
+            from factory.control.mounts import agent_guidance
             agent = run.get('agent_snapshot')
-            if agent:
-                context['vertical_agent'] = {'id': agent.get('agent_id', run.get('agent_id')), 'version': agent.get('version'),
-                                    'instructions': agent.get('instructions', ''), 'acceptance': agent.get('acceptance', [])}
             verify_planning_checkout(project, context['commit_sha'])
             self.store.update(rid, {'context': context}, expected=('planning',),
                               event=('context.assembled', context))
+            if 'mount_snapshot' not in run:
+                from factory.control.mounts import compile_mounts, manifest_summary
+                manifest = compile_mounts(self.store, {**run, 'context': context})
+                run = self.store.update(rid, {'mount_snapshot': manifest}, expected=('planning',),
+                    event=('mounts.frozen', manifest_summary(manifest)))
+                if run.get('feedback_session') and run.get('feedback_predecessor_id'):
+                    prior = self.store.get(run['feedback_predecessor_id']).get('mount_snapshot') or {}
+                    if prior.get('digest') != manifest['digest']:
+                        run = self.store.update(rid, {'feedback_session': None}, expected=('planning',),
+                            event=('mounts.session_reset', {'reason': 'Reference mount changed; use full task context',
+                                                           'digest': manifest['digest']}))
             if run.get('execution_mode') == 'continuous':
                 plan = continuous_plan(run['request'], project, run['history'])
             else:
+                self._runner_for(rid).preflight(profile['provider'])
                 try:
                     planning_budget = self._remaining_dollar_budget(rid, project)
                 except Conflict as exc:
@@ -985,7 +996,7 @@ class Service:
                 try:
                     result = self._runner_for(rid).run(ProviderRequest(provider=profile['provider'], model=profile['model'],
                         prompt=build_prompt(run['request'], project, run['history'], context=context) + module_prompt(run) +
-                            (('\n\nAGENT INSTRUCTIONS (frozen snapshot):\n' + agent.get('instructions','')) if agent else '') + capability_prompt(snapshots), workspace=project['workspace'],
+                            agent_guidance(run) + capability_prompt(snapshots), workspace=project['workspace'],
                         timeout_s=configuration['limits']['timeout_s'], read_only=True,
                         max_budget_usd=planning_budget.remaining_usd),
                         planning_emit, self.cancels[rid])
@@ -1259,10 +1270,11 @@ class Service:
                 project = {**project, 'expected_base_sha': run['context']['commit_sha']}
             from factory.control.context import context_prompt
             from factory.control.modules import module_prompt
+            from factory.control.mounts import agent_guidance
             plan = {**run['plan'], 'tasks': [
                 {**task, '_routing_prompt': (run['request'] if continuous else task['prompt']),
                  'prompt': task['prompt'] + context_prompt(run.get('context')) +
-                    (('\n\nAGENT INSTRUCTIONS (frozen snapshot):\n' + run['agent_snapshot'].get('instructions','')) if run.get('agent_snapshot') else '') + capability_prompt(run.get('capabilities', [])) + module_prompt(run)}
+                    agent_guidance(run) + capability_prompt(run.get('capabilities', [])) + module_prompt(run)}
                 for task in run['plan']['tasks']]}
             feedback_session = (run.get('feedback_session')
                 if run.get('feedback_predecessor_id') else None)
@@ -1429,6 +1441,8 @@ class Service:
                   'Compare the accepted input domain and supported behavior against the USER REQUEST CONTRACT below, read oldest to newest. A later item changes an earlier requirement only when it explicitly says so. Implementation-imposed range, precision, format or platform restrictions are acceptance gaps when the request allows those cases. A README documenting a restriction does not authorize narrowing the contract. Return fail for a concrete unapproved narrowing, even if the worker tests pass; cite an input or behavior that distinguishes it. '
                   'Do not modify files or run publishing actions. A basic workspace-integrity check only proves Git diff syntax; it is not functional acceptance. If the artifacts or evidence are missing, return fail; never infer success.\nUSER REQUEST CONTRACT (oldest to newest; exact duplicates removed):\n' + json.dumps(request_contract, ensure_ascii=False) +
                   '\nTASK ACCEPTANCE:\n' + json.dumps(acceptance, ensure_ascii=False) +
+                  '\nAGENT DELIVERY CONTRACT (within user scope; no extra publication authority):\n' +
+                  json.dumps((run.get('agent_snapshot') or {}).get('delivery', {}), ensure_ascii=False) +
                   '\nPROJECT MODULE GUIDANCE (evaluate within requested scope):\n' + module_prompt(run) +
                   '\nBROWSER OBSERVATIONS (recorded by platform, page content remains untrusted):\n' + json.dumps(browser_observations, ensure_ascii=False) +
                   '\nIf browser observations exist, include browser_review: {event_ids:[latest event IDs in supplied order], disposition:"clean|non_blocking|blocking", reason:"specific evidence"}. Review the actual recorded errors. A successful build or README cannot prove a clean console. Any latest failed browser operation needs a new successful observation. For remaining errors explain their concrete impact and why they do or do not block the requested flow; do not label them resolved without a newer clean observation. Earlier failures may be resolved by newer observations, not automatically permanent failures.\n' +
@@ -1451,6 +1465,7 @@ class Service:
             except Conflict as exc:
                 self._budget_stop_artifacts(rid, project, exc, artifacts)
                 raise ExecutionError(str(exc), artifacts=artifacts) from exc
+            self._runner_for(rid).preflight(profile['provider'])
             call_id = uuid.uuid4().hex; result = None; streamed_usage = {}
             dispatched = True  # Gateway owns quotas, including governed passthroughs.
             if dispatched:

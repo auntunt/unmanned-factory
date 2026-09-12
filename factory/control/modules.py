@@ -37,6 +37,9 @@ class ModuleStore:
             value[field] = scrub(item.strip())
         if payload.get('category') not in CATEGORIES: raise ValueError('请选择有效的模块类别')
         value['category'] = payload['category']
+        from factory.control.sources import source_refs, source_slots
+        value['source_refs'] = source_refs(payload.get('source_refs', []))
+        value['source_slots'] = source_slots(payload.get('source_slots', []))
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             current = db.execute('SELECT MAX(version) FROM instruction_modules WHERE id=?',(mid,)).fetchone()[0] if mid else 0
@@ -56,6 +59,8 @@ class ModuleStore:
         self.store.project(pid)
         if not isinstance(refs,list) or len(refs)>12: raise ValueError('最多选择12个能力模块')
         selected=[]; seen=set()
+        from factory.control.sources import SourceStore
+        sources = SourceStore(self.store)
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT revision FROM project_modules WHERE project_id=?',(pid,)).fetchone()
@@ -67,6 +72,13 @@ class ModuleStore:
                 item=db.execute('SELECT data FROM instruction_modules WHERE id=? AND version=?',(mid,ref['version'])).fetchone()
                 if not item: raise ValueError('模块版本不存在，请刷新模块库')
                 selected.append(json.loads(item[0]))
+            versions = {}
+            for module in selected:
+                for ref in [*module.get('source_refs', []), *sources.resolve_slots(pid, module.get('source_slots', []))]:
+                    sources.resolve(pid, ref)
+                    if ref['id'] in versions and versions[ref['id']] != ref['revision']:
+                        raise ValueError('模块组合的数据源版本冲突')
+                    versions[ref['id']] = ref['revision']
             if sum(m['category']=='style' for m in selected)>1: raise ValueError('一个项目只能选择一种界面风格，其他类别可以组合')
             if sum(len(m['instructions']) for m in selected)>40000: raise ValueError('组合内容过长，请精简模块')
             db.execute('INSERT OR REPLACE INTO project_modules VALUES(?,?,?)',(pid,revision+1,json.dumps(selected,ensure_ascii=False)))
@@ -75,6 +87,11 @@ class ModuleStore:
     def freeze(self, run):
         if 'module_snapshot' in run: return {}
         selected=self.selection(run['project_id'])
+        from factory.control.sources import SourceStore
+        sources = SourceStore(self.store)
+        for module in selected['modules']:
+            module['resolved_sources'] = [*module.get('source_refs', []),
+                *sources.resolve_slots(run['project_id'], module.get('source_slots', []))]
         return {'module_snapshot':selected['modules'], 'module_selection_revision':selected['revision']}
 
 

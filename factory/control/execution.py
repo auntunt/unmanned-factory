@@ -914,6 +914,13 @@ def execute_plan(
                     provider_dispatched = False
                     raise ExecutionError('provider call not dispatched: project dollar budget is exhausted')
                 request = ProviderRequest(provider=str(route["provider"]), model=str(route["model"]), prompt=worker_prompt, workspace=str(child_root), session_id=task.get('_resume_session'), timeout_s=max(1, int(remaining())), read_only=False, max_budget_usd=call_budget_usd)
+                preflight = getattr(runner, 'preflight', None)
+                if callable(preflight):
+                    try:
+                        preflight(request.provider)
+                    except Exception:
+                        provider_dispatched = False
+                        raise
                 if provider_dispatched:
                     provider_started()
                 _emit(emit, 'task.activity', {'phase': 'model'}, task_id)
