@@ -1,3 +1,4 @@
+import { ProjectTargets } from './ServerTargets'
 import ProjectInspection from './ProjectInspection'
 import ProjectKnowledge from './ProjectKnowledge'
 import { nextRunAction } from './run-guidance'
@@ -112,6 +113,7 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
   const navigate = useNavigate()
   const [value, setValue] = useState('')
   const [operation, setOperation] = useState('general')
+  const [executeDeploy, setExecuteDeploy] = useState(false)
   const submission = useRef({ signature: '', key: '' })
   const [presets, setPresets] = useState<Array<{ id: string; version: number; label: string; hint: string; fields: Array<{ id: string; label: string }> }>>([])
   const [fields, setFields] = useState<Record<string, string>>({})
@@ -130,18 +132,19 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
     event.preventDefault(); setError(null)
     if (value.trim().length < 1) { setError('请先写下想做的事，简短描述也可以。'); return }
     if (busy) return
-    const signature = JSON.stringify([project.id, operation, value.trim(), fields])
+    const signature = JSON.stringify([project.id, operation, value.trim(), fields, executeDeploy])
     if (submission.current.signature !== signature) submission.current = { signature, key: crypto.randomUUID() }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
-    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: fields, idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { setValue(''); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
+    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: fields, ...(operation === 'release' ? { execute_deploy: executeDeploy } : {}), idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { setValue(''); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
     catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
   const selected = presets.find(item => item.id === operation)
   return <section id="project-work-request" className="wb-card wb-requirement-card">
     <div className="wb-card-head"><div><span className="wb-eyebrow">需求 · 维护 · 运维</span><h2>接下来让助手做什么</h2><p>选一种工作，补一句具体情况。助手沿用项目配置，执行、自测并提交验收。</p></div></div>
-    <div className="wb-project-tabs" role="group" aria-label="工作类型">{presets.map(({ id, label }) => <button type="button" key={id} aria-pressed={operation === id} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}) }}>{label}</button>)}</div>
+    <div className="wb-project-tabs" role="group" aria-label="工作类型">{presets.map(({ id, label }) => <button type="button" key={id} aria-pressed={operation === id} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
     <form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">{(selected?.label ?? '新需求')}说明<textarea id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} placeholder={(selected?.hint ?? '描述想得到的结果。')} aria-describedby="operation-hint" /></label><p id="operation-hint" className="wb-runtime-note">{(selected?.hint ?? '描述想得到的结果。')}</p>
     {selected && selected.fields.length > 0 && <details className="wb-advanced"><summary>补充信息（可选）</summary><div className="wb-advanced-body">{selected.fields.map(field => <label key={field.id}>{field.label}<textarea rows={2} maxLength={8000} disabled={busy} value={fields[field.id] ?? ''} onChange={event => setFields(previous => ({ ...previous, [field.id]: event.target.value }))} /></label>)}</div></details>}
+    {operation === 'release' && <label className="wb-checkbox"><input type="checkbox" disabled={busy} checked={executeDeploy} onChange={e => setExecuteDeploy(e.target.checked)} />执行部署：独立验收通过后，在已绑定目标运行预注册脚本</label>}
     {operation === 'bugfix'  && <p className="wb-runtime-note">如果是下方已有任务失败，请先打开该任务继续修复，以保留工作成果与会话。</p>}
     {error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || !selected || value.trim().length < 1}>{busy ? '正在接收…' : `开始${(selected?.label ?? '新需求')} →`}</button></div></form>
   </section>
@@ -229,7 +232,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
       {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务使用同一份快照</p>}
       {overview && overview.runs > 0 && <section className="ov3-summary" aria-label="本项目进展"><div><span>已接收需求</span><strong>{overview.runs}</strong><small>只统计本项目</small></div><div><span>进行中</span><strong>{overview.active_runs}</strong><small>规划、执行或验证</small></div><div className={overview.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{overview.attention_runs}</strong><small>需要处理的具体原因见下方</small></div><div><span>计费方式</span><strong>中转站管理</strong><small>本平台不再计费或限额</small></div></section>}
       {requirementForm}
-      <ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} />
+      <ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} />
       {currentRun && <section className="wb-card"><span className="wb-eyebrow">当前任务 · {runGuidance(currentRun).label}</span><h2>{currentRun.plan?.title || currentRun.request}</h2><p>{runGuidance(currentRun).summary}</p><Link className="wb-button wb-button-primary" to={nextRunAction(currentRun).href}>{nextRunAction(currentRun).label} →</Link></section>}
       {(overview?.attention ?? []).length > 0 && <section className="wb-card pw-attention"><div className="ov3-section-head"><div><span className="wb-eyebrow">本项目 · 待处理</span><h2>让工作继续的下一步</h2></div></div><AttentionList items={overview!.attention!.slice(0, 3)} /></section>}
       {runs?.length === 0 ? null : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={<a className="wb-text-link" href="#project-work-request">提交新需求或维护工作 ↑</a>} isAdmin={isAdmin} /> : !overviewError && <div className="wb-card ov3-loading" role="status" aria-label="正在读取本项目闭环"><span /><span /></div>}

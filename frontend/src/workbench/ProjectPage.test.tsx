@@ -12,6 +12,7 @@ const api = vi.mocked(request)
 const unauthorized = vi.fn()
 const project = { id: 'p1', name: '示例项目', repository: 'local/sample', workspace: '/tmp/project', base_branch: 'main', checks: {}, revision: 1 }
 const presets = [
+  { id: 'release', version: 1, label: '部署准备', hint: '环境', fields: [] },
   { id: 'general', version: 1, label: '新需求', hint: '目标', fields: [] },
   { id: 'bugfix', version: 7, label: '数据库里的修复入口', hint: '描述问题', fields: [{ id: 'error_log', label: '错误日志' }, { id: 'reproduction', label: '复现步骤' }] },
 ]
@@ -19,6 +20,7 @@ function show() { return render(<MemoryRouter initialEntries={['/projects/p1']}>
 beforeEach(() => {
   api.mockReset()
   api.mockImplementation(async (url) => {
+    if (url.includes('/deploy-targets')) return { targets: [], revision: 0, available: [] } as never
     if (url === '/api/v2/projects') return { projects: [project] } as never
     if (url === '/api/v2/operation-presets') return { presets } as never
     if (url.includes('/inspection')) return { enabled: false, interval_s: 3600, revision: 0 } as never
@@ -63,6 +65,23 @@ describe('ProjectPage maintenance entry', () => {
     expect(Array.from(intervals.querySelectorAll('option')).map(option => [option.textContent, option.value])).toEqual([['5 分钟', '300'], ['15 分钟', '900'], ['1 小时', '3600'], ['6 小时', '21600'], ['1 天', '86400']])
     fireEvent.click(checkbox)
     await waitFor(() => expect(api.mock.calls.some(([url, options]) => url.endsWith('/inspection') && options?.method === 'PUT')).toBe(true))
-    expect(api.mock.calls.find(([, options]) => options?.method === 'PUT')![1]?.body).toEqual({ enabled: true, interval_s: 3600, revision: 0 })
+    expect(api.mock.calls.find(([, options]) => options?.method === 'PUT')![1]?.body).toEqual({ enabled: true, interval_s: 3600, revision: 0, remote_read_only: false })
   })
+})
+it('requires an explicit release checkbox and includes it in the submission identity', async () => {
+  show()
+  fireEvent.click(await screen.findByRole('button', { name: '部署准备' }))
+  const checkbox = screen.getByRole('checkbox', { name: /执行部署：/ }) as HTMLInputElement
+  expect(checkbox.checked).toBe(false)
+  fireEvent.change(screen.getByLabelText('部署准备说明'), { target: { value: '准备部署' } })
+  api.mockImplementationOnce(async () => { throw new Error('网络中断') })
+  fireEvent.click(screen.getByRole('button', { name: '开始部署准备 →' }))
+  await screen.findByText('网络中断')
+  fireEvent.click(checkbox)
+  api.mockImplementationOnce(async () => ({ id: 'r1' }) as never)
+  fireEvent.click(screen.getByRole('button', { name: '开始部署准备 →' }))
+  await screen.findByText('运行已接收')
+  const bodies = api.mock.calls.filter(([url]) => url === '/api/v2/runs').map(([, options]) => options!.body as { execute_deploy: boolean; idempotency_key: string })
+  expect(bodies.map(body => body.execute_deploy)).toEqual([false, true])
+  expect(bodies[0].idempotency_key).not.toEqual(bodies[1].idempotency_key)
 })

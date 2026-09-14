@@ -270,7 +270,9 @@ def _run(self, rid):
             cancel=self.cancels[rid], max_parallel=limits['max_parallel'], timeout_s=remaining_timeout(),
             **({'resume_artifacts': resume['artifacts']} if resume else {}))
         progress['artifacts'] = artifacts
-        if run.get('execution_mode') == 'continuous' or run.get('agent_snapshot') or project.get('managed_workspace'):
+        if (run.get('execution_mode') == 'continuous' or run.get('agent_snapshot') or project.get('managed_workspace')
+                or (run.get('source', {}).get('operation') == 'release' and run['source'].get('execute_deploy')
+                    and run['source'].get('remote_targets'))):
             prior_repairs = ((resume or {}).get('artifacts') or {}).get('verification_repair_count', 0)
             artifacts['verification_repair_count'] = max(artifacts.get('verification_repair_count', 0), prior_repairs)
             try:
@@ -320,7 +322,9 @@ def _run(self, rid):
                 self._independent_verify(rid, run, {**project, 'budget_usd': total_budget}, verification_configuration(), artifacts)
         execution_known = valid_cost(artifacts.get('known_cost_usd')) or 0.0
         artifacts['total_known_cost_usd'] = execution_known + prior_usage['known_cost_usd']
-        if run.get('execution_mode') == 'continuous' or run.get('agent_snapshot') or project.get('managed_workspace'):
+        if (run.get('execution_mode') == 'continuous' or run.get('agent_snapshot') or project.get('managed_workspace')
+                or (run.get('source', {}).get('operation') == 'release' and run['source'].get('execute_deploy')
+                    and run['source'].get('remote_targets'))):
             final_usage = self._usage(rid)
             artifacts['total_known_cost_usd'] = final_usage['known_cost_usd']
             artifacts['verification_cost_usd'] = self._usage(rid, profile='verification')['known_cost_usd']
@@ -334,6 +338,9 @@ def _run(self, rid):
         tasks = artifacts.get('tasks') or [{**t, 'status': 'completed'} for t in run['tasks']]
         self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts, 'tasks': tasks},
             expected=('running', 'verifying'), event=('run.verified', artifacts))
+        if run.get('source', {}).get('operation') == 'release':
+            self.remote.collect(rid, artifacts)
+            self.store.update(rid, {'artifacts': artifacts})
         self._capture_capability(rid)
         if project.get('auto_publish'):
             self.publish(rid)

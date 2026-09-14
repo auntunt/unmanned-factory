@@ -141,6 +141,11 @@ def build_argv(
     if root.exists():
         out += ["--tmpfs", str(root)]
 
+    from factory.deploy_keys import hidden_deploy_dir
+    private = hidden_deploy_dir(ws)
+    if private:
+        out += ['--tmpfs', str(private)]
+
     # --- 第 3 段：放开可写点（必须最后）---
     out += ["--bind", str(ws), str(ws)]
     out += ["--bind", str(tmp), str(tmp)]

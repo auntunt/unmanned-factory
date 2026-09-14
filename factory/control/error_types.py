@@ -5,6 +5,7 @@ from factory.harness.proc import Timeout as ProcessTimeout
 
 
 FAILURE_CATEGORIES = {
+    'remote_connection': 'environment', 'host_fingerprint': 'environment',
     'budget': 'budget', 'browser_unavailable': 'environment',
     'BrowserUnavailable': 'environment', 'timeout': 'timeout',
     'TimeoutError': 'timeout', 'TimeoutExpired': 'timeout',

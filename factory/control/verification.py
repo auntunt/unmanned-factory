@@ -171,6 +171,8 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         artifacts=render_evidence(evidence, max_chars=16000),
         criteria=json.dumps(criteria, ensure_ascii=False),
     )
+    if run.get('source', {}).get('operation') == 'release' and run['source'].get('remote_targets'):
+        prompt += '\nOptional remote_requests may contain at most 8 objects with target_id, verb and optional lines (fetch_log only, 1..500). Never supply commands. The coordinator validates authorization and only runs registered verbs after this review. Remote results are separate evidence, not proof for your local verdict. Targets: ' + json.dumps(run['source']['remote_targets'], ensure_ascii=False)
     if coverage_retry:
         prompt += '\nYour previous overall PASS lacked complete valid per-criterion evidence. Complete the missing evidence in this verification session; do not ask the developer to rewrite working code.\n'
     review_deadline = time.monotonic() + min(600, configuration['limits']['timeout_s'])

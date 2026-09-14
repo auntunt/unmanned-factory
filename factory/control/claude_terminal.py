@@ -83,6 +83,10 @@ def command_argv(workspace: Path, scratch: Path, command: str) -> list[str]:
         uv = str(Path.home() / '.local/bin/uv')
     if uv:
         argv += ['--ro-bind', str(Path(uv).resolve()), '/tmp/.webuddy-bin/uv']
+    from factory.deploy_keys import hidden_deploy_dir
+    private = hidden_deploy_dir(workspace)
+    if private:
+        argv += ['--tmpfs', str(private)]
     argv += ['--clearenv', '--setenv', 'PATH', '/tmp/.webuddy-bin:/usr/local/bin:/usr/bin:/bin',
              '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp',
              '--setenv', 'LANG', 'C.UTF-8',

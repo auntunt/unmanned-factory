@@ -59,6 +59,9 @@ class OperationsAutomation:
                 END;
             """)
 
+            if 'remote_results' not in {r['name'] for r in db.execute('PRAGMA table_info(inspection_history)')}:
+                db.execute('ALTER TABLE inspection_history ADD COLUMN remote_results TEXT')
+
     def config(self, private=False):
         data = json.loads(self.path.read_text()) if self.path.exists() else {
             'revision': 0, 'webhook': '', 'knowledge_enabled': False}
@@ -99,6 +102,8 @@ class OperationsAutomation:
                 if row['verdict'] == 'pass':
                     break
                 streak += 1
+        for row in rows:
+            row['remote_results'] = json.loads(row.get('remote_results') or '[]')
         return {'history': rows, 'consecutive_failures': streak}
 
     def _history(self, run, reason):
@@ -107,8 +112,12 @@ class OperationsAutomation:
         verification = run.get('artifacts', {}).get('verification') or {}
         verdict = 'pass' if run['status'] == 'inspection_completed' else (
             'unverified' if verification.get('verdict') == 'unverified' or run['status'] == 'cancelled' else 'fail')
+        remote = run.get('artifacts', {}).get('remote_results') or []
+        remote_unverified = any(r.get('status') != 'pass' for r in remote)
+        if verdict == 'pass' and remote_unverified:
+            verdict = 'unverified'
         reason = reason + ' ' + str(verification.get('reason', ''))
-        error_type = run.get('error_type') or verification.get('error_type')
+        error_type = run.get('error_type') or verification.get('error_type') or ('remote_connection' if remote_unverified else None)
         if verdict == 'pass':
             category = None
         elif error_type:
@@ -122,8 +131,8 @@ class OperationsAutomation:
             start = db.execute("SELECT at FROM events WHERE run_id=? AND type='inspection.started' ORDER BY id LIMIT 1", (run['id'],)).fetchone()
             begin = start['at'] if start else run['created_at']
             duration = max(0, (datetime.fromisoformat(run['updated_at']) - datetime.fromisoformat(begin)).total_seconds())
-            db.execute('INSERT OR IGNORE INTO inspection_history VALUES(?,?,?,?,?,?)',
-                       (run['id'], run['project_id'], run['updated_at'], verdict, duration, category))
+            db.execute('INSERT OR IGNORE INTO inspection_history(run_id,project_id,at,verdict,duration_s,failure_category,remote_results) VALUES(?,?,?,?,?,?,?)',
+                       (run['id'], run['project_id'], run['updated_at'], verdict, duration, category, json.dumps(scrub(remote))))
 
     def facts(self, pid):
         return [e for e in self.memory.entries(pid) if
@@ -197,10 +206,11 @@ class OperationsAutomation:
         if not claimed:
             return
         try:
-            project = self.store.project(run['project_id'])
+            project = {'name': run['project_name']} if run.get('workbench_path') == '/settings/runtime' else self.store.project(run['project_id'])
             ongoing = (run.get('source', {}).get('type') == 'inspection'
                        and self.history(run['project_id'])['consecutive_failures'] >= 3)
-            text = f"{'持续故障 · ' if ongoing else ''}{scrub(project['name'])}\n{reason[:200]}\n{self.origin}/runs/{quote(str(run['id']), safe='')}"
+            link = '/settings/runtime' if run.get('workbench_path') == '/settings/runtime' else '/runs/' + quote(str(run['id']), safe='')
+            text = f"{'持续故障 · ' if ongoing else ''}{scrub(project['name'])}\n{reason[:200]}\n{self.origin}{link}"
             self.send(webhook, text)
         except Exception as exc:
             # Never log the URL, response body, exception message or request object.

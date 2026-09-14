@@ -125,6 +125,11 @@ class SandboxPolicy:
             params += ["-D", f"{key}={root}"]
             deny_lines.append(f'(deny file-write* (subpath (param "{key}")))')
 
+        from factory.deploy_keys import hidden_deploy_dir
+        private = hidden_deploy_dir()
+        if private:
+            params += ['-D', 'DEPLOY_KEYS=' + str(private)]
+            deny_lines.append('(deny file-read* file-write* (subpath (param "DEPLOY_KEYS")))')
         src = _PROFILE.format(
             allows="\n".join(allow_lines), denies="\n".join(deny_lines)
         )

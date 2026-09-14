@@ -16,6 +16,8 @@ from factory.control.agents import AgentStore
 from factory.control.autonomy import DurableQueue, PolicyStore, policy_decision
 from factory.control.codegraph import baseline_sha
 from factory.control.execution import execute_plan
+from factory.control.deploy_targets import TargetStore
+from factory.control.remote_targets import RemoteTargets
 from factory.control.inspections import InspectionStore, inspect_run
 from factory.control.modules import ModuleStore
 from factory.control.mounts import MountedRunner
@@ -81,7 +83,9 @@ class Service:
         self.operations = OperationStore(store)
         self._inspection_tick_at = 0
         self.operations_automation = OperationsAutomation(store)
-        self.inspections = InspectionStore(store, self.operations, automation=self.operations_automation)
+        self.targets = TargetStore(store)
+        self.remote = RemoteTargets(self.targets)
+        self.inspections = InspectionStore(store, self.operations, automation=self.operations_automation, targets=self.targets)
         self.operations_thread = None
 
     def _ensure_scheduler(self):

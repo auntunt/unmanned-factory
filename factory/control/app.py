@@ -89,12 +89,14 @@ class NewRun(Body):
     project_id: str
     request: str = Field(min_length=1, max_length=50_000)
     operation: str = Field(default="general", max_length=60)
+    execute_deploy: bool = Field(default=False, strict=True)
     operation_fields: dict[str, str] = Field(default_factory=dict, max_length=8)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class InspectionSettings(Body):
     enabled: bool
+    remote_read_only: bool = False
     interval_s: int = Field(default=3600, ge=300, le=604800, strict=True)
     revision: int = Field(ge=0, strict=True)
 
@@ -133,6 +135,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     from factory.control.governance import Governance
     governance = Governance(auth, store)
     svc.governance = governance
+    svc.targets.workspace_root = allowed_root
     # Runtime settings are persisted in the control store. Root may initialize
     # this on Service; keeping the fallback here preserves compatibility with
     # injected test services and older callers.
@@ -161,6 +164,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed_origin.hostname, '127.0.0.1', 'localhost'])
     from factory.control.runtime_routes import router as runtime_router
     app.include_router(runtime_router(store, svc, allowed_root, static))
+    from factory.control.remote_routes import router as remote_router
+    app.include_router(remote_router(svc))
     from factory.control.autonomy_routes import router as autonomy_router
     from factory.control.capability_routes import router as capability_router
     app.include_router(autonomy_router(store, svc))
@@ -181,6 +186,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(req, exc):
+        if req.url.path.startswith('/api/v2/deploy-targets') or req.url.path.endswith('/deploy-targets'):
+            return JSONResponse({'detail': '目标请求字段或类型不符合要求'}, status_code=422)
         if req.url.path == '/api/v2/runtime/probe' and any(e['type'] == 'missing' for e in exc.errors()):
             return JSONResponse({'detail': '模型检查请求缺少当前配置版本或模型档位。请刷新页面后重试；旧版页面无法发起此检查。'}, status_code=422)
         return await request_validation_exception_handler(req, exc)
@@ -548,16 +555,23 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         store.project(body.project_id)
         try:
             compiled, fingerprint, preset = operations.compile(body.operation, body.request, body.operation_fields)
+            if body.execute_deploy and body.operation != 'release':
+                raise ValueError('执行部署仅适用于部署准备工作流')
+            if body.execute_deploy:
+                fingerprint = hashlib.sha256((fingerprint + '\0execute_deploy=true').encode()).hexdigest()
+                compiled += '\n[用户明确授权：独立验收通过后，由平台执行绑定目标的预注册部署动作。]'
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
                if body.idempotency_key else None)
         if body.operation == 'startup':
             compiled += svc.operations_automation.context(body.project_id)
+        remote_targets = svc.targets.snapshot(body.project_id) if body.operation == 'release' else []
         run, created = store.create_run(body.project_id, compiled,
                                  source={'type': 'web', 'actor': request.state.user['username'],
                                          'actor_id': request.state.user['id'],
                                          'operation': body.operation, 'operation_version': preset['version'],
+                                         'execute_deploy': body.execute_deploy, 'remote_targets': remote_targets,
                                          'request_fingerprint': fingerprint}, delivery_id=key)
         if not created:
             if run['source'].get('request_fingerprint') != fingerprint:
@@ -573,7 +587,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     @app.get('/api/v2/runs/{rid}')
     def get_run(rid: str):
         from factory.control.engineering_overview import current_evidence
-        run = store.get(rid)
+        run = svc.remote.evidence(store.get(rid))
         return {**run, 'progress': current_evidence(run)}
 
     @app.post('/api/v2/runs/{rid}/clarify')
