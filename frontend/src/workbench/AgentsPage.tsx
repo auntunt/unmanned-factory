@@ -6,6 +6,7 @@ import { request, WorkspaceApiError } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import { ErrorNotice, EmptyState, formatDate, PageHeader, errorText, type PageProps } from './ui'
 import Deliverables from './Deliverables'
+import AgentManifest from './AgentManifest'
 import './agents.css'
 
 type Mode = 'do' | 'maintain'
@@ -65,8 +66,8 @@ function AgentList({ agents, selected, onSelect, onCreate }: { agents: Agent[]; 
 
 function NewAgent({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps & { onCreated: (agent: Agent) => void; onCancel: () => void }) {
   const [name, setName] = useState(''); const [purpose, setPurpose] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!name.trim()) return; setBusy(true); setError(null); try { const result = await request<Agent>(`${base}/agents`, { method: 'POST', csrfToken, onUnauthorized, body: { name: name.trim(), purpose: purpose.trim() } }); onCreated(result) } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) } finally { setBusy(false) } }
-  return <div className="agent-create-card wb-card"><div className="agent-card-kicker">新建职能体</div><h2>先告诉它擅长什么</h2><p>名字和用途足够开始，具体做法可以在维护对话里慢慢补充。</p><form onSubmit={submit}><label>名称<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：工业格式维护员" /></label><label>用途<textarea maxLength={500} rows={3} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder="它适合解决哪些问题？" /></label>{error && <ErrorNotice message={error} />}<div className="agent-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy}>{busy ? '创建中…' : '创建并开始'}</button></div></form></div>
+  const submit = async (event: FormEvent) => { event.preventDefault(); if (!name.trim()) return; setBusy(true); setError(null); try { const result = await request<Agent>(`${base}/agents`, { method: 'POST', csrfToken, onUnauthorized, body: { name: name.trim(), purpose: purpose.trim(), identity: purpose.trim() } }); onCreated(result) } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) } finally { setBusy(false) } }
+  return <div className="agent-create-card wb-card"><div className="agent-card-kicker">新建职能体</div><h2>先告诉它擅长什么</h2><p>创建岗位而非一次任务：写下长期职责，具体做法通过 skill 清单组合。</p><form onSubmit={submit}><label>名称<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：工业格式维护员" /></label><label>用途<textarea maxLength={500} rows={3} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder="它适合解决哪些问题？" /></label>{error && <ErrorNotice message={error} />}<div className="agent-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy}>{busy ? '创建中…' : '创建并开始'}</button></div></form></div>
 }
 
 function DraftCard({ draft, version, props, agentId, onChanged }: { draft: Draft; version?: AgentVersion; props: PageProps; agentId: string; onChanged: () => void }) {
@@ -160,6 +161,8 @@ export default function AgentsPage(props: PageProps) {
     <PageHeader title="职能体工作台" description="让反复出现的业务，有一个持续维护的入口。" actions={<button className="wb-button wb-button-primary" onClick={() => setCreating(true)}>＋ 新建职能体</button>} />
     {!params.agentId && <section className="wb-purpose-band"><span className="wb-purpose-symbol" aria-hidden="true">↗</span><div><h2>一类业务，一个长期伙伴</h2><p>上传 Skill、维护方法，再把任务交给它。</p></div><Link className="wb-text-link" to="/modules">查看能力模块</Link></section>}
     {error && <ErrorNotice message={error} />}
+    {props.user?.role==='admin' && <label className="wb-text-link">导入职能包 v1/v2 ZIP<input type="file" accept=".zip" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;const body=new FormData();body.append('file',file);try{const r=await fetch('/api/v4/agent-packs/import',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':props.csrfToken},body});if(!r.ok)throw new Error(`导入失败（${r.status}）`);const a=await r.json() as Agent;choose(a.id)}catch(cause){setError(errorText(cause))}}}/></label>}
+    {params.agentId && selected && <AgentManifest key={selected.id} agentId={selected.id} {...props}/>}
     {creating && <NewAgent {...props} onCancel={() => setCreating(false)} onCreated={(agent) => { setCreating(false); setAgents((current) => [agent, ...current]); navigate(`/agents/${encodeURIComponent(agent.id)}`) }} />}
     {loading && agents.length === 0 && <div className="wb-card agent-loading">正在读取职能体…</div>}
     {!loading && !error && agents.length === 0 && !creating && <div className="wb-card"><EmptyState title="还没有职能体" description="从一个名字和用途开始，之后可以在维护对话里教会它。" action={<button className="wb-button wb-button-primary" onClick={() => setCreating(true)}>创建第一个职能体</button>} /></div>}

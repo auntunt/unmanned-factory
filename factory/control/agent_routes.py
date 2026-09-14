@@ -11,6 +11,7 @@ from factory.control.store import Conflict
 class Body(BaseModel): model_config=ConfigDict(extra='forbid')
 class AgentCreate(Body):
     name:str=Field(min_length=1,max_length=120); purpose:str=Field(default='',max_length=4000)
+    identity:str|None=Field(default=None,max_length=1200)
     instructions:str=Field(default='',max_length=30000); model_settings:dict|None=None
     tool_scope:list[str]=Field(default_factory=list); acceptance:list[str]=Field(default_factory=list); delivery:dict|None=None
 class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); project_id:str|None=None
@@ -87,6 +88,8 @@ def router(store, service):
 
     from factory.control.agent_packs import install_builtins, pack_zip
     install_builtins(store)
+    manifests = service.agent_manifests
+    manifests.migrate_all()
 
     @api.get('/builtin-packs/{slug}/download')
     def download_builtin_pack(slug: str):
@@ -99,7 +102,8 @@ def router(store, service):
 
     @api.get('/modules')
     def list_modules():
-        return {'modules': modules.list()}
+        refs = manifests.references()
+        return {'modules': [{**m, 'agent_references': refs.get(m['id'], []), 'agent_reference_count': len(refs.get(m['id'], []))} for m in modules.list()]}
 
     @api.post('/modules', status_code=201)
     def create_module(body: ModuleBody, request: Request):
@@ -159,7 +163,12 @@ def router(store, service):
     @api.post('/agents',status_code=201)
     def create(body:AgentCreate,request:Request):
         data=body.model_dump(); data={k:v for k,v in data.items() if v is not None}
-        return guarded(agents.create,data,str(actor(request)['id']))
+        identity=data.pop('identity',None)
+        result=guarded(agents.create,data,str(actor(request)['id']))
+        if identity is not None:
+            m=manifests.get(result['id'])
+            guarded(manifests.save,result['id'],{'identity':identity,'skills':[],'assertions':data.get('acceptance',[])},m['revision'],actor(request)['id'])
+        return result
     @api.get('/agents/{aid}')
     def get(aid:str):
         a=guarded(agents.get,aid); return {**a,'version':agents.version(aid),'versions':agents.versions(aid),'draft':agents.draft(aid)}
@@ -261,7 +270,7 @@ def router(store, service):
                 version=agents.version(c['agent_id'])
                 conversation_request='\n\n'.join(str(m.get('content','')) for m in c['messages'] if m.get('role')=='user')
                 run,_=store.create_run(c['project_id'],conversation_request,source={'type':'agent','actor_id':actor(request)['id'],'agent_id':c['agent_id'],'agent_version':version['version'],'conversation_id':cid})
-                frozen={**version,'frozen_at':version.get('created_at') or ''}
+                frozen={**manifests.freeze(c['agent_id'],version),'frozen_at':version.get('created_at') or ''}
                 runtime=service.runtime_settings.get(); overrides=version.get('model_settings') or {}
                 default = overrides.get('default')
                 def configured(*candidates):

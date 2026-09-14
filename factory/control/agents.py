@@ -344,6 +344,9 @@ class AgentStore:
         version = {"id": uuid.uuid4().hex, "agent_id": aid, "version": 1, **payload, "source": "created", "previous_version": None, "created_at": at}
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE"); db.execute("INSERT INTO agents VALUES (?,?)", (aid, _json(agent))); db.execute("INSERT INTO agent_versions VALUES (?,?,?,?,?)", (version["id"], aid, 1, _json(version), at))
+        # Sidecar migration captures human identity before maintenance can edit skills.
+        from factory.control.agent_manifests import ManifestStore
+        ManifestStore(self.store).get(aid)
         return {**agent, "version": version}
 
     def versions(self, aid):

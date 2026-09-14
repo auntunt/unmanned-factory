@@ -121,6 +121,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.state.governance = governance
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed_origin.hostname, '127.0.0.1', 'localhost'])
     from factory.control.runtime_routes import router as runtime_router
+    from factory.control.manifest_routes import router as manifest_router
+    app.include_router(manifest_router(svc))
     app.include_router(runtime_router(store, svc, allowed_root, static))
     from factory.control.remote_routes import router as remote_router
     app.include_router(remote_router(svc))

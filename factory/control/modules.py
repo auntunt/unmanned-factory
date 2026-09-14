@@ -38,6 +38,8 @@ class ModuleStore:
             value[field] = scrub(item.strip())
         if payload.get('category') not in CATEGORIES: raise ValueError('请选择有效的模块类别')
         value['category'] = payload['category']
+        value['warnings'] = ['正文超过 4000 字符，建议拆分为单一能力'] if len(value['instructions']) > 4000 else []
+        value['status'] = 'ready'
         from factory.control.sources import source_refs, source_slots
         value['source_refs'] = source_refs(payload.get('source_refs', []))
         value['source_slots'] = source_slots(payload.get('source_slots', []))

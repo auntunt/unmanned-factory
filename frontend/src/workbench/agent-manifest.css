@@ -1,0 +1,9 @@
+.agent-manifest { padding:24px; margin-block:20px; }
+.agent-manifest form { display:grid; gap:16px; }
+.agent-manifest label { display:grid; gap:6px; }
+.agent-manifest textarea,.agent-manifest select { width:100%; color:var(--color-text); background:var(--color-surface); border:1px solid var(--color-border); border-radius:6px; padding:10px; }
+.agent-manifest li { margin-block:10px; overflow-wrap:anywhere; }
+.agent-manifest small { font-size:14px; color:var(--color-muted); }
+.agent-manifest pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.agent-manifest button { margin-inline-end:8px; }
+.agent-manifest details { margin-top:20px; }

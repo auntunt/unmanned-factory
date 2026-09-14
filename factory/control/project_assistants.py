@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 
+from factory.control.agent_manifests import ManifestStore
 from factory.control.agents import AgentStore
 from factory.control.capabilities import CapabilityStore
 from factory.control.knowledge import KnowledgeStore
@@ -14,6 +15,7 @@ class ProjectAssistants:
     def __init__(self, store):
         self.store = store
         self.agents = AgentStore(store)
+        self.manifests = ManifestStore(store)
         self.memory = KnowledgeStore(store)
         self.capabilities = CapabilityStore(store)
         with store.connect() as db:
@@ -69,7 +71,7 @@ class ProjectAssistants:
         verification = configured('verification', 'default')
         if verification:
             config['agent_verification_profile'] = verification
-        return {'agent_id': agent['id'], 'agent_version': version['version'], 'agent_snapshot': version,
+        return {'agent_id': agent['id'], 'agent_version': version['version'], 'agent_snapshot': self.manifests.freeze(agent['id'], version),
                 'runtime_configuration': config, 'project_assistant_revision': binding['revision']}
 
     def learnings(self, pid):
