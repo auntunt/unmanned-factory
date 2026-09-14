@@ -154,3 +154,40 @@ def test_list_paths_shows_active_worktrees(tmp_path):
     paths = pool.list_paths()
     assert wt1.path in paths
     assert wt2.path in paths
+
+
+def test_pool_serializes_git_metadata_mutations(tmp_path, monkeypatch):
+    """Deterministically exercise the prune/add overlap seen on the Linux CI runner."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from factory.harness import worktree as module
+    repo = _init_repo(tmp_path)
+    pool = WorktreePool(repo, root=tmp_path / 'pool')
+    original = module._git
+    guard = threading.Lock()
+    active = 0
+    peak = 0
+    def slow_git(root, *args):
+        nonlocal active, peak
+        if args[:1] != ('worktree',):
+            return original(root, *args)
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(.02)
+            return original(root, *args)
+        finally:
+            with guard:
+                active -= 1
+    monkeypatch.setattr(module, '_git', slow_git)
+    barrier = threading.Barrier(4)
+    def acquire(index):
+        barrier.wait()
+        return pool.acquire(f'parallel-{index}')
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        trees = list(executor.map(acquire, range(4)))
+        assert all(tree.head() for tree in trees)
+        assert all(executor.map(lambda tree: pool.release(tree, discard=True), trees))
+    assert peak == 1

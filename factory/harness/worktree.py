@@ -20,6 +20,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +115,7 @@ class WorktreePool:
         # 也会被自己的 capture_diff 当成改动文件。
         self._root = Path(root).resolve() if root else self._repo.parent / f".{prefix}-worktrees"
         self._prefix = prefix
+        self._metadata_lock = threading.RLock()
 
     @property
     def root(self) -> Path:
@@ -131,25 +133,28 @@ class WorktreePool:
         清掉而不是复用：复用会让上一次任务的残留改动混进这次的 diff，
         审计里就分不清哪些改动属于哪个 task_attempt。
         """
-        self._ensure_repo()
-        branch = branch_name(task_id, prefix=self._prefix)
-        path = self._root / _slug(task_id)
+        # git worktree prune/add inspect the same partially-written metadata.
+        # Serialize this short phase, never the task's actual execution.
+        with self._metadata_lock:
+            self._ensure_repo()
+            branch = branch_name(task_id, prefix=self._prefix)
+            path = self._root / _slug(task_id)
 
-        # 兜底：确认算出来的路径真的落在池内。_slug() 已经保证了这点，这里是
-        # 第二道 —— 下一行就是 _force_release() 的 shutil.rmtree，它删什么
-        # 完全取决于这个 path。曾经 task_id='..' 能让它删掉用户主仓库。
-        # 一道 rmtree 前的 assert 值这个钱。
-        self._assert_inside_pool(path)
+            # 兜底：确认算出来的路径真的落在池内。_slug() 已经保证了这点，这里是
+            # 第二道 —— 下一行就是 _force_release() 的 shutil.rmtree，它删什么
+            # 完全取决于这个 path。曾经 task_id='..' 能让它删掉用户主仓库。
+            # 一道 rmtree 前的 assert 值这个钱。
+            self._assert_inside_pool(path)
 
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._force_release(path, branch)
+            self._root.mkdir(parents=True, exist_ok=True)
+            self._force_release(path, branch)
 
-        proc = _git(self._repo, "worktree", "add", "-q", "-b", branch, str(path), base)
-        if proc.returncode != 0:
-            raise WorktreeError(
-                f"git worktree add 失败（task={task_id}）：{proc.stderr.strip()}"
-            )
-        return Worktree(path=path, branch=branch, repo=self._repo)
+            proc = _git(self._repo, "worktree", "add", "-q", "-b", branch, str(path), base)
+            if proc.returncode != 0:
+                raise WorktreeError(
+                    f"git worktree add 失败（task={task_id}）：{proc.stderr.strip()}"
+                )
+            return Worktree(path=path, branch=branch, repo=self._repo)
 
     def _assert_inside_pool(self, path: Path) -> None:
         """确认 path 严格落在 worktree 池内部，否则拒绝动它。
@@ -195,10 +200,11 @@ class WorktreePool:
         discard=False（默认）时，树里有未提交改动就**拒绝删**并返回 False ——
         那是 agent 的产出，还没人验收过。返回值让调用方能把路径打给人。
         """
-        if not discard and self.has_changes(wt):
-            return False
-        self._force_release(wt.path, wt.branch)
-        return True
+        with self._metadata_lock:
+            if not discard and self.has_changes(wt):
+                return False
+            self._force_release(wt.path, wt.branch)
+            return True
 
     def has_changes(self, wt: Worktree) -> bool:
         if not wt.path.exists():

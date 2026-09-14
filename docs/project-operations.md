@@ -64,3 +64,5 @@ GitHub Actions 分别执行后端测试、前端构建/Vitest，以及 Linux 容
 运行配置页管理目标与公钥，项目页管理绑定和远程巡检开关。release 新增 `execute_deploy` 显式勾选（默认 false，进请求指纹）；独立验收 pass 后才可执行绑定目标的预注册部署/回滚。模型只可提交受限结构化 verb 请求，不获得 SSH 工具或凭据。部署结果卡显示目标、健康检查及部署/回滚退出码；无目标明确显示“未连接服务器，仅完成准备”。
 
 远程动作单独留证，失败记 unverified，不改本地验收 verdict；巡检历史汇总本地及远程结论。写操作持久去重，未知回执不自动重放。私钥文件与主机指纹约束、接口说明和 ForceCommand 建议见 [remote-targets.md](remote-targets.md)。
+
+本轮 CI 另发现并修复旧 CLI 的 worktree 元数据竞争：同一池的创建/回收阶段互斥，避免 prune/add 看到尚未完整写入的 Git 注册项；编码任务本身仍并行。该修复只处理冻结引擎缺陷，没有新增旧 CLI 功能。
