@@ -49,6 +49,8 @@ function StagePreview({ stage, run }: { stage: string; run: Run }) {
     return <><p>{runGuidance(run).summary}</p><ul className="pw-record-list">{tasks.slice(0, 4).map((task, index) => <li key={String(task.id ?? index)}><strong>{String(task.title ?? task.id ?? `任务 ${index + 1}`)}</strong><span>{statusLabel(String(task.status ?? 'pending'))} · {records(task.attempts).length} 次尝试</span></li>)}</ul>{!tasks.length && <p>等待执行器返回任务与尝试记录。</p>}</>
   }
   if (stage === 'verify') {
+    const verdict = run.artifacts?.verification as { verdict?: string; reason?: string } | undefined
+    if (verdict?.verdict === 'unverified' || run.source?.type === 'inspection') return <p>{runGuidance(run).label} · {verdict?.reason || '等待巡检证据'}</p>
     const checks = checkRecords(run)
     return checks.length ? <><p>{verificationScopeNote(run)}</p><ul className="pw-record-list">{checks.slice(0, 5).map((check, index) => {
       const passed = checkPassed(check)

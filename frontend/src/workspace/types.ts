@@ -1,4 +1,5 @@
 export type RunStatus =
+  | 'inspection_completed'
   | 'received'
   | 'planning'
   | 'needs_clarification'
@@ -95,6 +96,7 @@ export interface Run {
   id: string | number
   project_id: string | number
   request: string
+  source?: Record<string, unknown>
   status: RunStatus
   revision: number
   plan?: Plan | null

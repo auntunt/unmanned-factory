@@ -76,7 +76,7 @@ def browser_evidence(store, rid):
     for row in rows:
         data = json.loads(row['payload'])
         item = {'event_id': row['id'], 'task_id': row['task_id'], 'at': row['at'],
-                'action': data.get('action'), 'ok': data.get('ok'),
+                'action': data.get('action'), 'ok': data.get('ok'), 'error_type': data.get('error_type'),
                 'url': str(data.get('url') or '')[:400],
                 'error_count': len(data.get('errors') or []),
                 'errors': [str(e)[:350] for e in (data.get('errors') or [])[:10]],

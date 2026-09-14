@@ -38,7 +38,7 @@ def coverage(criteria, verdict, commit):
     counts = {status: sum(i['status'] == status for i in items) for status in ('pass', 'fail', 'unverified')}
     digest = hashlib.sha256(json.dumps(criteria, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return {'schema_version': 1, 'commit': commit, 'criteria_digest': digest, 'items': items,
-            'counts': counts, 'total': len(items), 'complete': not invalid and counts['pass'] == len(items)}
+            'counts': counts, 'total': len(items), 'accounted': not invalid and len(by_id) == len(criteria) and all(i['evidence'] for i in items), 'complete': not invalid and counts['pass'] == len(items)}
 
 
 def repair_guidance(reason):

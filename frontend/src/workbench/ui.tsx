@@ -45,6 +45,10 @@ export function EmptyState({ title, description, action }: {
 }
 
 const STATUS_LABELS: Record<string, string> = {
+  unverified: '未验证',
+  pass: '通过',
+  fail: '未通过',
+  inspection_completed: '巡检通过',
   received: '已接收',
   planning: '规划中',
   needs_clarification: '需要补充需求',
@@ -73,10 +77,10 @@ export function statusLabel(status?: string | null): string {
 
 function statusTone(status?: string | null): string {
   if (!status) return 'neutral'
-  if (['published', 'completed', 'verified', 'ready_for_review'].includes(status)) return 'success'
+  if (['published', 'completed', 'verified', 'ready_for_review', 'inspection_completed', 'pass'].includes(status)) return 'success'
   if (['failed', 'discarded', 'cancelled'].includes(status)) return 'danger'
   if (status === 'blocked') return 'neutral'
-  if (['needs_clarification', 'awaiting_approval', 'needs_human'].includes(status)) return 'warning'
+  if (['needs_clarification', 'awaiting_approval', 'needs_human', 'unverified'].includes(status)) return 'warning'
   if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
   return 'neutral'
 }

@@ -27,7 +27,7 @@ export default function RunJourney({ run }: { run: Run }) {
     evidence.requirements ? '已记录需求' : '未记录',
     evidence.plan ? '已记录计划' : '未记录',
     evidence.execution ? '已记录任务与尝试' : '未记录',
-    evidence.checks === 'passed' ? (['ready_for_review', 'publishing', 'published'].includes(run.status) ? '验证通过' : '已有检查记录，待整体验证') : evidence.checks === 'failed' ? '检查未通过' : evidence.checks === 'recorded' ? '已记录检查' : '未记录',
+    evidence.checks === 'passed' ? (['ready_for_review', 'publishing', 'published'].includes(run.status) ? '验证通过' : '已有检查记录，待整体验证') : evidence.checks === 'unverified' ? '未验证' : evidence.checks === 'failed' ? '检查未通过' : evidence.checks === 'recorded' ? '已记录检查' : '未记录',
     evidence.delivery ? (run.status === 'published' ? '已发布' : '已记录交付') : '未记录',
   ]
   const terminal = run.status === 'published' || run.status === 'discarded' || run.status === 'cancelled'

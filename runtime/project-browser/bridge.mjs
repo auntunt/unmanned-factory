@@ -142,12 +142,13 @@ async function startBridge(socketPath, workspace, chrome) {
   const directory = await fs.mkdtemp('/tmp/webuddy-chrome-');
   async function ensurePage() {
     if (page) return;
-    browser = await puppeteer.launch({executablePath: chrome, headless: true, pipe: true,
+    try { browser = await puppeteer.launch({executablePath: chrome, headless: true, pipe: true,
       userDataDir: directory, timeout:30000, protocolTimeout:30000,
       args:['--no-sandbox','--disable-dev-shm-usage','--disable-background-networking',
         '--disable-component-update','--disable-sync','--disable-extensions',
         '--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
         `--proxy-server=http://127.0.0.1:${proxy.port}`, '--proxy-bypass-list=<-loopback>']});
+    } catch (error) { error.browserUnavailable = true; throw error; }
     page = await browser.newPage();
     await page.setViewport({width:1280,height:900,deviceScaleFactor:1});
     await page.setBypassServiceWorker(true);
@@ -232,7 +233,7 @@ async function startBridge(socketPath, workspace, chrome) {
       queue = queue.then(async()=>{
         let result;
         try { result={ok:true,...await perform(JSON.parse(line))}; }
-        catch(error) { result={ok:false,error:String(error.message).slice(0,1000),errors:[...errors]}; }
+        catch(error) { result={ok:false,error:String(error.message).slice(0,1000),error_type: error.browserUnavailable || error.name === 'TimeoutError' ? 'browser_unavailable' : 'browser_error',errors:[...errors]}; }
         result = compactResponse(result);
         socket.end(JSON.stringify(result)+'\n');
       }).catch(()=>socket.destroy());

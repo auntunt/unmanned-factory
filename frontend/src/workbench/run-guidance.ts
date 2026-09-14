@@ -26,7 +26,7 @@ export interface RunEvidence {
   requirements: boolean
   plan: boolean
   execution: boolean
-  checks: 'none' | 'passed' | 'failed' | 'recorded'
+  checks: 'none' | 'passed' | 'failed' | 'recorded' | 'unverified'
   delivery: boolean
 }
 
@@ -58,7 +58,7 @@ export function frozenPolicy(run: Run): FrozenRunPolicy | null {
 
 export function canGenerateNextPlan(run: Run, canActOnRun: boolean): boolean {
   const guidance = runGuidance(run)
-  return canActOnRun && ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status) && guidance.kind !== 'budget' && guidance.kind !== 'billing'
+  return run.source?.type !== 'inspection' && canActOnRun && ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status) && guidance.kind !== 'budget' && guidance.kind !== 'billing'
 }
 
 function runError(run: Run): string | undefined {
@@ -97,17 +97,21 @@ export function runEvidence(run: Run): RunEvidence {
   const checks = records(run.artifacts?.checks).length ? records(run.artifacts?.checks) : taskChecks
   const hasFailed = checks.some((check) => check.outcome === 'failed' || check.outcome === 'fail' || check.status === 'failed' || check.timeout === true || typeof check.exit === 'number' && check.exit !== 0)
   const hasPassed = checks.length > 0 && checks.every(checkPassed)
+  const verdict = (run.artifacts?.verification as { verdict?: string } | undefined)?.verdict
   return {
     requirements: Boolean(run.request.trim()),
     plan: Boolean(run.plan),
     execution: attempts.length > 0 || tasks.some((task) => ['running', 'completed', 'verified', 'failed'].includes(String(task.status))),
-    checks: !checks.length ? 'none' : hasFailed ? 'failed' : hasPassed ? 'passed' : 'recorded',
+    checks: verdict === 'unverified' ? 'unverified' : verdict === 'fail' ? 'failed' : verdict === 'pass' ? 'passed' : !checks.length ? 'none' : hasFailed ? 'failed' : hasPassed ? 'passed' : 'recorded',
     delivery: typeof run.artifacts?.commit === 'string' && Boolean(run.artifacts.commit.trim()) || typeof run.artifacts?.pr_url === 'string' && Boolean(run.artifacts.pr_url.trim()),
   }
 }
 
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
+  const verification = run.artifacts?.verification as { verdict?: string; reason?: string } | undefined
+  if (verification?.verdict === 'unverified') return result(run, { kind: 'paused', label: '验收未验证', summary: verification.reason || '浏览器证据暂不可用，其余证据已保留。', view: 'verification', stage: 'verify', primaryLabel: '查看未验证项' })
+  if (run.source?.type === 'inspection') return result(run, { kind: run.status === 'needs_human' ? 'paused' : 'progress', label: run.status === 'inspection_completed' ? '巡检通过' : run.status === 'needs_human' ? '巡检待处理' : '巡检中', summary: verification?.reason || '只检查本机项目副本，不改代码或部署。', view: 'verification', stage: 'verify', primaryLabel: '查看巡检证据' })
   const questions = requirements(run)
   const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
@@ -180,4 +184,8 @@ export function nextRunAction(run: Run): { label: string; href: string } {
   if (run.status === 'awaiting_approval') return { label: '确认计划并开始执行', href: `/runs/${encodeURIComponent(String(run.id))}?view=plan` }
   if (['ready_for_review', 'published'].includes(run.status)) return { label: '查看和下载成果', href: `/runs/${encodeURIComponent(String(run.id))}?view=delivery#deliverables-title` }
   return { label: guidance.primaryLabel, href: guidance.primaryHref }
+}
+
+export function runDisplayStatus(run: Run): string {
+  return (run.artifacts?.verification as { verdict?: string } | undefined)?.verdict === 'unverified' ? 'unverified' : run.status
 }

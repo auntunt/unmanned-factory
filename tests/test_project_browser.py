@@ -46,10 +46,25 @@ def test_requires_matching_terminal(tmp_path):
 
 def test_missing_runtime_never_falls_back_to_host(tmp_path):
     terminal=Terminal(tmp_path);terminal.run=lambda *_:{'exit_code':1,'output':'missing'}
-    with pytest.raises(RuntimeError,match='administrator'):BrowserSession(tmp_path,terminal).call('snapshot')
+    with pytest.raises(RuntimeError,match='重启重试一次'):BrowserSession(tmp_path,terminal).call('snapshot')
 
 def test_truncated_response_is_not_success(tmp_path):
     terminal=Terminal(tmp_path);browser=BrowserSession(tmp_path,terminal);browser.started=True
     terminal.run=lambda *_:{'exit_code':0,'truncated':True,'output':'{"ok":true}'}
     with pytest.raises(RuntimeError,match='complete'):browser.call('snapshot')
     assert len(TOOL_NAMES)==5
+
+
+def test_startup_timeout_restarts_once_then_reuses(tmp_path):
+    terminal = Terminal(tmp_path)
+    calls = []
+    def run(command, timeout):
+        calls.append((command, timeout))
+        return {'exit_code': 1 if len(calls) == 1 else 0, 'output': ''}
+    terminal.run = run
+    browser = BrowserSession(tmp_path, terminal, startup_timeout=42)
+    browser._start()
+    assert len(calls) == 2 and all(timeout == 47 for _, timeout in calls)
+    assert 'seq 1 420' in calls[0][0] and 'kill "$bridge_pid"' in calls[0][0]
+    browser._start()
+    assert len(calls) == 2

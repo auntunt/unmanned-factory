@@ -19,6 +19,7 @@ STAGES = (
 )
 
 STATUS_DETAILS = {
+    "inspection_completed": "巡检通过",
     "received": "已接收",
     "needs_clarification": "等待补充信息",
     "planning": "正在规划",
@@ -163,9 +164,11 @@ def current_evidence(run: Mapping) -> dict:
         outcome = check.get('outcome', check.get('status'))
         return outcome in ('passed', 'pass') if outcome is not None else check.get('exit') == 0
     failure = any(check.get('outcome', check.get('status')) in ('failed', 'fail') or check.get('timeout') or check.get('cancelled') or check.get('exit') not in (None, 0) for check in checks)
+    verification = artifacts.get('verification') or {}
+    verification_status = {'pass': 'passed', 'fail': 'failed', 'unverified': 'unverified'}.get(verification.get('verdict'))
     return {'requirements': bool(str(run.get('request') or '').strip()),
             'plan': bool(run.get('plan')), 'execution': _has_execution_tasks(tasks),
-            'checks': 'none' if not checks else 'failed' if failure else 'passed' if all(passed(check) for check in checks) else 'recorded',
+            'checks': verification_status or ('none' if not checks else 'failed' if failure else 'passed' if all(passed(check) for check in checks) else 'recorded'),
             'delivery': bool(artifacts.get('commit') or artifacts.get('pr_url'))}
 
 

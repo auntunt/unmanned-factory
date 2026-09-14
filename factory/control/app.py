@@ -88,8 +88,15 @@ class NewWorkspace(Body):
 class NewRun(Body):
     project_id: str
     request: str = Field(min_length=1, max_length=50_000)
-    operation: Literal["general", "bugfix", "startup", "release", "dependencies"] = "general"
+    operation: str = Field(default="general", max_length=60)
+    operation_fields: dict[str, str] = Field(default_factory=dict, max_length=8)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class InspectionSettings(Body):
+    enabled: bool
+    interval_s: int = Field(default=3600, ge=300, le=604800, strict=True)
+    revision: int = Field(ge=0, strict=True)
 
 
 class Continuation(Body):
@@ -513,17 +520,41 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         store.project(project_id)
         return {'runs': [run for run in store.all_runs() if run.get('project_id') == project_id]}
 
+    @app.get('/api/v2/projects/{pid}/inspection')
+    def get_inspection(pid: str):
+        return svc.inspections.get(pid)
+
+    @app.put('/api/v2/projects/{pid}/inspection')
+    def configure_inspection(pid: str, body: InspectionSettings, request: Request):
+        try:
+            result = svc.inspections.configure(pid, **body.model_dump(), actor_id=request.state.user['id'])
+        except Conflict:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        svc._ensure_scheduler()
+        svc.wake.set()
+        return result
+
+    @app.get('/api/v2/operation-presets')
+    def operation_presets():
+        from factory.control.operation_presets import OperationStore
+        return {'presets': OperationStore(store).list()}
+
     @app.post('/api/v2/runs', status_code=201)
     def new_run(body: NewRun, request: Request):
         store.project(body.project_id)
-        from factory.control.operation_presets import operation_request
-        fingerprint = hashlib.sha256(f'{body.operation}\0{body.request}'.encode()).hexdigest()
+        from factory.control.operation_presets import OperationStore
+        try:
+            compiled, fingerprint, preset = OperationStore(store).compile(body.operation, body.request, body.operation_fields)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
                if body.idempotency_key else None)
-        run, created = store.create_run(body.project_id, operation_request(body.operation, body.request),
+        run, created = store.create_run(body.project_id, compiled,
                                  source={'type': 'web', 'actor': request.state.user['username'],
                                          'actor_id': request.state.user['id'],
-                                         'operation': body.operation, 'operation_version': 1,
+                                         'operation': body.operation, 'operation_version': preset['version'],
                                          'request_fingerprint': fingerprint}, delivery_id=key)
         if not created:
             if run['source'].get('request_fingerprint') != fingerprint:
@@ -682,7 +713,6 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             return {'ignored': True, 'reason': 'repository_not_registered'}
         # Deduplicate semantic issue revision as well as GitHub delivery id. Label events
         # with no content change can enable a single fresh, explicitly opted-in analysis.
-        import hashlib
         semantic_id = hashlib.sha256(json.dumps([repo, number, issue.get('updated_at'), text,
                                                  'factory-ready' in labels]).encode()).hexdigest()
         run, created = store.create_run(project['id'], text[:50_000],

@@ -1,15 +1,71 @@
-"""Versioned operation briefs compiled at the authenticated run entry point."""
-OPERATION_BRIEFS = {
-    'bugfix': '复现用户描述的问题，记录触发条件与预期结果；定位根因并检查同类调用。只修复确认受影响的范围，补充能捕获原问题的回归检查，再执行相关既有检查。无法复现时明确证据缺口，不把猜测当成修复完成。',
-    'startup': '检查项目启动说明、依赖锁文件、环境变量名称、端口和启动命令；在隔离工作区实际启动并检查可用性。修复确认的配置或代码问题，记录验证命令、结果和停止方法。不得输出密钥值，不得终止不属于本任务的进程。',
-    'release': '检查构建、运行时配置、健康检查和现有发布流程；补齐可重复执行的部署说明或脚本，以及失败回滚步骤。在工作区实际验证构建与启动。只有已配置且已授权的目标才可发布；未连接服务器时交付准备结果并明确未部署，不得宣称线上健康。',
-    'dependencies': '检查依赖声明与锁文件一致性、安装失败及运行时兼容性。只更新解决已确认问题所需的依赖，避免无关的大版本升级；保留可复现安装，运行相关回归检查，说明变化、兼容性影响与回退方式。',
-}
+"""Database-backed, versioned operation catalog; seed files are migrations only."""
+import hashlib
+import json
+from pathlib import Path
 
 
-def operation_request(kind: str, description: str) -> str:
-    if kind == 'general':
-        return description
-    brief = OPERATION_BRIEFS[kind]
-    return (f'{description}\n\n[项目工作方式 · {kind} · v1]\n{brief}\n'
-            '沿用项目既有权限、能力挂载和验收规则；优先复用有效成果。交付包含实际改动、验证证据、尚未解决的事项；需要额外授权或缺少连接时说明具体阻碍。')
+class OperationStore:
+    def __init__(self, store):
+        self.store = store
+        with store.connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS operation_presets(id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(id,version))")
+            for row in json.loads((Path(__file__).parent / 'templates/operations-v1.json').read_text()):
+                db.execute('INSERT OR IGNORE INTO operation_presets VALUES(?,?,?)',
+                           (row['id'], row['version'], json.dumps(row, ensure_ascii=False)))
+
+    def list(self):
+        with self.store.connect() as db:
+            return [{**json.loads(r['data']), 'id': r['id'], 'version': r['version']} for r in db.execute("SELECT id,version,data FROM operation_presets p WHERE version=(SELECT MAX(version) FROM operation_presets WHERE id=p.id) ORDER BY rowid")]
+
+    def get(self, kind):
+        for row in self.list():
+            if row['id'] == kind:
+                return row
+        raise ValueError('未知工作类型')
+
+    def compile(self, kind, description, fields=None):
+        preset = self.get(kind)
+        fields = fields or {}
+        allowed = {f['id']: f['label'] for f in preset['fields']}
+        if set(fields) - set(allowed):
+            raise ValueError('工作类型不支持这些补充字段')
+        if any(not isinstance(v, str) or len(v) > 8000 for v in fields.values()):
+            raise ValueError('补充字段必须为不超过 8000 字符的文字')
+        fields = {k: v.strip() for k, v in fields.items() if v.strip()}
+        # Preserve pre-upgrade fingerprints for field-free submissions.
+        identity = f'{kind}\0{description}'
+        if fields:
+            identity += '\0' + json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        fingerprint = hashlib.sha256(identity.encode()).hexdigest()
+        compiled = description
+        if fields:
+            compiled += '\n\n补充信息：\n' + '\n'.join(f'{allowed[k]}：{v}' for k, v in fields.items())
+        if kind != 'general':
+            compiled += (f"\n\n[项目工作方式 · {kind} · v{preset['version']}]\n{preset['brief']}\n"
+                '沿用项目既有权限、能力挂载和验收规则；优先复用有效成果。交付包含实际改动、验证证据、尚未解决的事项；需要额外授权或缺少连接时说明具体阻碍。')
+        return compiled, fingerprint, preset
+
+
+def operation_results(verdict, ledger):
+    """Bind maintenance summaries to this review's actual criterion evidence."""
+    rows = {row['id']: row for row in ledger['items']}
+    result = {}
+    supplied = verdict.get('operation_results')
+    supplied = supplied if isinstance(supplied, dict) else {}
+    for key in ('regression', 'startup_command', 'health', 'build_artifacts', 'rollback'):
+        value = supplied.get(key)
+        if not isinstance(value, dict) or value.get('status') not in ('pass', 'fail', 'unverified'):
+            continue
+        refs = value.get('criterion_ids')
+        evidence = value.get('evidence')
+        if (not isinstance(refs, list) or not refs or any(not isinstance(r, str) or r not in rows for r in refs)
+                or not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 3000):
+            continue
+        statuses = [rows[r]['status'] for r in refs]
+        status = 'fail' if 'fail' in statuses else 'unverified' if 'unverified' in statuses else 'pass'
+        if value.get('status') == 'unverified':
+            status = 'unverified'
+        elif value.get('status') == 'fail':
+            status = 'fail'
+        result[key] = {'status': status, 'evidence': evidence, 'criterion_ids': refs}
+    return result

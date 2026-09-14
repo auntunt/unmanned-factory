@@ -1,0 +1,13 @@
+FROM python:3.12-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap chromium git nodejs npm && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir uv
+COPY runtime/project-browser/package*.json /opt/webuddy-browser/
+RUN cd /opt/webuddy-browser && npm ci --omit=dev
+COPY runtime/project-browser/bridge.mjs /opt/webuddy-browser/bridge.mjs
+COPY . /app
+WORKDIR /app
+RUN uv sync --frozen --all-extras && useradd -m -u 1000 smoke && chown -R smoke:smoke /app
+USER smoke
+ENV FACTORY_BROWSER_CHROME=/usr/bin/chromium
+ENV FACTORY_BROWSER_RUNTIME=/opt/webuddy-browser
+CMD ["sh", "-c", ".venv/bin/python -c 'from factory.control.claude_terminal import available; assert available(), \"sandbox unavailable; refusing skipped smoke\"' && .venv/bin/python -m pytest -q tests/test_active_verification.py -k 'real_verification_browser or real_sandbox_probe' -rs"]
