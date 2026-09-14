@@ -78,7 +78,8 @@ def test_inspection_budget_blocks_provider_and_no_coding(app_env, monkeypatch):
     monkeypatch.setattr(service, '_remaining_dollar_budget', exhausted)
     monkeypatch.setattr(service, '_independent_verify', lambda *args: pytest.fail('must not call provider'))
     inspect_run(service, rid)
-    assert store.get(rid)['status'] == 'needs_human'
+    assert store.get(rid)['status'] == 'inspection_failed'
+    assert 'budget exhausted' in store.get(rid)['error']
     for fn, args in [(service.start_plan, (rid,)), (service.publish, (rid,)), (service.publish_github, (rid,))]:
         with pytest.raises(Conflict): fn(*args)
 
@@ -213,3 +214,100 @@ def test_recovered_browser_preserves_mixed_observation_review_ids(app_env, monke
     artifacts = {'worktree': str(repo)}
     service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
     assert artifacts['verification']['verdict'] == 'pass'
+
+
+def test_inspection_failure_superseded_preserves_evidence(app_env, monkeypatch):
+    from factory.control.autonomy_routes import _attention
+    service, store, p, config = schedule(app_env)
+    first = service.inspections.tick(config['next_at'])[0]
+    evidence = {'verification': {'verdict': 'fail', 'reason': 'health endpoint failed'}}
+    def failed(rid, run, project, settings, artifacts):
+        artifacts.update(evidence)
+        raise ExecutionError('health endpoint failed', artifacts=artifacts)
+    monkeypatch.setattr(service, '_independent_verify', failed)
+    inspect_run(service, first)
+    old = store.get(first)
+    assert old['status'] == 'inspection_failed'
+    assert old['artifacts']['verification'] == evidence['verification']
+    assert _attention(old, {})['reason'] == 'health endpoint failed'
+    second = service.inspections.tick(config['next_at'] + 300)[0]
+    old = store.get(first)
+    assert old['inspection_superseded_by'] == second
+    assert old['artifacts']['verification'] == evidence['verification']
+    assert old['error'] == 'health endpoint failed'
+    assert _attention(old, {}) is None
+    inspect_run(service, second)
+    assert _attention(store.get(second), {}, {p['id']: second}) is not None
+    assert _attention(store.get(second), {}, {p['id']: 'newer'}) is None
+
+
+def test_operation_store_reused_under_concurrent_submissions(app_env, monkeypatch):
+    from contextlib import contextmanager
+    from concurrent.futures import ThreadPoolExecutor
+    client, store, service, repo = app_env
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    monkeypatch.setattr(service, 'start_plan', lambda rid: None)
+    original = store.connect
+    statements = []
+    @contextmanager
+    def traced():
+        with original() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+    monkeypatch.setattr(store, 'connect', traced)
+    def submit(index):
+        return client.post('/api/v2/runs', headers=headers, json={
+            'project_id': pid, 'request': '保存失败', 'operation': 'bugfix',
+            'idempotency_key': f'concurrent-operation-{index}',
+        })
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(submit, range(4)))
+    assert all(response.status_code == 201 for response in responses)
+    assert client.get('/api/v2/operation-presets').status_code == 200
+    service.inspections.tick()
+    assert service.inspections.operations is service.operations
+    assert not any('CREATE TABLE' in sql.upper() for sql in statements)
+    assert not any('INSERT OR IGNORE INTO OPERATION_PRESETS' in sql.upper() for sql in statements)
+
+
+def test_legacy_inspections_latest_only_and_atomic_supersession(app_env, monkeypatch):
+    from factory.control.autonomy_routes import overview
+    service, store, p, config = schedule(app_env)
+    first = service.inspections.tick(config['next_at'])[0]
+    store.update(first, {'status': 'needs_human', 'artifacts': {'verification': {'reason': 'legacy failure'}}},
+                 event=('run.failed', {'message': 'legacy failure'}))
+    original_event = store._event
+    def broken(db, rid, kind, *args, **kwargs):
+        if kind == 'inspection.enqueued':
+            raise RuntimeError('simulated queue transaction failure')
+        return original_event(db, rid, kind, *args, **kwargs)
+    monkeypatch.setattr(store, '_event', broken)
+    with pytest.raises(RuntimeError):
+        service.inspections.tick(config['next_at'] + 300)
+    assert not store.get(first).get('inspection_superseded_by')
+    assert service.inspections.get(p['id'])['last_run_id'] == first
+    monkeypatch.setattr(store, '_event', original_event)
+    second = service.inspections.tick(config['next_at'] + 300)[0]
+    assert store.get(first)['error'] == 'legacy failure'
+    assert store.get(first)['status'] == 'inspection_failed'
+    store.update(second, {'status': 'inspection_failed', 'error': 'latest failure'})
+    result = overview(store, project_id=p['id'])
+    assert [item['id'] for item in result['attention']] == [second]
+    assert result['attention_runs'] == result['project_summaries'][0]['attention_runs'] == 1
+    store.update(second, {'status': 'inspection_completed'})
+    assert overview(store, project_id=p['id'])['attention'] == []
+
+
+@pytest.mark.parametrize('status', ['received', 'verifying'])
+def test_interrupted_inspection_never_becomes_needs_human(app_env, monkeypatch, status):
+    service, store, p, config = schedule(app_env)
+    rid = service.inspections.tick(config['next_at'])[0]
+    store.update(rid, {'status': status, 'policy': {'resume_on_restart': False},
+                       'artifacts': {'verification': {'reason': 'partial evidence'}}})
+    monkeypatch.setattr(service, '_ensure_scheduler', lambda: None)
+    service.recover()
+    failed = store.get(rid)
+    assert failed['status'] == 'inspection_failed'
+    assert '中断' in failed['error']
+    assert failed['artifacts']['verification']['reason'] == 'partial evidence'

@@ -255,7 +255,9 @@ class Service:
         from factory.control.agents import AgentStore
         self.agents = AgentStore(store)
         from factory.control.inspections import InspectionStore
-        self.inspections = InspectionStore(store)
+        from factory.control.operation_presets import OperationStore
+        self.operations = OperationStore(store)
+        self.inspections = InspectionStore(store, self.operations)
         self._inspection_tick_at = 0
 
     def _ensure_scheduler(self):
@@ -458,6 +460,10 @@ class Service:
                 except KeyError:
                     policy = {'resume_on_restart': False}
                 self.queue.reset(rid)
+                if run.get('source', {}).get('type') == 'inspection' and (run['status'] in ('running', 'verifying') or not policy['resume_on_restart']):
+                    from factory.control.execution import ExecutionError
+                    self._fail(rid, ExecutionError('巡检在服务重启时中断；已保留现有证据，等待下一次巡检', artifacts=run.get('artifacts') or {}))
+                    continue
                 if (policy['resume_on_restart'] and run.get('execution_mode') == 'continuous'
                         and run['status'] in ('running', 'verifying')):
                     checkpoints = [event['payload'] for event in all_events(self.store, rid)
@@ -913,7 +919,10 @@ class Service:
             run = self.store.get(rid)
             if run['status'] == 'cancelled':
                 return
-            changes = {'status': 'needs_human'}
+            inspection = run.get('source', {}).get('type') == 'inspection'
+            changes = {'status': 'inspection_failed' if inspection else 'needs_human'}
+            if inspection:
+                changes['error'] = scrub(str(exc))[:2000]
             if getattr(exc, 'artifacts', None):
                 try:
                     usage = self._usage(rid)
@@ -926,7 +935,7 @@ class Service:
                 if exc.artifacts.get('tasks'):
                     changes['tasks'] = exc.artifacts['tasks']
             self.store.update(rid, changes,
-                event=('run.failed', {'message': scrub(str(exc))[:2000], 'error_type': type(exc).__name__}))
+                event=('inspection.failed' if inspection else 'run.failed', {'message': scrub(str(exc))[:2000], 'error_type': type(exc).__name__}))
 
     def _plan(self, rid):
         from factory.control.planning import build_prompt, continuous_plan, parse_plan, triage

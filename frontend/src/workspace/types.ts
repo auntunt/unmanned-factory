@@ -1,5 +1,6 @@
 export type RunStatus =
   | 'inspection_completed'
+  | 'inspection_failed'
   | 'received'
   | 'planning'
   | 'needs_clarification'
@@ -92,6 +93,7 @@ export interface Artifacts {
 }
 
 export interface Run {
+  inspection_superseded_by?: string
   execution_mode?: 'continuous' | 'dag'
   id: string | number
   project_id: string | number

@@ -107,11 +107,14 @@ def _recent_events(store, run_ids):
     return result
 
 
-def _attention(run, events):
+def _attention(run, events, latest_inspections=None):
+    if run.get('source', {}).get('type') == 'inspection':
+        if run.get('inspection_superseded_by') or (latest_inspections is not None and latest_inspections.get(run.get('project_id')) != run['id']):
+            return None
     artifacts = run.get('artifacts') if isinstance(run.get('artifacts'), dict) else {}
     run_events = events.get(str(run.get('id')), [])
     status = run.get('status')
-    active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed'}
+    active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed', 'inspection_failed'}
     has_needs_human = bool(artifacts.get('needs_human'))
     if not active_attention:
         return None
@@ -159,6 +162,11 @@ def overview(store, project_id=None):
     names = {project['id']: project['name'] for project in projects}
     from factory.control.engineering_overview import current_evidence
     all_runs = [{**run, 'progress': current_evidence(run)} for run in store.all_runs()]
+    latest_inspections = {}
+    # all_runs is newest-inserted first; superseding an old record must not make it latest.
+    for run in all_runs:
+        if run.get('source', {}).get('type') == 'inspection':
+            latest_inspections.setdefault(run.get('project_id'), run['id'])
     all_capabilities = CapabilityStore(store).list()
     run_by_id = {str(run['id']): run for run in all_runs}
 
@@ -248,7 +256,7 @@ def overview(store, project_id=None):
     attention = []
     for run in runs:
         enriched = {**run, 'project_name': names.get(run.get('project_id'), '项目')}
-        item = _attention(enriched, scoped_events)
+        item = _attention(enriched, scoped_events, latest_inspections)
         if item:
             attention.append(item)
     attention.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
@@ -274,7 +282,7 @@ def overview(store, project_id=None):
     summary_projects = [project_by_id[project_id]] if project_id is not None else projects
     for project in summary_projects:
         project_runs = scope_runs(project['id'])
-        project_attention = sum(_attention({**run, 'project_name': project['name']}, all_events) is not None
+        project_attention = sum(_attention({**run, 'project_name': project['name']}, all_events, latest_inspections) is not None
                                 for run in project_runs)
         project_summaries.append({
             'id': project['id'], 'name': project['name'], 'repository': project.get('repository'),

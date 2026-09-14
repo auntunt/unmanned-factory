@@ -13,7 +13,7 @@ it('shows evidence and marks missing maintenance facts unverified', () => {
 
 it('exposes unverified independently from the paused run status', async () => {
   const { runDisplayStatus, runEvidence } = await import('./run-guidance')
-  const run = { request: 'x', status: 'needs_human', artifacts: { verification: { verdict: 'unverified' } } } as Run
+  const run = { request: 'x', status: 'needs_human', artifacts: { verification: { verdict: 'unverified' } } } as unknown as Run
   expect(runDisplayStatus(run)).toBe('unverified')
   expect(runEvidence(run).checks).toBe('unverified')
 })

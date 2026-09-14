@@ -20,6 +20,7 @@ STAGES = (
 
 STATUS_DETAILS = {
     "inspection_completed": "巡检通过",
+    "inspection_failed": "巡检未通过",
     "received": "已接收",
     "needs_clarification": "等待补充信息",
     "planning": "正在规划",

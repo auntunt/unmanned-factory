@@ -59,6 +59,8 @@ describe('ProjectPage maintenance entry', () => {
   it('saves opt-in inspection with the current revision', async () => {
     show()
     const checkbox = await screen.findByRole('checkbox', { name: '启用巡检' })
+    const intervals = screen.getByLabelText('巡检间隔')
+    expect(Array.from(intervals.querySelectorAll('option')).map(option => [option.textContent, option.value])).toEqual([['5 分钟', '300'], ['15 分钟', '900'], ['1 小时', '3600'], ['6 小时', '21600'], ['1 天', '86400']])
     fireEvent.click(checkbox)
     await waitFor(() => expect(api.mock.calls.some(([url, options]) => url.endsWith('/inspection') && options?.method === 'PUT')).toBe(true))
     expect(api.mock.calls.find(([, options]) => options?.method === 'PUT')![1]?.body).toEqual({ enabled: true, interval_s: 3600, revision: 0 })

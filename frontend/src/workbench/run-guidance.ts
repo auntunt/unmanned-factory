@@ -110,8 +110,8 @@ export function runEvidence(run: Run): RunEvidence {
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
   const verification = run.artifacts?.verification as { verdict?: string; reason?: string } | undefined
+  if (run.source?.type === 'inspection') return result(run, { kind: ['inspection_failed', 'needs_human'].includes(run.status) ? 'paused' : 'progress', label: run.inspection_superseded_by ? '巡检已被取代' : run.status === 'inspection_completed' ? '巡检通过' : ['inspection_failed', 'needs_human'].includes(run.status) ? '巡检未通过' : '巡检中', summary: runError(run) || verification?.reason || '只检查本机项目副本，不改代码或部署。', view: 'verification', stage: 'verify', primaryLabel: '查看巡检证据' })
   if (verification?.verdict === 'unverified') return result(run, { kind: 'paused', label: '验收未验证', summary: verification.reason || '浏览器证据暂不可用，其余证据已保留。', view: 'verification', stage: 'verify', primaryLabel: '查看未验证项' })
-  if (run.source?.type === 'inspection') return result(run, { kind: run.status === 'needs_human' ? 'paused' : 'progress', label: run.status === 'inspection_completed' ? '巡检通过' : run.status === 'needs_human' ? '巡检待处理' : '巡检中', summary: verification?.reason || '只检查本机项目副本，不改代码或部署。', view: 'verification', stage: 'verify', primaryLabel: '查看巡检证据' })
   const questions = requirements(run)
   const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
@@ -187,5 +187,6 @@ export function nextRunAction(run: Run): { label: string; href: string } {
 }
 
 export function runDisplayStatus(run: Run): string {
+  if (run.status === 'inspection_failed') return run.status
   return (run.artifacts?.verification as { verdict?: string } | undefined)?.verdict === 'unverified' ? 'unverified' : run.status
 }

@@ -125,6 +125,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         raise ValueError('公网登录必须使用 HTTPS')
     auth = AuthStore(data / 'users.db')
     store = service.store if service else Store(data / 'control.db')
+    from factory.control.operation_presets import OperationStore
+    operations = OperationStore(store)
     token = os.getenv('FACTORY_GITHUB_TOKEN', '')
     svc = service or Service(store, publisher=GitHubDelivery(token) if token else None,
                             timeout_s=int(os.getenv('FACTORY_TASK_TIMEOUT', '14400')))
@@ -538,15 +540,13 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     @app.get('/api/v2/operation-presets')
     def operation_presets():
-        from factory.control.operation_presets import OperationStore
-        return {'presets': OperationStore(store).list()}
+        return {'presets': operations.list()}
 
     @app.post('/api/v2/runs', status_code=201)
     def new_run(body: NewRun, request: Request):
         store.project(body.project_id)
-        from factory.control.operation_presets import OperationStore
         try:
-            compiled, fingerprint, preset = OperationStore(store).compile(body.operation, body.request, body.operation_fields)
+            compiled, fingerprint, preset = operations.compile(body.operation, body.request, body.operation_fields)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"

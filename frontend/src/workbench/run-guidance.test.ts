@@ -101,3 +101,11 @@ it('持续编码的连接恢复仍是进行中，不要求批准，终态不沿�
   expect(runGuidance(value).label).toBe('正在恢复模型连接')
   expect(runGuidance({ ...value, status: 'ready_for_review' }).kind).toBe('delivery')
 })
+
+it('shows failed inspections as terminal findings with preserved evidence', () => {
+  const failed = run({ status: 'inspection_failed', source: { type: 'inspection' }, artifacts: { verification: { verdict: 'unverified', reason: 'Chrome unavailable' } } })
+  expect(runGuidance(failed).label).toBe('巡检未通过')
+  expect(runGuidance(failed).summary).toBe('Chrome unavailable')
+  expect(canGenerateNextPlan(failed, true)).toBe(false)
+  expect(runGuidance({ ...failed, inspection_superseded_by: 'next' }).label).toBe('巡检已被取代')
+})

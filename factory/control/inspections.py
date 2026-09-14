@@ -9,8 +9,9 @@ from factory.control.store import ACTIVE, Conflict, now, scrub
 
 
 class InspectionStore:
-    def __init__(self, store):
+    def __init__(self, store, operations=None):
         self.store = store
+        self.operations = operations if operations is not None else OperationStore(store)
         with store.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS project_inspections(
                 project_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, interval_s INTEGER NOT NULL,
@@ -51,8 +52,7 @@ class InspectionStore:
 
     def tick(self, timestamp=None):
         timestamp = time.time() if timestamp is None else timestamp
-        catalog = OperationStore(self.store)
-        compiled, _, preset = catalog.compile('startup', '定时巡检：检查本机项目副本能否按已有说明启动并通过健康检查。')
+        compiled, _, preset = self.operations.compile('startup', '定时巡检：检查本机项目副本能否按已有说明启动并通过健康检查。')
         # Override startup repair instructions: inspection has no execution phase.
         prompt = ('只巡检，不修复、不部署、不发布；不得改动原项目、既有源码、依赖声明或测试。'
                   '在隔离副本运行已有启动命令与健康检查，缺配置或无法验证须标记 unverified。'
@@ -71,6 +71,20 @@ class InspectionStore:
                     plan=None, triage=None, tasks=[], artifacts={}, history=[], created_at=now(), updated_at=now(),
                     source={'type': 'inspection', 'operation': 'startup', 'operation_version': preset['version'],
                             'actor_id': config['actor_id'], 'schedule_revision': config['revision']})
+                # Supersession and enqueue share one transaction; never drop a finding
+                # unless its replacement is durably queued. Preserve all prior evidence.
+                older = db.execute("SELECT id,data FROM runs WHERE json_extract(data,'$.project_id')=? AND json_extract(data,'$.source.type')='inspection' AND json_extract(data,'$.status') IN ('inspection_failed','needs_human')", (pid,)).fetchall()
+                for row in older:
+                    previous = json.loads(row['data'])
+                    if previous.get('inspection_superseded_by'):
+                        continue
+                    if not previous.get('error'):
+                        failure = db.execute("SELECT payload FROM events WHERE run_id=? AND type='run.failed' ORDER BY id DESC LIMIT 1", (row['id'],)).fetchone()
+                        if failure:
+                            previous['error'] = json.loads(failure['payload']).get('message')
+                    previous.update(status='inspection_failed', inspection_superseded_by=rid, updated_at=now())
+                    db.execute('UPDATE runs SET data=? WHERE id=?', (json.dumps(previous, ensure_ascii=False), row['id']))
+                    self.store._event(db, row['id'], 'inspection.superseded', {'replacement_run_id': rid})
                 db.execute('INSERT INTO runs VALUES(?,?)', (rid, json.dumps(scrub(run), ensure_ascii=False)))
                 db.execute('INSERT INTO control_jobs VALUES(?,?,?,?,?)', (rid, 'plan', 'pending', 1, now()))
                 db.execute('UPDATE project_inspections SET next_at=?,last_at=?,last_run_id=? WHERE project_id=?',
