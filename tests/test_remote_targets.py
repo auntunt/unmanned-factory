@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import stat
 import sys
 import time
@@ -112,6 +113,11 @@ def test_timeout_kills_child_group(remote_env, tmp_path):
     _, _, service, _, _, target, config, _ = remote_env
     pidfile = tmp_path / 'child.pid'
     data = json.loads(config.read_text()); data.update(hang=True, pidfile=str(pidfile)); config.write_text(json.dumps(data))
+    # Exercise group termination, not two cold Python interpreter startups within
+    # the 400 ms deadline. Keep real subprocesses and all timeout assertions.
+    binary = tmp_path / 'bin'
+    (binary / 'ssh-keyscan').write_text('#!/bin/sh\nprintf "%s\\n" ' + shlex.quote('example.test ' + data['key']) + '\n')
+    (binary / 'ssh').write_text('#!/bin/sh\nsleep 90 &\nprintf "%s\\n" "$!" > ' + shlex.quote(str(pidfile)) + '\nwait\n')
     service.remote.timeout = .4
     run = release(remote_env)
     start = time.monotonic()

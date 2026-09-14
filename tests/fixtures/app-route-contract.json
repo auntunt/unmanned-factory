@@ -1,0 +1,419 @@
+{
+  "routes": [
+    {
+      "name": "login",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='Login', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/auth/login')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "me",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/auth/me')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "logout",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/auth/logout')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "projects",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "create_project",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='Project', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "new_workspace",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='NewWorkspace', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/create-workspace')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "import_workspace",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load())), arg(arg='file', annotation=Name(id='UploadFile', ctx=Load())), arg(arg='name', annotation=Name(id='str', ctx=Load())), arg(arg='idempotency_key', annotation=Name(id='str', ctx=Load())), arg(arg='budget_usd', annotation=Name(id='float', ctx=Load())), arg(arg='agent_id', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kwonlyargs=[], kw_defaults=[], defaults=[Call(func=Name(id='File', ctx=Load()), args=[Constant(value=Ellipsis)], keywords=[]), Call(func=Name(id='Form', ctx=Load()), args=[Constant(value=Ellipsis)], keywords=[keyword(arg='min_length', value=Constant(value=1)), keyword(arg='max_length', value=Constant(value=120))]), Call(func=Name(id='Form', ctx=Load()), args=[Constant(value=Ellipsis)], keywords=[keyword(arg='min_length', value=Constant(value=8)), keyword(arg='max_length', value=Constant(value=100)), keyword(arg='pattern', value=Constant(value='^[A-Za-z0-9_-]+$'))]), Call(func=Name(id='Form', ctx=Load()), args=[Constant(value=10.0)], keywords=[keyword(arg='gt', value=Constant(value=0)), keyword(arg='le', value=Constant(value=1000))]), Call(func=Name(id='Form', ctx=Load()), args=[Constant(value=None)], keywords=[])])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/import-zip')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "project_candidates",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/project-candidates')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "connect_project",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='ConnectProject', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/connect')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "update_project",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='pid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='ProjectUpdate', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/{pid}')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "project_readiness",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='pid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/{pid}/readiness')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "providers",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/providers')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "runs",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='project_id', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kwonlyargs=[], kw_defaults=[], defaults=[Constant(value=None)])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "get_inspection",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='pid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/{pid}/inspection')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "configure_inspection",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='pid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='InspectionSettings', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/projects/{pid}/inspection')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "operation_presets",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/operation-presets')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "new_run",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='NewRun', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "get_run",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "clarify",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='Clarification', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/clarify')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "continue_run",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='Continuation', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/continue')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "approve",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='Approval', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/approve')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "cancel",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/cancel')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "discard",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/discard')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "github_options",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load())), arg(arg='page', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[Constant(value=1)])",
+      "decorator_args": [
+        "Constant(value='/api/v3/runs/{rid}/github-options')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "github_publish",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='GitHubPublishRequest', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/runs/{rid}/github-publish')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "publish",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/publish')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "events",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load())), arg(arg='after', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[Constant(value=0)])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/events')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "conversation",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/conversation')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "export",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='rid', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/runs/{rid}/export')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "webhook",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v2/github/webhook')"
+      ],
+      "decorator_keywords": [],
+      "async": true
+    },
+    {
+      "name": "unknown_api",
+      "method": "api_route",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='path', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/{path:path}')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='methods', value=List(elts=[Constant(value='GET'), Constant(value='POST'), Constant(value='PUT'), Constant(value='PATCH'), Constant(value='DELETE'), Constant(value='HEAD'), Constant(value='OPTIONS')], ctx=Load()))"
+      ],
+      "async": false
+    },
+    {
+      "name": "frontend",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='path', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/{path:path}')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "team",
+      "method": "get",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "create_member",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='MemberCreate', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/members')"
+      ],
+      "decorator_keywords": [
+        "keyword(arg='status_code', value=Constant(value=201))"
+      ],
+      "async": false
+    },
+    {
+      "name": "update_member",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='user_id', annotation=Name(id='int', ctx=Load())), arg(arg='body', annotation=Name(id='MemberUpdate', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/members/{user_id}')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "assign",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='user_id', annotation=Name(id='int', ctx=Load())), arg(arg='body', annotation=Name(id='Assignments', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/members/{user_id}/projects')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "quota",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='Limit', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/quotas')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "settings",
+      "method": "put",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='Settings', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/settings')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "reconcile",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='call_id', annotation=Name(id='str', ctx=Load())), arg(arg='body', annotation=Name(id='Reconcile', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/v3/team/calls/{call_id}/reconcile')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    },
+    {
+      "name": "password",
+      "method": "post",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='body', annotation=Name(id='Password', ctx=Load())), arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "decorator_args": [
+        "Constant(value='/api/auth/password')"
+      ],
+      "decorator_keywords": [],
+      "async": false
+    }
+  ],
+  "middleware_sha256": "83e1344001e582f0517b7dda732e84c0c2e67575e40dd62b15e39320311c5d6c"
+}

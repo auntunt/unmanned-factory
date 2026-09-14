@@ -186,10 +186,15 @@ def test_inspection_preserves_drift_evidence(app_env,monkeypatch):
     from factory.control.inspections import inspect_run
     client,store,service,root=app_env;headers=login(client);p=project(client,root,headers)
     store.update_project(p['id'],{'spec_tree_enabled':True},p['revision'],'owner')
-    config=service.inspections.configure(p['id'],enabled=True,interval_s=300,revision=0,actor_id=1)
-    # Prevent scheduler races; call the same inspection job directly.
+    # Setting the stop flag alone does not end an in-flight dispatch iteration.
+    # Join before manually queuing a job, so only this test can claim it.
     service.stopping.set()
-    rid=service.inspections.tick(config['next_at'])[0]
+    service.wake.set()
+    if service.scheduler is not None:
+        service.scheduler.join(timeout=5)
+        assert not service.scheduler.is_alive()
+    config=service.inspections.configure(p['id'],enabled=True,interval_s=300,revision=0,actor_id=1)
+    rid=service.inspections.tick(float(config['next_at']) + 1.0)[0]
     service.cancels[rid]=threading.Event()
     monkeypatch.setattr(service.runner,'run',lambda req,*a,**kw: ProviderResult(passing_review(req,'observed'),cost_usd=.01))
     inspect_run(service,rid)
@@ -250,3 +255,24 @@ def test_node_links_read_delivery_commit_before_merge(app_env):
     unrelated=store.add_project({'name':'other','repository':'owner/other','workspace':str(root),'base_branch':'main'})
     foreign=store.create_run(unrelated['id'],'foreign')[0]
     assert client.get(url,params={'run_id':foreign['id']}).status_code==404
+
+
+def test_inspection_stop_flag_does_not_join_inflight_dispatch(app_env,monkeypatch):
+    """Reproduce the exact race: a dispatcher already past its stop check can scan jobs."""
+    _,_,service,_=app_env
+    entered,release,scanned=threading.Event(),threading.Event(),threading.Event()
+    def paused():
+        entered.set()
+        release.wait(10)
+    monkeypatch.setattr(service,'_drain_feedback',paused)
+    monkeypatch.setattr(service.queue,'pending',lambda: (scanned.set() or []))
+    service.wake.set()
+    try:
+        assert entered.wait(5)
+        service.stopping.set()
+        release.set()
+        service.scheduler.join(timeout=5)
+        assert not service.scheduler.is_alive()
+        assert scanned.is_set()  # The flag cannot substitute for joining before manual tick.
+    finally:
+        release.set()

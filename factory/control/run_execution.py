@@ -18,6 +18,7 @@ from factory.control.run_billing import _verification_reserve_usd
 from factory.control.store import Conflict, now
 from factory.control.verification import verify_spec_only
 from factory.control.spec_tree import enrich_tasks
+from factory.control.spec_refs import render as render_spec_refs, focus as spec_ref_focus
 
 
 def _plan(self, rid):
@@ -53,6 +54,7 @@ def _plan(self, rid):
             # cancellation race. Keep it visible with a next action.
             raise ValueError(str(exc)) from None
         context = assemble_context(self.store, project, run['request'], run['history'])
+        spec_reference_section = render_spec_refs(project, run.get('source') or {})
         agent = run.get('agent_snapshot')
         verify_planning_checkout(project, context['commit_sha'])
         self.store.update(rid, {'context': context}, expected=('planning',),
@@ -69,6 +71,10 @@ def _plan(self, rid):
                                                        'digest': manifest['digest']}))
         if run.get('execution_mode') == 'continuous':
             plan = continuous_plan(run['request'], project, run['history'])
+            if spec_reference_section:
+                for task in plan['tasks']:
+                    task['prompt'] = task['prompt'].replace('CURRENT USER REQUEST (complete):\n' + run['request'],
+                        'USER REQUEST CONTRACT:\n' + run['request'] + spec_reference_section, 1)
         else:
             self._runner_for(rid).preflight(profile['provider'])
             try:
@@ -97,7 +103,7 @@ def _plan(self, rid):
             planning_failure = None
             try:
                 result = self._runner_for(rid).run(ProviderRequest(provider=profile['provider'], model=profile['model'],
-                    prompt=build_prompt(run['request'], project, run['history'], context=context) + module_prompt({**run, 'spec_tree_enabled': project.get('spec_tree_enabled', False)}) +
+                    prompt=build_prompt(run['request'], project, run['history'], context=context, spec_references=spec_reference_section) + module_prompt({**run, 'spec_tree_enabled': project.get('spec_tree_enabled', False)}) +
                         agent_guidance(run) + capability_prompt(snapshots), workspace=project['workspace'],
                     timeout_s=configuration['limits']['timeout_s'], read_only=True,
                     max_budget_usd=planning_budget.remaining_usd),
@@ -125,6 +131,7 @@ def _plan(self, rid):
                 raise planning_failure
             verify_planning_checkout(project, context['commit_sha'])
             plan = parse_plan(result.text, project)
+        spec_ref_focus(project, run.get('source') or {}, plan)
         enrich_tasks(project, plan)
         if len(plan['tasks']) > configuration['limits']['max_tasks']:
             raise ValueError('计划任务数超过运行配置限制；请缩小需求或调整限制后重新规划')

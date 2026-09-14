@@ -83,10 +83,5 @@ def router(auth, governance):
     def reconcile(call_id: str, body: Reconcile, request: Request):
         return governance.reconcile(call_id, body.actual_tokens, body.reason, request.state.user['username'])
 
-    @api.post('/api/auth/password')
-    def password(body: Password, request: Request):
-        auth.change_password(request.state.user['id'], body.current_password, body.password)
-        governance.audit(request.state.user['username'], 'member.password_changed', {'id': request.state.user['id']})
-        return {'ok': True, 'login_required': True}
 
     return api

@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import hashlib
 import hmac
-import json
 import os
 import re
 import shutil
@@ -13,38 +11,22 @@ import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from factory.control.auth import AuthError, AuthStore
-from factory.control.github import GitHubDelivery, REPOSITORY, verify_signature
+from factory.control.github import GitHubDelivery
 from factory.control.service import Service
 from factory.control.store import Conflict, Store, now, scrub
 
-class GitHubPublishRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    mode: Literal['existing', 'create', 'bound']
-    repository: str | None = Field(default=None, max_length=240)
-    name: str | None = Field(default=None, max_length=100)
-    private: Literal[True] = True
-    expected_project_revision: int = Field(ge=1)
 
-
-COOKIE = 'factory_session'
-
-
-class Body(BaseModel):
-    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
-
-
-class Login(Body):
-    username: str = Field(min_length=3, max_length=80)
-    password: str = Field(min_length=1, max_length=4096)
-    model_config = ConfigDict(extra='forbid', str_strip_whitespace=False)
+from factory.control.auth_routes import Body, Login, COOKIE, router as auth_router
+from factory.control.run_routes import (GitHubPublishRequest, NewRun, Continuation, Clarification,
+                                        Approval, router as run_router)
+from factory.control.webhook_routes import router as webhook_router
 
 
 class Project(Body):
@@ -84,35 +66,11 @@ class NewWorkspace(Body):
     budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
     idempotency_key: str = Field(min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
 
-
-class NewRun(Body):
-    project_id: str
-    request: str = Field(min_length=1, max_length=50_000)
-    operation: str = Field(default="general", max_length=60)
-    execute_deploy: bool = Field(default=False, strict=True)
-    operation_fields: dict[str, str] = Field(default_factory=dict, max_length=8)
-    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
-
-
 class InspectionSettings(Body):
     enabled: bool
     remote_read_only: bool = False
     interval_s: int = Field(default=3600, ge=300, le=604800, strict=True)
     revision: int = Field(ge=0, strict=True)
-
-
-class Continuation(Body):
-    answer: str = Field(default="", max_length=20000)
-    revision: int = Field(ge=1)
-    resume_count: int = Field(default=0, ge=0)
-
-
-class Clarification(Body):
-    answer: str = Field(min_length=1, max_length=50_000)
-
-
-class Approval(Body):
-    revision: int = Field(ge=1)
 
 
 def create_app(*, data_dir=None, workspace_root=None, public_origin=None, service=None,
@@ -285,26 +243,6 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         response.headers['Referrer-Policy'] = 'same-origin'
         if is_api or response.headers.get('content-type', '').startswith('text/html') or response.status_code == 404:
             response.headers['Cache-Control'] = 'no-store'
-        return response
-
-    @app.post('/api/auth/login')
-    def login(body: Login):
-        token, csrf, user = auth.login(body.username, body.password)
-        response = JSONResponse({'user': user, 'csrf_token': csrf})
-        response.set_cookie(COOKIE, token, httponly=True, secure=parsed_origin.scheme == 'https',
-                            samesite='strict', max_age=43200, path='/')
-        return response
-
-    @app.get('/api/auth/me')
-    def me(request: Request):
-        user = request.state.user
-        return {'user': {key: user[key] for key in ('id', 'username', 'role', 'active')}, 'csrf_token': user['csrf_token']}
-
-    @app.post('/api/auth/logout')
-    def logout(request: Request):
-        auth.logout(request.cookies.get(COOKIE, ''))
-        response = JSONResponse({'ok': True})
-        response.delete_cookie(COOKIE, path='/')
         return response
 
     @app.get('/api/v2/projects')
@@ -523,12 +461,6 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def providers():
         return {'providers': svc.runner.available(), 'profiles': svc.runtime_settings.get()['profiles']}
 
-    @app.get('/api/v2/runs')
-    def runs(project_id: str | None = None):
-        if project_id is None:
-            return {'runs': store.runs()}
-        store.project(project_id)
-        return {'runs': [run for run in store.all_runs() if run.get('project_id') == project_id]}
 
     @app.get('/api/v2/projects/{pid}/inspection')
     def get_inspection(pid: str):
@@ -550,206 +482,10 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def operation_presets():
         return {'presets': operations.list()}
 
-    @app.post('/api/v2/runs', status_code=201)
-    def new_run(body: NewRun, request: Request):
-        store.project(body.project_id)
-        try:
-            compiled, fingerprint, preset = operations.compile(body.operation, body.request, body.operation_fields)
-            if body.execute_deploy and body.operation != 'release':
-                raise ValueError('执行部署仅适用于部署准备工作流')
-            if body.execute_deploy:
-                fingerprint = hashlib.sha256((fingerprint + '\0execute_deploy=true').encode()).hexdigest()
-                compiled += '\n[用户明确授权：独立验收通过后，由平台执行绑定目标的预注册部署动作。]'
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from None
-        key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
-               if body.idempotency_key else None)
-        if body.operation == 'startup':
-            compiled += svc.operations_automation.context(body.project_id)
-        remote_targets = svc.targets.snapshot(body.project_id) if body.operation == 'release' else []
-        run, created = store.create_run(body.project_id, compiled,
-                                 source={'type': 'web', 'actor': request.state.user['username'],
-                                         'actor_id': request.state.user['id'],
-                                         'operation': body.operation, 'operation_version': preset['version'],
-                                         'execute_deploy': body.execute_deploy, 'remote_targets': remote_targets,
-                                         'request_fingerprint': fingerprint}, delivery_id=key)
-        if not created:
-            if run['source'].get('request_fingerprint') != fingerprint:
-                raise HTTPException(409, '这次提交已被接收；内容发生变化，请重新提交。')
-            return run
-        try:
-            svc.start_plan(run['id'])
-        except Exception as exc:
-            svc._fail(run['id'], exc)
-            raise
-        return run
 
-    @app.get('/api/v2/runs/{rid}')
-    def get_run(rid: str):
-        from factory.control.engineering_overview import current_evidence
-        run = svc.remote.evidence(store.get(rid))
-        return {**run, 'progress': current_evidence(run)}
-
-    @app.post('/api/v2/runs/{rid}/clarify')
-    def clarify(rid: str, body: Clarification, request: Request):
-        return svc.clarify(rid, body.answer, request.state.user['username'])
-
-    @app.post('/api/v2/runs/{rid}/continue')
-    def continue_run(rid: str, body: Continuation, request: Request):
-        return svc.continue_run(rid, body.answer, body.revision, body.resume_count, request.state.user['username'])
-
-    @app.post('/api/v2/runs/{rid}/approve')
-    def approve(rid: str, body: Approval, request: Request):
-        return svc.approve(rid, body.revision, request.state.user['username'])
-
-    @app.post('/api/v2/runs/{rid}/cancel')
-    def cancel(rid: str, request: Request):
-        return svc.cancel(rid, request.state.user['username'])
-
-    @app.post('/api/v2/runs/{rid}/discard')
-    def discard(rid: str, request: Request):
-        return svc.discard(rid, request.state.user['username'])
-
-    @app.get('/api/v3/runs/{rid}/github-options')
-    def github_options(rid: str, request: Request, page: int = 1):
-        if request.state.user['role'] != 'admin':
-            raise HTTPException(403, '此操作需要管理员权限')
-        if not 1 <= page <= 100:
-            raise HTTPException(422, '页码无效')
-        try:
-            return svc.github_options(rid, page=page)
-        except (Conflict, KeyError):
-            raise
-        except Exception:
-            raise HTTPException(502, '无法读取 GitHub 仓库，请检查凭据权限后重试。') from None
-
-    @app.post('/api/v3/runs/{rid}/github-publish')
-    def github_publish(rid: str, body: GitHubPublishRequest, request: Request):
-        try:
-            return svc.publish_github(rid, **body.model_dump(), actor=request.state.user['username'])
-        except (Conflict, KeyError):
-            raise
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from None
-        except Exception:
-            message = (store.get(rid).get('artifacts') or {}).get('publish_error')
-            raise HTTPException(502, message or 'GitHub 发布未完成；本地成果仍可查看和下载。请刷新仓库列表后重试。') from None
-
-    @app.post('/api/v2/runs/{rid}/publish')
-    def publish(rid: str):
-        try:
-            return svc.publish(rid)
-        except (Conflict, KeyError):
-            raise
-        except Exception:
-            message = (store.get(rid).get('artifacts') or {}).get('publish_error')
-            raise HTTPException(502, message or 'GitHub 发布未完成；本地成果仍可查看和下载。') from None
-
-    @app.get('/api/v2/runs/{rid}/events')
-    def events(rid: str, after: int = 0):
-        store.get(rid)
-        rows = store.events(rid, max(0, after))
-        return {'events': rows, 'cursor': rows[-1]['id'] if rows else max(0, after)}
-
-    @app.get('/api/v2/runs/{rid}/conversation')
-    def conversation(rid: str):
-        store.get(rid)
-        return {'messages': store.conversation(rid)}
-
-    @app.get('/api/v2/runs/{rid}/export')
-    def export(rid: str):
-        run = store.get(rid)
-        parts = [f"# 工程记录 {rid}", f"计划版本：{run['revision']} · 状态：{run['status']}"]
-        for message in store.conversation(rid):
-            parts.append(f"## {'用户' if message['role'] == 'user' else '系统'} · {message['at']}\n\n{message['content']}\n\n事件：{message['event_ids']}")
-        parts.append('## 交付证据\n\n```json\n' + json.dumps(run['artifacts'], ensure_ascii=False, indent=2) + '\n```')
-        if run.get('runtime_configuration'):
-            parts.append('## 本次冻结的执行配置\n\n```json\n' +
-                         json.dumps(run['runtime_configuration'], ensure_ascii=False, indent=2) + '\n```')
-        if run.get('context'):
-            parts.append('## 本次冻结的项目上下文\n\n```json\n' + json.dumps(run['context'], ensure_ascii=False, indent=2) + '\n```')
-        return PlainTextResponse('\n\n'.join(parts), media_type='text/markdown',
-            headers={'Content-Disposition': f'attachment; filename="factory-{rid}.md"'})
-
-    @app.post('/api/v2/github/webhook')
-    async def webhook(request: Request):
-        raw = await request.body()
-        if not verify_signature(raw, request.headers.get('x-hub-signature-256', ''), secret):
-            raise HTTPException(401, 'Webhook 签名无效')
-        event = request.headers.get('x-github-event')
-        if event not in ('issues', 'pull_request'):
-            return {'ignored': True}
-        delivery = request.headers.get('x-github-delivery', '')
-        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', delivery):
-            raise HTTPException(400, '缺少有效 delivery id')
-        if event == 'pull_request':
-            try:
-                payload = json.loads(raw)
-                if payload.get('action') != 'closed':
-                    return {'ignored': True}
-                pull = payload['pull_request']
-                if pull.get('merged') is not True:
-                    return {'ignored': True, 'reason': 'not_merged'}
-                repo = payload['repository']['full_name']
-                number = payload['number']
-                if not isinstance(repo, str) or not REPOSITORY.fullmatch(repo) or type(number) is not int or number < 1:
-                    raise ValueError('invalid pull request identity')
-            except (ValueError, KeyError, TypeError, AttributeError):
-                raise HTTPException(400, '无效 GitHub Pull Request 事件') from None
-            project = next((p for p in store.projects() if p['repository'].casefold() == repo.casefold()), None)
-            if not project:
-                return {'ignored': True, 'reason': 'repository_not_registered'}
-            matching = store.published_runs_for_pr(project['id'], number, repo)
-            if not matching:
-                return {'ignored': True, 'reason': 'run_not_found'}
-            # The signed event is only a trigger. Fetch GitHub's current PR state
-            # independently; never promote webhook-provided SHAs or summaries.
-            from starlette.concurrency import run_in_threadpool
-            try:
-                results = [await run_in_threadpool(svc.sync_merge, run['id']) for run in matching]
-            except (Conflict, KeyError):
-                raise
-            except Exception:
-                raise HTTPException(502, 'GitHub 合并状态核对失败；可重发事件或在控制台重试') from None
-            return {'results': results}
-        try:
-            payload = json.loads(raw)
-            if payload.get('action') not in ('opened', 'edited', 'labeled', 'reopened'):
-                return {'ignored': True}
-            repo = payload['repository']['full_name']
-            issue = payload['issue']
-            number = int(issue['number'])
-            text = str(issue.get('title', '')) + '\n\n' + str(issue.get('body') or '')
-            labels = {label['name'] for label in issue.get('labels', [])}
-        except (ValueError, KeyError, TypeError, AttributeError):
-            raise HTTPException(400, '无效 GitHub Issue 事件') from None
-        if 'pull_request' in issue or issue.get('state', 'open') != 'open':
-            return {'ignored': True}
-        project = next((p for p in store.projects() if p['repository'].casefold() == repo.casefold()), None)
-        if not project:
-            return {'ignored': True, 'reason': 'repository_not_registered'}
-        # Deduplicate semantic issue revision as well as GitHub delivery id. Label events
-        # with no content change can enable a single fresh, explicitly opted-in analysis.
-        semantic_id = hashlib.sha256(json.dumps([repo, number, issue.get('updated_at'), text,
-                                                 'factory-ready' in labels]).encode()).hexdigest()
-        run, created = store.create_run(project['id'], text[:50_000],
-            source={'type': 'github', 'issue_number': number,
-                    'url': f'https://github.com/{repo}/issues/{number}',
-                    'trusted_label': 'factory-ready' in labels, 'delivery_id': delivery},
-            delivery_id=delivery, semantic_id=semantic_id)
-        if created:
-            previous = run['source'].get('previous_run_id')
-            if previous:
-                try:
-                    svc.cancel(previous, actor='issue-revision')
-                except Conflict:
-                    pass  # A verified/publishing result requires explicit human review.
-            try:
-                svc.start_plan(run['id'])
-            except Exception as exc:
-                svc._fail(run['id'], exc)
-                raise
-        return {'run_id': run['id'], 'duplicate': not created}
+    app.include_router(auth_router(auth, governance, parsed_origin))
+    app.include_router(run_router(store, svc, operations))
+    app.include_router(webhook_router(store, svc, secret))
 
     from factory.control.project_routes import router
     app.include_router(router(store, svc))

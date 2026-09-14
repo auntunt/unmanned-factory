@@ -16,6 +16,7 @@ from factory.control.providers import ProviderRequest
 from factory.control.review_workspace import changed_sources, preserve_screenshot, review_workspace
 from factory.control.store import Conflict
 from factory.control.spec_tree import evidence as spec_evidence, apply_evidence
+from factory.control.spec_refs import render as render_spec_refs
 from factory.control.scope_declaration import evidence as scope_evidence
 from factory.control.verification_evidence import browser_evidence, browser_review_failure, render_evidence
 
@@ -168,6 +169,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     artifacts['verification_template_version'] = 1
     prompt = Template(template.read_text()).substitute(
         request_contract=json.dumps(request_contract, ensure_ascii=False),
+        spec_references=render_spec_refs(project, run.get('source') or {}),
         acceptance=json.dumps(acceptance, ensure_ascii=False),
         delivery=json.dumps((run.get('agent_snapshot') or {}).get('delivery', {}), ensure_ascii=False),
         module_guidance=module_prompt({**run, 'spec_tree_enabled': project.get('spec_tree_enabled', False)}),
