@@ -107,7 +107,7 @@ base repo/ref、head repo/ref/SHA、PR URL、merged、merged_at 和 merge commit
 ## 7. 运维和当前限制
 
 - 这是单实例、单所有者/可信工程师工作站；同一实例账号共享工程空间，不宣传项目 ACL 或租户隔离。
-- Trusted Host、HTTPS、登录和 CSRF 仍是入口边界。公网不要暴露旧 `factory api`。
+- Trusted Host、HTTPS、登录和 CSRF 仍是入口边界。旧控制室 HTTP 层已移除，旧 CLI 引擎保留且冻结维护。
 - worktree 只隔离文件变更，不等于 OS/容器沙箱；控制面和 provider worker 当前不构成强秘密隔离。
 - 三家 SDK 的真实账号、权限、成本、超时取消和隔离认证不由本地替身测试代替；付费 SDK E2E 仍待环境配置。
 - 完整大日志、持久租约/恢复、worker 隔离、团队 ACL 和后续自动合并策略属于后续阶段。本地回归结果与未验证范围见 `STATUS.md`；通过本地测试不等于生产上线。

@@ -1,36 +1,4 @@
-"""控制室事件流：live 和 replay 走同一种事件，前端不区分来源。
-
-为什么单独一个模块而不是往 api.py 里加一个端点：
-
-  1. 事件的形状是**前端契约**。live 从「两次快照的差」推出来，replay 从
-     audit.db 的一条任务轨迹推出来，两条路必须产出一模一样的事件 —— 否则
-     demo 时切 live 会露馅。把生成逻辑关在一处，契约才只有一份。
-  2. 快照、求差、时间线三个都是纯函数，离线可测。SSE 那层（api.py）只负责
-     把它们套进 while 循环加 sleep。
-
-事件类型（`type` 字段）：
-
-  snapshot        连上时先给一份全量：五个队列桶 + 所有 attempt 的当前态
-  task.state      任务在队列里换了目录（inbox → running → done …）
-  attempt.open    一轮开始：分级、模型
-  attempt.line    agent 现场的一行（工具调用 / 一句话）
-  attempt.result  一轮跑完：花费、token、墙钟、diff
-  gate.verdict    一个监工出了判决
-  attempt.final   一轮定案：merged / escalated / …
-  heartbeat       没事发生时每几秒一条，让代理和浏览器知道连接还活着
-
-每条都带 `at`（ISO，UTC）。replay 里 `at` 是**原始时间**，另有 `t`
-（距任务首轮开始的秒数），前端按 `t` 排、按 `at` 显示 —— 回放里
-「三个月前的任务」屏幕上也该显示三个月前的时刻，不然观众会问。
-
-## live 的现场文本从哪来
-
-transcript_path 在 attempt 跑完才落库（adapter 跑完才知道 session_id），
-所以正在跑的那一轮没有路径可读。这里用 `~/.claude/projects/*/*.jsonl`
-里 mtime 晚于该轮 created_at 的最新一个文件当现场 —— 是猜的，猜错的
-后果只是屏幕上滚了别的会话的行，不进审计。并行多轮时按 mtime 顺序
-逐个分给 created_at 顺序的 attempt，同样是猜。**这条路径只喂屏幕**。
-"""
+"""CLI 审计回放：保留原始时间、事件形状、倍速与 JSONL 落盘格式。"""
 
 from __future__ import annotations
 
@@ -43,7 +11,6 @@ from pathlib import Path
 
 from factory.audit.models import Resolution, TaskAttempt
 from factory.audit.store import AuditStore
-from factory.harness.transcript import projects_root
 
 #: 屏幕上一行最长多少字符。超过就截，尾巴换成 …。demo 是隔着桌子看的，
 #: 一行 200 字符谁也读不完，而且会把日志区撑得高低不齐。
@@ -169,44 +136,6 @@ def transcript_lines(path: str | Path | None, *, start: int = 0) -> tuple[Line, 
             elif kind == "tool_result" and block.get("is_error"):
                 out.append(Line("✗ 上一步报错", "error", ts))
     return tuple(out)
-
-
-def transcript_record_count(path: str | Path | None) -> int:
-    """文件现在有多少条记录（给 live 的 `start` 用）。"""
-    if not path:
-        return 0
-    p = Path(path)
-    if not p.exists():
-        return 0
-    try:
-        return sum(1 for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip())
-    except OSError:
-        return 0
-
-
-def guess_live_transcripts(
-    since: datetime, *, root: Path | None = None, limit: int = 8
-) -> tuple[Path, ...]:
-    """`since` 之后被写过的 session 文件，按 mtime 升序。模块 docstring 有说明。"""
-    base = root or projects_root()
-    if not base.exists():
-        return ()
-    # 留 2 秒余量：open_attempt 落库和 claude 建 session 文件几乎同时，
-    # 两边的时钟精度不同，严格比较会把刚好同一秒的文件漏掉。
-    cutoff = since.replace(tzinfo=UTC).timestamp() - 2.0
-    found: list[tuple[float, Path]] = []
-    try:
-        for cand in base.glob("*/*.jsonl"):
-            try:
-                mt = cand.stat().st_mtime
-            except OSError:
-                continue
-            if mt >= cutoff:
-                found.append((mt, cand))
-    except OSError:
-        return ()
-    found.sort()
-    return tuple(p for _, p in found[-limit:])
 
 
 # ---------- 快照 ----------
@@ -337,143 +266,6 @@ class Snapshot:
         }
 
 
-def take_snapshot(db: str | Path, queue: str | Path, *, prev: Snapshot | None = None) -> Snapshot:
-    """读一次库和队列。`prev` 给了就沿用它的现场文件指针（避免重复猜路径）。"""
-    from factory.api import list_tasks  # 函数内 import：api 反向依赖本模块
-
-    snap = Snapshot(at=_now_iso())
-    try:
-        listed = list_tasks(queue)
-    except Exception:  # noqa: BLE001 - 队列读不出来时屏幕上的桶为空，不炸流
-        listed = {}
-    for bucket, rows in listed.items():
-        for row in rows:
-            snap.tasks[str(row.get("task_id", ""))] = bucket
-
-    for a in AuditStore(db).all_attempts():
-        v = _view(a)
-        snap.attempts[(v.task_id, v.attempt_no)] = v
-
-    if prev is not None:
-        for key, tail in prev.tails.items():
-            if key in snap.attempts:
-                snap.tails[key] = tail
-    return snap
-
-
-def diff_snapshots(prev: Snapshot | None, cur: Snapshot) -> list[dict]:
-    """两份快照之间发生了什么。prev 为 None 时只产出一条 snapshot。
-
-    顺序：任务状态 → 新开的轮 → 结果 → 判决 → 定案。同一轮的几件事在
-    一秒内一起落库时也按这个顺序发，前端的状态机才不会先收到 final 再收到
-    open。
-    """
-    if prev is None:
-        return [cur.public()]
-    out: list[dict] = []
-    at = cur.at
-
-    for tid, bucket in cur.tasks.items():
-        if prev.tasks.get(tid) != bucket:
-            out.append({"type": "task.state", "at": at, "task_id": tid, "state": bucket})
-
-    for key, a in sorted(cur.attempts.items(), key=lambda kv: (kv[1].created_at or datetime.min, kv[0])):
-        b = prev.attempts.get(key)
-        base = {"at": at, "task_id": a.task_id, "attempt_no": a.attempt_no}
-        if b is None:
-            out.append({
-                "type": "attempt.open", **base,
-                "oracle_class": a.oracle_class, "class_reason": a.class_reason, "model": a.model,
-            })
-        if a.has_result and (b is None or not b.has_result):
-            out.append({
-                "type": "attempt.result", **base,
-                "cost_usd": round(a.cost_usd, 4), "tokens_in": a.tokens_in,
-                "tokens_out": a.tokens_out, "wall_clock_ms": a.wall_clock_ms,
-                "has_diff": bool(a.diff_hash),
-            })
-        seen = set(b.verdicts) if b else set()
-        for role, verdict, n in a.verdicts:
-            if (role, verdict, n) not in seen:
-                out.append({"type": "gate.verdict", **base, "role": role, "verdict": verdict, "claims": n})
-        if a.is_final and (b is None or not b.is_final):
-            out.append({
-                "type": "attempt.final", **base,
-                "resolution": a.resolution, "commit": a.commit, "note": a.resolution_note,
-            })
-    return out
-
-
-def _running_keys(snap: Snapshot) -> list[tuple[str, int]]:
-    """还没定案、还没结果的轮 —— 现场正在写的那些，按开始时间。"""
-    keys = [k for k, a in snap.attempts.items() if not a.is_final and not a.has_result]
-    keys.sort(key=lambda k: snap.attempts[k].created_at or datetime.min)
-    return keys
-
-
-def tail_lines(snap: Snapshot, *, root: Path | None = None) -> list[dict]:
-    """给正在跑的轮各读一段新出现的现场行，并推进 snap.tails 指针。"""
-    out: list[dict] = []
-    running = _running_keys(snap)
-    if not running:
-        return out
-    earliest = min(snap.attempts[k].created_at or datetime.now(UTC) for k in running)
-    fresh = guess_live_transcripts(earliest, root=root)
-    # 已经分配过路径的轮沿用；没分配的按顺序领一个还没被别的轮占用的文件
-    taken = {p for p, _ in snap.tails.values()}
-    for key in running:
-        if key not in snap.tails:
-            for cand in fresh:
-                if str(cand) not in taken:
-                    snap.tails[key] = (str(cand), 0)
-                    taken.add(str(cand))
-                    break
-        if key not in snap.tails:
-            continue
-        path, start = snap.tails[key]
-        lines = transcript_lines(path, start=start)
-        total = transcript_record_count(path)
-        snap.tails[key] = (path, total)
-        a = snap.attempts[key]
-        for ln in lines:
-            out.append({
-                "type": "attempt.line", "at": snap.at,
-                "task_id": a.task_id, "attempt_no": a.attempt_no,
-                "kind": ln.kind, "text": ln.text,
-            })
-    return out
-
-
-# ---------- live ----------
-
-
-def live_stream(
-    db: str | Path,
-    queue: str | Path,
-    *,
-    poll_s: float = 1.0,
-    heartbeat_s: float = 10.0,
-    stop: Callable[[], bool] = lambda: False,
-    transcript_root: Path | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-) -> Iterator[dict]:
-    """一直产事件直到 stop() 为真。第一条是 snapshot。"""
-    prev: Snapshot | None = None
-    last_emit = time.monotonic()
-    while not stop():
-        cur = take_snapshot(db, queue, prev=prev)
-        events = diff_snapshots(prev, cur)
-        events.extend(tail_lines(cur, root=transcript_root))
-        for ev in events:
-            yield ev
-            last_emit = time.monotonic()
-        if time.monotonic() - last_emit >= heartbeat_s:
-            yield {"type": "heartbeat", "at": _now_iso()}
-            last_emit = time.monotonic()
-        prev = cur
-        sleep(poll_s)
-
-
 # ---------- replay ----------
 
 
@@ -580,7 +372,7 @@ def replay_stream(
 ) -> Iterator[dict]:
     """按 `t` 的间隔（除以 speed）逐条产出。第一条是只含这一个任务的 snapshot。
 
-    speed ≤ 0 视为「全部立刻给」—— 前端要一次拿到整条时间线自己控制节奏时用。
+    speed ≤ 0 视为「全部立刻给」，供 CLI 一次导出整条时间线。
     """
     timeline = replay_timeline(db, task_id, transcript_root=transcript_root)
     snap = Snapshot(at=_now_iso(), tasks={task_id: "inbox"})

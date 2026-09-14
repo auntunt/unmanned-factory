@@ -740,40 +740,9 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     from factory.control.project_routes import router
     app.include_router(router(store, svc))
 
-    @app.get('/api/{path:path}')
-    def legacy(path: str, request: Request):
-        if path == 'runtime':
-            raise HTTPException(404, '这是旧版模型配置接口。请刷新页面，使用当前工作台的“运行配置”。')
-        if path.startswith('v2/') or path.startswith('auth/'):
-            raise HTTPException(404, '接口不存在')
-        if path == 'events':
-            import threading
-            from fastapi.responses import StreamingResponse
-            from starlette.concurrency import run_in_threadpool
-            from factory.events import live_stream, replay_stream
-            audit = Path(os.getenv('FACTORY_AUDIT_DB', 'audit.db'))
-            queue = Path(os.getenv('FACTORY_QUEUE', '~/.factory/q')).expanduser()
-            stopped = threading.Event()
-            replay = request.query_params.get('replay')
-            iterator = (replay_stream(audit, replay, speed=0, stop=stopped.is_set) if replay
-                        else live_stream(audit, queue, stop=stopped.is_set, sleep=stopped.wait))
-            async def stream():
-                try:
-                    while auth.authenticate(request.cookies.get(COOKIE, '')):
-                        if await request.is_disconnected():
-                            break
-                        event = await run_in_threadpool(lambda: next(iterator, None))
-                        if event is None:
-                            break
-                        yield f"event: {event['type']}\ndata: {json.dumps(scrub(event), ensure_ascii=False)}\n\n"
-                finally:
-                    stopped.set()
-            return StreamingResponse(stream(), media_type='text/event-stream', headers={'X-Accel-Buffering': 'no'})
-        from factory.api import route
-        code, payload = route('/api/' + path + ('?' + request.url.query if request.url.query else ''),
-            db=os.getenv('FACTORY_AUDIT_DB', 'audit.db'),
-            queue=Path(os.getenv('FACTORY_QUEUE', '~/.factory/q')).expanduser())
-        return JSONResponse(scrub(payload), status_code=code)
+    @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+    def unknown_api(path: str):
+        raise HTTPException(404, '接口不存在或旧版接口已移除；请使用当前工作台及 /api/v2 接口，运行配置请刷新页面。')
 
     @app.get('/{path:path}')
     def frontend(path: str):

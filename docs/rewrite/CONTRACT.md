@@ -1,6 +1,6 @@
 # Engineering Harness v2 — implementation contract
 
-The rewrite lives in `factory/control/` alongside the legacy engine. All SDK types stay behind providers.py. The existing API is private behind the new authenticated gateway; the legacy `factory api` command remains loopback-only for local compatibility.
+The rewrite lives in `factory/control/` alongside the legacy engine. All SDK types stay behind providers.py. Only the current control-plane API is served by the authenticated gateway. The retired control-room HTTP layer is removed; unknown API paths return 404 with migration guidance. The legacy CLI engine is frozen for defect fixes only, and audit playback remains available through `factory replay`.
 
 ## Product boundary
 

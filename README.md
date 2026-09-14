@@ -33,7 +33,7 @@ Token 计费和额度由中转站统一管理，webuddy 不再因本地费用记
 - [Project Agent 实践说明](docs/rewrite/PROJECT-AGENT.zh-CN.md)
 - [已完成范围、验证结果与后续里程碑](docs/rewrite/STATUS.md)
 
-新入口为 `.venv/bin/factory-web serve`；先用 `uv sync --frozen --all-extras` 安装 SDK 与配套运行时，按运行说明构建前端并创建账号。运行配置支持保存模型分工、连接测试和执行限制。维护此虚拟环境时持续保留 extras，避免普通 `uv sync` / `uv run` 将其卸载。下方是原有引擎文档，旧 `factory api` 入口不应直接暴露公网。
+新入口为 `.venv/bin/factory-web serve`；先用 `uv sync --frozen --all-extras` 安装 SDK 与配套运行时，按运行说明构建前端并创建账号。运行配置支持保存模型分工、连接测试和执行限制。维护此虚拟环境时持续保留 extras，避免普通 `uv sync` / `uv run` 将其卸载。下方是旧 CLI 引擎文档。旧引擎处于冻结维护状态，只修缺陷、不加功能；run / loop / queue / replay 产品线继续保留，旧控制室 HTTP 服务已移除。
 
 一个调度 + 审计层：把任务派给 coding agent，用四道监工判收，全程留可回查的证据。
 
@@ -93,26 +93,18 @@ uv run factory queue --queue ~/.factory/q --history 50
 launchd 的 PATH 里没有 nvm 装的 `claude`，夜跑会每次派发都失败。plist 里标了
 「←」的行按本机改，改完跑 `plutil -lint`。
 
-## 控制室（给人看的那一屏）
+## 工作台与旧 CLI 回放
 
+当前浏览器工作台使用 `factory-web serve`，按上方运行说明启动。旧控制室的实时流和浏览器回放入口已移除。
+
+旧任务仍可通过 CLI 查看并导出审计时间线：
+
+```sh
+uv run factory replay T-142 --db audit.db --speed 4
+uv run factory replay T-142 --db audit.db --speed 0 > rec.jsonl
 ```
-uv run factory api --db audit.db --queue ~/.factory/q     # 后端，含 SSE
-cd frontend && npm run dev                                 # 前端：新版工程工作台
-```
 
-浏览器开 `http://localhost:5173/` 看 live；开
-`http://localhost:5173/?replay=T-142&speed=4` 按 4 倍速回放一个跑过的任务。
-两种模式前端**不区分**：`GET /api/events` 发的是同一种事件
-（形状见 `factory/events.py` 模块头），只是 replay 从 audit.db 展开，
-live 从「两次快照的差」推出来。
-
-回放的保险：`factory replay T-142 --db audit.db --speed 0 > rec.jsonl` 把
-整条时间线落盘，不依赖 demo 那台机器上的库和 transcript 目录还在。
-
-live 模式里**正在跑**的那一轮，现场文本来自 `~/.claude/projects` 下
-mtime 最新的 session 文件 —— 是猜的（transcript 路径要跑完才落库）。
-猜错只影响屏幕，不进审计。走 Caddy 时按 `deploy/Caddyfile.example`
-关掉 `/api/events` 的缓冲，否则现场行会一批批跳。
+原始事件格式、时间戳、倍速和落盘方式保持兼容，不依赖 HTTP 服务。
 
 ## 子命令
 

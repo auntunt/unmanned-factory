@@ -1,4 +1,4 @@
-"""控制室事件流：live 和 replay 必须产出同一种形状的事件。"""
+"""旧 CLI 回放的事件形状、时间顺序与 JSONL 数据。"""
 
 from __future__ import annotations
 
@@ -11,11 +11,8 @@ from factory.audit.store import AuditStore
 from factory.backlog.store import Backlog, INBOX, RUNNING
 from factory.events import (
     Snapshot,
-    diff_snapshots,
     replay_stream,
     replay_timeline,
-    tail_lines,
-    take_snapshot,
     transcript_lines,
 )
 
@@ -75,66 +72,10 @@ def _open(store, task_id="T-1"):
     )
 
 
-def test_首次快照只出snapshot(env):
-    snap = take_snapshot(env["db"], env["queue"])
-    evs = diff_snapshots(None, snap)
-    assert [e["type"] for e in evs] == ["snapshot"]
-    assert evs[0]["tasks"] == {"inbox": ["T-1"]}
 
 
-def test_快照差推出完整一轮的事件序列(env):
-    store, db, queue = env["store"], env["db"], env["queue"]
-    s0 = take_snapshot(db, queue)
-
-    # 任务被认领 + 开轮
-    (queue / INBOX / "T-1.yaml").rename(queue / RUNNING / "T-1.yaml")
-    aid = _open(store)
-    s1 = take_snapshot(db, queue, prev=s0)
-    evs = diff_snapshots(s0, s1)
-    assert [e["type"] for e in evs] == ["task.state", "attempt.open"]
-    assert evs[0]["state"] == "running"
-    assert evs[1]["oracle_class"] == "B" and evs[1]["attempt_no"] == 1
-
-    # 一秒内结果、两条判决、定案一起落库 → 顺序仍是 result → verdict → final
-    store.record_result(aid, diff_hash="abc", commit=None, transcript_path=str(env["transcript"]),
-                        tokens_in=10, tokens_out=20, cost_usd=0.84, wall_clock_ms=192_000)
-    store.record_verdict(aid, role=SupervisorRole.REGRESSION, verdict=Verdict.PASS, claims=[])
-    store.record_verdict(aid, role=SupervisorRole.SCOPE, verdict=Verdict.FAIL,
-                         claims=[{"check": "scope", "expected": "", "got": "x"}])
-    store.finalize(aid, Resolution.ESCALATED)
-    s2 = take_snapshot(db, queue, prev=s1)
-    evs = diff_snapshots(s1, s2)
-    assert [e["type"] for e in evs] == ["attempt.result", "gate.verdict", "gate.verdict", "attempt.final"]
-    assert evs[0]["cost_usd"] == 0.84 and evs[0]["has_diff"] is True
-    assert {(e["role"], e["verdict"], e["claims"]) for e in evs[1:3]} == {
-        ("regression", "pass", 0), ("scope", "fail", 1)}
-    assert evs[3]["resolution"] == "escalated"
-
-    # 再来一次没变化 → 没事件
-    s3 = take_snapshot(db, queue, prev=s2)
-    assert diff_snapshots(s2, s3) == []
 
 
-def test_live现场只喂正在跑的轮且只读增量(env, tmp_path):
-    store, db, queue = env["store"], env["db"], env["queue"]
-    root = tmp_path / "projects"
-    (root / "slug").mkdir(parents=True)
-    live = root / "slug" / "sess.jsonl"
-
-    _open(store)
-    # session 文件在开轮之后才出现 —— 真实顺序就是这样
-    live.write_text(_rec("assistant", [{"type": "text", "text": "第一行"}]) + "\n", encoding="utf-8")
-    snap = take_snapshot(db, queue)
-    evs = tail_lines(snap, root=root)
-    assert [e["text"] for e in evs] == ["第一行"]
-
-    # 同一份快照再 tail 一次：指针已推进，不重复
-    assert tail_lines(snap, root=root) == []
-
-    with live.open("a", encoding="utf-8") as f:
-        f.write(_rec("assistant", [{"type": "text", "text": "第二行"}]) + "\n")
-    nxt = take_snapshot(db, queue, prev=snap)
-    assert [e["text"] for e in tail_lines(nxt, root=root)] == ["第二行"]
 
 
 def test_replay时间线按t排且闸门错开(env):

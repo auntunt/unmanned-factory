@@ -78,7 +78,7 @@ Issue 出现新版本时撤销尚未完成的旧运行；新版本必须人工�
 
 服务固定绑定 `127.0.0.1:8788`。公网域名必须设置完整 HTTPS 源，例如 `FACTORY_PUBLIC_ORIGIN=https://factory.example.com`，再用 [Caddy 示例](../../examples/control/Caddyfile.example) 反代。前端与 API 使用同一源。用户名密码登录、会话 Cookie、来源校验和 CSRF 都由新入口提供。
 
-主界面已替换为工作台、项目、任务详情和运行配置，原 CLI 与历史数据库继续保留。不要再把旧 `factory api` 服务直接转发到公网。
+主界面已替换为工作台、项目、任务详情和运行配置，原 CLI 与历史数据库继续保留。旧控制室 HTTP 服务已移除；旧引擎冻结维护，只修缺陷、不加功能。审计回放使用 `factory replay <task_id> --db audit.db --speed 0 > rec.jsonl`。
 
 现有服务器使用 `factoryweb.service`、Caddy 和 `FACTORY_PUBLIC_ORIGIN=https://harness.cloudwaveai.cn`。保持该 HTTPS 源，旧 `factoryapi.service` 不得启动。使用 [部署说明](../../deploy/README.md) 和 [Hermes 交接](../../deploy/HERMES-HANDOFF.md) 更新当前服务；不要并行启用第二个监听相同端口的服务。
 

@@ -900,15 +900,13 @@ def _cmd_show(ns: argparse.Namespace) -> int:
 
 
 def _cmd_replay(ns: argparse.Namespace) -> int:
-    """把一个任务的审计轨迹展开成控制室事件流。
+    """把一个任务的审计轨迹展开为可落盘的 JSONL 回放。
 
     两种用法：
       factory replay T-x --db audit.db                # 按真实节奏逐条打 JSONL
       factory replay T-x --db audit.db --speed 0 > rec.jsonl   # 一次全部导出
 
-    `--speed 0` 导出的文件是 demo 的保险：前端用 `?replay=<id>` 直连 API
-    时靠的是同一个函数，但一份落盘的录像不依赖当时那台机器上的 audit.db
-    和 transcript 目录还在不在。
+    落盘回放无需浏览器或 HTTP 服务；保留原事件格式与倍速参数。
     """
     from factory.events import replay_stream
 
@@ -1268,18 +1266,6 @@ timeout = 900
     return 0
 
 
-def _cmd_api(ns: argparse.Namespace) -> int:
-    """起只读 JSON API。前端（frontend/）靠它拿数据。
-
-    延迟 import：`factory.api` 只在跑这个子命令时才需要，放模块顶会让
-    每次跑 `factory dispatch` 都白读一遍 http.server。
-    """
-    from factory.api import serve_api
-
-    serve_api(ns.db, ns.queue, port=ns.port)
-    return 0
-
-
 def _cmd_metrics(ns: argparse.Namespace) -> int:
     store = AuditStore(ns.db)
     report = supervisor_metrics(store, task_id=ns.task_id)
@@ -1493,14 +1479,6 @@ def main(argv: list[str] | None = None) -> int:
     mx.add_argument("--db", default="audit.db")
     mx.set_defaults(func=_cmd_metrics)
 
-    ap = sub.add_parser("api", help="只读 JSON API（给前端用）")
-    ap.add_argument("--db", default="audit.db", help="审计库路径")
-    ap.add_argument("--queue", default="backlog", help="队列根目录")
-    # 只绑 127.0.0.1：外部访问一律走反向代理，认证在那一层做。
-    # API 本身没有任何认证，直接暴露到公网等于把审计库敞开。
-    ap.add_argument("--port", type=int, default=8788, help="监听端口")
-    ap.set_defaults(func=_cmd_api)
-
     ib = sub.add_parser("inbox", help="看卡在 needs-human / blocked 的任务和原因")
     ib.add_argument("--queue", default="backlog", help="队列根目录")
     ib.add_argument("--state", default=None, choices=(NEEDS_HUMAN, BLOCKED),
@@ -1540,7 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 四级配置只作用于真正要跑活的子命令。prd/show/metrics 这些不碰仓库、
     # 参数就是它们的全部意图，套配置进去只会让「我明明没写这个参数」变得难查。
-    if ns.cmd in ("run", "loop", "api"):
+    if ns.cmd in ("run", "loop"):
         raw = list(sys.argv[1:] if argv is None else argv)
         dest_of = {
             opt: act.dest

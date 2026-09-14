@@ -609,7 +609,7 @@ def test_continuous_rechecks_actor_before_execution(app_env, monkeypatch):
 
 def test_execution_review_and_repair_share_one_deadline(app_env, monkeypatch):
     from types import SimpleNamespace
-    from factory.control import service as service_module
+    from factory.control import run_execution as service_module
     store, svc, p, rid, _ = prepared(app_env, monkeypatch)
     svc._plan(rid)
     clock = [100.0]
@@ -644,7 +644,7 @@ def test_execution_review_and_repair_share_one_deadline(app_env, monkeypatch):
 def test_review_transient_reconnect_keeps_session_and_records_each_call(app_env, monkeypatch, session_source):
     import json
     from types import SimpleNamespace
-    from factory.control import service as service_module
+    from factory.control import run_execution as service_module
     from factory.control.autonomy import all_events
     from factory.control.providers import ProviderError, ProviderResult
     store, svc, p, rid, _ = prepared(app_env, monkeypatch)
