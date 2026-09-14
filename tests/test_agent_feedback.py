@@ -644,7 +644,7 @@ def test_message_during_execution_is_automatically_planned_at_completion(app_env
     while time.monotonic() < deadline:
         c = svc.agents.conversation(cid)
         successor = store.get(c['run_id'])
-        if successor['id'] != prior['id'] and successor['status'] not in ('received', 'planning'):
+        if successor['id'] != prior['id'] and successor['status'] not in ('received', 'queued', 'planning'):
             break
         time.sleep(.02)
     assert successor['id'] != prior['id']
