@@ -10,4 +10,4 @@ RUN uv sync --frozen --all-extras && useradd -m -u 1000 smoke && chown -R smoke:
 USER smoke
 ENV FACTORY_BROWSER_CHROME=/usr/bin/chromium
 ENV FACTORY_BROWSER_RUNTIME=/opt/webuddy-browser
-CMD ["sh", "-c", ".venv/bin/python -c 'from factory.control.claude_terminal import available; assert available(), \"sandbox unavailable; refusing skipped smoke\"' && .venv/bin/python -m pytest -q tests/test_active_verification.py -k 'real_verification_browser or real_sandbox_probe' -rs"]
+CMD [".venv/bin/python", "runtime/project-browser/ci_smoke.py"]

@@ -1,3 +1,5 @@
+[![CI](https://github.com/auntunt/unmanned-factory/actions/workflows/ci.yml/badge.svg)](https://github.com/auntunt/unmanned-factory/actions/workflows/ci.yml)
+
 # webuddy
 
 webuddy 是可定制的 AI 工作伙伴：先创建工作区，再用自然语言描述目标，由职能体完成规划、执行、验证与成果交付。通过 Skill 和维护对话持续积累专门能力。
