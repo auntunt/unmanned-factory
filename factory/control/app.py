@@ -123,6 +123,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     from factory.control.runtime_routes import router as runtime_router
     from factory.control.manifest_routes import router as manifest_router
     app.include_router(manifest_router(svc))
+    from factory.control.evolution_routes import router as evolution_router
+    app.include_router(evolution_router(svc))
     app.include_router(runtime_router(store, svc, allowed_root, static))
     from factory.control.remote_routes import router as remote_router
     app.include_router(remote_router(svc))
@@ -167,7 +169,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         is_api = path.startswith('/api/')
         skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/skills', path) is not None
         project_upload = request.method == 'POST' and path == '/api/v2/projects/import-zip'
-        bounded_upload = skill_upload or project_upload
+        pack_upload = request.method == 'POST' and path == '/api/v4/agent-packs/import'
+        bounded_upload = skill_upload or project_upload or pack_upload
         # Authenticate and check CSRF before opening the bounded upload stream;
         # an unauthenticated upload must not be buffered into memory first.
         if bounded_upload:

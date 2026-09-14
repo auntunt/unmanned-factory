@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.request
 import uuid
 from datetime import datetime
@@ -25,6 +26,8 @@ DELIVERED = {'ready_for_review', 'published', 'inspection_completed'}
 class OperationsAutomation:
     def __init__(self, store):
         self.store = store
+        self.evolution = None
+        self._evolution_tick_at = 0
         self.memory = KnowledgeStore(store)
         self.path = Path(store.path).with_name('operations-channel.json')
         self.lock = threading.Lock()
@@ -211,6 +214,8 @@ class OperationsAutomation:
             ongoing = (run.get('source', {}).get('type') == 'inspection'
                        and self.history(run['project_id'])['consecutive_failures'] >= 3)
             link = '/settings/runtime' if run.get('workbench_path') == '/settings/runtime' else '/runs/' + quote(str(run['id']), safe='')
+            if run.get('source', {}).get('type') == 'evolution':
+                link = '/agents/' + quote(str(run['agent_id']), safe='')
             text = f"{'持续故障 · ' if ongoing else ''}{scrub(project['name'])}\n{reason[:200]}\n{self.origin}{link}"
             self.send(webhook, text)
         except Exception as exc:
@@ -218,6 +223,12 @@ class OperationsAutomation:
             LOG.warning('Operations notification failed (%s), run=%s', type(exc).__name__, run['id'])
 
     def tick(self):
+        if self.evolution is not None and time.monotonic() >= self._evolution_tick_at:
+            self._evolution_tick_at = time.monotonic() + 60
+            try:
+                self.evolution.weekly()
+            except Exception as exc:
+                LOG.warning("Weekly evolution scan failed (%s)", type(exc).__name__)
         with self.store.connect() as db:
             rows = db.execute('SELECT * FROM operations_outbox ORDER BY id LIMIT 100').fetchall()
         for row in rows:

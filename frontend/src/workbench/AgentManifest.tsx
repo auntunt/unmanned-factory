@@ -11,11 +11,12 @@ export default function AgentManifest({agentId,...props}:PageProps & {agentId:st
   const [identity,setIdentity]=useState(''),[assertions,setAssertions]=useState(''),[refs,setRefs]=useState<SkillRef[]>([])
   const base=`/api/v4/agents/${encodeURIComponent(agentId)}/manifest`
   const admin=props.user?.role==='admin'
-  const load=useCallback(async()=>{
-    const [m,library]=await Promise.all([request<Manifest>(base,{onUnauthorized:props.onUnauthorized}),request<{modules:Skill[]}>('/api/v4/modules',{onUnauthorized:props.onUnauthorized})])
+  const load=useCallback(async(signal?:AbortSignal)=>{
+    const [m,library]=await Promise.all([request<Manifest>(base,{signal,onUnauthorized:props.onUnauthorized}),request<{modules:Skill[]}>('/api/v4/modules',{signal,onUnauthorized:props.onUnauthorized})])
+    if(signal?.aborted)return
     setValue(m);setSkills(library.modules);setIdentity(m.identity);setAssertions(m.assertions.join('\n'));setRefs(m.skills)
   },[base,props.onUnauthorized])
-  useEffect(()=>{void load().catch(e=>setError(errorText(e)))},[load])
+  useEffect(()=>{const c=new AbortController();void load(c.signal).catch(e=>{if(!c.signal.aborted)setError(errorText(e))});return()=>c.abort()},[load])
   const mutate=async(path:string,body:unknown,method:'PUT'|'POST')=>{setBusy(true);setError('');try{await request(path,{method,body,csrfToken:props.csrfToken,onUnauthorized:props.onUnauthorized});await load()}catch(e){setError(errorText(e))}finally{setBusy(false)}}
   return <section className="wb-card agent-manifest" aria-label="职能体清单">
     <h2>岗位清单{value && <small> · revision {value.revision}</small>}</h2>

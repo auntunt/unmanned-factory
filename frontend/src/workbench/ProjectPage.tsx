@@ -5,6 +5,7 @@ import useRequestDraft from './useRequestDraft'
 import { runTitle, RunMode, CopyValue, tabKeys, LoadingCard, ListTime } from './presentation'
 import { ProjectTargets } from './ServerTargets'
 import ProjectInspection from './ProjectInspection'
+import { EvolutionPolicy } from './AgentEvolution'
 import ProjectKnowledge from './ProjectKnowledge'
 import { nextRunAction } from './run-guidance'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -257,7 +258,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
         {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{runTitle(run)}</Link><RunMode run={run} /><small><CopyValue value={run.id} label="运行编号" /> · <ListTime value={run.updated_at} /></small></td><td><RunStatusBadge run={run} /></td><td><Link className="wb-text-link" to={nextRunAction(run).href}>打开运行</Link></td></tr> })}</tbody></table></div>}
       </section>
     </>}
-    {tab === 'settings' && <><ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} runs={runs ?? []} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /></>}
+    {tab === 'settings' && <><EvolutionPolicy projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin}/><ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} runs={runs ?? []} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /></>}
     {tab === 'overview' && <p className="wb-runtime-note">计费由中转站管理</p>}
     {tab === 'agent' && isAdmin && <ProjectKnowledge projectId={project.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
     {tab === 'agent' && isAdmin && <details className="wb-card wb-agent-card"><summary className="pk-reference-summary">项目档案、知识原文与代码索引</summary><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></details>}

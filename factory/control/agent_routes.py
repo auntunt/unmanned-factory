@@ -368,10 +368,10 @@ def router(store, service):
     @api.patch('/agents/{aid}/draft')
     def patch_draft(aid:str,body:DraftPatch): return guarded(agents.save_draft,aid,body.patch,body.expected_revision)
     @api.post('/agents/{aid}/draft/apply')
-    def apply(aid:str,body:Apply):
+    def apply(aid:str,body:Apply,request:Request):
         d=guarded(agents.draft,aid)
         if d.get('conflicts'): raise HTTPException(409,'草稿存在未决冲突，请先解决后再应用')
-        return guarded(agents.apply,aid,body.expected_revision,body.idempotency_key)
+        return guarded(agents.apply,aid,body.expected_revision,body.idempotency_key,actor=str(actor(request)['id']))
     @api.post('/agents/{aid}/rollback')
     def rollback(aid:str,body:Rollback): return guarded(agents.rollback,aid,body.version)
     @api.get('/maintenance-jobs/{job_id}')

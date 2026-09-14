@@ -7,3 +7,6 @@
 .agent-manifest pre { white-space:pre-wrap; overflow-wrap:anywhere; }
 .agent-manifest button { margin-inline-end:8px; }
 .agent-manifest details { margin-top:20px; }
+
+.agent-pack-upload { display:flex; flex-wrap:wrap; gap:8px; max-width:100%; }
+.agent-pack-upload input { max-width:100%; min-width:0; }

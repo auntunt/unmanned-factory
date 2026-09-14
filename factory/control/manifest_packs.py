@@ -5,7 +5,7 @@ import uuid
 import zipfile
 
 from factory.control.agents import _validate_payload, inspect_skill
-from factory.control.agent_manifests import encoded
+from factory.control.agent_manifests import encoded, compile_instructions
 from factory.control.store import now, scrub
 
 
@@ -68,6 +68,7 @@ def import_pack(manifests, raw, actor):
                 manifests._validate(payload,db)
                 compiler='legacy-exact-v1' if m.get('compiler')=='legacy-exact-v1' else 'composition-v2'
                 if compiler=='legacy-exact-v1' and len(imported)!=1:raise ValueError('遗留兼容清单必须引用一个完整 skill')
+                compile_instructions({**payload,'compiler':compiler},manifests.resolve(payload,db))
                 config['acceptance']=payload['assertions']
                 assets=pack.get('assets',[])
                 if not isinstance(assets,list) or len(assets)>100:raise ValueError('附件清单无效')

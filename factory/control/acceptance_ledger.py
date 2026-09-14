@@ -16,16 +16,21 @@ def criteria_for(run):
     return result
 
 
-def coverage(criteria, verdict, commit):
+def coverage(criteria, verdict, commit, *, skills=()):
     rows = verdict.get('criteria', [])
     if not isinstance(rows, list) or len(rows) > len(criteria):
         rows = []
     valid_ids = {c['id'] for c in criteria}
+    allowed_skills = {(s['id'],s['version']) for s in skills}
     by_id, invalid = {}, False
     for row in rows:
         if (not isinstance(row, dict) or not isinstance(row.get('id'), str) or row.get('id') not in valid_ids
                 or row['id'] in by_id or row.get('status') not in ('pass', 'fail', 'unverified')
                 or not isinstance(row.get('evidence'), str) or len(row['evidence']) > 3000):
+            invalid = True
+            continue
+        refs = row.get('skill_refs', [])
+        if (not isinstance(refs,list) or len(refs)>24 or any(not isinstance(s,dict) or set(s)!={'id','version'} or not isinstance(s.get('id'),str) or type(s.get('version')) is not int or (s['id'],s['version']) not in allowed_skills for s in refs)):
             invalid = True
             continue
         by_id[row['id']] = row
@@ -34,7 +39,7 @@ def coverage(criteria, verdict, commit):
         row = by_id.get(criterion['id'], {})
         evidence = row.get('evidence', '').strip()
         status = row.get('status', 'unverified') if evidence else 'unverified'
-        items.append({**criterion, 'status': status, 'evidence': evidence})
+        items.append({**criterion, 'status': status, 'evidence': evidence, **({'skill_refs':row['skill_refs']} if 'skill_refs' in row else {})})
     counts = {status: sum(i['status'] == status for i in items) for status in ('pass', 'fail', 'unverified')}
     digest = hashlib.sha256(json.dumps(criteria, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return {'schema_version': 1, 'commit': commit, 'criteria_digest': digest, 'items': items,

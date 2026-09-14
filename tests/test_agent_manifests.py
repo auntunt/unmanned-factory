@@ -87,3 +87,54 @@ def test_manifest_routes_cas_warning_refs_and_permissions(app_env):
     member={'Origin':'http://testserver','X-CSRF-Token':response.json()['csrf_token']}
     assert client.get(f'/api/v4/agents/{aid}/manifest').status_code==200
     assert client.put(f'/api/v4/agents/{aid}/manifest',headers=member,json=payload).status_code==403
+
+
+def test_human_maintenance_apply_becomes_skill_without_rewriting_identity(env):
+    s,a,m=env;aid=a.create({'name':'长期岗位','instructions':'旧资料'},'human')['id']
+    m.save(aid,{'identity':'人签职责不变','skills':[],'assertions':['结果可复核']},1,'human')
+    draft=a.save_draft(aid,{'instructions':'按真实日志复现'},0)
+    a.apply(aid,draft['revision'],actor='user-1')
+    frozen=m.freeze(aid,a.version(aid))
+    assert frozen['manifest']['identity']=='人签职责不变'
+    assert frozen['acceptance']==['结果可复核']
+    assert '按真实日志复现' in frozen['instructions']
+    assert frozen['manifest_skills'][0]['source']['type']=='maintenance'
+    assert m.get(aid)['revision']==3
+
+
+def test_compiled_prompt_is_rejected_instead_of_silently_truncated(env):
+    s,a,m=env;aid=a.create({'name':'大岗位'},'human')['id']
+    refs=[]
+    for i in range(7):
+        skill=m.modules.save({'name':str(i),'category':'workflow','instructions':'"'*14000},'human')
+        refs.append({'id':skill['id'],'version':1})
+    with pytest.raises(ValueError,match='不能静默截断'):
+        m.save(aid,{'identity':'范围','skills':refs,'assertions':[]},1,'human')
+    assert m.get(aid)['revision']==1
+
+
+def test_large_pack_upload_uses_bounded_authenticated_stream(app_env):
+    client,s,svc,repo=app_env;h=login(client)
+    # A real v2 pack with a >1 MiB asset must roundtrip through the HTTP importer.
+    aid=svc.agents.create({'name':'带资料的岗位'},'human')['id']
+    import random
+    import uuid
+    from factory.control.agents import inspect_skill
+    from factory.control.store import now
+    content=io.BytesIO()
+    with zipfile.ZipFile(content,'w') as z:z.writestr('reference.txt',random.Random(1).randbytes(1100000).hex()[:1100000])
+    raw=content.getvalue();sid=uuid.uuid4().hex
+    meta={**inspect_skill(raw),'id':sid,'agent_id':aid,'filename':'source.zip','source':'upload','created_at':now()}
+    with s.connect() as db:db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',(sid,aid,json.dumps(meta),raw,now()))
+    d=svc.agents.save_draft(aid,{'skill_ids':[sid]},0);svc.agents.apply(aid,d['revision'])
+    pack=export_pack(svc.agent_manifests,svc.agents,aid)
+    # ZIP compression can shrink textual fixtures: store outer entries verbatim.
+    out=io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(pack)) as old,zipfile.ZipFile(out,'w') as z:
+        for name in old.namelist():z.writestr(name,old.read(name))
+    pack=out.getvalue();assert len(pack)>1048576
+    response=client.post('/api/v4/agent-packs/import',headers=h,files={'file':('pack.zip',pack,'application/zip')})
+    assert response.status_code==201,response.text
+    assert client.post('/api/v4/agent-packs/import',headers={'Origin':'http://testserver'},files={'file':('pack.zip',pack)}).status_code==403
+    client.cookies.clear()
+    assert client.post('/api/v4/agent-packs/import',headers={'Origin':'http://testserver'},files={'file':('pack.zip',pack)}).status_code==401

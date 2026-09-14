@@ -9,7 +9,7 @@ const categories = { style: '界面风格', knowledge: '业务知识', workflow:
 type Category = keyof typeof categories
 type SourceRef = { id: string; revision: number }
 type DataSource = SourceRef & { name: string; enabled: boolean; document_count: number }
-type Module = { agent_reference_count?: number; id: string; version: number; name: string; category: Category; description: string; instructions: string; source_refs?: SourceRef[]; source_slots?: string[] }
+type Module = { status?: string; agent_reference_count?: number; id: string; version: number; name: string; category: Category; description: string; instructions: string; source_refs?: SourceRef[]; source_slots?: string[] }
 type Selection = { revision: number; modules: Module[] }
 const blank = { name: '', category: 'knowledge' as Category, description: '', instructions: '', source_refs: [] as SourceRef[], source_slots: [] as string[] }
 
@@ -88,7 +88,7 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
             <p>{m.description || '按需搭配到项目，作为该领域的工作指导。'}</p>
             {Boolean((m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)) && <p>挂载 {(m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)} 个资料来源 · 按项目绑定查询</p>}
             {embedded && <p title="按能力来源运行中保存的模块记录关联，仅统计当前可见记录。">由它沉淀的能力 {provenance.error ? '暂不可用' : !provenance.loaded ? '读取中' : `${provenance.counts.get(m.id) || 0} 项`}</p>}
-            <p>被 {m.agent_reference_count ?? 0} 个职能体引用</p>
+            <p>{m.status === 'draft' && 'skill 草稿 · '}被 {m.agent_reference_count ?? 0} 个职能体引用</p>
             <details><summary>查看内容</summary><p className="mod-instructions">{m.instructions}</p></details>
             <footer><span>{categories[m.category]}</span>{projectId && admin ? <button className="mod-toggle" aria-pressed={Boolean(chosen)} disabled={busy || (!chosen && selected.length >= 12)} onClick={() => toggle(m)}>{chosen ? `已添加 v${chosen.version} ✓` : '添加 ＋'}</button> : admin ? <button className="wb-text-link" onClick={() => { setEditing(m); setEditor({name:m.name,category:m.category,description:m.description,instructions:m.instructions,source_refs:m.source_refs ?? [],source_slots:m.source_slots ?? []}) }}>编辑模块</button> : null}</footer>
           </article>

@@ -12,6 +12,7 @@ import time
 import uuid
 
 from factory.control import recovery, run_billing, run_execution, run_lifecycle, verification
+from factory.control.agent_evolution import EvolutionStore
 from factory.control.agent_manifests import ManifestStore
 from factory.control.agents import AgentStore
 from factory.control.autonomy import DurableQueue, PolicyStore, policy_decision
@@ -86,6 +87,8 @@ class Service:
         self.operations = OperationStore(store)
         self._inspection_tick_at = 0
         self.operations_automation = OperationsAutomation(store)
+        self.evolution = EvolutionStore(store, self.agent_manifests)
+        self.operations_automation.evolution = self.evolution
         self.targets = TargetStore(store)
         self.remote = RemoteTargets(self.targets)
         self.inspections = InspectionStore(store, self.operations, automation=self.operations_automation, targets=self.targets)

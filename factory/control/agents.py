@@ -403,7 +403,9 @@ class AgentStore:
             if expected_revision is not None and d["revision"] != expected_revision: raise Conflict("职能体草稿已更新，请重新加载")
             d.update(conflicts=list(conflicts or []), explanation=list(explanation or []), revision=d["revision"] + 1, updated_at=now()); db.execute("UPDATE agent_drafts SET data=?,updated_at=? WHERE agent_id=?", (_json(d), d["updated_at"], aid))
         return d
-    def apply(self, aid, expected_revision, idem=None, *, allow_scope_change=False, allow_acceptance_relax=False):
+    def apply(self, aid, expected_revision, idem=None, *, allow_scope_change=False, allow_acceptance_relax=False, actor="human"):
+        from factory.control.agent_manifests import ManifestStore  # Agent assets and manifests share one transaction.
+        manifests = ManifestStore(self.store)
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE"); arow = db.execute("SELECT data FROM agents WHERE id=?", (aid,)).fetchone()
             if not arow: raise KeyError(aid)
@@ -425,6 +427,24 @@ class AgentStore:
             ver = max(v["version"] for v in versions) + 1; at = now(); payload = _validate_payload(d["patch"])
             data = {"id": uuid.uuid4().hex, "agent_id": aid, "version": ver, **payload, "previous_version": next(v["id"] for v in versions if v["version"] == agent["active_version"]), "source": "draft", "idempotency_key": idem, "idempotency_fingerprint": requested_fingerprint, "created_at": at}
             db.execute("INSERT INTO agent_versions VALUES (?,?,?,?,?)", (data["id"], aid, ver, _json(data), at)); agent.update(active_version=ver, updated_at=at); db.execute("UPDATE agents SET data=? WHERE id=?", (_json(agent), aid))
+            manifest = manifests._current(db, aid)
+            if manifest['compiler'] != 'legacy-exact-v1':
+                previous = next(v for v in versions if v['id'] == data['previous_version'])
+                patch = {k: manifest[k] for k in ('identity', 'skills', 'assertions')}
+                changed = False
+                if payload['instructions'] != previous['instructions']:
+                    mid = uuid.uuid4().hex
+                    skill = {'id': mid, 'version': 1, 'name': '维护对话整理的能力', 'category': 'workflow',
+                             'instructions': payload['instructions'], 'description': '人工应用的维护草稿', 'status': 'ready',
+                             'source': {'type': 'maintenance', 'agent_id': aid, 'agent_version': ver}, 'actor': str(actor), 'updated_at': at}
+                    db.execute('INSERT INTO instruction_modules VALUES(?,?,?)', (mid, 1, _json(skill)))
+                    patch['skills'] = [*manifest['skills'], {'id': mid, 'version': 1}]
+                    changed = True
+                if payload['acceptance'] != previous['acceptance']:
+                    patch['assertions'] = payload['acceptance']
+                    changed = True
+                if changed:
+                    manifests.save(aid, patch, manifest['revision'], actor, _db=db, action='maintenance.applied')
             if row: db.execute("DELETE FROM agent_drafts WHERE agent_id=?", (aid,))
         return data
     def rollback(self, aid, version, *, expected_active_version=None):
