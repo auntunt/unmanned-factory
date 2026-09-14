@@ -143,7 +143,8 @@ class RemoteTargets:
         with self.store.connect() as db:
             self.store._event(db, run['id'], 'remote.executed', result)
             if result['status'] != 'pass' and (result['verb'] in ('deploy', 'rollback') or result.get('error_type') == 'host_fingerprint'):
-                reason = f"服务器 {result['target']} · {result['verb']}：{result['reason']}"
+                action = '主机指纹' if result.get('error_type') == 'host_fingerprint' else result['verb']
+                reason = f"服务器 {result['target']} · {action}：{result['reason']}"
                 db.execute('INSERT INTO operations_outbox(run_id,data,reason) VALUES(?,?,?)',
                            (run['id'], json.dumps(run), redact_text(reason)))
 

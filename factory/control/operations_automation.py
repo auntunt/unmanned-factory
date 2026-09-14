@@ -107,7 +107,8 @@ class OperationsAutomation:
         return {'history': rows, 'consecutive_failures': streak}
 
     def _history(self, run, reason):
-        if run.get('source', {}).get('type') != 'inspection':
+        if (run.get('source', {}).get('type') != 'inspection'
+                or run['status'] not in ('inspection_completed', 'inspection_failed', 'needs_human', 'cancelled')):
             return
         verification = run.get('artifacts', {}).get('verification') or {}
         verdict = 'pass' if run['status'] == 'inspection_completed' else (
@@ -221,6 +222,11 @@ class OperationsAutomation:
             rows = db.execute('SELECT * FROM operations_outbox ORDER BY id LIMIT 100').fetchall()
         for row in rows:
             run = json.loads(row['data'])
+            if (run.get('source', {}).get('type') == 'inspection'
+                    and run['status'] not in ('inspection_completed', 'inspection_failed', 'needs_human', 'cancelled')):
+                run = self.store.get(run['id'])
+                if run['status'] not in ('inspection_completed', 'inspection_failed', 'needs_human', 'cancelled'):
+                    continue  # Remote alerts must wait for the complete inspection evidence.
             reason = row['reason'] or run.get('error') or (run.get('artifacts', {}).get('verification') or {}).get('reason') or run.get('artifacts', {}).get('needs_human')
             if not reason:
                 with self.store.connect() as db:

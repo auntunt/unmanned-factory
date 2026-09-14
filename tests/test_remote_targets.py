@@ -327,3 +327,27 @@ def test_real_linux_worker_cannot_read_coordinator_key(remote_env, tmp_path):
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout == 'BLOCKED'
+
+
+def test_inspection_alert_waits_for_terminal_history_and_deduplicates_pin_failure(remote_env, monkeypatch):
+    _, store, service, p, _, _, config, _ = remote_env
+    data = json.loads(config.read_text()); data['key'] = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode(); config.write_text(json.dumps(data))
+    service.operations_automation.configure(0, False, 'https://open.feishu.cn/open-apis/bot/v2/hook/test-hook')
+    sent = []
+    monkeypatch.setattr(service.operations_automation, 'send', lambda url, text: sent.append(text))
+    settings = service.inspections.configure(p['id'], enabled=True, interval_s=300, revision=0, actor_id=1, remote_read_only=True)
+    rid = service.inspections.tick(settings['next_at'])[0]
+    monkeypatch.setattr(service, '_independent_verify', lambda rid, run, p, settings, artifacts: artifacts.update(verification={'verdict': 'pass'}))
+    record = service.remote._record
+    def record_and_tick(run, result):
+        record(run, result)
+        service.operations_automation.tick()
+        assert service.operations_automation.history(p['id'])['history'] == []
+        assert sent == []
+    monkeypatch.setattr(service.remote, '_record', record_and_tick)
+    inspect_run(service, rid)
+    service.operations_automation.tick()
+    history = service.operations_automation.history(p['id'])['history']
+    assert len(history) == 1 and history[0]['verdict'] == 'unverified'
+    assert len(history[0]['remote_results']) == 2
+    assert len(sent) == 1

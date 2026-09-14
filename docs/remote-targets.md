@@ -32,7 +32,7 @@
 
 写操作在 I/O 前以 run_id、target_id、verb 持久登记。并发、重试或服务重启都不能重复执行同一写动作。回执未收到保留 unverified，运行详情从持久回执补齐展示；不可把未知状态当作成功，也不可盲目重放。管理员核对后可另行发起运行。
 
-每次调用记录 remote.executed（目标名/ID、verb、退出码、耗时、脱敏摘要；复用回执标记 reused）。连接失败、超时、非零退出均为该动作 unverified，不使本地验收变为 fail。deploy/rollback 失败及主机指纹不匹配进入现有通知 outbox；未配飞书则不发，通知发送失败不影响执行。目标注册/编辑/删除/测试写 deploy_target_audit，项目绑定写 project_settings_audit。
+每次调用记录 remote.executed（目标名/ID、verb、退出码、耗时、脱敏摘要；复用回执标记 reused）。连接失败、超时、非零退出均为该动作 unverified，不使本地验收变为 fail。deploy/rollback 失败及主机指纹不匹配进入现有通知 outbox；未配飞书则不发，通知发送失败不影响执行。巡检告警等待完整结论再写历史与发送；同一目标的指纹故障按原因去重。目标注册/编辑/删除/测试写 deploy_target_audit，项目绑定写 project_settings_audit。
 
 ## 可选远程巡检
 
