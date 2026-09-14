@@ -47,6 +47,8 @@ def router(service):
     def invoke(fn, *args):
         try:
             return fn(*args)
+        except KeyError:
+            raise HTTPException(404, '记录不存在') from None
         except ValueError as exc:
             if isinstance(exc, Conflict):
                 raise
@@ -65,7 +67,7 @@ def router(service):
     @routes.get('/api/v2/deploy-targets/{tid}')
     def get(tid: str, request: Request):
         admin(request)
-        return targets.get(tid)
+        return invoke(targets.get, tid)
 
     @routes.put('/api/v2/deploy-targets/{tid}')
     def update(tid: str, body: Update, request: Request):
@@ -75,7 +77,7 @@ def router(service):
     @routes.delete('/api/v2/deploy-targets/{tid}')
     def delete(tid: str, body: Revision, request: Request):
         admin(request)
-        targets.delete(tid, body.revision, request.state.user['id'])
+        invoke(targets.delete, tid, body.revision, request.state.user['id'])
         return {'deleted': True}
 
     @routes.post('/api/v2/deploy-targets/{tid}/test')

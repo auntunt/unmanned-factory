@@ -12,6 +12,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
+      - name: Base installation import smoke (no extras)
+        run: |
+          uv sync --frozen
+          uv run --no-sync pytest tests/test_base_install.py
       - run: uv sync --frozen --all-extras
       - run: uv run pytest -m 'not smoke'
       - uses: actions/setup-node@v4

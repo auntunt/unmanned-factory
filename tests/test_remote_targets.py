@@ -351,3 +351,30 @@ def test_inspection_alert_waits_for_terminal_history_and_deduplicates_pin_failur
     assert len(history) == 1 and history[0]['verdict'] == 'unverified'
     assert len(history[0]['remote_results']) == 2
     assert len(sent) == 1
+
+
+@pytest.mark.parametrize('standalone', [False, True])
+@pytest.mark.parametrize('method', ['GET', 'PUT', 'DELETE'])
+def test_missing_target_returns_404(remote_env, method, standalone):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from factory.control.remote_routes import router
+
+    client, _, service, _, headers, target, *_ = remote_env
+    if standalone:
+        app = FastAPI()
+
+        @app.middleware('http')
+        async def admin_identity(request, call_next):
+            request.state.user = {'id': 1, 'role': 'admin'}
+            return await call_next(request)
+
+        app.include_router(router(service))
+        client = TestClient(app)
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    kwargs = {} if method == 'GET' else {'json': {'revision': 1}}
+    if method == 'PUT':
+        kwargs['json'].update(values)
+    response = client.request(method, '/api/v2/deploy-targets/' + '0' * 32, headers=headers, **kwargs)
+    assert response.status_code == 404
+    assert response.json() == {'detail': '记录不存在'}

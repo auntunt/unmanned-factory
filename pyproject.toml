@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn>=0.52.4",
     "httpx>=0.28.1",
+    "cryptography>=50.0.0",
 ]
 
 # 文档里从第一天就写着 `factory run ...`，但这个入口点一直不存在 ——

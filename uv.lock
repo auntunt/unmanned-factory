@@ -951,6 +951,7 @@ name = "unmanned-factory"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pyyaml" },
@@ -977,6 +978,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.152" },
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "deepseek-harness-sdk", marker = "extra == 'dsh'", specifier = ">=0.1.2rc1" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.28.1" },
