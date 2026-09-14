@@ -1,5 +1,6 @@
 """Real Linux/browser smoke: unavailable environments and skipped tests are failures."""
 from pathlib import Path
+import subprocess
 import pytest
 from factory.control.claude_terminal import available
 
@@ -10,7 +11,10 @@ class RequiredSmoke:
             session.exitstatus = 1
 
 if __name__ == '__main__':
-    assert available(), 'sandbox unavailable; refusing skipped smoke'
+    if not available():
+        probe = subprocess.run(['/usr/bin/bwrap', '--unshare-user', '--ro-bind', '/', '/', 'true'],
+                               capture_output=True, text=True, timeout=5)
+        raise RuntimeError('sandbox unavailable; refusing skipped smoke: ' + probe.stderr.strip())
     assert Path('/opt/webuddy-browser/bridge.mjs').is_file(), 'browser runtime missing'
     raise SystemExit(pytest.main(['-q', 'tests/test_active_verification.py',
         '-k', 'real_verification_browser or real_sandbox_probe', '-rs'], plugins=[RequiredSmoke()]))

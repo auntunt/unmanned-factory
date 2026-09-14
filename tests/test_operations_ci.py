@@ -23,3 +23,9 @@ def test_ci_runs_required_commands_and_separate_strict_smoke():
         assert required in workflow
     assert 'continue-on-error' not in workflow
     assert 'ci_smoke.py' in Path('runtime/project-browser/Dockerfile.smoke').read_text()
+
+
+def test_browser_smoke_uses_runner_supporting_nested_user_namespaces():
+    import yaml
+    workflow = yaml.safe_load(Path('.github/workflows/ci.yml').read_text())
+    assert workflow['jobs']['browser-smoke']['runs-on'] == 'ubuntu-22.04'

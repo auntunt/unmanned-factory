@@ -22,7 +22,8 @@ jobs:
       - run: npm ci && npm run build && npm test
         working-directory: frontend
   browser-smoke:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 restricts nested unprivileged user namespaces via AppArmor.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f runtime/project-browser/Dockerfile.smoke -t webuddy-browser-smoke .
