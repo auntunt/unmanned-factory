@@ -1,5 +1,5 @@
-import { CopyValue, runTitle, RunMode } from './presentation'
-import { runDisplayStatus } from './run-guidance'
+import RunStatusBadge from './RunStatusBadge'
+import { CopyValue, runTitle, RunMode, ListTime } from './presentation'
 import { nextRunAction } from './run-guidance'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -7,7 +7,7 @@ import { request, WorkspaceApiError } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import { runGuidance } from './run-guidance'
 import type { V3Project } from './v3-types'
-import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, errorText, type PageProps } from './ui'
+import { EmptyState, ErrorNotice, PageHeader, errorText, type PageProps } from './ui'
 import './run-guidance.css'
 import { subscribeDataRefresh } from './data-refresh'
 
@@ -68,6 +68,6 @@ export default function RunsPage({ onUnauthorized }: PageProps) {
     {error && <ErrorNotice message={error} />}{projectsError && <ErrorNotice message={projectsError} />}
     {!runs && !error && <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>}
     {runs && visible.length === 0 && <div className="wb-card"><EmptyState title={query || projectId ? '没有匹配的运行' : '还没有运行'} description={query || projectId ? '换一个关键词、项目或状态筛选试试。' : '从项目提交一条需求后，运行现场会出现在这里。'} action={!query && !projectId ? <Link className="wb-button wb-button-primary" to="/projects">浏览项目</Link> : undefined} /></div>}
-    {runs && visible.length > 0 && <section className="wb-card wb-run-table-card"><div className="wb-table-wrap"><table className="wb-table wb-runs-table"><thead><tr><th>需求</th><th>项目</th><th>状态与下一步</th><th>计划</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visible.map((run) => { const project = projectNames.get(String(run.project_id)); const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{runTitle(run)}</Link><RunMode run={run} /><small><CopyValue value={run.id} label="运行编号" /></small></td><td>{project ? <Link className="wb-project-inline" to={`/projects/${encodeURIComponent(String(project.id))}?stage=${guidance.stage}`}>{project.name}</Link> : <span className="wb-project-inline"><span>项目暂未返回</span><CopyValue value={run.project_id} label="工程编号" /></span>}{project && <CopyValue value={project.id} label="工程编号" />}</td><td><StatusBadge status={runDisplayStatus(run)} /><small className="wb-run-guidance"><strong>{guidance.label}</strong></small></td><td>{run.revision ? `v${run.revision}` : '—'}</td><td>{formatDate(run.updated_at)}</td><td><Link className="wb-button wb-button-secondary" to={nextRunAction(run).href} aria-label={`${guidance.primaryLabel}：${run.plan?.title || run.request}`}>{nextRunAction(run).label}</Link></td></tr> })}</tbody></table></div></section>}
+    {runs && visible.length > 0 && <section className="wb-card wb-run-table-card"><div className="wb-table-wrap"><table className="wb-table wb-runs-table"><thead><tr><th>需求</th><th>项目</th><th>状态与下一步</th><th>计划</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visible.map((run) => { const project = projectNames.get(String(run.project_id)); const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{runTitle(run)}</Link><RunMode run={run} /><small><CopyValue value={run.id} label="运行编号" /></small></td><td>{project ? <Link className="wb-project-inline" to={`/projects/${encodeURIComponent(String(project.id))}?stage=${guidance.stage}`}>{project.name}</Link> : <span className="wb-project-inline"><span>项目暂未返回</span><CopyValue value={run.project_id} label="工程编号" /></span>}{project && <CopyValue value={project.id} label="工程编号" />}</td><td><RunStatusBadge run={run} /></td><td>{run.revision ? `v${run.revision}` : '—'}</td><td><ListTime value={run.updated_at} /></td><td><Link className="wb-button wb-button-secondary" to={nextRunAction(run).href} aria-label={`${guidance.primaryLabel}：${run.plan?.title || run.request}`}>{nextRunAction(run).label}</Link></td></tr> })}</tbody></table></div></section>}
   </div>
 }

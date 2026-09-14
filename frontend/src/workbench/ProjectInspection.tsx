@@ -34,7 +34,7 @@ export default function ProjectInspection({ projectId, csrfToken, onUnauthorized
     {error && <ErrorNotice message={error} />}</section>
 }
 
-const verdicts = { pass: { label: '通过', color: '#147d64' }, fail: { label: '失败', color: '#bd413d' }, unverified: { label: '未验证', color: '#ad7b18' } }
+const verdicts = { pass: { label: '通过', color: 'var(--color-success)' }, fail: { label: '失败', color: 'var(--color-danger)' }, unverified: { label: '未验证', color: 'var(--color-warning)' } }
 export function InspectionTrend({ history, consecutiveFailures }: { history: NonNullable<Inspection['history']>; consecutiveFailures: number }) {
   return <div aria-label="最近 20 次巡检"><p>连续未通过：{consecutiveFailures} 次 {consecutiveFailures >= 3 && <strong className="wb-outage">持续故障</strong>}</p><div className="wb-inspection-trend">{[...history].sort((a,b) => b.at.localeCompare(a.at)).slice(0,20).reverse().map(item => {
     const date = new Date(item.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })

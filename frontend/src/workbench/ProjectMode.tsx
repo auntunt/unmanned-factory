@@ -19,5 +19,5 @@ export default function ProjectMode({ projectId, isAdmin, onUnauthorized }: { pr
   return <div className="pa-project-mode"><div>
     <strong>{policy ? policy.mode === 'autonomous' ? 'Auto · 自动执行' : '监督模式 · 等待计划批准' : error ? '执行模式暂不可用' : '正在读取执行模式…'}</strong>
     <small>{policy ? policy.mode === 'autonomous' ? '新需求在配置范围内自动推进，过程按版本留档。' : '新需求规划完成后，需要手动批准才会开始执行。' : error}</small>
-  </div>{isAdmin && <Link className="wb-text-link" to={`/projects/${encodeURIComponent(projectId)}?tab=automation#project-autonomy`}>{policy?.mode === 'supervised' ? '改为 Auto →' : '执行策略 →'}</Link>}</div>
+  </div>{isAdmin && <Link className="wb-text-link" to={`/projects/${encodeURIComponent(projectId)}?tab=automation#project-autonomy`}>{policy?.mode === 'supervised' ? '改为 Auto' : '执行策略'}</Link>}</div>
 }

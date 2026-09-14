@@ -10,6 +10,9 @@ const engineering = { stages: definitions.map(([id, label]) => ({ id, label, cou
 const project = { id: run.project_id, name: '工时 CSV 工具', repository: 'local/hours', workspace: '/workspace/hours', base_branch: 'main', checks: {}, revision: 1, managed_workspace: true, budget_usd: 10 };
 const overview = { snapshot_at: run.updated_at, projects: 1, runs: 3, active_runs: 1, attention_runs: 1, engineering, run_snapshots: [run], project_summaries: [{ ...project, next_run: run, active_runs: 1, attention_runs: 1, engineering }], attention: [{ id: run.id, title: '持续编码', project_id: project.id, project_name: project.name, status: run.status, updated_at: run.updated_at, run_snapshot: run }], recent_events: [], model_usage: [{ profile: 'standard', provider: 'claude', model: 'opus', calls: 3, token_usage_calls: 0, cache_usage_calls: 0, cached_input_tokens: 0 }] };
 const presets = ['general', 'bugfix', 'startup', 'release', 'dependencies'].map((id, index) => ({ id, label: ['新需求', '修复 Bug', '启动排错', '部署准备', '依赖维护'][index], hint: '描述目标与验收方式', version: 1, fields: [] }));
+const moduleFixture = { id: 'module-one', version: 1, name: '代码维护方法', category: 'workflow', description: '按真实证据修复已有项目', instructions: '先复现，再回归。' };
+const capabilityFixture = { id: 'cap-one', revision: 1, name: 'CSV 导出维护', description: '复用导出修复经验', category: 'engineering', status: 'ready', instructions: '验证导出。', acceptance: [], input_description: 'CSV', output_description: '检查记录', created_at: run.created_at, updated_at: run.updated_at, source_run_id: run.id };
+run.module_snapshot = [moduleFixture];
 const mutations = []; let delayRuntime = false;
 function payload(url, method) {
   const p = new URL(url).pathname;
@@ -26,7 +29,11 @@ function payload(url, method) {
   if (p.endsWith('/inspection')) return { enabled: true, interval_s: 3600, revision: 1, last_at: run.updated_at, last_status: 'inspection_failed', last_run_id: run.id, consecutive_failures: 3, history: Array.from({ length: 20 }, (_, i) => ({ run_id: `inspection-${i}`, at: new Date(Date.UTC(2026, 8, 14, i)).toISOString(), verdict: i < 3 ? 'fail' : i % 4 === 0 ? 'unverified' : 'pass', duration_s: 3.2 })) };
   if (p.endsWith('/deploy-targets')) return { targets: [], available: [], revision: 0 };
   if (p.endsWith('/knowledge')) return { entries: [] };
-  if (p.endsWith('/capabilities')) return { capabilities: [], bindings: [] };
+  if (p === '/api/v3/capabilities/cap-one') return { ...capabilityFixture, versions: [capabilityFixture] };
+  if (p.endsWith('/capabilities')) return { capabilities: [capabilityFixture], bindings: [] };
+  if (p === '/api/v4/modules') return { modules: [moduleFixture] };
+  if (p.endsWith('/events')) return { events: Array.from({ length: 35 }, (_, i) => ({ id: i, type: i % 3 === 0 ? 'command.started' : i % 3 === 1 ? 'model.output' : 'attempt.failed', at: new Date(Date.UTC(2026,8,14,10,0,i)).toISOString(), payload: { message: i % 3 === 0 ? 'npm run build' : i % 3 === 1 ? '正在检查导出格式与回归结果' : '测试失败：日期格式不匹配' } })), cursor: 35 };
+  if (p.endsWith('/plans')) return { versions: [] };
   if (p.endsWith('/deliverables')) return { items: [], count: 0 };
   if (p.endsWith('/runtime')) return { revision: 1, profiles: {}, limits: {}, blockers: [], tools: {}, host: {}, last_probes: [] };
   if (p.endsWith('/operations')) return { revision: 0, knowledge_enabled: false, webhook_configured: false };
@@ -34,9 +41,11 @@ function payload(url, method) {
 }
 (async () => {
  const browser = await puppeteer.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
- const report = { fixture: true, viewport: { width: 1440, height: 1000 }, pages: [], errors: [], mutations };
+ const report = { theme: process.env.UIUX_THEME || 'light', fixture: true, viewport: { width: 1440, height: 1000 }, pages: [], errors: [], mutations };
  try {
  const page = await browser.newPage(); await page.setViewport(report.viewport);
+ await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: report.theme }]);
+ await page.evaluateOnNewDocument(theme => localStorage.setItem('webuddy:theme',theme), report.theme);
  page.on('pageerror', error => report.errors.push(error.message));
  await page.setRequestInterception(true);
  page.on('request', async req => { if (new URL(req.url()).pathname.startsWith('/api/')) { if (delayRuntime && req.url().endsWith('/runtime')) await new Promise(r => setTimeout(r, 2000)); await req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(payload(req.url(), req.method())) }); } else await req.continue(); });
@@ -54,6 +63,13 @@ function payload(url, method) {
  await page.focus('#stage-deliver'); await page.keyboard.press('ArrowLeft'); await page.waitForFunction(() => location.search.includes('stage=verify'));
  assert.equal(await page.$eval('#stage-verify', e => e.getAttribute('aria-selected')), 'true');
 
+ await page.setViewport({ width: 1024, height: 1000 });
+ assert.equal(await page.$eval('.wb-stage-strip', e => e.scrollWidth > e.clientWidth && getComputedStyle(e).scrollSnapType === 'x mandatory'), true);
+ assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+ await page.setViewport({ width: 1800, height: 1000 });
+ assert.equal(await page.$eval('.wb-page', e => Math.round(e.getBoundingClientRect().width)), 1240);
+ await page.setViewport(report.viewport);
+
  await audit('project-settings', `/projects/${project.id}?tab=settings`, '.wb-inspection-trend a');
  await audit('runs', '/runs', '.wb-runs-table');
  await audit('run-detail', `/runs/${run.id}?view=requirements`, '#run-view-panel');
@@ -65,7 +81,15 @@ function payload(url, method) {
  assert.equal(await page.evaluate(() => document.activeElement.textContent), '保留运行');
  await page.keyboard.press('Escape'); assert.equal(await page.$('dialog[open]'), null);
  assert.equal(await page.evaluate(() => document.activeElement.textContent), '取消运行');
- await audit('capabilities-empty', '/capabilities', '.wb-empty-state');
+ await audit('ability-center', '/modules', '.mod-card');
+ await audit('capabilities', '/capabilities?selected=cap-one', '.cl-detail-head');
+ await audit('execution-log', `/runs/${run.id}?view=execution`, '.wb-log-line');
+ assert.equal(await page.$eval('.wb-log-stream', e => e.scrollHeight - e.clientHeight - e.scrollTop < 9), true);
+ await page.$eval('.wb-log-stream', e => { e.scrollTop = 0; e.dispatchEvent(new Event('scroll', { bubbles: true })); });
+ await page.waitForSelector('.wb-log-jump');
+ await page.click('.wb-log-jump');
+ assert.equal(await page.$eval('.wb-log-stream', e => e.scrollHeight - e.clientHeight - e.scrollTop < 9), true);
+ assert.equal(await page.$eval('.wb-detail-grid', e => getComputedStyle(e).gridTemplateColumns.split(' ').length), 2);
  await audit('costs', '/costs', '.wb-cost-summary');
  await audit('runtime', '/settings/runtime', '[aria-label="服务器连接"]');
  delayRuntime = true; await page.goto(origin + '/settings/runtime', { waitUntil: 'domcontentloaded' }); await page.waitForSelector('.wb-skeleton'); await page.screenshot({ path: path.join(output, 'runtime-loading.png') });

@@ -61,19 +61,19 @@ export default function TaskGraph({ tasks }: Props) {
         <svg className="wf-graph" viewBox={`0 0 ${width} ${height}`} role="group" aria-label="可交互任务依赖图">
           <defs>
             <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#a5b1c4" />
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--color-border)" />
             </marker>
           </defs>
           {positions.flatMap((position) => position.task.depends_on.map((dependency) => {
             const parent = byId.get(dependency)
             if (!parent) return null
-            return <line key={`${dependency}-${position.task.id}`} x1={parent.x + 178} y1={parent.y + 42} x2={position.x - 8} y2={position.y + 42} stroke="#a5b1c4" strokeWidth="1.5" markerEnd="url(#wf-arrow)" />
+            return <line key={`${dependency}-${position.task.id}`} x1={parent.x + 178} y1={parent.y + 42} x2={position.x - 8} y2={position.y + 42} stroke="var(--color-border)" strokeWidth="1.5" markerEnd="url(#wf-arrow)" />
           }))}
           {positions.map((position) => {
             const isSelected = position.task.id === selected
             return (
               <g key={position.task.id} className={`wf-node ${isSelected ? 'is-selected' : ''}`} onClick={() => setSelected(position.task.id)} role="button" aria-label={position.task.title} aria-pressed={isSelected} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(position.task.id) } }}>
-                <rect x={position.x} y={position.y} width="178" height="84" rx="10" fill={isSelected ? '#edf6f1' : '#fff'} stroke={isSelected ? '#136b53' : '#d8e2dc'} strokeWidth={isSelected ? 2 : 1} />
+                <rect x={position.x} y={position.y} width="178" height="84" rx="10" fill={isSelected ? 'var(--color-accent-soft)' : 'var(--color-surface)'} stroke={isSelected ? 'var(--color-accent)' : 'var(--color-border)'} strokeWidth={isSelected ? 2 : 1} />
                 <text x={position.x + 14} y={position.y + 23} className="wf-node-id">{position.task.id}</text>
                 <text x={position.x + 14} y={position.y + 46} className="wf-node-title">{position.task.title.slice(0, 11)}{position.task.title.length > 11 ? '…' : ''}</text>
                 <text x={position.x + 14} y={position.y + 67} className={`wf-node-meta wf-task-status-${position.task.status ?? 'pending'}`}>{taskStatusLabels[position.task.status ?? 'pending']} · {{ small: '简单', medium: '中等', large: '复杂' }[position.task.complexity]} · {{ low: '低', medium: '中', high: '高' }[position.task.risk]}风险</text>

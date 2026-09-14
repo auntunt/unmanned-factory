@@ -194,3 +194,5 @@ smoke 的花费实测在 $0.5 到 $2.5 之间浮动：一轮过是前者，第�
 没有它本地测试会 `ModuleNotFoundError`。
 
 审计库里不许有明文密码或 key（`factory/redact.py` 管这个）。
+
+界面第二轮：[布局、深色主题、日志与能力中心](docs/uiux-round2-2026-09-14.md)，包含亮暗 axe 报告和深色截图。

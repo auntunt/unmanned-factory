@@ -1,18 +1,18 @@
-.wb-run-journey { margin-bottom: 24px; border: 1px solid #cbded6; border-radius: 12px; background: #fff; padding: 23px 25px 0; }
+.wb-run-journey { margin-bottom: 24px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); padding: 23px 25px 0; }
 .wb-run-journey-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
 .wb-detail-page.wb-run-page .wb-run-journey-heading h2 { margin: 8px 0 0; font-size: 17px; font-weight: 600; line-height: 1.55; text-wrap: pretty; }
 .wb-run-journey-stages { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); list-style: none; margin: 26px 0 23px; padding: 0; }
-.wb-run-journey-stages li { position: relative; min-width: 0; display: grid; gap: 5px; padding-right: 8px; color: #64736c; font-size: 12px; }
-.wb-run-journey-stages li::after { position: absolute; z-index: 0; content: ''; height: 1px; top: 14px; left: 36px; right: 9px; background: #dce4df; }
+.wb-run-journey-stages li { position: relative; min-width: 0; display: grid; gap: 5px; padding-right: 8px; color: var(--color-muted); font-size: 12px; }
+.wb-run-journey-stages li::after { position: absolute; z-index: 0; content: ''; height: 1px; top: 14px; left: 36px; right: 9px; background: var(--color-raised); }
 .wb-run-journey-stages li:last-child::after { display: none; }
-.wb-run-step-number { width: 29px; height: 29px; display: grid; place-items: center; margin-bottom: 7px; border: 1px solid #d7dfda; border-radius: 50%; font-size: 11px; font-variant-numeric: tabular-nums; }
-.wb-run-journey-stages strong { color: #4a5d52; font-weight: 600; }
+.wb-run-step-number { width: 29px; height: 29px; display: grid; place-items: center; margin-bottom: 7px; border: 1px solid var(--color-border); border-radius: 50%; font-size: 11px; font-variant-numeric: tabular-nums; }
+.wb-run-journey-stages strong { color: var(--color-text); font-weight: 600; }
 .wb-run-journey-stages small { font-size: 11px; }
-.wb-run-journey-stages .is-recorded .wb-run-step-number { border-color: #cee4d9; background: #edf6f1; color: #196649; }
-.wb-run-journey-stages .is-current .wb-run-step-number { border-color: #136b53; background: #136b53; color: #fff; box-shadow: 0 0 0 4px #edf6f1; }
-.wb-run-journey-stages .is-current strong { color: #125840; font-weight: 750; }
-.wb-run-journey-feedback { display: flex; justify-content: space-between; gap: 16px; border-top: 1px solid #e0eae4; padding: 14px 0; color: #5d6d63; font-size: 12px; line-height: 1.5; }
-.wb-run-journey-feedback a { flex-shrink: 0; color: #0b5f50; font-weight: 650; }
+.wb-run-journey-stages .is-recorded .wb-run-step-number { border-color: var(--color-border); background: var(--color-bg); color: var(--color-accent); }
+.wb-run-journey-stages .is-current .wb-run-step-number { border-color: var(--color-border); background: var(--color-accent); color: var(--color-on-accent); box-shadow: 0 0 0 4px var(--color-shadow); }
+.wb-run-journey-stages .is-current strong { color: var(--color-accent); font-weight: 750; }
+.wb-run-journey-feedback { display: flex; justify-content: space-between; gap: 16px; border-top: 1px solid var(--color-border); padding: 14px 0; color: var(--color-muted); font-size: 12px; line-height: 1.5; }
+.wb-run-journey-feedback a { flex-shrink: 0; color: var(--color-accent); font-weight: 650; }
 .wb-run-journey-feedback a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .wb-detail-page.wb-run-page { padding: 0; }
 .wb-detail-page.wb-run-page .wb-page-header h1 { font-size: clamp(23px, 2.2vw, 29px); }
@@ -20,7 +20,7 @@
 .wb-detail-page.wb-run-page .wb-detail-meta { margin: 0 0 15px; font-size: 12px; }
 .wb-detail-page.wb-run-page .wb-detail-main > .wb-question { order: -1; }
 .wb-detail-page.wb-run-page .wb-detail-card h2 { font-size: 17px; }
-.wb-detail-page.wb-run-page .wb-task-graph { background: #f7f9f8; }
+.wb-detail-page.wb-run-page .wb-task-graph { background: var(--color-surface); }
 @media (max-width: 900px) {
   .wb-detail-page.wb-run-page .wb-detail-grid { grid-template-columns: minmax(0, 1fr); }
   .wb-detail-page.wb-run-page .wb-detail-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }

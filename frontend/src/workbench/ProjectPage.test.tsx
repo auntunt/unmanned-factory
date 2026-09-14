@@ -18,6 +18,7 @@ const presets = [
 ]
 function show() { return render(<MemoryRouter initialEntries={['/projects/p1']}><Routes><Route path="/projects/:projectId" element={<ProjectPage csrfToken="csrf" onUnauthorized={unauthorized} user={{ id: 1, username: 'owner', role: 'admin' }} />} /><Route path="/runs/:runId" element={<div>运行已接收</div>} /></Routes></MemoryRouter>) }
 beforeEach(() => {
+  localStorage.clear()
   api.mockReset()
   api.mockImplementation(async (url) => {
     if (url.includes('/deploy-targets')) return { targets: [], revision: 0, available: [] } as never
@@ -98,4 +99,27 @@ it('keeps settings out of the main flow and supports arrow keys between work-typ
   expect(bugfix.getAttribute('aria-selected')).toBe('true')
   fireEvent.click(screen.getByRole('button', { name: '项目设置' }))
   await screen.findByText('定时巡检'); await screen.findByText('项目服务器')
+})
+
+it('restores a per-project draft including fields and clears it only after successful keyboard submission', async () => {
+  localStorage.setItem('webuddy:request:p1', JSON.stringify({ value:'保留导出格式', operation:'bugfix', fields:{error_log:'TypeError'} }))
+  localStorage.setItem('webuddy:request:another',JSON.stringify({value:'另一个项目'}))
+  show(); const input = await screen.findByLabelText('数据库里的修复入口说明') as HTMLTextAreaElement
+  expect(input.value).toBe('保留导出格式'); expect((screen.getByLabelText('错误日志') as HTMLTextAreaElement).value).toBe('TypeError')
+  api.mockImplementationOnce(async () => { throw new Error('网络中断') })
+  fireEvent.keyDown(input,{key:'Enter',ctrlKey:true})
+  await screen.findByText('网络中断'); expect(localStorage.getItem('webuddy:request:p1')).toContain('保留导出格式')
+  api.mockImplementationOnce(async () => ({id:'r1'}) as never)
+  fireEvent.keyDown(input,{key:'Enter',metaKey:true})
+  await screen.findByText('运行已接收')
+  expect(localStorage.getItem('webuddy:request:p1')).toBeNull(); expect(localStorage.getItem('webuddy:request:another')).toContain('另一个项目')
+})
+it('saves edits across unmount, shows remaining characters near the limit and does not submit composing text', async () => {
+  const view = show(); const input = await screen.findByLabelText('新需求说明')
+  fireEvent.change(input,{target:{value:'字'.repeat(49000)}})
+  expect(screen.getByText('还可输入 1000 字')).toBeTruthy()
+  fireEvent.keyDown(input,{key:'Enter',ctrlKey:true,isComposing:true})
+  expect(api.mock.calls.some(([url])=>url==='/api/v2/runs')).toBe(false)
+  view.unmount(); show()
+  expect((await screen.findByLabelText('新需求说明') as HTMLTextAreaElement).value.length).toBe(49000)
 })

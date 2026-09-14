@@ -1,6 +1,6 @@
 import { useState, type KeyboardEvent } from 'react'
 import type { Run } from '../workspace/types'
-import { statusLabel } from './ui'
+import { formatDate, statusLabel } from './ui'
 import './presentation.css'
 
 // 一个视口内不重复整句指引；边界说明后置。内部术语必须附白话解释。
@@ -20,10 +20,13 @@ export function LoadingCard({ label = '正在读取…' }: { label?: string }) {
   return <div className="wb-card wb-skeleton" role="status" aria-label={label}><span /><span /><span /></div>
 }
 export function relativeTime(value: string) {
-  const elapsed = Math.max(0, Date.now() - Date.parse(value))
-  if (!Number.isFinite(elapsed)) return '时间未记录'
-  const mins = Math.floor(elapsed / 60000)
-  return mins < 1 ? '刚刚' : mins < 60 ? `${mins} 分钟前` : mins < 1440 ? `${Math.floor(mins / 60)} 小时前` : `${Math.floor(mins / 1440)} 天前`
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return '时间未记录'
+  const hours = Math.floor(Math.max(0, Date.now() - at) / 3600000)
+  return hours < 1 ? '不足 1 小时前' : hours < 24 ? `${hours} 小时前` : new Date(at).toLocaleDateString('zh-CN')
+}
+export function ListTime({ value }: { value: string }) {
+  return <time dateTime={Number.isFinite(Date.parse(value)) ? value : undefined} title={formatDate(value)}>{relativeTime(value)}</time>
 }
 export function StatusDot({ status }: { status?: string }) {
   const tone = ['pass', 'published', 'ready_for_review', 'verified', 'completed', 'inspection_completed', 'ready'].includes(status || '') ? 'success' : ['fail', 'failed', 'inspection_failed'].includes(status || '') ? 'danger' : ['running', 'planning', 'queued', 'verifying', 'publishing'].includes(status || '') ? 'active' : ['unverified', 'needs_human', 'needs_clarification', 'awaiting_approval'].includes(status || '') ? 'warning' : 'neutral'

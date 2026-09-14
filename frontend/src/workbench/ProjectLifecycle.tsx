@@ -1,10 +1,11 @@
+import { ListTime } from './presentation'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
 import StageStrip from './StageStrip'
 import { CopyValue, runTitle, RunMode } from './presentation'
 import { PROJECT_STAGES, projectStage, projectStageHref } from './project-stages'
-import { formatDate, StatusBadge, statusLabel } from './ui'
+import { StatusBadge, statusLabel } from './ui'
 import type { EngineeringSummary } from './v3-types'
 import { checkPassed, runGuidance, verificationScopeNote } from './run-guidance'
 
@@ -84,7 +85,7 @@ export default function ProjectLifecycle({ projectId, projectName, engineering, 
         {content.items.map((item) => {
           const run = runs.find((record) => String(record.id) === item.id)
           return <article className="pw-stage-record" key={item.id}>
-            <div className="pw-record-meta"><span>{formatDate(item.updated_at)}</span>{run ? <span>{runGuidance(run).label}</span> : <StatusBadge status={item.status} />}</div>
+            <div className="pw-record-meta"><span><ListTime value={item.updated_at} /></span>{run ? <span>{runGuidance(run).label}</span> : <StatusBadge status={item.status} />}</div>
             <h4><Link to={item.href}>{run ? runTitle(run) : item.title}</Link>{run && <RunMode run={run} />}</h4>
             {run ? <StagePreview stage={stage.id} run={run} /> : <p>{item.detail}</p>}
             <Link className="wb-text-link" to={item.href}>{stage.action}</Link>

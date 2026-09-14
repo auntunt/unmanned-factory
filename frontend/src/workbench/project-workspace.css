@@ -18,16 +18,16 @@
 .pw-stage-link { font-size: 10px; color: var(--wb-teal); line-height: 1.5; }
 .pw-project-footer { color: var(--wb-faint); font-size: 11px; line-height: 1.6; }
 .pw-project-footer a { color: var(--wb-teal-dark); }
-.pw-attention { border-color: #e6d1ad; margin-bottom: 22px; background: #fffdf9; }
-.pw-attention-item { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 17px 0; border-top: 1px solid #eee3d2; }
+.pw-attention { border-color: var(--color-border); margin-bottom: 22px; background: var(--color-surface); }
+.pw-attention-item { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 17px 0; border-top: 1px solid var(--color-border); }
 .pw-attention-item:first-child { padding-top: 0; border-top: 0; }
 .pw-attention-item:last-child { padding-bottom: 0; }
-.pw-attention-indicator { display: grid; place-items: center; width: 27px; height: 30px; border-radius: 6px; color: #9d610f; background: #fcf0db; font-weight: 750; }
-.pw-attention-label { display: block; font-size: 12px; color: #95621d; font-weight: 650; }
+.pw-attention-indicator { display: grid; place-items: center; width: 27px; height: 30px; border-radius: 6px; color: var(--color-warning); background: var(--color-warning-bg); font-weight: 750; }
+.pw-attention-label { display: block; font-size: 12px; color: var(--color-warning); font-weight: 650; }
 .pw-attention-label small { font-weight: 400; color: var(--wb-muted); }
 .pw-attention-title { display: block; margin: 5px 0; font-size: 15px; font-weight: 600; color: var(--wb-ink); }
 .pw-attention-item p { margin: 0; color: var(--wb-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; max-width: 65ch; }
-.pw-warning-text { color: #9d610f; }
+.pw-warning-text { color: var(--color-warning); }
 .pw-budget-link { display: flex; gap: 10px; align-items: baseline; }
 .pw-budget-link strong { font-size: 18px; font-variant-numeric: tabular-nums; }
 .pw-context { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; color: var(--wb-muted); font-size: 12px; }
@@ -56,22 +56,22 @@
 .pw-record-list strong { font-weight: 500; color: var(--wb-ink); }
 .pw-record-list span { flex-shrink: 0; font-size: 11px; }
 .pw-record-list .is-pass { color: var(--wb-teal); }
-.pw-record-list .is-fail { color: #a45325; }
+.pw-record-list .is-fail { color: var(--color-warning); }
 .pw-delivery-values { display: grid; gap: 8px; margin: 12px 0; font-size: 12px; color: var(--wb-muted); }
 .pw-delivery-values code { display: block; color: var(--wb-ink); font-size: 11px; overflow-wrap: anywhere; }
-.pw-stage-empty { background: #f5f8f6; border-radius: 8px; padding: 22px; margin-top: 8px; }
+.pw-stage-empty { background: var(--color-bg); border-radius: 8px; padding: 22px; margin-top: 8px; }
 .pw-stage-empty h4 { font-size: 15px; margin: 0 0 8px; }
 .pw-stage-empty p { color: var(--wb-muted); font-size: 12px; line-height: 1.7; margin: 0 0 14px; }
 .pw-stage-tail { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--wb-border); font-size: 11px; color: var(--wb-muted); }
 .pw-runs-list { margin-top: 22px; }
 .pw-run-reason { max-width: 460px; white-space: normal; line-height: 1.5; color: var(--wb-muted); font-size: 11px; margin-top: 5px; }
 .pw-settings-stack { display: grid; gap: 18px; }
-.pw-budget-field { padding: 20px; border: 1px solid #bfd5ce; background: #f7fbf9; border-radius: 8px; display: grid; gap: 8px; margin: 0 0 22px; }
-.pw-budget-field:focus-within, .pw-budget-field:target { outline: 2px solid #61a995; outline-offset: 3px; }
+.pw-budget-field { padding: 20px; border: 1px solid var(--color-border); background: var(--color-surface); border-radius: 8px; display: grid; gap: 8px; margin: 0 0 22px; }
+.pw-budget-field:focus-within, .pw-budget-field:target { outline: 2px solid var(--color-border); outline-offset: 3px; }
 .pw-budget-field label { max-width: 320px; font-size: 15px; }
 .pw-budget-field small { color: var(--wb-muted); line-height: 1.7; font-size: 12px; max-width: 70ch; }
 .pw-budget-guide { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 18px; }
-.pw-budget-guide > div { border-left: 2px solid #d2e2dc; padding-left: 14px; }
+.pw-budget-guide > div { border-left: 2px solid var(--color-border); padding-left: 14px; }
 .pw-budget-guide h3 { margin: 0 0 8px; font-size: 14px; }
 .pw-budget-guide p { font-size: 12px; line-height: 1.7; color: var(--wb-muted); }
 .pw-preflight { margin: 20px 0; }
@@ -108,14 +108,14 @@
 
 /* Current work is independent of accumulated stage counts. */
 .pw-stage-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 20px; flex-wrap: wrap; }
-.pw-project-stages > a.pw-stage-current { background: #edf7f3; box-shadow: inset 0 3px 0 #167768; }
-.pw-stage-current > strong { color: #12685b; }
-.pw-stage-marker { display: inline-flex; align-items: center; gap: 6px; color: #12685b; font-size: 11px; font-weight: 700; white-space: nowrap; }
-.pw-stage-marker i { display: block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px #16776818; }
+.pw-project-stages > a.pw-stage-current { background: var(--color-bg); box-shadow: inset 0 3px 0 var(--color-shadow); }
+.pw-stage-current > strong { color: var(--color-accent); }
+.pw-stage-marker { display: inline-flex; align-items: center; gap: 6px; color: var(--color-accent); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.pw-stage-marker i { display: block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px var(--color-shadow); }
 .pw-stage-current.is-moving .pw-stage-marker i { animation: pw-current-pulse 2s ease-in-out infinite; }
-.pw-project-stages > a.pw-stage-current.is-waiting { background: #fff8eb; box-shadow: inset 0 3px 0 #b57111; }
-.pw-stage-current.is-waiting > strong, .pw-stage-current.is-waiting .pw-stage-marker { color: #87540c; }
-@keyframes pw-current-pulse { 0%, 100% { box-shadow: 0 0 0 3px #16776820; } 50% { box-shadow: 0 0 0 7px #16776808; } }
+.pw-project-stages > a.pw-stage-current.is-waiting { background: var(--color-bg); box-shadow: inset 0 3px 0 var(--color-shadow); }
+.pw-stage-current.is-waiting > strong, .pw-stage-current.is-waiting .pw-stage-marker { color: var(--color-warning); }
+@keyframes pw-current-pulse { 0%, 100% { box-shadow: 0 0 0 3px var(--color-shadow); } 50% { box-shadow: 0 0 0 7px var(--color-shadow); } }
 @media (prefers-reduced-motion: reduce) { .pw-stage-current.is-moving .pw-stage-marker i { animation: none; } }
 
 .pw-completed summary { cursor: pointer; font-weight: 700; padding: 4px 0; }

@@ -1,0 +1,44 @@
+/* Semantic color and layout tokens. Components never choose light/dark colors themselves. */
+:root {
+  color-scheme:light;
+  --layout-content-max:1240px; --layout-gutter:28px; --layout-rail:280px;
+  --color-bg:#f2f5f3; --color-surface:#ffffff; --color-raised:#edf2ef; --color-border:#c4d1c9;
+  --color-text:#20362d; --color-muted:#50665b; --color-accent:#126b58; --color-accent-soft:#e0eee7; --color-on-accent:#ffffff;
+  --color-success:#176642; --color-success-bg:#e4f2e9; --color-warning:#79500d; --color-warning-bg:#fff0d3;
+  --color-danger:#a12d30; --color-danger-bg:#fbe8e7; --color-info:#245f91; --color-info-bg:#e5eff9;
+  --color-overlay:rgba(15,25,20,.6); --color-shadow:rgba(20,40,30,.12);
+}
+@media (prefers-color-scheme:dark) {
+  :root:not([data-theme=light]) {
+    color-scheme:dark;
+    --color-bg:#111916; --color-surface:#1b2621; --color-raised:#24332c; --color-border:#4c6457;
+    --color-text:#e4eee8; --color-muted:#adbdB3; --color-accent:#81dec0; --color-accent-soft:#254438; --color-on-accent:#11291f;
+    --color-success:#8ce0a8; --color-success-bg:#233f30; --color-warning:#f2cd80; --color-warning-bg:#443822;
+    --color-danger:#ffabae; --color-danger-bg:#492d31; --color-info:#a0d0ff; --color-info-bg:#263a4d;
+    --color-overlay:rgba(0,0,0,.72); --color-shadow:rgba(0,0,0,.3);
+  }
+}
+:root[data-theme=dark] {
+  color-scheme:dark;
+  --color-bg:#111916; --color-surface:#1b2621; --color-raised:#24332c; --color-border:#4c6457;
+  --color-text:#e4eee8; --color-muted:#adbdb3; --color-accent:#81dec0; --color-accent-soft:#254438; --color-on-accent:#11291f;
+  --color-success:#8ce0a8; --color-success-bg:#233f30; --color-warning:#f2cd80; --color-warning-bg:#443822;
+  --color-danger:#ffabae; --color-danger-bg:#492d31; --color-info:#a0d0ff; --color-info-bg:#263a4d;
+  --color-overlay:rgba(0,0,0,.72); --color-shadow:rgba(0,0,0,.3);
+}
+html,body,#root{background:var(--color-bg);color:var(--color-text)}
+.wb-shell .wb-content{width:100%;max-width:calc(var(--layout-content-max) + var(--layout-gutter)*2);padding:32px var(--layout-gutter) 60px;margin-inline:auto;box-sizing:border-box}
+.wb-shell :is(.wb-page,.wb-detail-page,.cl-page,.tm-page){width:100%;max-width:var(--layout-content-max);margin-inline:auto;min-width:0}
+.wb-shell .ov3-page{display:block}.wb-shell .wb-run-page .wb-detail-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:24px}.wb-detail-main,.wb-detail-rail{min-width:0}
+@media(min-width:1200px){.wb-shell .wb-run-page .wb-detail-grid{grid-template-columns:minmax(0,1fr) var(--layout-rail)}}
+.wb-shell .wb-stage-strip{display:grid;grid-template-columns:repeat(6,minmax(154px,1fr));overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding:4px;padding:4px 2px 12px;max-width:100%}.wb-stage-strip>*{scroll-snap-align:start}.pw-cycle,.pw-cycle-layout,.pw-stage-panel,.pw-runs-list{min-width:0;width:100%;box-sizing:border-box}
+.wb-card h2,.wb-detail-card h2,.wb-shell .mod-card h2{font-size:18px;font-weight:650}.wb-card .wb-card .wb-eyebrow,.wb-detail-card .wb-eyebrow,.pw-runs-list .wb-eyebrow,.ov3-events .wb-eyebrow{display:none}
+.wb-theme-switch{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;padding:12px 0;color:var(--color-muted)}.wb-theme-switch select{background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);padding:6px;border-radius:6px;max-width:130px}
+.wb-shell a:focus-visible,.wb-shell button:focus-visible,.wb-shell select:focus-visible,.wb-shell textarea:focus-visible{outline:2px solid var(--color-accent);outline-offset:3px}
+.wb-draft-note{display:flex;gap:16px;justify-content:space-between;font-size:12px;color:var(--color-muted)}
+.wb-log-wrap{position:relative}.wb-log-stream{max-height:420px;min-height:180px;overflow:auto;background:var(--color-raised);border:1px solid var(--color-border);border-radius:8px;padding:12px;font:12px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace;overscroll-behavior:contain}.wb-log-line{display:grid;grid-template-columns:75px 88px minmax(0,1fr);gap:12px;white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid var(--color-border);padding:4px 0}.wb-log-line time{color:var(--color-muted)}.wb-log-command{color:var(--color-accent)}.wb-log-model{color:var(--color-info)}.wb-log-error{color:var(--color-danger)}.wb-log-event{color:var(--color-text)}.wb-log-jump{position:absolute;bottom:14px;right:18px;background:var(--color-accent);color:var(--color-on-accent);border:0;border-radius:20px;padding:9px 15px;cursor:pointer}.wb-log-heading{display:flex;justify-content:space-between;align-items:center}
+.wb-ability-tabs{display:flex;gap:8px;margin-bottom:24px;border-bottom:1px solid var(--color-border)}.wb-ability-tabs a{padding:12px 18px;color:var(--color-muted);text-decoration:none}.wb-ability-tabs [aria-selected=true]{color:var(--color-accent);border-bottom:2px solid var(--color-accent)}.wb-ability-center .mod-card,.wb-ability-center .cl-capability-card,.wb-ability-center .cl-detail{background:var(--color-surface);border:1px solid var(--color-border);border-radius:10px;box-shadow:none}.wb-source-links{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;margin:12px 0}.wb-source-links a{color:var(--color-accent)}
+.wb-shell .wb-detail-page{padding:0}.wb-ability-center .wb-page,.wb-ability-center .cl-page{padding:0}.wb-capability-record{min-width:0}.wb-ability-center .cl-capability-card{width:100%;text-align:left}.wb-ability-center .mod-card.is-selected{outline:2px solid var(--color-accent)}
+
+.wb-shell .wb-status-success{color:var(--color-success);background:var(--color-success-bg)}.wb-shell .wb-status-warning{color:var(--color-warning);background:var(--color-warning-bg)}.wb-shell .wb-status-danger{color:var(--color-danger);background:var(--color-danger-bg)}.wb-shell .wb-status-active{color:var(--color-info);background:var(--color-info-bg)}.wb-shell .wb-status-neutral{color:var(--color-muted);background:var(--color-raised)}
+.wb-shell .wb-stage-strip [aria-selected=true],.wb-shell .wb-stage-strip [aria-current=page]{border-color:var(--color-accent);background:var(--color-accent-soft)}
