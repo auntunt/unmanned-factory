@@ -3,12 +3,13 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Markdown from './Markdown'
 import { request } from '../workspace/api'
 import type { Project } from '../workspace/types'
-import { ErrorNotice, errorText, type PageProps } from './ui'
+import { ErrorNotice, errorText, formatDate, type PageProps } from './ui'
 import './spec-tree.css'
 
 type Commit = { sha: string; subject: string; timestamp?: number }
 type Entry = { entry: string; path: string; symbol: string | null }
-export type SpecNode = { path: string; title: string; status: string; depth: number; code_count: number; desc: string; errors: string[]; raw_source: string; expanded: string; code: Entry[]; related: Entry[]; history: Commit[]; drift: { level: 'none'|'file'|'anchored'; unverified?: boolean; commits: Commit[]; reasons: string[] } }
+type ScopeReceipt = {event_id:number;run_id:string;at:string;task_id?:string;files:string[];status:'pass'|'fail'|'unverified'|'pending'}
+export type SpecNode = { scope_declarations?:ScopeReceipt[]; path: string; title: string; status: string; depth: number; code_count: number; desc: string; errors: string[]; raw_source: string; expanded: string; code: Entry[]; related: Entry[]; history: Commit[]; drift: { level: 'none'|'file'|'anchored'; unverified?: boolean; commits: Commit[]; reasons: string[] } }
 export function SpecDriftBadge({ drift }: Pick<SpecNode,'drift'>) {
   const tone = drift.level === 'anchored' ? 'danger' : drift.level === 'file' || drift.unverified ? 'warning' : 'success'
   return <span className={`wb-status wb-status-${tone}`}>{drift.unverified ? '未验证' : {none:'无漂移',file:'文件级漂移',anchored:'锚定漂移'}[drift.level]}</span>
@@ -26,6 +27,7 @@ export function SpecNodeDetail({ node }: { node: SpecNode }) {
     <section><h3>管辖文件</h3><ul>{node.code.map(e => <li key={e.entry}><code>{e.path}</code> {e.symbol && <span className="wb-status">#{e.symbol}</span>}</li>)}</ul>{!node.code.length && <p>尚未声明管辖文件</p>}</section>
     <section><h3>相关文件 · related</h3><ul>{node.related.map(e => <li key={e.entry}><code>{e.entry}</code></li>)}</ul>{!node.related.length && <p>没有相关文件</p>}</section>
     <section><h3>漂移状态</h3><SpecDriftBadge drift={node.drift}/>{node.drift.reasons.map(r => <p key={r}>{r}</p>)}<Commits items={node.drift.commits}/></section>
+    <section><h3>最近运行触碰声明</h3>{node.scope_declarations?.length ? <ul>{node.scope_declarations.map(d=><li key={d.event_id}><Link to={`/runs/${encodeURIComponent(d.run_id)}`}>{d.run_id.slice(0,8)}</Link> <time dateTime={d.at} title={d.at}>{formatDate(d.at)}</time> <span className={`wb-status wb-status-${d.status==='fail'?'danger':d.status==='pass'?'success':'warning'}`}>{{pass:'未越界',fail:'越界',unverified:'未验证',pending:'待对账'}[d.status]}</span>{d.task_id && <small>任务 {d.task_id}</small>}<div>{d.files.join('、')}</div></li>)}</ul> : <p>暂无运行声明</p>}</section>
     <section><h3>版本历史</h3><Commits items={node.history}/></section>
   </article>
 }

@@ -149,7 +149,8 @@ def test_verification_snapshot_uses_source_git_and_mechanical_ledger(app_env,mon
     with pytest.raises(ExecutionError):service._independent_verify(run['id'],run,p,service.runtime_settings.get(),artifacts)
     ledger=artifacts['acceptance_ledger']
     assert ledger['commit']==sha
-    assert ledger['counts']['fail' if anchored else 'unverified']==1
+    assert ledger['counts']['fail' if anchored else 'unverified']==(1 if anchored else 2)
+    assert next(i for i in ledger['items'] if i['id']=='scope:reconciliation')['status']=='unverified'
     assert artifacts['verification']['verdict']==('fail' if anchored else 'unverified')
     assert next(i for i in ledger['items'] if i.get('spec_path'))['spec_path']=='.spec/sample/spec.md'
 
@@ -178,7 +179,7 @@ def test_git_failure_downgrades_real_verifier(app_env,monkeypatch):
     artifacts={}
     with pytest.raises(ExecutionError):service._independent_verify(run['id'],run,p,service.runtime_settings.get(),artifacts)
     assert artifacts['verification']['verdict']=='unverified'
-    assert artifacts['acceptance_ledger']['counts']=={'pass':1,'fail':0,'unverified':1}
+    assert artifacts['acceptance_ledger']['counts']=={'pass':1,'fail':0,'unverified':2}
 
 
 def test_inspection_preserves_drift_evidence(app_env,monkeypatch):
@@ -210,6 +211,8 @@ def test_normal_run_mounts_spec_and_archives_spec_with_code(app_env,monkeypatch,
     def runner(req,emit,cancel=None):
         prompts.append(req)
         if req.verification:return ProviderResult(passing_review(req,'observed greeting'),cost_usd=.01)
+        if not req.read_only:
+            emit('assistant.message', {'text':json.dumps({'scope_declaration':{'files':[{'path':'greeting.txt'}]}})})
         result=original(req,emit,cancel)
         if not req.read_only:
             specfile=Path(req.workspace)/'.spec/sample/spec.md'

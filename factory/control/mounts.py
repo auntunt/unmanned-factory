@@ -127,6 +127,8 @@ class MountedRunner:
         from factory.control.providers import ProviderCancelled
         if cancel is not None and cancel.is_set():
             raise ProviderCancelled('execution cancelled before mount dispatch')
+        from factory.control.scope_declaration import wrap_emit
+        emit = wrap_emit(self.store, self.rid, request, emit)
         manifest = self.preflight(request.provider)
         if manifest is None:
             return self.runner.run(request, emit, cancel=cancel)

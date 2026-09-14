@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from factory.control.spec_tree import BOOTSTRAP_REQUEST, SpecError, drift, git, safe_path, tree
 from factory.control.store import Conflict, scrub
+from factory.control.scope_declaration import recent
 
 
 class Settings(BaseModel):
@@ -73,7 +74,8 @@ def router(store, service, allowed_root):
         data = read(p, run_id)
         node = next((n for n in data['nodes'] if n['path'] == path), None)
         if node is None: raise HTTPException(404, '规格节点不存在')
-        return node
+        node['scope_declarations'] = recent(store, pid, node)
+        return scrub(node)
 
     @api.put('/settings')
     def configure(pid: str, request: Request, body: Settings):

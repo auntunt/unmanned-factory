@@ -301,13 +301,13 @@ class Store:
                               (rid, after, min(limit, 2000))).fetchall()
             return [{**dict(r), 'payload': json.loads(r['payload']), 'version': 1} for r in rows]
 
-    def export_events(self, rid, *, through=None):
+    def export_events(self, rid, *, through=None, kind=None):
         """Read the complete stored payload against a stable event watermark."""
         with self.connect() as db:
             rows = db.execute('''SELECT e.*, a.content AS archive, a.sha256 AS archive_sha
                 FROM events e LEFT JOIN event_archives a ON a.event_id=e.id
-                WHERE e.run_id=? AND (? IS NULL OR e.id<=?) ORDER BY e.id''',
-                (rid, through, through))
+                WHERE e.run_id=? AND (? IS NULL OR e.id<=?) AND (? IS NULL OR e.type=?) ORDER BY e.id''',
+                (rid, through, through, kind, kind))
             for row in rows:
                 value = dict(row)
                 archive, sha = value.pop('archive'), value.pop('archive_sha')

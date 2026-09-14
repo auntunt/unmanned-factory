@@ -13,7 +13,12 @@ import tempfile
 import unicodedata
 
 UPSTREAM_COMMIT = 'd4f370b2909c9842a01ecd30c8f3a8772a9aba7b'
-GUIDANCE = '''SPEC TREE (platform guidance): Read the governing .spec/**/spec.md before editing its code: files.
+GUIDANCE = '''SPEC TREE (platform guidance): Before your FIRST file modification, emit a separate assistant message
+containing exactly {"scope_declaration":{"files":[{"path":"src/example.py","spec_nodes":[".spec/project/spec.md"]}]}}.
+Use real repository-relative exact file paths; spec_nodes may be empty. Emit additional declarations BEFORE
+editing additional files. Declarations only accumulate; they cannot be withdrawn. Tool stdout is not a declaration.
+Late declarations do not authorize earlier edits. The platform reconciles the final Git diff against receipts.
+Read the governing .spec/**/spec.md before editing its code: files.
 Update expanded spec together with code in the same platform-owned commit; do not commit yourself.
 The ## raw source section is human-signed intent: preserve it exactly. If it must change, explicitly
 propose that change in delivery notes. Only expanded content may be rewritten by the agent.
@@ -289,9 +294,9 @@ def apply_evidence(ledger, verdict, items):
     failures = [i for i in items if i['status'] == 'fail']
     pending = [i for i in items if i['status'] == 'unverified']
     if failures and verdict['verdict'] != 'fail':
-        return {**verdict, 'verdict': 'fail', 'error_type': 'spec_drift', 'reason': '锚定规格发生漂移：' + failures[0]['text']}
+        return {**verdict, 'verdict': 'fail', 'error_type': failures[0].get('error_type', 'spec_drift'), 'reason': (failures[0]['text'] + '：' + failures[0].get('evidence', '') if failures[0].get('error_type') else '锚定规格发生漂移：' + failures[0]['text'])}
     if pending and verdict['verdict'] == 'pass':
-        return {**verdict, 'verdict': 'unverified', 'reason': pending[0]['text'] + '：文件级漂移或无法验证'}
+        return {**verdict, 'verdict': 'unverified', 'reason': pending[0]['text'] + '：' + (pending[0].get('evidence', '无法验证') if pending[0].get('error_type') else '文件级漂移或无法验证')}
     return verdict
 
 

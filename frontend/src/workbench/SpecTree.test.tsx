@@ -42,3 +42,7 @@ it('keeps the verification run snapshot when fetching nodes and following eviden
  expect(api).toHaveBeenCalledWith('/api/v2/projects/p1/spec-tree/node?path=.spec%2Fapp%2Fspec.md&run_id=r1',expect.anything())
  expect(screen.getByText('查看对应规格节点').getAttribute('href')).toContain('&run=r1')
 })
+it('shows recent declarations with run links, timestamps and boundary status',()=>{
+ show(<SpecNodeDetail node={{...node,scope_declarations:[{event_id:7,run_id:'abcdef123456',at:'2026-09-14T10:00:00Z',files:['app.py'],task_id:'worker-1',status:'fail'},{event_id:8,run_id:'pending12345',at:'2026-09-14T11:00:00Z',files:['app.py'],status:'pending'}]}}/>);
+ expect(screen.getByRole('heading',{name:'最近运行触碰声明'})).toBeTruthy();expect(screen.getByRole('link',{name:'abcdef12'}).getAttribute('href')).toBe('/runs/abcdef123456');expect(screen.getByText('越界')).toBeTruthy();expect(screen.getByText('待对账')).toBeTruthy();expect(screen.getByTitle('2026-09-14T10:00:00Z').getAttribute('datetime')).toBe('2026-09-14T10:00:00Z')
+})

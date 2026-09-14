@@ -16,6 +16,7 @@ from factory.control.providers import ProviderRequest
 from factory.control.review_workspace import changed_sources, preserve_screenshot, review_workspace
 from factory.control.store import Conflict
 from factory.control.spec_tree import evidence as spec_evidence, apply_evidence
+from factory.control.scope_declaration import evidence as scope_evidence
 from factory.control.verification_evidence import browser_evidence, browser_review_failure, render_evidence
 
 
@@ -97,6 +98,7 @@ def _independent_verify(self, rid, run, project, configuration, artifacts):
             artifacts['verification_commit'] = commit
             if project.get('spec_tree_enabled'):
                 artifacts['spec_drift'] = spec_evidence(project, source, commit)
+                artifacts['scope_reconciliation'] = scope_evidence(self.store, rid, project, source, commit, artifacts)
             artifacts.pop('verification_session_id', None)
             artifacts.pop('verification_session_profile', None)
             self._emit(rid, 'verification.workspace_created', {'commit': commit,
@@ -318,7 +320,11 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         if items is None:
             items = spec_evidence(project, workspace, artifacts.get('verification_commit', 'HEAD'))
             artifacts['spec_drift'] = items
-        verdict = apply_evidence(ledger, verdict, items)
+        scope = artifacts.get('scope_reconciliation')
+        if scope is None:
+            scope = scope_evidence(self.store, rid, project, workspace, artifacts.get('verification_commit', 'HEAD'), artifacts)
+            artifacts['scope_reconciliation'] = scope
+        verdict = apply_evidence(ledger, verdict, items + scope)
     if verdict['verdict'] == 'unverified':
         verdict['error_type'] = 'unverified'
     artifacts['operation_results'] = operation_results(verdict, ledger)
@@ -336,16 +342,18 @@ def verify_spec_only(self, rid, project, artifacts):
     source = artifacts.get('worktree') or artifacts.get('integration_worktree') or project['workspace']
     commit = artifacts.get('commit', 'HEAD')
     items = spec_evidence(project, source, commit)
-    if not items:
+    scope = scope_evidence(self.store, rid, project, source, commit, artifacts)
+    artifacts['scope_reconciliation'] = scope
+    if not items and not scope:
         return
     ledger = {'schema_version': 1, 'scope': 'mechanical-spec-only', 'commit': commit,
               'items': [], 'total': 0, 'counts': {'pass': 0, 'fail': 0, 'unverified': 0},
               'complete': True, 'accounted': True}
     verdict = apply_evidence(ledger, {'verdict': 'pass', 'reason': 'Git 规格机械检查通过',
-                                    'scope': 'mechanical-spec-only'}, items)
+                                    'scope': 'mechanical-spec-only'}, items + scope)
     artifacts.update(spec_drift=items, acceptance_ledger=ledger, verification=verdict)
     self._emit(rid, 'verification.coverage', ledger, 'verification')
     self._emit(rid, 'verification.completed', verdict, 'verification')
     if verdict['verdict'] != 'pass':
         raise ExecutionError(verdict['reason'], artifacts=artifacts,
-                             error_type='spec_drift' if verdict['verdict'] == 'fail' else 'unverified')
+                             error_type=verdict.get('error_type', 'unverified'))
