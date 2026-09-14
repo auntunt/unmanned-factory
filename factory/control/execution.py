@@ -64,8 +64,9 @@ _FORBIDDEN_NAMES = frozenset(
 class ExecutionError(RuntimeError):
     """An execution attempt could not produce a verified delivery commit."""
 
-    def __init__(self, message: str, *, artifacts: dict | None = None) -> None:
+    def __init__(self, message: str, *, artifacts: dict | None = None, error_type: str | None = None) -> None:
         super().__init__(message)
+        self.error_type = error_type
         self.details = message
         self.artifacts = artifacts
 
@@ -92,7 +93,7 @@ def _remaining_budget() -> float | None:
     left = budget.deadline - time.monotonic()
     if left <= 0:
         budget.cancel.set()
-        raise ExecutionError(f'execution timeout after {budget.timeout_s}s', artifacts=budget.artifacts)
+        raise ExecutionError(f'execution timeout after {budget.timeout_s}s', artifacts=budget.artifacts, error_type='timeout')
     return left
 
 

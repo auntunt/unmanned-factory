@@ -5,12 +5,15 @@ import uuid
 from pathlib import Path
 
 from factory.control.operation_presets import OperationStore
+from factory.control.execution import ExecutionError
+from factory.control.error_types import failure_type
 from factory.control.store import ACTIVE, Conflict, now, scrub
 
 
 class InspectionStore:
-    def __init__(self, store, operations=None):
+    def __init__(self, store, operations=None, automation=None):
         self.store = store
+        self.automation = automation
         self.operations = operations if operations is not None else OperationStore(store)
         with store.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS project_inspections(
@@ -29,7 +32,7 @@ class InspectionStore:
             run = self.store.get(data['last_run_id'])
             data['last_status'] = run['status']
             data['last_result'] = (run.get('artifacts', {}).get('verification') or {}).get('reason') or run.get('error')
-        if hasattr(self, 'automation'):
+        if self.automation is not None:
             data.update(self.automation.history(pid))
         return data
 
@@ -69,7 +72,7 @@ class InspectionStore:
                 if busy:
                     continue
                 rid = uuid.uuid4().hex
-                context = self.automation.context(pid) if hasattr(self, 'automation') else ''
+                context = self.automation.context(pid) if self.automation is not None else ''
                 run = dict(id=rid, project_id=pid, request=prompt + context, status='received', revision=0,
                     plan=None, triage=None, tasks=[], artifacts={}, history=[], created_at=now(), updated_at=now(),
                     source={'type': 'inspection', 'operation': 'startup', 'operation_version': preset['version'],
@@ -112,5 +115,4 @@ def inspect_run(service, rid):
         service.store.update(rid, {'status': 'inspection_completed', 'artifacts': artifacts},
             expected=('verifying',), event=('inspection.completed', {'message': '巡检通过；没有改代码或部署'}))
     except Exception as exc:
-        from factory.control.execution import ExecutionError
-        service._fail(rid, ExecutionError(str(exc), artifacts=artifacts))
+        service._fail(rid, ExecutionError(str(exc), artifacts=artifacts, error_type=failure_type(exc)))

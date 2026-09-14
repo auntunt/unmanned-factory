@@ -33,7 +33,7 @@ def _usage(self, rid, *, profile=None):
     costs = [call['cost_usd'] for call in calls]
     total = sum(cost for cost in costs if cost is not None)
     if not __import__('math').isfinite(total):
-        raise Conflict('累计费用超出可表示范围，停止派发')
+        raise Conflict('累计费用超出可表示范围，停止派发', error_type='budget')
     return {'known_cost_usd': total, 'unknown_cost_calls': sum(cost is None for cost in costs), 'calls': len(costs)}
 
 
@@ -80,12 +80,12 @@ def _budget_usage(self, rid, project):
     unresolved = [call['max_budget_usd'] for call in calls
                   if call['cost_usd'] is None]
     if not __import__('math').isfinite(known):
-        raise Conflict('累计费用超出可表示范围，停止派发')
+        raise Conflict('累计费用超出可表示范围，停止派发', error_type='budget')
     limit = valid_cost(project.get('budget_usd'))
     reserved = sum(ceiling if ceiling is not None else (limit or 0.0)
                    for ceiling in unresolved)
     if not __import__('math').isfinite(reserved):
-        raise Conflict('未对账调用的预算占用超出可表示范围，停止派发')
+        raise Conflict('未对账调用的预算占用超出可表示范围，停止派发', error_type='budget')
     return {'known_cost_usd': known,
             'unknown_cost_calls': len(unresolved),
             'unknown_cost_reserved_usd': reserved,
@@ -101,7 +101,7 @@ def _dollar_budget(self, rid, project):
             'unknown_cost_calls': usage['unknown_cost_calls'],
         })
     except BudgetConfigurationError as exc:
-        raise Conflict(f'项目预算配置无效：{exc}') from None
+        raise Conflict(f'项目预算配置无效：{exc}', error_type='budget') from None
 
 
 def _remaining_dollar_budget(self, rid, project):
@@ -110,7 +110,7 @@ def _remaining_dollar_budget(self, rid, project):
         usage = self._budget_usage(rid, project)
         hold = usage['unknown_cost_reserved_usd']
         detail = (f'，未对账调用按上限暂占 ${hold:.4f}' if hold else '')
-        raise Conflict(f'本次运行预算已用尽：已记录 ${usage["known_cost_usd"]:.4f}{detail}，上限 ${budget.limit_usd:.4f}；停止新的模型调用')
+        raise Conflict(f'本次运行预算已用尽：已记录 ${usage["known_cost_usd"]:.4f}{detail}，上限 ${budget.limit_usd:.4f}；停止新的模型调用', error_type='budget')
     return budget
 
 

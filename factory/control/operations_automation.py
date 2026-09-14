@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from factory.control.error_types import FAILURE_CATEGORIES
 from factory.control.knowledge import KnowledgeStore
 from factory.control.operation_presets import operation_results
 from factory.control.store import Conflict, now, scrub
@@ -107,10 +108,16 @@ class OperationsAutomation:
         verdict = 'pass' if run['status'] == 'inspection_completed' else (
             'unverified' if verification.get('verdict') == 'unverified' or run['status'] == 'cancelled' else 'fail')
         reason = reason + ' ' + str(verification.get('reason', ''))
-        category = None if verdict == 'pass' else next(
-            (name for name, pattern in [('budget', r'budget|预算|额度'), ('timeout', r'timeout|超时'),
-             ('environment', r'Chrome|browser|环境|unavailable'), ('interrupted', r'中断|取消|interrupt|cancel'),
-             ('access', r'permission|权限|授权')] if re.search(pattern, reason, re.I)), 'health_check')
+        error_type = run.get('error_type') or verification.get('error_type')
+        if verdict == 'pass':
+            category = None
+        elif error_type:
+            category = FAILURE_CATEGORIES.get(error_type, 'health_check')
+        else:
+            category = next(
+                (name for name, pattern in [('budget', r'budget|预算|额度'), ('timeout', r'timeout|超时'),
+                 ('environment', r'Chrome|browser|环境|unavailable'), ('interrupted', r'中断|取消|interrupt|cancel'),
+                 ('access', r'permission|权限|授权')] if re.search(pattern, reason, re.I)), 'health_check')
         with self.store.connect() as db:
             start = db.execute("SELECT at FROM events WHERE run_id=? AND type='inspection.started' ORDER BY id LIMIT 1", (run['id'],)).fetchone()
             begin = start['at'] if start else run['created_at']

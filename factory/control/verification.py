@@ -183,7 +183,8 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     for connection_attempt in range(2 if run.get('execution_mode') == 'continuous' else 1):
         remaining = review_deadline - time.monotonic()
         if remaining < 1 or self.cancels[rid].is_set():
-            raise ExecutionError('独立验证已取消或总时限耗尽', artifacts=artifacts)
+            raise ExecutionError('独立验证已取消或总时限耗尽', artifacts=artifacts,
+                                 error_type='interrupted' if self.cancels[rid].is_set() else 'timeout')
         try:
             verification_budget = self._remaining_dollar_budget(rid, project)
         except Conflict as exc:
@@ -220,7 +221,8 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         try:
             remaining = review_deadline - time.monotonic()
             if remaining < 1 or self.cancels[rid].is_set():
-                raise ExecutionError('独立验证已取消或总时限耗尽', artifacts=artifacts)
+                raise ExecutionError('独立验证已取消或总时限耗尽', artifacts=artifacts,
+                                 error_type='interrupted' if self.cancels[rid].is_set() else 'timeout')
             result = self._runner_for(rid).run(ProviderRequest(provider=profile['provider'], model=profile['model'],
                 prompt=prompt, workspace=workspace, session_id=session_id,
                 timeout_s=int(remaining), read_only=True, verification=True,
@@ -313,4 +315,6 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     artifacts['verification'] = verdict
     self._emit(rid, 'verification.completed', verdict, 'verification')
     if verdict['verdict'] != 'pass':
-        raise ExecutionError('独立验证未通过：' + verdict['reason'], artifacts=artifacts)
+        raise ExecutionError('独立验证未通过：' + verdict['reason'], artifacts=artifacts,
+                             error_type='browser_unavailable' if unavailable and verdict['verdict'] == 'unverified'
+                             else verdict.get('error_type'))

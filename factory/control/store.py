@@ -42,7 +42,9 @@ def scrub(value, *, max_chars=100_000):
 
 
 class Conflict(ValueError):
-    pass
+    def __init__(self, *args, error_type=None):
+        super().__init__(*args)
+        self.error_type = error_type
 
 
 class Store:

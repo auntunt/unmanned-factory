@@ -1,6 +1,8 @@
 """Guarded run transitions, cancellation, publication and delivery bookkeeping."""
 from __future__ import annotations
 
+from factory.control.error_types import failure_type
+
 import json
 import logging
 import threading
@@ -287,6 +289,7 @@ def _fail(self, rid, exc):
         changes = {'status': 'inspection_failed' if inspection else 'needs_human'}
         if inspection:
             changes['error'] = scrub(str(exc))[:2000]
+            changes['error_type'] = failure_type(exc) or type(exc).__name__
         if getattr(exc, 'artifacts', None):
             try:
                 usage = self._usage(rid)
@@ -299,7 +302,7 @@ def _fail(self, rid, exc):
             if exc.artifacts.get('tasks'):
                 changes['tasks'] = exc.artifacts['tasks']
         self.store.update(rid, changes,
-            event=('inspection.failed' if inspection else 'run.failed', {'message': scrub(str(exc))[:2000], 'error_type': type(exc).__name__}))
+            event=('inspection.failed' if inspection else 'run.failed', {'message': scrub(str(exc))[:2000], 'error_type': changes.get('error_type', type(exc).__name__)}))
 
 
 def github_options(self, rid, *, page=1):

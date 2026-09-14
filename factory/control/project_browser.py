@@ -18,6 +18,7 @@ DEFAULT_RUNTIME = '/opt/webuddy-browser'
 
 class BrowserUnavailable(RuntimeError):
     """Infrastructure could not supply browser evidence; not an application defect."""
+    error_type = "browser_unavailable"
 
 
 class BrowserSession:

@@ -79,10 +79,9 @@ class Service:
         self.scheduler = None
         self.agents = AgentStore(store)
         self.operations = OperationStore(store)
-        self.inspections = InspectionStore(store, self.operations)
         self._inspection_tick_at = 0
         self.operations_automation = OperationsAutomation(store)
-        self.inspections.automation = self.operations_automation
+        self.inspections = InspectionStore(store, self.operations, automation=self.operations_automation)
         self.operations_thread = None
 
     def _ensure_scheduler(self):
