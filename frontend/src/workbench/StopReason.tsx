@@ -6,7 +6,6 @@ import './run-guidance.css'
 /** Shows a persisted stop reason together with only the next actions the viewer may take. */
 export function StopReason({ run, canConfigure }: { run: Run; canConfigure: boolean }) {
   const guidance = runGuidance(run)
-  if (!['budget', 'billing', 'failure', 'recovery', 'paused'].includes(guidance.kind)) return null
   const projectHref = `/projects/${encodeURIComponent(String(run.project_id))}?stage=${guidance.stage}`
   const budgetHref = `/projects/${encodeURIComponent(String(run.project_id))}?tab=settings&return_run=${encodeURIComponent(String(run.id))}#project-budget`
   const adminActions = guidance.kind === 'budget'
@@ -16,10 +15,10 @@ export function StopReason({ run, canConfigure }: { run: Run; canConfigure: bool
       : guidance.kind === 'recovery' || guidance.kind === 'paused'
         ? [{ href: '/settings/runtime', label: '查看模型策略' }]
         : []
-  const tone = guidance.kind === 'failure' ? 'is-danger' : 'is-warning'
+  const tone = guidance.kind === 'failure' ? 'is-danger' : ['budget', 'billing', 'recovery', 'paused'].includes(guidance.kind) ? 'is-warning' : ''
   return (
-    <section className={`wb-stop-reason wb-guidance ${tone}`} role="alert" aria-labelledby="stop-reason-title">
-      <div className="wb-detail-kicker">当前需要处理</div>
+    <section className={`wb-stop-reason wb-guidance ${tone}`} role={tone ? 'alert' : 'status'} aria-labelledby="stop-reason-title">
+      <div className="wb-detail-kicker">{tone ? '当前需要处理' : '当前进展'}</div>
       <h2 id="stop-reason-title">{guidance.label}</h2>
       <p>{guidance.summary}</p>
       {guidance.kind === 'budget' && <p className="wb-stop-reason-admin-note">这里显示的是本次运行使用的预算。调整项目预算后，可在“处理问题并继续”中创建新运行；保存设置不会自动继续这次运行。</p>}

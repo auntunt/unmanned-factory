@@ -1,0 +1,119 @@
+{
+  "fixture": true,
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "pages": [
+    {
+      "name": "overview",
+      "url": "/",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "aria-prohibited-attr",
+          "count": 1
+        },
+        {
+          "id": "color-contrast",
+          "count": 2
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "project",
+      "url": "/projects/abcdef1234567890abcdef1234567890?stage=deliver",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "color-contrast",
+          "count": 1
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "project-settings",
+      "url": "/projects/abcdef1234567890abcdef1234567890?tab=settings",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "aria-prohibited-attr",
+          "count": 1
+        },
+        {
+          "id": "color-contrast",
+          "count": 1
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "runs",
+      "url": "/runs",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "color-contrast",
+          "count": 3
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "run-detail",
+      "url": "/runs/1234567890abcdef1234567890abcdef?view=requirements",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "color-contrast",
+          "count": 3
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "capabilities-empty",
+      "url": "/capabilities",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "color-contrast",
+          "count": 3
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "costs",
+      "url": "/costs",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "aria-prohibited-attr",
+          "count": 1
+        },
+        {
+          "id": "color-contrast",
+          "count": 1
+        }
+      ],
+      "overflow": false
+    },
+    {
+      "name": "runtime",
+      "url": "/settings/runtime",
+      "violations": [],
+      "incomplete": [
+        {
+          "id": "color-contrast",
+          "count": 1
+        }
+      ],
+      "overflow": false
+    }
+  ],
+  "errors": [],
+  "mutations": []
+}

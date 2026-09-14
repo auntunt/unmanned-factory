@@ -14,7 +14,7 @@ export interface WorkbenchProps extends PageProps {
 }
 
 export function PageHeader({ title, description, actions }: {
-  title: string
+  title: ReactNode
   description?: string
   actions?: ReactNode
 }) {

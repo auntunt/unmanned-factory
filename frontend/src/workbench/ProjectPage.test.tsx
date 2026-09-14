@@ -33,7 +33,7 @@ afterEach(cleanup)
 describe('ProjectPage maintenance entry', () => {
   it('uses catalog labels and optional fields from the API and submits structured input', async () => {
     show()
-    fireEvent.click(await screen.findByRole('button', { name: '数据库里的修复入口' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '数据库里的修复入口' }))
     fireEvent.change(screen.getByLabelText('数据库里的修复入口说明'), { target: { value: '保存失败' } })
     fireEvent.change(screen.getByLabelText('错误日志'), { target: { value: 'TypeError at save' } })
     fireEvent.change(screen.getByLabelText('复现步骤'), { target: { value: '点击保存' } })
@@ -45,7 +45,7 @@ describe('ProjectPage maintenance entry', () => {
   })
   it('retains idempotency key on retry and leaves optional fields empty', async () => {
     show()
-    fireEvent.click(await screen.findByRole('button', { name: '数据库里的修复入口' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '数据库里的修复入口' }))
     fireEvent.change(screen.getByLabelText('数据库里的修复入口说明'), { target: { value: '保存失败' } })
     api.mockImplementationOnce(async () => { throw new Error('网络中断') })
     fireEvent.click(screen.getByRole('button', { name: '开始数据库里的修复入口 →' }))
@@ -60,7 +60,8 @@ describe('ProjectPage maintenance entry', () => {
   })
   it('saves opt-in inspection with the current revision', async () => {
     show()
-    const checkbox = await screen.findByRole('checkbox', { name: '启用巡检' })
+    fireEvent.click(await screen.findByRole('button', { name: '项目设置' }))
+    const checkbox = await screen.findByRole('switch', { name: '启用巡检' })
     const intervals = screen.getByLabelText('巡检间隔')
     expect(Array.from(intervals.querySelectorAll('option')).map(option => [option.textContent, option.value])).toEqual([['5 分钟', '300'], ['15 分钟', '900'], ['1 小时', '3600'], ['6 小时', '21600'], ['1 天', '86400']])
     fireEvent.click(checkbox)
@@ -70,7 +71,7 @@ describe('ProjectPage maintenance entry', () => {
 })
 it('requires an explicit release checkbox and includes it in the submission identity', async () => {
   show()
-  fireEvent.click(await screen.findByRole('button', { name: '部署准备' }))
+  fireEvent.click(await screen.findByRole('tab', { name: '部署准备' }))
   const checkbox = screen.getByRole('checkbox', { name: /执行部署：/ }) as HTMLInputElement
   expect(checkbox.checked).toBe(false)
   fireEvent.change(screen.getByLabelText('部署准备说明'), { target: { value: '准备部署' } })
@@ -84,4 +85,17 @@ it('requires an explicit release checkbox and includes it in the submission iden
   const bodies = api.mock.calls.filter(([url]) => url === '/api/v2/runs').map(([, options]) => options!.body as { execute_deploy: boolean; idempotency_key: string })
   expect(bodies.map(body => body.execute_deploy)).toEqual([false, true])
   expect(bodies[0].idempotency_key).not.toEqual(bodies[1].idempotency_key)
+})
+
+it('keeps settings out of the main flow and supports arrow keys between work-type tabs', async () => {
+  show()
+  const general = await screen.findByRole('tab', { name: '新需求' })
+  expect(screen.queryByText('定时巡检')).toBeNull()
+  expect(screen.queryByText('项目服务器')).toBeNull()
+  general.focus(); fireEvent.keyDown(general, { key: 'ArrowRight' })
+  const bugfix = screen.getByRole('tab', { name: '数据库里的修复入口' })
+  expect(document.activeElement).toBe(bugfix)
+  expect(bugfix.getAttribute('aria-selected')).toBe('true')
+  fireEvent.click(screen.getByRole('button', { name: '项目设置' }))
+  await screen.findByText('定时巡检'); await screen.findByText('项目服务器')
 })

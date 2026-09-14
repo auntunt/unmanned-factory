@@ -23,8 +23,9 @@ it('shows the public key and issues only the fixed connection test endpoint', as
 it('member project bindings are read only and never load the administrator catalog', async () => {
   api.mockResolvedValue({ targets: ['t1'], revision: 1, available: [target] } as never)
   render(<ProjectTargets projectId="p1" csrfToken="csrf" onUnauthorized={onUnauthorized} isAdmin={false} />)
-  const checkbox = await screen.findByRole('checkbox', { name: '生产服务' }) as HTMLInputElement
-  expect(checkbox.disabled).toBe(true)
+  await screen.findByText(/生产服务/ )
+  expect(screen.queryByRole('checkbox')).toBeNull()
+  expect(screen.getByText('未验证')).toBeTruthy()
   expect(screen.queryByText('保存项目绑定')).toBeNull()
   expect(api.mock.calls).toHaveLength(1)
 })

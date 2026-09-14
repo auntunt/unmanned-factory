@@ -1,3 +1,6 @@
+import { Link } from 'react-router-dom'
+import type { Run } from '../workspace/types'
+import { StatusDot } from './presentation'
 import { useEffect, useState, type FormEvent } from 'react'
 import { request } from '../workspace/api'
 import { ErrorNotice, errorText } from './ui'
@@ -25,7 +28,7 @@ export default function ServerTargets({ csrfToken, onUnauthorized }: Props) {
     {notice && <p role="status">{notice}</p>}{error && <ErrorNotice message={error} />}</section>
 }
 
-export function ProjectTargets({ projectId, csrfToken, onUnauthorized, isAdmin }: Props & { projectId: string; isAdmin: boolean }) {
+export function ProjectTargets({ projectId, csrfToken, onUnauthorized, isAdmin, runs = [] }: Props & { projectId: string; isAdmin: boolean; runs?: Run[] }) {
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([])
   const [selected, setSelected] = useState<string[]>([])
   const [revision, setRevision] = useState(0)
@@ -34,5 +37,7 @@ export function ProjectTargets({ projectId, csrfToken, onUnauthorized, isAdmin }
   const [saved, setSaved] = useState(false)
   const bindingUrl = `/api/v2/projects/${encodeURIComponent(projectId)}/deploy-targets`
   useEffect(() => { const controller = new AbortController(); void (async () => { try { const bindings = await request<{ targets: string[]; revision: number; available: Array<{ id: string; name: string }> }>(bindingUrl, { onUnauthorized, signal: controller.signal }); const options = isAdmin ? (await request<{ targets: ServerTarget[] }>(url, { onUnauthorized, signal: controller.signal })).targets : bindings.available; if (!controller.signal.aborted) { setCatalog(options); setSelected(bindings.targets); setRevision(bindings.revision) } } catch (e) { if (!controller.signal.aborted) setError(errorText(e)) } })(); return () => controller.abort() }, [bindingUrl, isAdmin, onUnauthorized])
-  return <section className="wb-card"><h2>项目服务器</h2><p>仅绑定的目标可用于此项目。成员可发起部署准备，连接设置由管理员维护。</p>{catalog.map(target => <label className="wb-checkbox" key={target.id}><input type="checkbox" disabled={!isAdmin || busy} checked={selected.includes(target.id)} onChange={e => { setSaved(false); setSelected(e.target.checked ? [...selected, target.id] : selected.filter(id => id !== target.id)) }} />{target.name}</label>)}{!catalog.length && <p>未连接服务器，仅完成准备。管理员可在运行配置中注册目标。</p>}{isAdmin && <button disabled={busy} onClick={() => { setBusy(true); setError(null); void request<{ revision: number }>(bindingUrl, { method: 'PUT', csrfToken, onUnauthorized, body: { revision, targets: selected } }).then(r => { setRevision(r.revision); setSaved(true) }).catch(e => setError(errorText(e))).finally(() => setBusy(false)) }}>保存项目绑定</button>}{saved && <p role="status">绑定已保存</p>}{error && <ErrorNotice message={error} />}</section>
+  const latestHealth = (id: string) => [...runs].sort((a,b) => b.updated_at.localeCompare(a.updated_at)).flatMap(run => ((run.artifacts?.remote_results ?? []) as Array<{ target_id: string; verb: string; status: string }>).slice().reverse()).find(result => result.target_id === id && result.verb === 'health_check')?.status
+  return <section className="wb-card wb-inspection-card"><h2>项目服务器</h2>{selected.length ? <ul>{catalog.filter(target => selected.includes(target.id)).map(target => <li key={target.id}>{target.name} · <StatusDot status={latestHealth(target.id)} /></li>)}</ul> : <p>未连接服务器，仅完成准备。{isAdmin ? <Link className="wb-text-link" to="/settings/runtime">去运行配置绑定</Link> : <span>由管理员配置</span>}</p>}
+    {isAdmin && catalog.length > 0 && <details className="wb-help"><summary>管理项目绑定</summary>{catalog.map(target => <label className="wb-checkbox" key={target.id}><input type="checkbox" disabled={busy} checked={selected.includes(target.id)} onChange={e => { setSaved(false); setSelected(e.target.checked ? [...selected, target.id] : selected.filter(id => id !== target.id)) }} />{target.name}</label>)}<button className="wb-button wb-button-secondary" disabled={busy} onClick={() => { setBusy(true); setError(null); void request<{ revision: number }>(bindingUrl, { method: 'PUT', csrfToken, onUnauthorized, body: { revision, targets: selected } }).then(r => { setRevision(r.revision); setSaved(true) }).catch(e => setError(errorText(e))).finally(() => setBusy(false)) }}>保存项目绑定</button></details>}{saved && <p role="status">绑定已保存</p>}{error && <ErrorNotice message={error} />}</section>
 }

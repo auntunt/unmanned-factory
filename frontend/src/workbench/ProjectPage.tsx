@@ -1,3 +1,4 @@
+import { runTitle, RunMode, CopyValue, tabKeys, LoadingCard } from './presentation'
 import { ProjectTargets } from './ServerTargets'
 import ProjectInspection from './ProjectInspection'
 import ProjectKnowledge from './ProjectKnowledge'
@@ -10,7 +11,7 @@ import ProjectAgent from '../workspace/ProjectAgent'
 import { request, WorkspaceApiError } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import ChecksEditor, { validateChecks, type ChecksMap } from './ChecksEditor'
-import { EmptyState, ErrorNotice, formatDate, PageHeader } from './ui'
+import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge } from './ui'
 import type { PageProps } from './ui'
 import ProjectAutomation from './ProjectAutomation'
 import ProjectMode from './ProjectMode'
@@ -103,9 +104,9 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
       {error && <ErrorNotice message={error} />}
       {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
       {saved && <div className="wb-notice" role="status">项目设置已保存。{returnRun ? '返回该运行后，可按新设置重新规划。' : '后续规划和重试将使用新设置。'}</div>}
-      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行并重新规划 →' : '返回刚才的运行'}</Link>}</div>
+      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行并重新规划' : '返回刚才的运行'}</Link>}</div>
     </form>
-    <section className="wb-card"><h2>模型与执行设置</h2><p>费用和 token 额度由中转站统一管理。</p><Link to="/settings/runtime">配置模型、并行数与超时 →</Link></section>
+    <section className="wb-card"><h2>模型与执行设置</h2><p>费用和 token 额度由中转站统一管理。</p><Link to="/settings/runtime">配置模型、并行数与超时</Link></section>
   </div>
 }
 
@@ -141,7 +142,7 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
   const selected = presets.find(item => item.id === operation)
   return <section id="project-work-request" className="wb-card wb-requirement-card">
     <div className="wb-card-head"><div><span className="wb-eyebrow">需求 · 维护 · 运维</span><h2>接下来让助手做什么</h2><p>选一种工作，补一句具体情况。助手沿用项目配置，执行、自测并提交验收。</p></div></div>
-    <div className="wb-project-tabs" role="group" aria-label="工作类型">{presets.map(({ id, label }) => <button type="button" key={id} aria-pressed={operation === id} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
+    <div className="wb-project-tabs" role="tablist" aria-label="工作类型" onKeyDown={tabKeys}>{presets.map(({ id, label }) => <button type="button" key={id} role="tab" aria-selected={operation === id} tabIndex={operation === id ? 0 : -1} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
     <form className="wb-form" onSubmit={submit}><label htmlFor="project-requirement">{(selected?.label ?? '新需求')}说明<textarea id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} placeholder={(selected?.hint ?? '描述想得到的结果。')} aria-describedby="operation-hint" /></label><p id="operation-hint" className="wb-runtime-note">{(selected?.hint ?? '描述想得到的结果。')}</p>
     {selected && selected.fields.length > 0 && <details className="wb-advanced"><summary>补充信息（可选）</summary><div className="wb-advanced-body">{selected.fields.map(field => <label key={field.id}>{field.label}<textarea rows={2} maxLength={8000} disabled={busy} value={fields[field.id] ?? ''} onChange={event => setFields(previous => ({ ...previous, [field.id]: event.target.value }))} /></label>)}</div></details>}
     {operation === 'release' && <label className="wb-checkbox"><input type="checkbox" disabled={busy} checked={executeDeploy} onChange={e => setExecuteDeploy(e.target.checked)} />执行部署：独立验收通过后，在已绑定目标运行预注册脚本</label>}
@@ -160,7 +161,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   const { projectId } = useParams<{ projectId: string }>()
   const [search, setSearch] = useSearchParams()
   const requestedTab = search.get('tab')
-  const tab: ProjectTab = isAdmin && ['automation', 'agent', 'settings'].includes(requestedTab ?? '') ? requestedTab as ProjectTab : 'overview'
+  const tab: ProjectTab = (requestedTab === 'settings' || isAdmin && ['automation', 'agent'].includes(requestedTab ?? '')) ? requestedTab as ProjectTab : 'overview'
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [runs, setRuns] = useState<Run[] | null>(null)
   const currentRun = overviewNextRun(runs ?? [])
@@ -225,28 +226,30 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   return <div className="wb-page pw-project-page">
     <div className="pw-context"><Link to="/overview">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
     <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <span className="wb-runtime-note">计费由中转站管理</span> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
-    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环'], ['settings', '项目设置']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
     <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
-      {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务使用同一份快照</p>}
-      {overview && overview.runs > 0 && <section className="ov3-summary" aria-label="本项目进展"><div><span>已接收需求</span><strong>{overview.runs}</strong><small>只统计本项目</small></div><div><span>进行中</span><strong>{overview.active_runs}</strong><small>规划、执行或验证</small></div><div className={overview.attention_runs ? 'is-attention' : ''}><span>待处理</span><strong>{overview.attention_runs}</strong><small>需要处理的具体原因见下方</small></div><div><span>计费方式</span><strong>中转站管理</strong><small>本平台不再计费或限额</small></div></section>}
+      {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务来自同一次记录</p>}
+
       {requirementForm}
-      <ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} />
-      {currentRun && <section className="wb-card"><span className="wb-eyebrow">当前任务 · {runGuidance(currentRun).label}</span><h2>{currentRun.plan?.title || currentRun.request}</h2><p>{runGuidance(currentRun).summary}</p><Link className="wb-button wb-button-primary" to={nextRunAction(currentRun).href}>{nextRunAction(currentRun).label} →</Link></section>}
+
+      {currentRun && <section className="wb-card"><span className="wb-eyebrow">当前任务 · {runGuidance(currentRun).label}</span><h2>{runTitle(currentRun)}<RunMode run={currentRun} /></h2><p>{formatDate(currentRun.updated_at)}</p><Link className="wb-button wb-button-primary" to={nextRunAction(currentRun).href}>{nextRunAction(currentRun).label} →</Link></section>}
       {(overview?.attention ?? []).length > 0 && <section className="wb-card pw-attention"><div className="ov3-section-head"><div><span className="wb-eyebrow">本项目 · 待处理</span><h2>让工作继续的下一步</h2></div></div><AttentionList items={overview!.attention!.slice(0, 3)} /></section>}
-      {runs?.length === 0 ? null : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={<a className="wb-text-link" href="#project-work-request">提交新需求或维护工作 ↑</a>} isAdmin={isAdmin} /> : !overviewError && <div className="wb-card ov3-loading" role="status" aria-label="正在读取本项目闭环"><span /><span /></div>}
+      {runs?.length === 0 ? null : overview?.engineering && runs ? <ProjectLifecycle projectId={project.id} projectName={project.name} engineering={overview.engineering} runs={runs} selectedStage={selectedStage} onSelect={setStage} requirementForm={<a className="wb-text-link" href="#project-work-request">提交新需求或维护工作</a>} isAdmin={isAdmin} /> : !overviewError && <LoadingCard label="正在读取本项目闭环" />}
       <details className="wb-card pw-preflight"><summary>项目准备与执行边界 · {readiness ? readiness.ready ? '可以开始' : '有配置需要处理' : '读取中'}</summary><div className="pw-preflight-body">
         <div className="wb-fact-grid"><div><span>基础分支</span><strong>{project.base_branch}</strong></div><div><span>验收检查</span><strong>{Object.keys(project.checks ?? {}).length} 条</strong></div><div><span>运行状态</span><strong>{activeRun ? '有进行中的运行' : '当前无执行任务'}</strong></div></div>
         <p className="wb-runtime-note">{project.workspace}</p>{readinessError && <ErrorNotice message={readinessError} />}
         {readiness && <div className="wb-project-readiness-list">{readiness.checks.map((check) => <div className="wb-project-readiness-row" key={check.id}><span className={`wb-readiness-dot ${check.status === 'ok' ? 'is-ready' : check.status === 'warning' ? 'is-warning' : 'is-blocked'}`} /><span><strong>{check.label}</strong><small>{check.message}</small></span></div>)}</div>}
-        {isAdmin && <Link className="wb-text-link" to={`/projects/${encodedId}?tab=settings#project-checks`}>配置验收检查与执行边界 →</Link>}
+        {isAdmin && <Link className="wb-text-link" to={`/projects/${encodedId}?tab=settings#project-checks`}>配置验收检查与执行边界</Link>}
       </div></details>
-      <section className="wb-card pw-runs-list"><div className="wb-card-head"><div><span className="wb-eyebrow">本项目 · 需求档案</span><h2>每条需求的状态与下一步</h2></div><Link className="wb-text-link" to={`/runs?project_id=${encodedId}`}>全部运行 →</Link></div>
+      <section className="wb-card pw-runs-list"><div className="wb-card-head"><div><span className="wb-eyebrow">本项目 · 需求档案</span><h2>每条需求的状态与下一步</h2></div><Link className="wb-text-link" to={`/runs?project_id=${encodedId}`}>全部运行</Link></div>
         {runs?.length === 0 && <EmptyState title="还没有需求记录" description="在需求澄清阶段提交这个项目的第一个目标。" />}
-        {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{run.plan?.title || run.request.slice(0, 90)}</Link><small>{formatDate(run.updated_at)}</small></td><td><strong>{guidance.label}</strong><div className="pw-run-reason">{guidance.summary}</div></td><td><Link className="wb-text-link" to={nextRunAction(run).href}>{nextRunAction(run).label} →</Link></td></tr> })}</tbody></table></div>}
+        {runs && runs.length > 0 && <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>需求</th><th>目前状态与原因</th><th>下一步</th></tr></thead><tbody>{runs.slice(0, 20).map((run) => { const guidance = runGuidance(run); return <tr key={String(run.id)}><td><Link className="wb-table-link" to={guidance.primaryHref}>{runTitle(run)}</Link><RunMode run={run} /><small><CopyValue value={run.id} label="运行编号" /> · {formatDate(run.updated_at)}</small></td><td><strong>{guidance.label}</strong><StatusBadge status={run.status} /></td><td><Link className="wb-text-link" to={nextRunAction(run).href}>打开运行</Link></td></tr> })}</tbody></table></div>}
       </section>
     </>}
+    {tab === 'settings' && <><ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} runs={runs ?? []} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /></>}
+    {tab === 'overview' && <p className="wb-runtime-note">计费由中转站管理</p>}
     {tab === 'agent' && isAdmin && <ProjectKnowledge projectId={project.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
     {tab === 'agent' && isAdmin && <details className="wb-card wb-agent-card"><summary className="pk-reference-summary">项目档案、知识原文与代码索引</summary><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></details>}
     {tab === 'automation' && isAdmin && <ProjectAutomation key={String(project.id)} projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onPolicySaved={() => setPolicyRefresh((value) => value + 1)} />}

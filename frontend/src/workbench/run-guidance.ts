@@ -118,7 +118,7 @@ export function runGuidance(run: Run): RunGuidance {
   const budgetStopped = run.artifacts?.budget_exhausted === true || /\bbudget\b|预算/i.test(stopReason || '')
   if (run.status === 'needs_human' && budgetStopped) return result(run, {
     kind: 'budget',
-    label: '已达到项目单次运行预算',
+    label: '预算已用尽',
     summary: '预算会按已报告费用停止后续模型调用；已在途调用仍可能使费用越过预算。现有成果已保留，管理员调整项目预算后，可从暂停任务继续或重试；账户级计费与额度仍由中转站管理。',
     detail: stopReason,
     view: 'execution',
@@ -128,7 +128,7 @@ export function runGuidance(run: Run): RunGuidance {
   })
   if (run.status === 'needs_human' && /quota|余额|额度|rate.?limit|限流/i.test(stopReason || '')) return result(run, {
     kind: 'billing',
-    label: '中转站额度或限流已暂停调用',
+    label: '额度或限流暂停',
     summary: '账户级余额、额度和限流由中转站管理。处理对应账户或通道后，可返回当前任务继续；现有成果和运行记录已保留。',
     detail: stopReason,
     view: 'execution',
@@ -141,10 +141,10 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'published') return result(run, { kind: 'delivery', label: '交付已发布', summary: '交付已发布；可查看提交和检查记录。', view: 'delivery', stage: 'deliver', primaryLabel: '查看交付证据' })
   if (run.status === 'discarded') return result(run, { kind: 'progress', label: '任务已废弃', summary: '旧任务已退出当前待办；计划和执行证据仍保留。', view: 'execution', stage: 'build', primaryLabel: '查看历史记录' })
   if (run.status === 'cancelled') return result(run, { kind: 'progress', label: '运行已取消', summary: '运行已主动结束；已产生的记录和证据仍可查看。', view: 'execution', stage: 'build', primaryLabel: '查看已记录现场' })
-  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '成果已生成，可查看', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : `查看或下载本次成果，也可选择推送到 GitHub。${verificationScopeNote(run)}`, view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
+  if (run.status === 'ready_for_review' || run.status === 'publishing') return result(run, { kind: 'delivery', label: run.status === 'publishing' ? '正在发布交付' : '成果可领取', summary: run.status === 'publishing' ? '检查结果已记录，正在发布交付产物。' : `查看或下载本次成果，也可选择推送到 GitHub。${verificationScopeNote(run)}`, view: 'delivery', stage: 'deliver', primaryLabel: '查看和下载成果' })
 
-  if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改超出当前任务范围', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。可直接重试自动处理，无需填写回答；原计划和草稿会保留。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
-  if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置改动需要处理', summary: '执行助手改动了受保护的测试配置。系统会在自动修复中尝试恢复检查配置；无需编写处理指令。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
+  if (run.status === 'needs_human' && stopReason?.startsWith('out-of-scope changes:')) return result(run, { kind: 'paused', label: '修改范围待处理', summary: '模型修改了当前任务未列入计划的文件，系统已暂停。可直接重试自动处理，无需填写回答；原计划和草稿会保留。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
+  if (run.status === 'needs_human' && stopReason?.startsWith('worker changed test/check infrastructure:')) return result(run, { kind: 'paused', label: '测试配置待处理', summary: '执行助手改动了受保护的测试配置。系统会在自动修复中尝试恢复检查配置；无需编写处理指令。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
   if (run.status === 'needs_clarification' || (run.status === 'needs_human' && questions.length > 0) || (run.status === 'awaiting_approval' && questions.length > 0)) {
     const count = questions.length
     return result(run, { kind: 'requirements', label: count ? '需要补充需求' : '需要补充运行边界', summary: count ? `请回答 ${count} 个已记录问题，系统会据此重新规划。` : '当前没有可展示的具体问题；请补充目标、范围或验收标准后重新规划。', detail: questions[0], view: 'requirements', stage: 'intake', primaryLabel: '查看需求与补充', rawEvidence: stopReason })
@@ -153,13 +153,13 @@ export function runGuidance(run: Run): RunGuidance {
     const policy = frozenPolicy(run)
     if (policy?.mode === 'autonomous') {
       const reasons = (run.triage?.reasons ?? []).filter((reason) => typeof reason === 'string' && reason.trim())
-      return result(run, { kind: 'approval', label: '自动策略未覆盖本次计划', summary: reasons.length ? reasons.join('；') : `冻结的自主策略 v${policy.revision} 没有授权本次计划，系统没有自动开始。`, detail: reasons[0], view: 'plan', stage: 'plan', primaryLabel: '查看计划与判断依据', rawEvidence: stopReason })
+      return result(run, { kind: 'approval', label: '计划待授权', summary: reasons.length ? reasons.join('；') : `冻结的自主策略 v${policy.revision} 没有授权本次计划，系统没有自动开始。`, detail: reasons[0], view: 'plan', stage: 'plan', primaryLabel: '查看计划与判断依据', rawEvidence: stopReason })
     }
-    return result(run, { kind: 'approval', label: '监督模式等待批准', summary: policy ? `本次运行冻结为监督模式 v${policy.revision}；批准当前版本后才能进入执行。` : '本次运行未返回策略冻结快照；批准当前版本后才能进入执行。', view: 'plan', stage: 'plan', primaryLabel: '查看计划并批准', rawEvidence: stopReason })
+    return result(run, { kind: 'approval', label: '计划待批准', summary: policy ? `本次运行冻结为监督模式 v${policy.revision}；批准当前版本后才能进入执行。` : '本次运行未返回策略冻结快照；批准当前版本后才能进入执行。', view: 'plan', stage: 'plan', primaryLabel: '查看计划并批准', rawEvidence: stopReason })
   }
   if (run.status === 'failed') return result(run, { kind: 'failure', label: '运行失败', summary: failure ? '运行记录了失败原因。请先查看失败和检查证据，再决定是否创建重试。' : '本次执行未形成可继续的结果。请先查看失败和检查证据，再决定是否创建重试。', detail: failure, view: 'verification', stage: 'verify', primaryLabel: '查看失败证据', rawEvidence: failure })
   if (run.status === 'needs_human' && stopReason && RECOVERY_PATTERN.test(stopReason)) return result(run, { kind: 'recovery', label: '恢复前暂停', summary: '运行在恢复现场前暂停，系统没有把未知写入自动重放。请查看已记录原因后再继续。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看恢复现场', rawEvidence: stopReason })
-  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '运行已暂停', summary: '自动处理尚未完成。原因和已有成果已保存，可查看证据或直接重试。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
+  if (run.status === 'needs_human') return result(run, { kind: 'paused', label: '已暂停·可重试', summary: '自动处理尚未完成。原因和已有成果已保存，可查看证据或直接重试。', detail: stopReason, view: 'execution', stage: 'build', primaryLabel: '查看处理情况', rawEvidence: stopReason })
 
   if (run.execution_mode === 'continuous' && ['planning', 'running'].includes(run.status)) {
     const reconnecting = records(run.tasks).some((task) => task.status === 'running' && record(task.activity) && task.activity.phase === 'reconnecting')

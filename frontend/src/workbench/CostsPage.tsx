@@ -7,7 +7,7 @@ import type { OverviewData } from './v3-types'
 const tokenFormat = new Intl.NumberFormat('zh-CN')
 
 function tokens(value: number, knownCalls: number) {
-  return knownCalls > 0 ? tokenFormat.format(value) : '未记录'
+  return knownCalls > 0 ? tokenFormat.format(value) : '—'
 }
 
 export default function CostsPage({ onUnauthorized }: PageProps) {
@@ -45,13 +45,13 @@ export default function CostsPage({ onUnauthorized }: PageProps) {
       <div className="wb-cost-summary">
         <article><span>运行总数</span><strong>{data.runs}</strong><small>包含规划与执行</small></article>
         <article><span>模型调用</span><strong>{calls}</strong><small>{tokenCalls > 0 ? `${tokenCalls} 次带 token 数据` : '尚无 token 数据'}</small></article>
-        <article><span>提示缓存</span><strong>{cacheCalls === 0 ? '未知' : cacheReads > 0 ? '已命中' : '未命中'}</strong><small>{cacheMessage}</small></article>
+        <article><span>提示缓存</span><strong title={cacheMessage} tabIndex={0} aria-label={`提示缓存：${cacheMessage}`}>{cacheCalls === 0 ? '未知' : cacheReads > 0 ? '已命中' : '未命中'}</strong></article>
       </div>
       <section className="wb-card wb-cost-card">
         <div className="wb-card-head"><div><span className="wb-eyebrow">真实调用记录</span><h2>按角色查看</h2><p>缓存读取和缓存创建分开统计；创建缓存不算命中。旧版无法区分的 Claude 数据不参与缓存统计。</p></div></div>
         {data.model_usage.length === 0
           ? <EmptyState title="还没有调用记录" description="运行产生调用记录后，这里会显示角色、provider、模型和 token。" />
-          : <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>角色</th><th>Provider</th><th>模型</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>缓存创建</th><th>缓存读取</th></tr></thead><tbody>{data.model_usage.map((item, index) => <tr key={`${item.profile}-${item.provider ?? 'unknown'}-${item.model ?? 'unknown'}-${index}`}><td><strong>{item.profile}</strong></td><td className="wb-mono">{item.provider || '未记录'}</td><td className="wb-mono">{item.model || '未配置'}</td><td>{item.calls}</td><td>{tokens(item.input_tokens, item.token_usage_calls)}</td><td>{tokens(item.output_tokens, item.token_usage_calls)}</td><td>{tokens(item.cache_creation_input_tokens, item.cache_usage_calls)}</td><td>{item.cache_usage_calls > 0 && item.cached_input_tokens === 0 ? '0（未命中）' : tokens(item.cached_input_tokens, item.cache_usage_calls)}</td></tr>)}</tbody></table></div>}
+          : <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>角色</th><th>Provider</th><th>模型</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>缓存创建</th><th>缓存读取</th></tr></thead><tbody>{data.model_usage.map((item, index) => <tr key={`${item.profile}-${item.provider ?? 'unknown'}-${item.model ?? 'unknown'}-${index}`}><td><strong>{item.profile}</strong></td><td className="wb-mono">{item.provider || '—'}</td><td className="wb-mono">{item.model || '未配置'}</td><td>{item.calls}</td>{item.token_usage_calls === 0 && item.cache_usage_calls === 0 ? <td colSpan={4}><span className="wb-mode-badge">供应商未返回明细</span></td> : <><td>{tokens(item.input_tokens, item.token_usage_calls)}</td><td>{tokens(item.output_tokens, item.token_usage_calls)}</td><td>{tokens(item.cache_creation_input_tokens, item.cache_usage_calls)}</td><td>{item.cache_usage_calls > 0 && item.cached_input_tokens === 0 ? '0（未命中）' : tokens(item.cached_input_tokens, item.cache_usage_calls)}</td></>}</tr>)}</tbody></table></div>}
       </section>
       <section className="wb-card wb-cost-note"><strong>缓存诊断</strong><span>{cacheMessage} 这里显示的是模型提示缓存；npm、pip、uv 的依赖缓存由执行环境按项目独立复用。</span></section>
       <section className="wb-card wb-cost-note"><strong>计费管理</strong><span>账户计费和 token 额度由中转站管理；webuddy 的项目预算只用于在达到上限后阻止后续模型调用。</span></section>

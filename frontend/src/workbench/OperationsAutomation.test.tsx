@@ -37,8 +37,8 @@ it('shows inspection trend and removes a sourced fact using its revision', async
       provenance: { source: 'verified_operation', run_id: 'r1', at: '2026-09-14T01:00:00Z' } }] } as never
   })
   render(<MemoryRouter><ProjectInspection projectId="p1" csrfToken="csrf" onUnauthorized={unauthorized} isAdmin /></MemoryRouter>)
-  await screen.findByText('连续未通过：3 次')
-  expect((await screen.findByRole('link', { name: /unverified/ })).getAttribute('href')).toBe('/runs/r1?view=verification')
+  await screen.findByText('持续故障')
+  expect((await screen.findByRole('link', { name: /未验证.*1.5s/ })).getAttribute('href')).toBe('/runs/r1?view=verification')
   await screen.findByText('npm start')
   fireEvent.click(screen.getByText('删除事实'))
   await waitFor(() => expect(screen.queryByText('npm start')).toBeNull())

@@ -1,11 +1,12 @@
+import StageStrip from './StageStrip'
+import { runTitle, RunMode, LoadingCard } from './presentation'
 import { nextRunAction, runGuidance } from './run-guidance'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request, WorkspaceApiError } from '../workspace/api'
 import type { Run } from '../workspace/types'
-import { EmptyState, ErrorNotice, formatDate, PageHeader, errorText, type PageProps } from './ui'
+import { EmptyState, ErrorNotice, formatDate, PageHeader, StatusBadge, errorText, type PageProps } from './ui'
 import type { OverviewData } from './v3-types'
-import { PROJECT_STAGES, projectStageHref } from './project-stages'
 import AttentionList from './AttentionList'
 import { subscribeDataRefresh } from './data-refresh'
 import './overview.css'
@@ -54,9 +55,9 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
       <button className="wb-button wb-button-secondary" onClick={() => load(true)}>{loading && data ? '更新中…' : '刷新'}</button>
       <Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目 <span aria-hidden="true">→</span></Link>
     </>} />
-    <section className="wb-purpose-band" aria-label="开始新工作"><span className="wb-purpose-symbol" aria-hidden="true">＋</span><div><h2>开始一项新工作</h2><p>直接描述目标，也可以从已有项目继续。</p></div><div className="wb-purpose-actions"><Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目</Link><Link className="wb-button wb-button-secondary" to="/agents">查看职能体 →</Link></div></section>
+    {data && data.projects > 0 ? <div className="wb-overview-start" aria-label="开始新工作"><span>继续已有项目，或开始新工作</span><Link className="wb-text-link" to="/agents">查看职能体</Link></div> : data && <section className="wb-purpose-band" aria-label="开始新工作"><span className="wb-purpose-symbol" aria-hidden="true">＋</span><div><h2>开始一项新工作</h2><p>直接描述目标，也可以从已有项目继续。</p></div><div className="wb-purpose-actions"><Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目</Link><Link className="wb-button wb-button-secondary" to="/agents">查看职能体</Link></div></section>}
     {error && <ErrorNotice message={data ? `刷新失败，以下为上一份记录：${error}` : error} />}
-    {loading && !data && <div className="wb-card ov3-loading" role="status" aria-label="正在读取项目进展"><span /><span /><span /></div>}
+    {loading && !data && <LoadingCard label="正在读取项目进展" />}
     {data && <>
       {data.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(data.snapshot_at)} · 每 5 秒更新</p>}
       <section className="ov3-summary" aria-label="全部项目摘要">
@@ -67,39 +68,27 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
       </section>
       {attention.length > 0 && <section className="wb-card pw-attention" aria-labelledby="overview-attention">
         <div className="ov3-section-head"><div><span className="wb-eyebrow">需要处理</span><h2 id="overview-attention">需要你看一眼</h2></div>
-          <Link className="wb-text-link" to="/runs?filter=attention">全部 {data.attention_runs} 条 →</Link></div>
+          <Link className="wb-text-link" to="/runs?filter=attention">全部 {data.attention_runs} 条</Link></div>
         <AttentionList items={attention.slice(0, 4)} />
       </section>}
       <section className="pw-portfolio" aria-labelledby="project-portfolio">
-        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">当前工作</h2><p>阶段数量按当前计划记录统计，不等于验证通过数。点击阶段查看同一份进度。</p></div></div>
+        <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">当前工作</h2><p>点击阶段，查看项目最近的工作记录。</p></div></div>
         {currentProjects.map((project) => <article className="wb-card pw-project" key={project.id}>
           <header className="pw-project-heading"><div><Link to={`/projects/${encodeURIComponent(project.id)}`}><h3>{project.name}</h3></Link><p>{project.repository?.startsWith('local/') ? '系统管理的工作区' : project.repository}</p></div>
-            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 →</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} →</Link>}</div>
+            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} →</Link>}</div>
           </header>
-          <nav className="pw-project-stages" aria-label={`${project.name}的工程阶段`}>{PROJECT_STAGES.map((stage, index) => {
-            const record = project.engineering.stages.find((item) => item.id === stage.id)
-            const run = project.next_run
-            const current = Boolean(run && !['cancelled', 'discarded'].includes(run.status) && runGuidance(run).stage === stage.id)
-            const moving = Boolean(run && ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status))
-            const waiting = Boolean(run && ['needs_human', 'needs_clarification', 'awaiting_approval', 'failed'].includes(run.status))
-            const marker = moving ? '正在进行' : waiting ? '待处理' : run?.status === 'published' ? '已交付' : '可领取'
-            return <Link to={projectStageHref(project.id, stage.id)} key={stage.id} aria-current={current ? 'step' : undefined} className={current ? `pw-stage-current ${moving ? 'is-moving' : waiting ? 'is-waiting' : 'is-ready'}` : undefined}>
-              <span className="pw-stage-top"><span className="pw-stage-number">0{index + 1}</span>{current && <span className="pw-stage-marker"><i aria-hidden="true" />{marker}</span>}</span><strong>{stage.label}</strong>
-              <span className="pw-stage-count">{record?.count ?? 0}<small>{record?.unit ?? '条记录'}</small></span>
-              <small className="pw-stage-link">{stage.action} <span aria-hidden="true">↗</span></small>
-            </Link>
-          })}</nav>
-          <footer className="pw-project-footer"><span>需求 → 方案 → 执行 → 验证 → 交付 · 按需沉淀经验</span>
+          <StageStrip stages={project.engineering.stages} projectId={project.id} runs={data.run_snapshots} selectedId={project.next_run ? runGuidance(project.next_run).stage : undefined} />
+          <footer className="pw-project-footer"><span>按阶段查看工作记录</span>
             <span>计费由中转站管理</span>
           </footer>
         </article>)}
         {currentProjects.length === 0 && completed.length > 0 && <p className="wb-runtime-note">当前工作已完成。可以查看下方成果，或进入项目提出新需求。</p>}
-        {completed.length > 0 && <section className="wb-card pw-completed" aria-label="最近成果"><div className="ov3-section-head"><h2>最近成果</h2><span className="wb-runtime-note">{completed.length} 个项目成果已就绪</span></div>{completed.map((project) => <div className="pw-completed-row" key={project.id}><strong>{project.name}</strong><div><Link className="wb-text-link" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 / 新需求 →</Link>{project.next_run && <Link className="wb-button wb-button-secondary" to={nextRunAction(project.next_run).href}>查看成果 →</Link>}</div></div>)}</section>}
+        {completed.length > 0 && <section className="wb-card pw-completed" aria-label="最近成果"><div className="ov3-section-head"><h2>最近成果</h2><span className="wb-runtime-note">{completed.length} 个项目成果已就绪</span></div>{completed.map((project) => <div className="pw-completed-row" key={project.id}><div><strong>{project.name}</strong>{project.next_run && <><p>{runTitle(project.next_run)}<RunMode run={project.next_run} /></p><small>{formatDate(project.next_run.updated_at)} · <StatusBadge status={project.next_run.status} /> · {project.next_run.status === 'published' ? '已发布' : '未发布'}</small></>}</div><div><Link className="wb-text-link" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目 / 新需求</Link>{project.next_run && <Link className="wb-button wb-button-secondary" to={nextRunAction(project.next_run).href}>查看成果</Link>}</div></div>)}</section>}
         {data.project_summaries?.length === 0 && <div className="wb-card"><EmptyState title="登记第一个项目" description="每个项目会拥有自己的需求、执行记录、交付产物和经验。" action={<Link className="wb-button wb-button-primary" to="/projects">前往项目管理</Link>} /></div>}
         {!data.project_summaries && <div className="wb-card"><EmptyState title="项目进展暂未返回" action={<Link className="wb-button wb-button-secondary" to="/projects">查看项目列表</Link>} /></div>}
       </section>
-      <section className="wb-card ov3-events" aria-labelledby="overview-events"><div className="ov3-section-head"><div><span className="wb-eyebrow">工作区动态</span><h2 id="overview-events">最近的工程进展</h2></div><Link className="wb-text-link" to="/costs">成本与调用记录 →</Link></div>
-        {events.length ? <div className="ov3-event-list">{events.map((event) => <Link className="ov3-event-row" to={`/runs/${encodeURIComponent(event.run_id)}`} key={event.id}><span className="ov3-event-dot" aria-hidden="true" /><span><strong>{event.run_title || '运行进展'}</strong><small>{event.project_name} · {EVENT_LABELS[event.type]} · {formatDate(event.at)}</small></span><span className="ov3-arrow" aria-hidden="true">→</span></Link>)}</div> : <p className="wb-runtime-note">项目开始工作后，这里会汇总重要进展。</p>}
+      <section className="wb-card ov3-events" aria-labelledby="overview-events"><div className="ov3-section-head"><div><span className="wb-eyebrow">工作区动态</span><h2 id="overview-events">最近的工程进展</h2></div><Link className="wb-text-link" to="/costs">成本与调用记录</Link></div>
+        {events.length ? <div className="ov3-event-list">{events.map((event) => <Link className="ov3-event-row" to={`/runs/${encodeURIComponent(event.run_id)}`} key={event.id}><span className="ov3-event-dot" aria-hidden="true" /><span><strong>{data.run_snapshots?.find(run => String(run.id) === event.run_id) ? runTitle(data.run_snapshots.find(run => String(run.id) === event.run_id)!) : event.run_title === '持续编码' ? `运行 ${event.run_id.slice(0, 8)}` : event.run_title || '运行进展'}</strong><small>{event.project_name} · {EVENT_LABELS[event.type]} · {formatDate(event.at)}</small></span></Link>)}</div> : <p className="wb-runtime-note">项目开始工作后，这里会汇总重要进展。</p>}
       </section>
     </>}
   </div>

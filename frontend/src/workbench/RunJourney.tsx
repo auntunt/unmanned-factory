@@ -1,7 +1,8 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
-import { runEvidence, runGuidance, nextRunAction, type RunView } from './run-guidance'
-import { StatusBadge } from './ui'
+import { runEvidence, runGuidance, type RunView } from './run-guidance'
+import { tabKeys } from './presentation'
 import './run-journey.css'
 import './run-guidance.css'
 
@@ -14,7 +15,7 @@ const stages: Array<{ name: string; view: RunView }> = [
 ]
 const stageIndex = { intake: 0, plan: 1, build: 2, verify: 3, deliver: 4 } as const
 
-export default function RunJourney({ run }: { run: Run }) {
+export default function RunJourney({ run, activeView, guidanceContent }: { run: Run; activeView?: RunView; guidanceContent?: ReactNode }) {
   const guidance = runGuidance(run)
   const evidence = runEvidence(run)
   const currentStage = stageIndex[guidance.stage]
@@ -32,26 +33,22 @@ export default function RunJourney({ run }: { run: Run }) {
   ]
   const terminal = run.status === 'published' || run.status === 'discarded' || run.status === 'cancelled'
   return <section className="wb-run-journey" aria-labelledby="run-journey-title">
-    <div className="wb-run-journey-heading">
-      <div><span className="wb-eyebrow">本次工程闭环</span><h2 id="run-journey-title">{guidance.summary}</h2></div>
-      <div><StatusBadge status={run.status} /> <Link className="wb-button wb-button-primary" to={nextRunAction(run).href}>{nextRunAction(run).label} →</Link></div>
-    </div>
-    <ol className="wb-run-journey-stages">
+    {guidanceContent}
+    <div className="wb-run-journey-heading"><h2 id="run-journey-title">本次工程闭环</h2></div>
+    <ol className="wb-run-journey-stages" role="tablist" aria-label="运行工作视图" onKeyDown={tabKeys}>
       {stages.map(({ name, view }, index) => {
         const current = !terminal && index === currentStage
         const state = complete[index] ? 'is-recorded' : recorded[index] ? 'is-evidenced' : ''
         const label = current ? guidance.label : labels[index]
-        return <li className={`${state} ${current ? 'is-current' : ''}`} key={name} aria-current={current ? 'step' : undefined}>
-          <Link to={runHref(view)} aria-label={`${name}：${label}`}>
+        return <li className={`${state} ${current ? 'is-current' : ''}`} key={name} role="presentation">
+          <Link role="tab" id={`run-tab-${view}`} aria-controls="run-view-panel" aria-selected={(activeView ?? guidance.view) === view} tabIndex={(activeView ?? guidance.view) === view ? 0 : -1} to={runHref(view)} aria-label={`${name}：${label}`}>
             <span className="wb-run-step-number" aria-hidden="true">{complete[index] ? '✓' : recorded[index] ? '•' : String(index + 1).padStart(2, '0')}</span>
             <strong>{name}</strong><small>{label}</small>
           </Link>
         </li>
       })}
-      <li className={candidate ? 'is-evidenced' : ''}>
-        {candidate ? <Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`} aria-label="能力沉淀：已留草稿"><span className="wb-run-step-number" aria-hidden="true">•</span><strong>能力沉淀（可选）</strong><small>已留草稿</small></Link> : <><span className="wb-run-step-number" aria-hidden="true">06</span><strong>能力沉淀（可选）</strong><small>按需整理</small></>}
-      </li>
     </ol>
-    {candidate && <div className="wb-run-journey-feedback"><span>有值得复用的经验时，可查看并启用草稿；不沉淀也不影响本次交付。</span><Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`}>查看能力草稿 <span aria-hidden="true">→</span></Link></div>}
+    <p className="wb-runtime-note">能力沉淀（可选） · 按需整理</p>
+    {candidate && <div className="wb-run-journey-feedback"><span>有值得复用的经验时，可查看并启用草稿；不沉淀也不影响本次交付。</span><Link to={`/capabilities?selected=${encodeURIComponent(candidate)}`}>查看能力草稿 </Link></div>}
   </section>
 }

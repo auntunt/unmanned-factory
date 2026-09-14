@@ -19,7 +19,7 @@ describe('runGuidance', () => {
   it('does not invent a question for a paused run without triage questions', () => {
     const guidance = runGuidance(run({ artifacts: { needs_human: 'manual intervention requested' } }))
     expect(guidance.kind).toBe('paused')
-    expect(guidance.label).toBe('运行已暂停')
+    expect(guidance.label).toBe('已暂停·可重试')
     expect(guidance.summary).not.toContain('回答')
   })
 
@@ -74,7 +74,7 @@ describe('runGuidance', () => {
 it('explains a scope stop using persisted failed-task evidence, including older artifact snapshots', () => {
   const tasks = [{ id: 'scaffold', status: 'failed', attempts: [{ error: 'out-of-scope changes: src/api.py, tests/__init__.py', retryable: false }] }]
   for (const stopped of [run({ tasks }), run({ artifacts: { tasks } })]) {
-    expect(runGuidance(stopped).label).toBe('修改超出当前任务范围')
+    expect(runGuidance(stopped).label).toBe('修改范围待处理')
     expect(runGuidance(stopped).rawEvidence).toContain('src/api.py')
     expect(canGenerateNextPlan(stopped, true)).toBe(true)
     expect(canGenerateNextPlan(stopped, false)).toBe(false)
@@ -92,7 +92,7 @@ it('完整性检查不会被介绍成完整业务验收通过', () => {
   const result = runGuidance(run({ execution_mode: 'continuous', status: 'ready_for_review', artifacts: { checks: [{ name: 'workspace-integrity', exit: 0 }] } }))
   expect(result.summary).toContain('尚不能据此确认业务功能可用')
   expect(result.summary).not.toContain('验证已通过')
-  expect(result.label).toContain('成果已生成')
+  expect(result.label).toBe('成果可领取')
 })
 
 it('持续编码的连接恢复仍是进行中，不要求批准，终态不沿用旧活动', () => {

@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
-import EngineeringLoop from './EngineeringLoop'
+import StageStrip from './StageStrip'
+import { CopyValue, runTitle, RunMode } from './presentation'
 import { PROJECT_STAGES, projectStage, projectStageHref } from './project-stages'
 import { formatDate, StatusBadge, statusLabel } from './ui'
 import type { EngineeringSummary } from './v3-types'
@@ -46,7 +47,7 @@ function StagePreview({ stage, run }: { stage: string; run: Run }) {
   </>
   if (stage === 'build') {
     const tasks = taskRecords(run)
-    return <><p>{runGuidance(run).summary}</p><ul className="pw-record-list">{tasks.slice(0, 4).map((task, index) => <li key={String(task.id ?? index)}><strong>{String(task.title ?? task.id ?? `任务 ${index + 1}`)}</strong><span>{statusLabel(String(task.status ?? 'pending'))} · {records(task.attempts).length} 次尝试</span></li>)}</ul>{!tasks.length && <p>等待执行器返回任务与尝试记录。</p>}</>
+    return <><p>{runGuidance(run).label}</p><ul className="pw-record-list">{tasks.slice(0, 4).map((task, index) => <li key={String(task.id ?? index)}><strong>{String(task.title ?? task.id ?? `任务 ${index + 1}`)}</strong><span>{statusLabel(String(task.status ?? 'pending'))} · {records(task.attempts).length} 次尝试</span></li>)}</ul>{!tasks.length && <p>等待执行器返回任务与尝试记录。</p>}</>
   }
   if (stage === 'verify') {
     const verdict = run.artifacts?.verification as { verdict?: string; reason?: string } | undefined
@@ -59,8 +60,8 @@ function StagePreview({ stage, run }: { stage: string; run: Run }) {
   }
   if (stage === 'deliver') return <div className="pw-delivery-values">
     <span>交付状态：{run.status === 'published' ? '已发布' : run.status === 'publishing' ? '正在发布' : '尚未发布'}</span>
-    {typeof run.artifacts?.commit === 'string' && <span>代码提交<code>{run.artifacts.commit}</code></span>}
-    {typeof run.artifacts?.branch === 'string' && <span>交付分支<code>{run.artifacts.branch}</code></span>}
+    {typeof run.artifacts?.commit === 'string' && <span>代码提交<CopyValue value={run.artifacts.commit} label="提交 SHA" length={7} /></span>}
+    {typeof run.artifacts?.branch === 'string' && <span><CopyValue value={run.artifacts.branch} label="交付分支" display="交付分支" /></span>}
     {typeof run.artifacts?.pr_url === 'string' && <span>发布记录<code>{run.artifacts.pr_url}</code></span>}
   </div>
   return null
@@ -73,10 +74,10 @@ export default function ProjectLifecycle({ projectId, projectName, engineering, 
   const content = stages.find((item) => item.id === stage.id)!
   const previous = PROJECT_STAGES[Math.max(0, PROJECT_STAGES.findIndex((item) => item.id === stage.id) - 1)]
   return <section className="wb-card pw-cycle" aria-labelledby="project-cycle-title">
-    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>六环组织需求、执行与成果记录，不要求每环单独调用模型；已有记录数不代表完成率。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行 →</Link></div>
+    <div className="pw-cycle-heading"><div><span className="wb-eyebrow">{projectName} · 工程闭环</span><h2 id="project-cycle-title">这个项目的工作与产出</h2><p>按阶段查看最近的工作与产出。</p></div><Link className="wb-text-link" to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>本项目全部运行</Link></div>
     <div className="pw-cycle-layout">
-      <EngineeringLoop stages={stages} selectedId={stage.id} onSelect={onSelect} />
-      <section className="pw-stage-panel" id="ov3-stage-details" aria-labelledby="project-stage-title">
+      <StageStrip stages={stages} projectId={projectId} runs={runs} selectedId={stage.id} onSelect={onSelect} />
+      <section className="pw-stage-panel" id="ov3-stage-details" role="tabpanel" aria-labelledby={`stage-${stage.id}`}>
         <div className="pw-stage-heading"><h3 id="project-stage-title">{stage.label}</h3><span>{content.count} {content.unit}</span></div>
         <p className="pw-stage-description">{stage.description}</p>
         {stage.id === 'intake' && requirementForm}
@@ -84,18 +85,18 @@ export default function ProjectLifecycle({ projectId, projectName, engineering, 
           const run = runs.find((record) => String(record.id) === item.id)
           return <article className="pw-stage-record" key={item.id}>
             <div className="pw-record-meta"><span>{formatDate(item.updated_at)}</span>{run ? <span>{runGuidance(run).label}</span> : <StatusBadge status={item.status} />}</div>
-            <h4><Link to={item.href}>{item.title}</Link></h4>
+            <h4><Link to={item.href}>{run ? runTitle(run) : item.title}</Link>{run && <RunMode run={run} />}</h4>
             {run ? <StagePreview stage={stage.id} run={run} /> : <p>{item.detail}</p>}
-            <Link className="wb-text-link" to={item.href}>{stage.action} →</Link>
+            <Link className="wb-text-link" to={item.href}>{stage.action}</Link>
           </article>
         })}
         {content.items.length === 0 && <div className="pw-stage-empty"><h4>{stage.empty}</h4>
           <p>{stage.id === 'reuse' ? '交付留下的能力草稿会归到这里。已验证的能力可以用于这个项目的后续需求。' : stage.id === 'intake' ? '写下要完成的业务目标；不明确的地方，工厂会先提问。' : `先在“${previous.label}”中推进工作，有了${stage.label === '质量验证' ? '实际检查结果' : '对应产出'}后，这里会自动更新。`}</p>
-          {stage.id !== 'intake' && <Link className="wb-text-link" to={projectStageHref(projectId, previous.id)}>查看本项目{previous.label} →</Link>}
+          {stage.id !== 'intake' && <Link className="wb-text-link" to={projectStageHref(projectId, previous.id)}>查看本项目{previous.label}</Link>}
         </div>}
-        {content.count > content.items.length && <p className="pw-stage-tail">最近展示 {content.items.length} 条，共 {content.count} {content.unit}。<Link to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>浏览本项目完整运行记录 →</Link></p>}
-        {stage.id === 'reuse' && isAdmin && <p className="pw-stage-tail"><Link className="wb-text-link" to={`/projects/${encodeURIComponent(String(projectId))}?tab=automation`}>管理本项目绑定的能力 →</Link><br />跨项目复用时，选择并绑定已启用的具体版本。</p>}
-        {stage.id === 'verify' && isAdmin && <p className="pw-stage-tail"><Link className="wb-text-link" to={`/projects/${encodeURIComponent(String(projectId))}?tab=settings#project-checks`}>配置本项目的验收检查 →</Link></p>}
+        {content.count > content.items.length && <p className="pw-stage-tail">最近展示 {content.items.length} 条，共 {content.count} {content.unit}。<Link to={`/runs?project_id=${encodeURIComponent(String(projectId))}`}>浏览本项目完整运行记录</Link></p>}
+        {stage.id === 'reuse' && isAdmin && <p className="pw-stage-tail"><Link className="wb-text-link" to={`/projects/${encodeURIComponent(String(projectId))}?tab=automation`}>管理本项目绑定的能力</Link><br />跨项目复用时，选择并绑定已启用的具体版本。</p>}
+        {stage.id === 'verify' && isAdmin && <p className="pw-stage-tail"><Link className="wb-text-link" to={`/projects/${encodeURIComponent(String(projectId))}?tab=settings#project-checks`}>配置本项目的验收检查</Link></p>}
       </section>
     </div>
   </section>

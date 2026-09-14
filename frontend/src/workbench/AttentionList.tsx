@@ -1,3 +1,5 @@
+import { runTitle } from './presentation'
+import { StatusBadge, formatDate } from './ui'
 import { Link } from 'react-router-dom'
 import type { Run, RunStatus } from '../workspace/types'
 import { runGuidance, nextRunAction } from './run-guidance'
@@ -13,10 +15,10 @@ export default function AttentionList({ items }: { items: NonNullable<OverviewDa
     return <article className="pw-attention-item" key={item.id}>
       <span className="pw-attention-indicator" aria-hidden="true">!</span>
       <div><span className="pw-attention-label">{guidance.label}{item.project_name && <small> · {item.project_name}</small>}</span>
-        <Link className="pw-attention-title" to={nextRunAction(run).href}>{item.title || '待处理运行'}</Link>
-        <p>{guidance.summary}</p>
+        <Link className="pw-attention-title" to={nextRunAction(run).href}>{runTitle(run)}</Link>
+        <p><StatusBadge status={run.status} /> · {formatDate(item.updated_at)}</p>
       </div>
-      <Link className="wb-button wb-button-secondary" to={nextRunAction(run).href}>{nextRunAction(run).label} <span aria-hidden="true">→</span></Link>
+      <Link className="wb-button wb-button-secondary" to={nextRunAction(run).href}>查看记录</Link>
     </article>
   })}</div>
 }

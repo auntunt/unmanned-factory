@@ -24,7 +24,8 @@ export default function VerifiedOperationsFacts({ projectId, csrfToken, onUnauth
       setFacts(items => items.filter(item => item.key !== fact.key))
     } catch (cause) { setError(errorText(cause)) } finally { setBusy(false) }
   }
-  return <div><h3>已验证的运维事实</h3>{!facts.length && <p>暂无已回流事实。</p>}
+  if (!facts.length && !error) return null
+  return <div><h3>已验证的运维事实</h3>
     {facts.map(fact => <article key={fact.key}><strong>{fact.title}</strong><p>{fact.content}</p><small>{formatDate(fact.provenance.at)}</small>{fact.provenance.run_id && <Link to={`/runs/${fact.provenance.run_id}?view=verification`}>查看来源证据</Link>}{isAdmin && <button disabled={busy} onClick={() => void remove(fact)}>删除事实</button>}</article>)}
     {error && <ErrorNotice message={error} />}
   </div>
