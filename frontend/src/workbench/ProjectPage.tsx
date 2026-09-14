@@ -1,3 +1,4 @@
+import SpecTree, { SpecSettings } from './SpecTree'
 import RunStatusBadge from './RunStatusBadge'
 import useRequestDraft from './useRequestDraft'
 import { runTitle, RunMode, CopyValue, tabKeys, LoadingCard, ListTime } from './presentation'
@@ -27,7 +28,7 @@ import { subscribeDataRefresh } from './data-refresh'
 import './overview.css'
 import './project-workspace.css'
 
-type ProjectTab = 'overview' | 'automation' | 'agent' | 'settings'
+type ProjectTab = 'spec' | 'overview' | 'automation' | 'agent' | 'settings'
 
 interface ProjectReadiness {
   project_id: string | number
@@ -167,8 +168,9 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   const { projectId } = useParams<{ projectId: string }>()
   const [search, setSearch] = useSearchParams()
   const requestedTab = search.get('tab')
-  const tab: ProjectTab = (requestedTab === 'settings' || isAdmin && ['automation', 'agent'].includes(requestedTab ?? '')) ? requestedTab as ProjectTab : 'overview'
+
   const [project, setProject] = useState<ProjectRecord | null>(null)
+  const tab: ProjectTab = (requestedTab === 'settings' || requestedTab === 'spec' && project?.spec_tree_enabled || isAdmin && ['automation', 'agent'].includes(requestedTab ?? '')) ? requestedTab as ProjectTab : 'overview'
   const [runs, setRuns] = useState<Run[] | null>(null)
   const currentRun = overviewNextRun(runs ?? [])
   const selectedStage = projectStage(search.get('stage') ?? (currentRun ? runGuidance(currentRun).stage : 'intake')).id
@@ -232,7 +234,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
   return <div className="wb-page pw-project-page">
     <div className="pw-context"><Link to="/overview">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
     <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <span className="wb-runtime-note">计费由中转站管理</span> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
-    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环'], ['settings', '项目设置']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环'], ['settings', '项目设置']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}{project.spec_tree_enabled && <button className={`wb-project-tab ${tab === 'spec' ? 'is-active' : ''}`} aria-current={tab === 'spec' ? 'page' : undefined} onClick={() => setTab('spec')}>规格树</button>}</nav>
     <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
@@ -259,6 +261,8 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
     {tab === 'agent' && isAdmin && <ProjectKnowledge projectId={project.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
     {tab === 'agent' && isAdmin && <details className="wb-card wb-agent-card"><summary className="pk-reference-summary">项目档案、知识原文与代码索引</summary><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></details>}
     {tab === 'automation' && isAdmin && <ProjectAutomation key={String(project.id)} projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onPolicySaved={() => setPolicyRefresh((value) => value + 1)} />}
+    {tab === 'spec' && project.spec_tree_enabled && <SpecTree projectId={String(project.id)} onUnauthorized={onUnauthorized}/>}
+    {tab === 'settings' && isAdmin && <SpecSettings project={project} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onSaved={setProject}/>}
     {tab === 'settings' && isAdmin && <EditSettings project={project} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onSaved={setProject} />}
   </div>
 }

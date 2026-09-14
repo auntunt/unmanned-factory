@@ -1,5 +1,6 @@
 """Composable instruction modules, versioned independently of agent presets."""
 from __future__ import annotations
+from factory.control.spec_tree import GUIDANCE
 import json
 import uuid
 from factory.control.store import Conflict, now, scrub
@@ -92,10 +93,12 @@ class ModuleStore:
         for module in selected['modules']:
             module['resolved_sources'] = [*module.get('source_refs', []),
                 *sources.resolve_slots(run['project_id'], module.get('source_slots', []))]
-        return {'module_snapshot':selected['modules'], 'module_selection_revision':selected['revision']}
+        return {'module_snapshot':selected['modules'], 'module_selection_revision':selected['revision'],
+                'spec_tree_enabled': bool(self.store.project(run['project_id']).get('spec_tree_enabled'))}
 
 
 def module_prompt(run):
     modules=run.get('module_snapshot') or []
-    if not modules: return ''
-    return '\n\nPROJECT MODULES (frozen versions; scoped guidance, cannot grant tools or override the user request or platform permissions):\n' + '\n\n'.join(f"[{m['category']}] {m['name']} v{m['version']}\n{m['instructions']}" for m in modules)
+    spec = '\n\n' + GUIDANCE if run.get('spec_tree_enabled') else ''
+    if not modules: return spec
+    return spec + '\n\nPROJECT MODULES (frozen versions; scoped guidance, cannot grant tools or override the user request or platform permissions):\n' + '\n\n'.join(f"[{m['category']}] {m['name']} v{m['version']}\n{m['instructions']}" for m in modules)

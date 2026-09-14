@@ -753,6 +753,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     from factory.control.project_routes import router
     app.include_router(router(store, svc))
+    from factory.control.spec_routes import router as spec_router
+    app.include_router(spec_router(store, svc, allowed_root))
 
     @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
     def unknown_api(path: str):

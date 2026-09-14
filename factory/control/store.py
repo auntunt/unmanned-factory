@@ -136,9 +136,11 @@ class Store:
             raise ValueError('项目 revision 必须是正整数')
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError('项目设置修改人不能为空')
-        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd'}
+        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd', 'spec_tree_enabled'}
         if not isinstance(changes, dict) or set(changes) - allowed:
             raise ValueError('项目设置包含不可修改字段')
+        if 'spec_tree_enabled' in changes and type(changes['spec_tree_enabled']) is not bool:
+            raise ValueError('规格树配置须为开关')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT data FROM projects WHERE id=?', (pid,)).fetchone()
@@ -172,6 +174,9 @@ class Store:
                               (pid, *sorted(blocking_statuses))).fetchone()
             if busy is not None:
                 raise Conflict('项目存在进行中的运行，暂时不能修改设置')
+            if changes.get('spec_tree_enabled'):
+                from factory.control.spec_tree import initialize  # Load optional L0 support only when enabling.
+                initialize(project['workspace'], project['name'], project['base_branch'])
             updated = {**project, **changes, 'revision': current + 1, 'updated_at': now()}
             db.execute('UPDATE projects SET data=? WHERE id=?',
                        (json.dumps(updated, ensure_ascii=False), pid))

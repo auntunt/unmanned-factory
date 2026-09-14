@@ -28,6 +28,7 @@ export interface User {
 }
 
 export interface Project {
+  spec_tree_enabled?: boolean
   id: string | number
   name: string
   repository: string

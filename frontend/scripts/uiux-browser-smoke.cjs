@@ -13,6 +13,7 @@ const presets = ['general', 'bugfix', 'startup', 'release', 'dependencies'].map(
 const moduleFixture = { id: 'module-one', version: 1, name: '代码维护方法', category: 'workflow', description: '按真实证据修复已有项目', instructions: '先复现，再回归。' };
 const capabilityFixture = { id: 'cap-one', revision: 1, name: 'CSV 导出维护', description: '复用导出修复经验', category: 'engineering', status: 'ready', instructions: '验证导出。', acceptance: [], input_description: 'CSV', output_description: '检查记录', created_at: run.created_at, updated_at: run.updated_at, source_run_id: run.id };
 run.module_snapshot = [moduleFixture];
+const specFixture = { path: '.spec/hours/spec.md', title: '工时计算规则', status: 'active', depth: 0, code_count: 1, desc: '时间换算与导出边界', errors: [], raw_source: '保留原始工时记录，导出结果不得丢失精度。', expanded: '## 换算规则\n\n使用分钟作为内部单位，导出时按 **小时** 展示。\n\n- 原始数据可追溯\n- 日期使用统一格式', code: [{ entry: 'src/hours.py#calculate', path: 'src/hours.py', symbol: 'calculate' }], related: [{ entry: 'README.md', path: 'README.md', symbol: null }], history: [{ sha: 'a'.repeat(40), subject: '确认计算规格' }], drift: { level: 'anchored', reasons: [], commits: [{ sha: 'b'.repeat(40), subject: '调整换算函数' }] } };
 const mutations = []; let delayRuntime = false;
 function payload(url, method) {
   const p = new URL(url).pathname;
@@ -26,6 +27,8 @@ function payload(url, method) {
   if (p.endsWith('/readiness')) return { ready: true, checks: [] };
   if (p === '/api/v2/runs') return { runs: [run] };
   if (p === `/api/v2/runs/${run.id}`) return run;
+  if (p.endsWith('/spec-tree/node')) return specFixture;
+  if (p.endsWith('/spec-tree')) return { enabled: true, nodes: [specFixture], drift_count: 1 };
   if (p.endsWith('/inspection')) return { enabled: true, interval_s: 3600, revision: 1, last_at: run.updated_at, last_status: 'inspection_failed', last_run_id: run.id, consecutive_failures: 3, history: Array.from({ length: 20 }, (_, i) => ({ run_id: `inspection-${i}`, at: new Date(Date.UTC(2026, 8, 14, i)).toISOString(), verdict: i < 3 ? 'fail' : i % 4 === 0 ? 'unverified' : 'pass', duration_s: 3.2 })) };
   if (p.endsWith('/deploy-targets')) return { targets: [], available: [], revision: 0 };
   if (p.endsWith('/knowledge')) return { entries: [] };
@@ -92,6 +95,9 @@ function payload(url, method) {
  assert.equal(await page.$eval('.wb-detail-grid', e => getComputedStyle(e).gridTemplateColumns.split(' ').length), 2);
  await audit('costs', '/costs', '.wb-cost-summary');
  await audit('runtime', '/settings/runtime', '[aria-label="服务器连接"]');
+ project.spec_tree_enabled = true;
+ await audit('spec-tree', `/projects/${project.id}?tab=spec&node=.spec%2Fhours%2Fspec.md`, '.spec-detail');
+ assert.equal(await page.$eval('.spec-raw', e => e.textContent.includes('人签意图')), true);
  delayRuntime = true; await page.goto(origin + '/settings/runtime', { waitUntil: 'domcontentloaded' }); await page.waitForSelector('.wb-skeleton'); await page.screenshot({ path: path.join(output, 'runtime-loading.png') });
  assert.deepEqual(report.errors, []); assert.deepEqual(mutations, []);
  assert.equal(report.pages.every(p => !p.overflow && p.violations.length === 0), true, 'Axe violations or horizontal overflow: see report');
