@@ -29,6 +29,8 @@ class InspectionStore:
             run = self.store.get(data['last_run_id'])
             data['last_status'] = run['status']
             data['last_result'] = (run.get('artifacts', {}).get('verification') or {}).get('reason') or run.get('error')
+        if hasattr(self, 'automation'):
+            data.update(self.automation.history(pid))
         return data
 
     def configure(self, pid, *, enabled, interval_s, revision, actor_id):
@@ -67,7 +69,8 @@ class InspectionStore:
                 if busy:
                     continue
                 rid = uuid.uuid4().hex
-                run = dict(id=rid, project_id=pid, request=prompt, status='received', revision=0,
+                context = self.automation.context(pid) if hasattr(self, 'automation') else ''
+                run = dict(id=rid, project_id=pid, request=prompt + context, status='received', revision=0,
                     plan=None, triage=None, tasks=[], artifacts={}, history=[], created_at=now(), updated_at=now(),
                     source={'type': 'inspection', 'operation': 'startup', 'operation_version': preset['version'],
                             'actor_id': config['actor_id'], 'schedule_revision': config['revision']})

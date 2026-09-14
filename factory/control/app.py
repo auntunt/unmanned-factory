@@ -155,6 +155,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
 
     app = FastAPI(title='webuddy', docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
+    svc.operations_automation.origin = origin
     app.state.auth, app.state.service, app.state.store = auth, svc, store
     app.state.governance = governance
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed_origin.hostname, '127.0.0.1', 'localhost'])
@@ -551,6 +552,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             raise HTTPException(422, str(exc)) from None
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
                if body.idempotency_key else None)
+        if body.operation == 'startup':
+            compiled += svc.operations_automation.context(body.project_id)
         run, created = store.create_run(body.project_id, compiled,
                                  source={'type': 'web', 'actor': request.state.user['username'],
                                          'actor_id': request.state.user['id'],

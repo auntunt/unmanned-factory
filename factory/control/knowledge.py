@@ -342,7 +342,9 @@ class KnowledgeStore:
         # calling this helper, but must obey the same project-wide cap.
         if revision == 1 and count >= 1000:
             raise ValueError("project knowledge is limited to 1000 entries")
-        if revision > 100:
+        operational_fact = (key in ('operation.startup_command', 'operation.health')
+                            and provenance.get('source') == 'verified_operation')
+        if revision > 100 and not operational_fact:
             raise ValueError("knowledge entry history is limited to 100 versions")
         at = now()
         db.execute(

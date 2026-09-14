@@ -51,6 +51,9 @@ def assemble_context(store, project, query, history=None):
     candidates, stale = [], 0
     ancestry_cache, historical_keys = {}, set()
     for entry in knowledge.entries(project['id']):
+        # Operational facts have a separate opt-in compiler attachment.
+        if entry.get('provenance', {}).get('source') == 'verified_operation':
+            continue
         if entry['status'] != 'active':
             continue
         title = entry['title'].casefold()

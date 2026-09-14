@@ -25,6 +25,12 @@ class RuntimeProfilesBody(StrictBody):
     limits: dict
 
 
+class OperationsBody(StrictBody):
+    revision: int = Field(ge=0, strict=True)
+    knowledge_enabled: bool = Field(strict=True)
+    webhook: str | None = Field(default=None, max_length=1000)
+
+
 class RuntimeProbeBody(StrictBody):
     profile: str = Field(min_length=1, max_length=20)
     configuration_revision: int = Field(ge=1, strict=True)
@@ -43,6 +49,21 @@ def router(store, service, workspace_root=None, static_dir=None):
     if not isinstance(settings, RuntimeSettings):
         raise ValueError("service.runtime_settings is required")
     api = APIRouter(prefix="/api/v2")
+
+    @api.get("/runtime/operations")
+    def operations_config(request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        return service.operations_automation.config()
+
+    @api.put("/runtime/operations")
+    def operations_update(body: OperationsBody):
+        try:
+            return service.operations_automation.configure(**body.model_dump())
+        except Conflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     @api.get("/runtime")
     def runtime():

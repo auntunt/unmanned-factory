@@ -19,7 +19,7 @@ ACTIVE = ('received', 'planning', 'queued', 'running', 'verifying', 'publishing'
 PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
 PROJECT_BUDGET_INCREASE_BLOCKING = PROJECT_EDIT_BLOCKING - {'ready_for_review'}
 PROJECT_BUDGET_DECREASE_BLOCKING = PROJECT_EDIT_BLOCKING | {'needs_human'}
-SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key)$')
+SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key|webhook)$')
 
 
 def now():

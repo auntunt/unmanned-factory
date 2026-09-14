@@ -259,6 +259,10 @@ class Service:
         self.operations = OperationStore(store)
         self.inspections = InspectionStore(store, self.operations)
         self._inspection_tick_at = 0
+        from factory.control.operations_automation import OperationsAutomation
+        self.operations_automation = OperationsAutomation(store)
+        self.inspections.automation = self.operations_automation
+        self.operations_thread = None
 
     def _ensure_scheduler(self):
         with self.lock:
@@ -268,6 +272,9 @@ class Service:
             if self.scheduler is None:
                 self.scheduler = threading.Thread(target=self._dispatch, daemon=True,
                                                   name='factory-durable-queue')
+                self.operations_thread = threading.Thread(target=self.operations_automation.serve,
+                    args=(self.stopping,), daemon=True, name='factory-operations-observer')
+                self.operations_thread.start()
                 self.scheduler.start()
 
     def _dispatch(self):
@@ -1677,7 +1684,16 @@ class Service:
         if self.store.get(rid).get('source', {}).get('type') == 'inspection':
             raise Conflict('巡检没有可发布的交付物')
         from factory.control.github_publication import GitHubPublication
-        return GitHubPublication(self).publish(rid, **kwargs)
+        try:
+            return GitHubPublication(self).publish(rid, **kwargs)
+        except (Conflict, ValueError):
+            raise
+        except Exception as exc:
+            # Repository lookup/creation can fail before publish() emits its event.
+            from factory.control.github import publish_failure_message
+            self.store.append(rid, 'github.publish_failed', {
+                'message': publish_failure_message(exc), 'error_type': type(exc).__name__})
+            raise
 
     def publish(self, rid):
         if self.store.get(rid).get('source', {}).get('type') == 'inspection':
@@ -1826,6 +1842,8 @@ class Service:
         for event in self.maintenance_cancels.values():
             event.set()
         self.pool.shutdown(wait=True, cancel_futures=True)
+        if self.operations_thread is not None:
+            self.operations_thread.join(timeout=6)
         self.queue.release()
         if self.publisher and hasattr(self.publisher, 'close'):
             self.publisher.close()

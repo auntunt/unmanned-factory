@@ -15,6 +15,7 @@ MASK = "***REDACTED***"
 
 # 每条都保留 key 名，只吃掉值 —— 审计要能看出"这里有个密钥"，只是看不到它
 _PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"\'<>()]+", re.I),
     # key=value / key: value / "key": "value"
     # 前缀 [A-Za-z0-9_.-]* 是为了吃掉 DEPLOY_PASSWORD 这种带前缀的名字：
     # \b 在 "DEPLOY_PASSWORD" 的 _P 处不成立，光靠 \b 会漏。
