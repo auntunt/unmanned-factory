@@ -37,7 +37,7 @@ class Project(Body):
     checks: dict[str, list[str]] = Field(default_factory=dict)
     auto_issues: bool = False
     auto_publish: bool = False
-    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
 
 
 class ProjectUpdate(Body):
@@ -47,7 +47,7 @@ class ProjectUpdate(Body):
     checks: dict[str, list[str]] = Field(default_factory=dict)
     auto_issues: bool = False
     auto_publish: bool = False
-    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
 
 
 class ConnectProject(Body):
@@ -57,13 +57,13 @@ class ConnectProject(Body):
     checks: dict[str, list[str]] = Field(default_factory=dict)
     auto_issues: bool = False
     auto_publish: bool = False
-    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
 
 
 class NewWorkspace(Body):
     agent_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
-    budget_usd: float = Field(default=10.0, gt=0, le=1000, allow_inf_nan=False)
+    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
     idempotency_key: str = Field(min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
 
 class InspectionSettings(Body):
@@ -286,12 +286,12 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def import_workspace(request: Request, file: UploadFile = File(...),
                          name: str = Form(..., min_length=1, max_length=120),
                          idempotency_key: str = Form(..., min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$'),
-                         budget_usd: float = Form(10.0, gt=0, le=1000), agent_id: str | None = Form(None)):
+                         budget_usd: float | None = Form(None, gt=0, le=1000000), agent_id: str | None = Form(None)):
         from factory.control.project_import import import_project, ImportError
         from factory.control.workspaces import WorkspaceError
         from factory.control.project_assistants import ProjectAssistants
         import math
-        if not name.strip() or not math.isfinite(budget_usd):
+        if not name.strip() or (budget_usd is not None and not math.isfinite(budget_usd)):
             raise HTTPException(422, '请填写有效的项目名称和预算')
         helpers = ProjectAssistants(store)
         if agent_id:
@@ -373,7 +373,10 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         validate_check_definitions(body.checks)
         validate_project_git(root, body.base_branch)
         try:
-            return store.update_project(pid, body.model_dump(exclude={'revision'}), body.revision,
+            changes = body.model_dump(exclude={'revision'})
+            if 'budget_usd' not in body.model_fields_set:
+                changes.pop('budget_usd', None)
+            return store.update_project(pid, changes, body.revision,
                                         request.state.user['username'])
         except Conflict:
             raise

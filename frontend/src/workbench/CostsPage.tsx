@@ -38,11 +38,12 @@ export default function CostsPage({ onUnauthorized }: PageProps) {
       : `已观察到 ${tokenFormat.format(cacheReads)} 个缓存读取 token。`
 
   return <div className="wb-page">
-    <PageHeader title="调用记录" description="查看模型、token 和提示缓存是否真正命中。计费与 token 额度由中转站统一管理。" actions={<><button className="wb-button wb-button-secondary" onClick={() => setRefreshIndex((value) => value + 1)}>刷新</button><Link className="wb-button wb-button-secondary" to="/settings/runtime">运行配置</Link></>} />
+    <PageHeader title="用量与预算" description="监测模型费用和 token；项目停止线与团队月度额度分别管理。供应商未返回的费用不会视为零。" actions={<><button className="wb-button wb-button-secondary" onClick={() => setRefreshIndex((value) => value + 1)}>刷新</button><Link className="wb-button wb-button-secondary" to="/settings/runtime">运行配置</Link></>} />
     {error && <ErrorNotice message={error} />}
     {!data && !error && <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>}
     {data && <>
       <div className="wb-cost-summary">
+        <article><span>已报告费用（美元）</span><strong>{typeof data.known_cost_usd === 'number' ? `$${data.known_cost_usd.toFixed(4)}` : '费用未知'}</strong><small>{data.unknown_cost_runs ?? '未知数量的'} 条运行费用不完整</small></article>
         <article><span>运行总数</span><strong>{data.runs}</strong><small>包含规划与执行</small></article>
         <article><span>模型调用</span><strong>{calls}</strong><small>{tokenCalls > 0 ? `${tokenCalls} 次带 token 数据` : '尚无 token 数据'}</small></article>
         <article><span>提示缓存</span><strong title={cacheMessage} tabIndex={0} aria-label={`提示缓存：${cacheMessage}`}>{cacheCalls === 0 ? '未知' : cacheReads > 0 ? '已命中' : '未命中'}</strong></article>
@@ -54,7 +55,7 @@ export default function CostsPage({ onUnauthorized }: PageProps) {
           : <div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>角色</th><th>Provider</th><th>模型</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>缓存创建</th><th>缓存读取</th></tr></thead><tbody>{data.model_usage.map((item, index) => <tr key={`${item.profile}-${item.provider ?? 'unknown'}-${item.model ?? 'unknown'}-${index}`}><td><strong>{item.profile}</strong></td><td className="wb-mono">{item.provider || '—'}</td><td className="wb-mono">{item.model || '未配置'}</td><td>{item.calls}</td>{item.token_usage_calls === 0 && item.cache_usage_calls === 0 ? <td colSpan={4}><span className="wb-mode-badge">供应商未返回明细</span></td> : <><td>{tokens(item.input_tokens, item.token_usage_calls)}</td><td>{tokens(item.output_tokens, item.token_usage_calls)}</td><td>{tokens(item.cache_creation_input_tokens, item.cache_usage_calls)}</td><td>{item.cache_usage_calls > 0 && item.cached_input_tokens === 0 ? '0（未命中）' : tokens(item.cached_input_tokens, item.cache_usage_calls)}</td></>}</tr>)}</tbody></table></div>}
       </section>
       <section className="wb-card wb-cost-note"><strong>缓存诊断</strong><span>{cacheMessage} 这里显示的是模型提示缓存；npm、pip、uv 的依赖缓存由执行环境按项目独立复用。</span></section>
-      <section className="wb-card wb-cost-note"><strong>计费管理</strong><span>账户计费和 token 额度由中转站管理；webuddy 的项目预算只用于在达到上限后阻止后续模型调用。</span></section>
+      <section className="wb-card"><h2>项目费用控制</h2><p>仅监测不会按美元金额暂停；已配置停止线的项目保留原值，可在项目设置中关闭。</p><div className="wb-table-wrap"><table className="wb-table"><thead><tr><th>项目</th><th>当前模式</th><th>配置</th></tr></thead><tbody>{data.project_summaries?.map(project => <tr key={project.id}><td>{project.name}</td><td>{project.budget_usd == null ? '仅监测' : `每次运行 $${project.budget_usd} 后停止`}</td><td><Link to={`/projects/${encodeURIComponent(project.id)}?tab=settings#project-budget`}>管理 {project.name} 预算</Link></td></tr>)}</tbody></table></div><Link to="/team">团队 token 用量与额度（留空不限额）</Link></section>
     </>}
   </div>
 }

@@ -159,12 +159,13 @@ class Store:
                 and type(new_budget) in (int, float)
                 and math.isfinite(float(old_budget))
                 and math.isfinite(float(new_budget)))
-            if numeric_budget_change and new_budget < old_budget:
+            if ('budget_usd' in effective and new_budget is not None
+                    and (old_budget is None or (numeric_budget_change and new_budget < old_budget))):
                 # A paused run may be relying on its current ceiling. Apply this
                 # protection even when the request edits other settings too.
                 blocking_statuses = PROJECT_BUDGET_DECREASE_BLOCKING
-            elif (set(effective) == {'budget_usd'} and numeric_budget_change
-                    and new_budget > old_budget):
+            elif (set(effective) == {'budget_usd'}
+                    and (new_budget is None or (numeric_budget_change and new_budget > old_budget))):
                 blocking_statuses = PROJECT_BUDGET_INCREASE_BLOCKING
             else:
                 blocking_statuses = PROJECT_EDIT_BLOCKING

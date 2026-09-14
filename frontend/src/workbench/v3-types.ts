@@ -67,7 +67,7 @@ export interface ProjectSummary {
   id: string
   name: string
   repository: string
-  budget_usd?: number
+  budget_usd?: number | null
   run_count: number
   active_runs: number
   attention_runs: number
@@ -101,6 +101,6 @@ export interface Policy {
   resume_on_restart: boolean
 }
 
-export type V3Project = Project & { revision?: number; budget_usd?: number }
+export type V3Project = Project & { revision?: number; budget_usd?: number | null }
 export type V3Run = Run & { source?: Record<string, unknown>; capability?: Capability & { source?: Record<string, unknown> }; capabilities?: Capability[]; planner_usage?: Record<string, unknown>; previous_run_id?: string }
 export type V3Artifacts = Artifacts & { known_cost_usd?: number; observed_cost_usd?: number | null; billing_incomplete?: unknown; attempts?: unknown }

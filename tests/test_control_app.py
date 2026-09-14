@@ -73,7 +73,7 @@ def login(client):
 
 
 def project(client, repo, headers):
-    response = client.post('/api/v2/projects', json={'name': 'Sample', 'repository': 'owner/sample',
+    response = client.post('/api/v2/projects', json={'name': 'Sample', 'repository': 'owner/sample', 'budget_usd': 10,
         'workspace': str(repo), 'checks': {'greeting': [sys.executable, '-c',
             "from pathlib import Path; assert Path('greeting.txt').read_text() == 'hello world'"]}}, headers=headers)
     assert response.status_code == 201, response.text

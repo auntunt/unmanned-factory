@@ -119,7 +119,7 @@ export function runGuidance(run: Run): RunGuidance {
   if (run.status === 'needs_human' && budgetStopped) return result(run, {
     kind: 'budget',
     label: '预算已用尽',
-    summary: '预算会按已报告费用停止后续模型调用；已在途调用仍可能使费用越过预算。现有成果已保留，管理员调整项目预算后，可从暂停任务继续或重试；账户级计费与额度仍由中转站管理。',
+    summary: '预算会按已报告费用停止后续模型调用；已在途调用仍可能使费用越过预算。现有成果已保留，管理员提高项目预算或切换为仅监测后，可从暂停任务继续或重试；账户级计费与额度仍由中转站管理。',
     detail: stopReason,
     view: 'execution',
     stage: 'build',

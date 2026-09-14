@@ -123,3 +123,17 @@ it('saves edits across unmount, shows remaining characters near the limit and do
   view.unmount(); show()
   expect((await screen.findByLabelText('新需求说明') as HTMLTextAreaElement).value.length).toBe(49000)
 })
+
+it('shows budget controls and explicitly saves monitoring without a hidden dollar ceiling', async () => {
+  show()
+  fireEvent.click(await screen.findByRole('button', { name: '项目设置' }))
+  const mode = await screen.findByLabelText('费用控制', { selector: 'select' })
+  expect((mode as HTMLSelectElement).value).toBe('monitor')
+  fireEvent.change(mode, { target: { value: 'enforce' } })
+  expect((screen.getByLabelText('单次运行预算（美元）') as HTMLInputElement).value).toBe('100')
+  fireEvent.change(mode, { target: { value: 'monitor' } })
+  expect(screen.queryByLabelText('单次运行预算（美元）')).toBeNull()
+  api.mockImplementationOnce(async () => ({ ...project, revision: 2, budget_usd: null }) as never)
+  fireEvent.click(screen.getByRole('button', { name: '保存项目设置' }))
+  await waitFor(() => expect(api.mock.calls.find(([url, options]) => url === '/api/v2/projects/p1' && options?.method === 'PUT')?.[1]?.body).toMatchObject({ budget_usd: null, revision: 1 }))
+})

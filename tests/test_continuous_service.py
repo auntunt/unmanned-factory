@@ -11,9 +11,11 @@ from tests.test_control_app import login, project
 from tests.test_workbench_app import app_env
 
 
-def prepared(app_env, monkeypatch, request='Update greeting.txt'):
+def prepared(app_env, monkeypatch, request='Update greeting.txt', *, budget_usd=10):
     client, store, svc, repo = app_env
     p = project(client, repo, login(client))
+    if budget_usd != p['budget_usd']:
+        p = store.update_project(p['id'], {'budget_usd': budget_usd}, p['revision'], 'owner')
     current = svc.policies.get(p['id'])
     svc.policies.update(p['id'], dict(DEFAULT_POLICY), current['revision'], 'owner')
     submitted = []
@@ -792,3 +794,31 @@ def test_plain_continue_resumes_failed_platform_stage_but_new_feedback_runs_mode
     store.update(rid, {'status':'needs_human'})
     svc.continue_run(rid, '增加一个导出功能', run['revision'], 1, 'owner')
     assert store.get(rid)['execution_resume']['resume_stage'] is None
+
+
+def test_monitoring_continuous_coding_and_review_have_no_provider_ceiling(app_env, monkeypatch):
+    import json
+    from pathlib import Path
+    from factory.control.providers import ProviderResult
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch, budget_usd=None)
+    calls = []
+    def runner(request, emit, cancel=None):
+        calls.append(request)
+        if request.read_only:
+            assert 'verdict' in request.prompt
+            assert 'A README documenting a restriction does not authorize narrowing the contract' in request.prompt
+            return ProviderResult(passing_review(request, 'greeting check passed'), cost_usd=100)
+        (Path(request.workspace) / 'greeting.txt').write_text('hello world')
+        return ProviderResult('done', cost_usd=100, session_id='persistent-session')
+    monkeypatch.setattr(svc.runner, 'run', runner)
+    svc._plan(rid)
+    assert calls == []
+    svc._run(rid)
+    run = store.get(rid)
+    assert run['status'] == 'ready_for_review', run
+    assert len(calls) == 2
+    assert [call.read_only for call in calls] == [False, True]
+    assert [call.max_budget_usd for call in calls] == [None, None]
+    assert svc._usage(rid)['known_cost_usd'] == 200
+    assert run['artifacts']['session_id'] == 'persistent-session'
+    assert Path(p['workspace'], 'greeting.txt').read_text() == 'hello'

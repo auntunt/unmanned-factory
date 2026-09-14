@@ -91,7 +91,7 @@ def control(tmp_path):
         assert login.status_code == 200
         headers = {"Origin": "http://testserver", "X-CSRF-Token": login.json()["csrf_token"]}
         project = client.post("/api/v2/projects", json={
-            "name": "Sample", "repository": "owner/sample", "workspace": str(repo),
+            "name": "Sample", "repository": "owner/sample", "workspace": str(repo), "budget_usd": 10,
             "checks": {"greeting": [sys.executable, "-c", "from pathlib import Path; assert Path('greeting.txt').read_text() == 'hello autonomous\\n'"]},
         }, headers=headers)
         assert project.status_code == 201, project.text

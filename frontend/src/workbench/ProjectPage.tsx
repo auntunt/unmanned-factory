@@ -51,7 +51,8 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const [checks, setChecks] = useState<ChecksMap>(project.checks ?? {})
   const [autoIssues, setAutoIssues] = useState(Boolean(project.auto_issues))
   const [autoPublish, setAutoPublish] = useState(Boolean(project.auto_publish))
-  const [budget, setBudget] = useState(String(project.budget_usd ?? 10))
+  const [budget, setBudget] = useState(String(project.budget_usd ?? 100))
+  const [enforceBudget, setEnforceBudget] = useState(project.budget_usd != null)
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [search] = useSearchParams()
@@ -64,17 +65,17 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
-  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 10)); setBaseRevision(project.revision ?? 1) }, [project])
+  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
 
   const save = async (event: FormEvent) => {
     event.preventDefault(); setError(null); setConflict(null); setSaved(false)
     const budgetValue = Number(budget)
     const checksError = validateChecks(checks)
     if (checksError) { setError(checksError); return }
-    if (!Number.isFinite(budgetValue) || budgetValue <= 0) { setError('预算需要是大于 0 的数字。'); return }
+    if (enforceBudget && (!Number.isFinite(budgetValue) || budgetValue <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
     try {
-      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: budgetValue } })
+      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: enforceBudget ? budgetValue : null } })
       if (!controller.signal.aborted) { dirtyRef.current = false; setBaseRevision(next.revision ?? baseRevision); onSaved(next); setSaved(true) }
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -99,19 +100,21 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   return <div className="pw-settings-stack">
     <form className="wb-card wb-form" onSubmit={save}>
       <div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目设置</span><h2>预算与执行边界</h2><p>以下设置只属于这个项目。保存后用于后续规划和重试，不会自动继续已经暂停的运行。</p></div>{project.revision !== undefined && <span className="wb-revision">修订 {project.revision}</span>}</div>
-      {false && <section className="pw-budget-field" id="project-budget" aria-labelledby="project-budget-label">
-        <label htmlFor="project-budget-input" id="project-budget-label">单次运行预算（美元）<input id="project-budget-input" type="number" min="0.01" max="1000" step="0.01" required value={budget} onChange={(event) => { dirtyRef.current = true; setBudget(event.target.value); setSaved(false) }} /></label>
-        <small>每条需求分别使用这条费用停止线。服务商已报告的累计费用超过此值后，工厂停止后续派发；它不是充值余额，也不是成员的月度 token 额度。</small>
-        <small>正在进行的模型调用可能超过停止线。费用尚未返回时，按工作区的未知费用策略处理。</small>
-      </section>}
+      <section className="pw-budget-field" id="project-budget" aria-label="费用控制">
+        <label>费用控制<select value={enforceBudget ? 'enforce' : 'monitor'} onChange={event => { dirtyRef.current = true; setEnforceBudget(event.target.value === 'enforce'); setSaved(false) }}><option value="monitor">仅监测（推荐，不因美元额度暂停）</option><option value="enforce">达到额度停止</option></select></label>
+        {enforceBudget && <label htmlFor="project-budget-input">单次运行预算（美元）<input id="project-budget-input" type="number" min="0.01" max="1000000" step="0.01" required value={budget} onChange={event => { dirtyRef.current = true; setBudget(event.target.value); setSaved(false) }} /></label>}
+        <small>{enforceBudget ? '每条需求独立累计费用，到达停止线后不再派发模型调用；它不是供应商充值余额。' : '规划、编码与独立验收继续记录费用和 token，不向模型传递美元上限。费用缺失显示为未知，不当作免费。'}</small>
+        <small>超时、并发和重试限制仍生效。团队单独配置的月度 token 额度仍可暂停任务。</small>
+        <div><Link to="/costs">查看用量与预算</Link> · <Link to="/team">查看团队 token 额度</Link></div>
+      </section>
       <div className="wb-form-grid wb-form-grid-two"><label>项目名称<input required maxLength={120} value={name} onChange={(event) => { dirtyRef.current = true; setName(event.target.value) }} /></label><label>基础分支<input required value={branch} onChange={(event) => { dirtyRef.current = true; setBranch(event.target.value) }} /></label><label>仓库<input value={project.repository} readOnly /></label><label>工作区<input value={project.workspace} readOnly /></label></div>
       <details className="wb-advanced" id="project-checks"><summary>验收检查与自动发布</summary><div className="wb-advanced-body"><ChecksEditor value={checks} onChange={(value) => { dirtyRef.current = true; setChecks(value) }} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={autoIssues} onChange={(event) => { dirtyRef.current = true; setAutoIssues(event.target.checked) }} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={autoPublish} onChange={(event) => { dirtyRef.current = true; setAutoPublish(event.target.checked) }} />允许通过验证后自动交付</label></div></div></details>
       {error && <ErrorNotice message={error} />}
-      {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
-      {saved && <div className="wb-notice" role="status">项目设置已保存。{returnRun ? '返回该运行后，可按新设置重新规划。' : '后续规划和重试将使用新设置。'}</div>}
-      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行并重新规划' : '返回刚才的运行'}</Link>}</div>
+      {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'} · 费用控制 {conflict.budget_usd == null ? '仅监测' : `每次 $${conflict.budget_usd} 后停止`}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
+      {saved && <div className="wb-notice" role="status">项目设置已保存。{returnRun ? '返回该运行后，可按新设置继续或重试。' : '后续规划和重试将使用新设置。'}</div>}
+      <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行继续或重试' : '返回刚才的运行'}</Link>}</div>
     </form>
-    <section className="wb-card"><h2>模型与执行设置</h2><p>费用和 token 额度由中转站统一管理。</p><Link to="/settings/runtime">配置模型、并行数与超时</Link></section>
+    <section className="wb-card"><h2>模型与执行设置</h2><p>供应商账户余额由中转站管理；本地费用控制与团队额度可分别配置。</p><Link to="/settings/runtime">配置模型、并行数与超时</Link></section>
   </div>
 }
 
@@ -235,7 +238,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
 
   return <div className="wb-page pw-project-page">
     <div className="pw-context"><Link to="/overview">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
-    <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <span className="wb-runtime-note">计费由中转站管理</span> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
+    <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <Link className="wb-runtime-note" to={`/projects/${project.id}?tab=settings#project-budget`}>{project.budget_usd == null ? '费用：仅监测' : `预算：每次 $${project.budget_usd}`}</Link> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
     <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环'], ['settings', '项目设置']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}{project.spec_tree_enabled && <button className={`wb-project-tab ${tab === 'spec' ? 'is-active' : ''}`} aria-current={tab === 'spec' ? 'page' : undefined} onClick={() => setTab('spec')}>规格树</button>}</nav>
     <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
     {tab === 'overview' && <>
@@ -259,7 +262,6 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
       </section>
     </>}
     {tab === 'settings' && <><EvolutionPolicy projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin}/><ProjectInspection projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /><ProjectTargets projectId={String(project.id)} runs={runs ?? []} csrfToken={csrfToken} onUnauthorized={onUnauthorized} isAdmin={isAdmin} /></>}
-    {tab === 'overview' && <p className="wb-runtime-note">计费由中转站管理</p>}
     {tab === 'agent' && isAdmin && <ProjectKnowledge projectId={project.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
     {tab === 'agent' && isAdmin && <details className="wb-card wb-agent-card"><summary className="pk-reference-summary">项目档案、知识原文与代码索引</summary><div className="wb-project-agent"><ProjectAgent key={String(project.id)} projectId={project.id} repository={project.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div></details>}
     {tab === 'automation' && isAdmin && <ProjectAutomation key={String(project.id)} projectId={String(project.id)} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onPolicySaved={() => setPolicyRefresh((value) => value + 1)} />}

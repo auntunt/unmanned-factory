@@ -56,8 +56,8 @@ class DollarBudget:
 def dollar_budget(limit_usd: Any, usage: Mapping[str, Any]) -> DollarBudget:
     """Validate and normalize an event-derived usage subtotal.
 
-    ``None`` keeps the executor's explicit unlimited mode for non-project
-    callers. Project service paths always supply their configured finite limit.
+    ``None`` selects monitoring only: usage is still recorded, but no dollar
+    ceiling is passed to providers. A finite value explicitly enables enforcement.
     """
     if not isinstance(usage, Mapping):
         raise BudgetConfigurationError("usage must be a mapping")

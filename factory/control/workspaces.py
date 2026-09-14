@@ -22,7 +22,7 @@ def initialize_repository(path: Path, *, env=None):
         subprocess.run(['git', *args], cwd=path, env=env, check=True, capture_output=True, timeout=15)
 
 
-def create_workspace(store, root: Path, *, name: str, budget_usd: float, actor_id: int, idempotency_key: str):
+def create_workspace(store, root: Path, *, name: str, budget_usd: float | None, actor_id: int, idempotency_key: str):
     fingerprint = hashlib.sha256(json.dumps([name, budget_usd], ensure_ascii=False).encode()).hexdigest()
     owned = None
     try:

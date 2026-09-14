@@ -11,7 +11,7 @@ import type { PageProps } from './ui'
 
 export interface ProjectRecord extends Project {
   revision?: number
-  budget_usd?: number
+  budget_usd?: number | null
   managed_workspace?: boolean
 }
 
@@ -45,7 +45,7 @@ interface ProjectDraft {
   budget_usd: string
 }
 
-const blankDraft: ProjectDraft = { name: '', candidate_id: '', budget_usd: '10' }
+const blankDraft: ProjectDraft = { name: '', candidate_id: '', budget_usd: '' }
 
 function errorText(error: unknown): string {
   if (error instanceof WorkspaceApiError) return error.detail
@@ -75,15 +75,15 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     if (busy) return
     if (mode !== 'connect' && !draft.name.trim()) { setError('请填写项目名称。'); return }
     if (mode === 'zip') { const problem = validateProjectZip(archive); if (problem) { setError(problem); return } }
-    const budget = Number(draft.budget_usd)
-    if (!Number.isFinite(budget) || budget <= 0) { setError('预算需要是大于 0 的数字。'); return }
+    const budget = draft.budget_usd.trim() ? Number(draft.budget_usd) : null
+    if (budget !== null && (!Number.isFinite(budget) || budget <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     if (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered)) { setError('请从最新列表中选择工程。'); return }
     setBusy(true)
     controllerRef.current?.abort()
     const controller = new AbortController(); controllerRef.current = controller
     try {
       if (mode === 'zip' && archive) {
-        const body = new FormData(); body.append('file', archive); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); body.append('budget_usd', String(budget)); if (helperId) body.append('agent_id', helperId)
+        const body = new FormData(); body.append('file', archive); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); if (budget !== null) body.append('budget_usd', String(budget)); if (helperId) body.append('agent_id', helperId)
         const result = await request<{ project: ProjectRecord; import_summary: ProjectImportSummary }>('/api/v2/projects/import-zip', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body })
         if (!controller.signal.aborted) onCreated(result.project, projectImportNotice(result.import_summary))
         return
@@ -105,7 +105,7 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
       <div className="wb-form-grid wb-form-grid-two">
         {mode === 'connect' && <label className="wb-span-two">选择工程，系统自动连接<select required value={draft.candidate_id} onChange={(event) => { const candidate = candidates?.find((item) => item.id === event.target.value); update('candidate_id', event.target.value); if (candidate) update('name', candidate.name) }} disabled={!candidates || availableProjectCandidates(candidates).length === 0}><option value="">{candidates ? availableProjectCandidates(candidates).length ? '请选择工程' : '没有发现可登记的工程' : '正在发现工程…'}</option>{candidates && availableProjectCandidates(candidates).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select><small>{rootAvailable ? '工程位置由服务器维护。' : '服务器工程目录当前不可用，请稍后刷新。'}</small></label>}
         <label>项目名称<input required={mode !== 'connect'} maxLength={120} value={draft.name} onChange={(event) => update('name', event.target.value)} placeholder={mode !== 'connect' ? '例如：我的转换器项目' : '留空使用工程名称'} /></label>
-        <p>计费与 token 额度由中转站统一管理。</p>
+        <p>默认仅监测费用与 token，不因本地美元额度暂停。需要停止线时可在项目设置中开启。</p>
       </div>
       {mode === 'connect' && <><button type="button" className="wb-button wb-button-secondary" onClick={() => setRefresh((value) => value + 1)} disabled={!candidates && !candidateError}>刷新工程列表</button>{candidateError && <ErrorNotice message={`${candidateError} 可重试发现工程。`} />}</>}{error && <ErrorNotice message={error} />}
       <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy || (mode === 'zip' && Boolean(validateProjectZip(archive))) || (mode !== 'connect' && !draft.name.trim()) || (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered))}>{busy ? mode === 'zip' ? '正在上传并识别项目…' : '准备中…' : mode === 'workspace' ? '创建工作区' : mode === 'zip' ? '导入项目' : '连接工程'}</button></div>
