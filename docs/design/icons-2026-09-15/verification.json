@@ -1,0 +1,28 @@
+{
+  "fixture": true,
+  "report": [
+    {
+      "theme": "light",
+      "overflow": false,
+      "expanded": true,
+      "triangle": true,
+      "badge": true,
+      "actionSizes": [
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "theme": "dark",
+      "overflow": false,
+      "expanded": true,
+      "triangle": true,
+      "badge": true,
+      "actionSizes": [
+        "14px",
+        "14px"
+      ]
+    }
+  ],
+  "errors": []
+}

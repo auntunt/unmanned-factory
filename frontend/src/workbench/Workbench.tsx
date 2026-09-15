@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import ThemeSwitch from './ThemeSwitch'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -7,23 +8,20 @@ import { request } from '../workspace/api'
 import type { WorkbenchProps } from './ui'
 
 const navigation = [
-  { to: '/agents', label: '职能体', icon: 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM4 21a8 8 0 0 1 16 0M19 5h2M20 4v2', end: false },
-  { to: '/', label: '工作总览', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z', end: true },
-  { to: '/runs', label: '运行看板', icon: 'M4 4h16v16H4zM9 4v16M15 4v16M4 10h5M9 14h6M15 8h5', end: false },
-  { to: '/projects', label: '项目', icon: 'M3 7V5h6l2 2h10v13H3z', end: false },
-  { to: '/ability-center', label: '能力中心', icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5', end: false },
-  { to: '/costs', label: '用量与预算', icon: 'M4 4v16h17M8 15v-4M13 15V7M18 15v-6', end: false },
-  { to: '/team', label: '团队', icon: 'M7 20v-2.5A3.5 3.5 0 0 1 10.5 14h3A3.5 3.5 0 0 1 17 17.5V20M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 13a2.5 2.5 0 0 1 2 2.45V18M17 5.5a2.5 2.5 0 0 1 0 4.5', end: false },
+  { to: '/agents', label: '职能体', icon: 'agent' as const, end: false },
+  { to: '/', label: '工作总览', icon: 'overview' as const, end: true },
+  { to: '/runs', label: '运行看板', icon: 'runs' as const, end: false },
+  { to: '/projects', label: '项目', icon: 'project' as const, end: false },
+  { to: '/ability-center', label: '能力中心', icon: 'modules' as const, end: false },
+  { to: '/costs', label: '用量与预算', icon: 'costs' as const, end: false },
+  { to: '/team', label: '团队', icon: 'team' as const, end: false },
 ]
 
 const navOrder = ['/', '/projects', '/runs', '/ability-center', '/agents', '/costs', '/team']
 navigation.sort((a, b) => navOrder.indexOf(a.to) - navOrder.indexOf(b.to))
 
-const secondaryNavigation = [{ to: '/settings/runtime', label: '运行配置', icon: 'M4 7h16M4 17h16M8 4v6M16 14v6', end: false }]
+const secondaryNavigation = [{ to: '/settings/runtime', label: '运行配置', icon: 'settings' as const, end: false }]
 
-function NavIcon({ path }: { path: string }) {
-  return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={path} /></svg>
-}
 
 export default function Workbench({ user, onLogout, children }: WorkbenchProps & { children?: ReactNode }) {
   const [navOpen, setNavOpen] = useState(false)
@@ -48,28 +46,28 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
           <span className="wb-nav-label">工作区</span>
           {navigation.map((item, index) => (
             <div key={item.to} className="wb-nav-entry">{index === 3 && <span className="wb-nav-label wb-nav-group">能力与经验</span>}{index === 5 && <span className="wb-nav-label wb-nav-group">团队管理</span>}<NavLink aria-label={item.label} aria-current={item.to === '/' && location.pathname === '/overview' ? 'page' : undefined} to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}>
-              <span className="wb-nav-icon"><NavIcon path={item.icon} /></span><span>{item.label}</span>
+              <span className="wb-nav-icon"><Icon name={item.icon} /></span><span>{item.label}</span>
             </NavLink></div>
           ))}
           {visibleSecondary.length > 0 && <span className="wb-nav-label wb-nav-label-secondary">系统</span>}
-          {visibleSecondary.map((item) => <NavLink aria-label={item.label} key={item.to} to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}><span className="wb-nav-icon"><NavIcon path={item.icon} /></span><span>{item.label}</span></NavLink>)}
+          {visibleSecondary.map((item) => <NavLink aria-label={item.label} key={item.to} to={item.to} end={item.end} className={({ isActive }) => `wb-nav-item ${isActive ? 'is-active' : ''}`}><span className="wb-nav-icon"><Icon name={item.icon} /></span><span>{item.label}</span></NavLink>)}
         </nav>
         <div className="wb-sidebar-footer">
           <ThemeSwitch /><div className="wb-sidebar-note">需求驱动 · 结果可追溯</div>
           <div className="wb-account">
             <span className="wb-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
             <span className="wb-account-name">{user.username}</span>
-            <button className="wb-icon-button" onClick={onLogout} aria-label="退出登录" title="退出登录">↗</button>
+            <button className="wb-icon-button" onClick={onLogout} aria-label="退出登录" title="退出登录"><Icon name="logout" /></button>
           </div>
         </div>
       </aside>
       <div className="wb-main">
         <header className="wb-mobile-header">
-          <button className="wb-menu-button" aria-label="打开导航" aria-expanded={navOpen} onClick={() => setNavOpen(true)}>☰</button>
+          <button className="wb-menu-button" aria-label="打开导航" aria-expanded={navOpen} onClick={() => setNavOpen(true)}><Icon name="menu" /></button>
           <span className="wb-mobile-title">webuddy <em>/</em> {currentPage?.label ?? '工作区'}</span>
           <span className="wb-avatar wb-avatar-small" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
         </header>
-        {environment?.mode === 'preview' && <div className="wb-preview-banner" role="status"><span aria-hidden="true">◌</span><strong>本地演练</strong><span>{environment.label || '使用脚本执行，不调用模型或外部服务'}</span></div>}
+        {environment?.mode === 'preview' && <div className="wb-preview-banner" role="status"><span aria-hidden="true"><Icon name="preview" /></span><strong>本地演练</strong><span>{environment.label || '使用脚本执行，不调用模型或外部服务'}</span></div>}
         <main id="workbench-content" className="wb-content" tabIndex={-1}>{children ?? <Outlet />}</main>
       </div>
     </div>

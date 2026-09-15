@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { useEffect, useRef, useState } from 'react'
 import { request, WorkspaceApiError } from '../workspace/api'
 import type { Plan, Run } from '../workspace/types'
@@ -60,10 +61,10 @@ export default function PlanVersions({ run, onUnauthorized }: { run: Run; onUnau
   const toggle = (next: boolean) => { setOpen(next); if (next) void load() }
   const versions = planVersions(run, saved ?? [])
   return <details className="wb-plan-versions" open={open} onToggle={(event) => toggle((event.currentTarget as HTMLDetailsElement).open)}>
-    <summary>计划版本记录（当前 v{run.revision}）</summary>
+    <summary><Icon name="triangle" className="wb-disclosure-icon" />计划版本记录（当前 v{run.revision}）</summary>
     <p>展开后按需读取最近保存的计划版本（最多 100 个）；可查看历史范围和验收，当前没有一键回滚功能。</p>
     {error && <ErrorNotice message={error} />}
     {open && saved === null && !error && <div className="wb-loading" role="status">正在读取计划版本记录…</div>}
-    {versions.map((version) => <details className="wb-plan-version" key={version.revision} open={version.revision === run.revision}><summary><strong>v{version.revision}{version.revision === run.revision ? ' · 当前版本' : ''}</strong><span>{formatDate(version.at)}</span></summary><p>{version.summary}</p>{version.plan?.tasks.length ? <ul>{version.plan.tasks.map((task) => <li key={task.id}><strong>{task.title}</strong><span>范围：{task.paths.join('、') || '未记录'}；验收：{task.acceptance.join('；') || '未记录'}</span></li>)}</ul> : <p>该版本未保留完整任务明细。</p>}</details>)}
+    {versions.map((version) => <details className="wb-plan-version" key={version.revision} open={version.revision === run.revision}><summary><Icon name="triangle" className="wb-disclosure-icon" /><strong>v{version.revision}{version.revision === run.revision ? ' · 当前版本' : ''}</strong><span>{formatDate(version.at)}</span></summary><p>{version.summary}</p>{version.plan?.tasks.length ? <ul>{version.plan.tasks.map((task) => <li key={task.id}><strong>{task.title}</strong><span>范围：{task.paths.join('、') || '未记录'}；验收：{task.acceptance.join('；') || '未记录'}</span></li>)}</ul> : <p>该版本未保留完整任务明细。</p>}</details>)}
   </details>
 }

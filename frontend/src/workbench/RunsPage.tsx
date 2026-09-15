@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import RunStatusBadge from './RunStatusBadge'
 import { CopyValue, runTitle, RunMode, ListTime } from './presentation'
 import { nextRunAction } from './run-guidance'
@@ -63,7 +64,7 @@ export default function RunsPage({ onUnauthorized }: PageProps) {
     setSearchParams(next, { replace: true })
   }
   return <div className="wb-page">
-    <PageHeader title="运行看板" description="按真实运行状态追踪需求、异常和交付证据。" actions={<><button className="wb-button wb-button-secondary" onClick={() => setRefreshIndex((value) => value + 1)}>刷新</button><Link className="wb-button wb-button-primary" to="/projects">提交新需求 <span aria-hidden="true">＋</span></Link></>} />
+    <PageHeader title="运行看板" description="按真实运行状态追踪需求、异常和交付证据。" actions={<><button className="wb-button wb-button-secondary" onClick={() => setRefreshIndex((value) => value + 1)}>刷新</button><Link className="wb-button wb-button-primary" to="/projects">提交新需求 <span aria-hidden="true"><Icon name="plus" /></span></Link></>} />
     <section className="wb-card wb-runs-toolbar" aria-label="运行筛选"><label className="wb-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索需求、项目或运行编号" aria-label="搜索运行" /></label><label className="wb-run-project-filter">项目<select aria-label="按项目筛选运行" value={projectId} onChange={(event) => setProject(event.target.value)}><option value="">全部项目</option>{projects.map((project) => <option key={String(project.id)} value={String(project.id)}>{project.name}</option>)}</select></label><div className="wb-filter-list" role="tablist" aria-label="运行状态"><div>{filters.map(([key, label]) => <button key={key} role="tab" aria-selected={filter === key} className={`wb-filter ${filter === key ? 'is-active' : ''}`} onClick={() => setFilter(key)}>{label}<span>{key === 'all' ? runs?.length ?? '—' : key === 'active' ? runs?.filter((run) => ['received', 'planning', 'queued', 'running', 'verifying', 'publishing'].includes(run.status)).length ?? '—' : key === 'attention' ? runs?.filter((run) => ['needs_clarification', 'awaiting_approval', 'needs_human'].includes(run.status)).length ?? '—' : runs?.filter((run) => key === 'failed' ? ['failed', 'discarded', 'cancelled'].includes(run.status) : run.status === key).length ?? '—'}</span></button>)}</div></div></section>
     {error && <ErrorNotice message={error} />}{projectsError && <ErrorNotice message={projectsError} />}
     {!runs && !error && <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>}

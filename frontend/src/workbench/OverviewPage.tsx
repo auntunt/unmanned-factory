@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { ListTime } from './presentation'
 import StageStrip from './StageStrip'
 import { runTitle, RunMode, LoadingCard } from './presentation'
@@ -54,9 +55,9 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
   return <div className="wb-page ov3-page">
     <PageHeader title="工作总览" description="把想法交给伙伴，把注意力留给重要的事。" actions={<>
       <button className="wb-button wb-button-secondary" onClick={() => load(true)}>{loading && data ? '更新中…' : '刷新'}</button>
-      <Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目 <span aria-hidden="true">→</span></Link>
+      <Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目 <span aria-hidden="true"><Icon name="arrow" /></span></Link>
     </>} />
-    {data && data.projects > 0 ? <div className="wb-overview-start" aria-label="开始新工作"><span>继续已有项目，或开始新工作</span><Link className="wb-text-link" to="/agents">查看职能体</Link></div> : data && <section className="wb-purpose-band" aria-label="开始新工作"><span className="wb-purpose-symbol" aria-hidden="true">＋</span><div><h2>开始一项新工作</h2><p>直接描述目标，也可以从已有项目继续。</p></div><div className="wb-purpose-actions"><Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目</Link><Link className="wb-button wb-button-secondary" to="/agents">查看职能体</Link></div></section>}
+    {data && data.projects > 0 ? <div className="wb-overview-start" aria-label="开始新工作"><span>继续已有项目，或开始新工作</span><Link className="wb-text-link" to="/agents">查看职能体</Link></div> : data && <section className="wb-purpose-band" aria-label="开始新工作"><span className="wb-purpose-symbol" aria-hidden="true"><Icon name="plus" /></span><div><h2>开始一项新工作</h2><p>直接描述目标，也可以从已有项目继续。</p></div><div className="wb-purpose-actions"><Link className="wb-button wb-button-primary" to="/projects?create=1">新建项目</Link><Link className="wb-button wb-button-secondary" to="/agents">查看职能体</Link></div></section>}
     {error && <ErrorNotice message={data ? `刷新失败，以下为上一份记录：${error}` : error} />}
     {loading && !data && <LoadingCard label="正在读取项目进展" />}
     {data && <>
@@ -76,7 +77,7 @@ export default function OverviewPage({ onUnauthorized }: PageProps) {
         <div className="ov3-section-head"><div><span className="wb-eyebrow">项目工作台</span><h2 id="project-portfolio">当前工作</h2><p>点击阶段，查看项目最近的工作记录。</p></div></div>
         {currentProjects.map((project) => <article className="wb-card pw-project" key={project.id}>
           <header className="pw-project-heading"><div><Link to={`/projects/${encodeURIComponent(project.id)}`}><h3>{project.name}</h3></Link><p>{project.repository?.startsWith('local/') ? '系统管理的工作区' : project.repository}</p></div>
-            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} →</Link>}</div>
+            <div className="pw-project-activity"><span>{project.active_runs} 项进行中</span>{project.attention_runs > 0 && <Link className="pw-warning-text" to={`/runs?project_id=${encodeURIComponent(project.id)}&filter=attention`}>{project.attention_runs} 项待处理</Link>}<Link className="wb-button wb-button-secondary" to={`/projects/${encodeURIComponent(project.id)}`}>进入项目</Link>{project.next_run && <Link className="wb-button wb-button-primary" to={nextRunAction(project.next_run).href}>{nextRunAction(project.next_run).label} <Icon name="arrow" /></Link>}</div>
           </header>
           <StageStrip stages={project.engineering.stages} projectId={project.id} runs={data.run_snapshots} selectedId={project.next_run ? runGuidance(project.next_run).stage : undefined} />
           <footer className="pw-project-footer"><span>按阶段查看工作记录</span>

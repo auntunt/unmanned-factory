@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
@@ -12,9 +13,9 @@ export default function RunActions({ run, canClarify, canDiscard, canCancel, bus
   useEffect(() => { if (confirm) { dialog.current?.showModal(); dialog.current?.querySelector<HTMLButtonElement>('button')?.focus() } }, [confirm])
   const close = () => { dialog.current?.close(); setConfirm(false); cancelTrigger.current?.focus() }
   return <div className="wb-detail-actions">
-    <Link className="wb-button wb-button-primary" to={action.href}>{action.label} →</Link>
+    <Link className="wb-button wb-button-primary" to={action.href}>{action.label} <Icon name="arrow" /></Link>
     <Link className="wb-button wb-button-secondary" to="/runs">返回看板</Link>
-    <details className="wb-overflow" ref={menu} onKeyDown={e => { if (e.key === 'Escape' && !confirm) { e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() } }}><summary className="wb-button wb-button-secondary" aria-label="更多运行操作">···</summary><div>
+    <details className="wb-overflow" ref={menu} onKeyDown={e => { if (e.key === 'Escape' && !confirm) { e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() } }}><summary className="wb-button wb-button-secondary" aria-label="更多运行操作"><Icon name="triangle" className="wb-disclosure-icon" />···</summary><div>
       {canClarify && <Link to={`/runs/${encodeURIComponent(String(run.id))}?view=requirements`}>补充要求并生成下一版计划</Link>}
       <span>导出记录</span>{['json', 'markdown', 'zip'].map(format => <a key={format} href={`/api/v3/runs/${encodeURIComponent(String(run.id))}/export?format=${format}`}>{format.toUpperCase()}</a>)}
       {canDiscard && <button className="wb-button wb-button-secondary" disabled={busy} onClick={onDiscard}>标记为废弃</button>}

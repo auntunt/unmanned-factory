@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { AuditEvent } from '../workspace/types'
 import { formatDate } from './ui'
@@ -23,5 +24,5 @@ export default function ExecutionLog({ events, error }: { events: AuditEvent[] |
   }}>
   {!events?.length && <p>{events === null ? '正在读取运行日志…' : '尚无已记录事件，等待下次同步。'}</p>}
   {events?.map(event => { const entry = logEntry(event); const at = new Date(event.at); const stamp = Number.isFinite(at.getTime()) ? at.toLocaleTimeString('zh-CN', { hour12: false }) : '时间未知'; return entry.text.split('\n').map((line, index) => <div key={`${event.id}:${index}`} className={`wb-log-line wb-log-${entry.kind}`}><time title={formatDate(event.at)} dateTime={event.at}>{stamp}</time><span>{entry.label}</span><span>{line || '\u00a0'}</span></div>) })}
-  </div>{paused && <button className="wb-log-jump" onClick={() => { follow.current = true; setPaused(false); bottom() }}>跳到最新 ↓</button>}</div></section>
+  </div>{paused && <button className="wb-log-jump" onClick={() => { follow.current = true; setPaused(false); bottom() }}>跳到最新 <Icon name="down" /></button>}</div></section>
 }

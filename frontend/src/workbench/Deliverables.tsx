@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { useEffect, useState } from 'react'
 import { request } from '../workspace/api'
 import type { Run } from '../workspace/types'
@@ -59,12 +60,12 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
         <p>{catalog.note}</p>
         <div className="wb-delivery-entrypoints" aria-label="快速查看成果">{primary.map(item => <button key={item.id} className="wb-button wb-button-secondary" disabled={busy} onClick={() => void open(item)}>{item.kind === 'web' ? '查看页面' : item.kind === 'image' ? '查看截图 / 图片' : '阅读使用说明'} <small>{item.name}</small></button>)}</div>
         {preview && <section className="wb-file-preview" aria-label="成果预览"><div className="wb-deliverables-heading"><h3>{preview.name}</h3><button className="wb-button" onClick={() => setPreview(null)}>关闭预览</button></div>{preview.kind === 'image' && preview.image_url ? <img className="wb-deliverable-image" src={preview.image_url} alt={preview.name} /> : preview.kind === 'web' ? <><p>页面外观预览：加载归档中的样式与图片，脚本不运行。若页面由脚本生成，请查看截图；完整交互请下载后按说明启动。</p><iframe title={preview.name} sandbox="" srcDoc={`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">${preview.content}`} /></> : <pre>{preview.content}</pre>}</section>}
-        <details className="wb-delivery-files"><summary>全部文件与下载 · {catalog.items.length} 个文件</summary><label>成果类型 <select value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <details className="wb-delivery-files"><summary><Icon name="triangle" className="wb-disclosure-icon" />全部文件与下载 · {catalog.items.length} 个文件</summary><label>成果类型 <select value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         {!items.length && <p>没有此类文件。安装包需要先完成对应平台的构建，系统不会把源码当作安装包。</p>}
-        <div className="wb-deliverable-list">{items.map(item => <article className="wb-deliverable-item" key={item.id}><div><strong>{item.name}</strong><p>{labels[item.kind]} · {sizeLabel(item.size)} · {item.origin === 'commit' ? '验收版本' : '构建产物快照'}</p><details><summary>文件校验值</summary><code>{item.sha256}</code></details></div><div className="wb-detail-actions">{item.preview && <button className="wb-button" disabled={busy} onClick={() => void open(item)}>预览</button>}<a className="wb-button" href={`${base}/files/${item.id}`}>下载</a></div></article>)}</div>
+        <div className="wb-deliverable-list">{items.map(item => <article className="wb-deliverable-item" key={item.id}><div><strong>{item.name}</strong><p>{labels[item.kind]} · {sizeLabel(item.size)} · {item.origin === 'commit' ? '验收版本' : '构建产物快照'}</p><details><summary><Icon name="triangle" className="wb-disclosure-icon" />文件校验值</summary><code>{item.sha256}</code></details></div><div className="wb-detail-actions">{item.preview && <button className="wb-button" disabled={busy} onClick={() => void open(item)}>预览</button>}<a className="wb-button" href={`${base}/files/${item.id}`}>下载</a></div></article>)}</div>
 
         </details>
-        <details><summary>如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
+        <details><summary><Icon name="triangle" className="wb-disclosure-icon" />如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
       </>}
     </>}
   </section>

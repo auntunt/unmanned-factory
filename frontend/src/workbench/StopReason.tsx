@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { Link } from 'react-router-dom'
 import type { Run } from '../workspace/types'
 import { runGuidance } from './run-guidance'
@@ -30,7 +31,7 @@ export function StopReason({ run, canConfigure, onContinue, onRetry, busy = fals
         {canConfigure && adminActions.map((action) => <Link key={action.href} to={action.href}>{action.label}</Link>)}
       </div>
       {!canConfigure && adminActions.length > 0 && <p className="wb-stop-reason-admin-note">你可以查看运行和项目记录；预算、模型策略和团队额度由管理员配置，请联系管理员处理。</p>}
-      {guidance.rawEvidence && <details className="wb-stop-reason-raw"><summary>后端原始信息</summary><code>{guidance.rawEvidence}</code></details>}
+      {guidance.rawEvidence && <details className="wb-stop-reason-raw"><summary><Icon name="triangle" className="wb-disclosure-icon" />后端原始信息</summary><code>{guidance.rawEvidence}</code></details>}
     </section>
   )
 }

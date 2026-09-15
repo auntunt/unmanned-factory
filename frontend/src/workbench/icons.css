@@ -1,0 +1,24 @@
+.wb-svg-icon { display:inline-block; flex-shrink:0; vertical-align:-.18em; }
+.wb-category-badge { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; border-radius:10px; background:var(--wb-teal-soft); color:var(--wb-teal-dark); font-size:24px; font-weight:600; }
+.wb-category-badge .wb-svg-icon { width:24px; height:24px; }
+summary:has(> .wb-disclosure-icon) { list-style:none; cursor:pointer; }
+summary:has(> .wb-disclosure-icon)::-webkit-details-marker { display:none; }
+summary:has(> .wb-disclosure-icon)::marker { content:''; }
+.wb-disclosure-icon { width:14px; height:14px; margin-right:7px; transition:transform .15s ease; }
+details[open] > summary > .wb-disclosure-icon { transform:rotate(90deg); }
+.mod-card .mod-content-action, .mod-card footer .wb-text-link { font-size:14px; font-weight:600; color:var(--wb-teal-dark); background:none; border:0; padding:8px 0; }
+.wb-import-tabs { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; }
+.wb-import-tabs [aria-selected=true] { background:var(--wb-teal-soft); border-color:var(--wb-teal); color:var(--wb-teal-dark); }
+.wb-import-panel > .wb-card { border:0; padding:0; box-shadow:none; }
+@media (prefers-reduced-motion:reduce) { .wb-disclosure-icon { transition:none; } }
+.wb-pack-import.wb-card { margin-bottom:24px; }
+.wb-pack-import .wb-import-tabs .wb-button[aria-selected=true] { background:var(--wb-teal-soft); border-color:var(--wb-teal); color:var(--wb-teal-dark); box-shadow:inset 0 -2px 0 var(--wb-teal); }
+.wb-pack-import .wb-import-panel > section { padding:8px 0 0; margin:0; }
+.wb-pack-import .wb-import-panel h2, .wb-pack-import .wb-import-panel h3 { font-size:18px; margin:8px 0 12px; }
+.wb-pack-import .wb-import-panel p { color:var(--wb-muted); line-height:1.7; margin:8px 0 16px; }
+.wb-pack-import .wb-import-panel > section > label { display:grid; gap:8px; margin:16px 0; max-width:620px; font-size:14px; font-weight:600; }
+.wb-pack-import .wb-import-panel > section > label > input, .wb-pack-import .wb-import-panel > section > label > select { width:100%; min-width:0; min-height:42px; border:1px solid var(--wb-border); border-radius:7px; padding:9px 12px; background:var(--color-surface); color:var(--wb-ink); font:inherit; }
+.wb-pack-import input[type=file]::file-selector-button { border:0; border-right:1px solid var(--wb-border); margin:-9px 12px -9px -12px; padding:12px; background:var(--wb-teal-soft); color:var(--wb-teal-dark); cursor:pointer; }
+.wb-pack-import input:disabled { opacity:.6; }
+.mod-card .mod-content-action, .mod-card footer .wb-text-link { text-decoration:none; }
+.mod-card .mod-content-action:hover, .mod-card footer .wb-text-link:hover { text-decoration:underline; }

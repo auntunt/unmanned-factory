@@ -9,8 +9,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks() })
 it('keeps native restoration secondary and explains an external ZIP rejection without bypassing review', async () => {
   vi.mocked(request).mockRejectedValue(new WorkspaceApiError(400, '外部 skill ZIP 请使用“导入外部 skill 包”'))
   render(<NativePackImport {...props} />)
-  expect(document.querySelector('details')?.open).toBe(false)
-  fireEvent.click(screen.getByText('恢复 webuddy 导出的职能包（v1/v2）'))
+  expect(screen.getByRole('region', { name: '恢复职能包' })).toBeTruthy()
   const input = screen.getByLabelText('选择 webuddy 职能包 ZIP') as HTMLInputElement
   fireEvent.change(input, { target: { files: [new File(['zip'], 'reverse-skill.zip')] } })
   expect((await screen.findByRole('alert')).textContent).toContain('外部 skill ZIP 请使用')

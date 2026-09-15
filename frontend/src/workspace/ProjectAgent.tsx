@@ -1,3 +1,4 @@
+import Icon from '../workbench/Icon'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { request, WorkspaceApiError } from './api'
@@ -71,7 +72,7 @@ function StatusTag({ status }: { status: string }) {
 }
 
 function Provenance({ value }: { value: Record<string, unknown> }) {
-  return <details className="pa-provenance"><summary>来源与审计</summary><pre>{formatUnknown(value)}</pre></details>
+  return <details className="pa-provenance"><summary><Icon name="triangle" className="wb-disclosure-icon" />来源与审计</summary><pre>{formatUnknown(value)}</pre></details>
 }
 
 function ProfilePanel({ profile, draft, saving, error, onChange, onSave }: {

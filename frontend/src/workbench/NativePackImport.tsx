@@ -5,9 +5,9 @@ import { errorText, type PageProps } from './ui'
 export default function NativePackImport({ onImported, ...props }: PageProps & { onImported: (id: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  return <details className="wb-card">
-    <summary>恢复 webuddy 导出的职能包（v1/v2）</summary>
-    <p>此入口只接收 webuddy 导出的职能包。其他来源的 skill ZIP 请使用上方“导入外部 skill 包”，先适配、验收，再人签启用。</p>
+  return <section aria-label="恢复职能包">
+    <h3>恢复 webuddy 导出的职能包（v1/v2）</h3>
+    <p>此入口只接收 webuddy 导出的职能包。其他来源的 skill ZIP 请使用“外部 skill 包·适配人签”标签，先适配、验收，再人签启用。</p>
     <label>选择 webuddy 职能包 ZIP<input type="file" accept=".zip" disabled={busy} onChange={async e => {
       const input = e.currentTarget; const file = input.files?.[0]
       if (!file || busy) return
@@ -21,5 +21,5 @@ export default function NativePackImport({ onImported, ...props }: PageProps & {
     }} /></label>
     {busy && <p role="status">正在恢复职能包…</p>}
     {error && <p role="alert">{error}</p>}
-  </details>
+  </section>
 }

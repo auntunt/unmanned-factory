@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { request } from '../workspace/api'
@@ -60,9 +61,9 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       <h4>注入风险条目</h4>{mapping.injection_risks.map((r, i) => <blockquote key={i}>{r.path}：{r.reason} {r.text}</blockquote>)}
       <h4>安全映射与来源</h4>{mapping.skills.map(s => <div key={s.path}>
         <label><input type="checkbox" disabled={!editable} checked={flags[s.path]} onChange={e => setFlags({ ...flags, [s.path]: e.target.checked })} />{s.name}：执行前需要逐目标授权</label>
-        <p>{s.path} · <code>{s.sha256}</code></p><details><summary>原始正文（不可信资料）</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{s.body}</pre></details>
+        <p>{s.path} · <code>{s.sha256}</code></p><details><summary><Icon name="triangle" className="wb-disclosure-icon" />原始正文（不可信资料）</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{s.body}</pre></details>
       </div>)}
-      {editable && <details><summary>调整完整结构、映射和依赖</summary>
+      {editable && <details><summary><Icon name="triangle" className="wb-disclosure-icon" />调整完整结构、映射和依赖</summary>
         <p>修改完整映射数据；来源正文和哈希由平台保留，不允许替换。保存后重新核对再签署。</p>
         <button className="wb-button wb-button-secondary" onClick={() => setAdvanced(JSON.stringify({ identity: mapping.identity, steps: mapping.steps, decisions: mapping.decisions, dependencies: mapping.dependencies, injection_risks: mapping.injection_risks, authorization_required: mapping.authorization_required || [] }, null, 2))}>载入映射草稿</button>
         <label>映射 JSON<textarea rows={12} value={advanced} onChange={e => setAdvanced(e.target.value)} maxLength={200000} /></label>

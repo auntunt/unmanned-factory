@@ -11,7 +11,6 @@
 .mod-card-head { display:flex; gap:12px; align-items:center; }
 .mod-card-head h2 { font-size:17px; margin:0; flex:1; line-height:1.5; }
 .mod-card-head small { color:var(--wb-muted); font-size:12px; }
-.mod-symbol { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; background:var(--wb-teal-soft); color:var(--wb-teal-dark); border-radius:10px; font-size:27px; }
 .mod-card p,.mod-composition p { color:var(--wb-muted); font-size:14px; line-height:1.8; }
 .mod-card details { margin:2px 0 20px; font-size:13px; color:var(--wb-muted); }
 .mod-card summary { cursor:pointer; }

@@ -1,3 +1,4 @@
+import Icon, { CategoryBadge } from './Icon'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProvenance } from './capability-links'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -75,7 +76,7 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
   const dirty = JSON.stringify(selected.map(m => [m.id,m.version])) !== JSON.stringify((binding?.modules ?? []).map(m => [m.id,m.version]))
   const visible = modules.filter(m => (filter === 'all' || m.category === filter) && `${m.name} ${m.description}`.includes(search))
   return <div className="wb-page mod-page">
-    {embedded ? <div className="wb-form-actions">{admin && <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}>新建模块</button>}</div> : <PageHeader title={projectId ? '能力随任务组合' : '能力模块'} description="把团队的知识与方法，变成随时可用的能力。" actions={admin ? <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}>＋ 新建模块</button> : undefined} />}
+    {embedded ? <div className="wb-form-actions">{admin && <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}>新建模块</button>}</div> : <PageHeader title={projectId ? '能力随任务组合' : '能力模块'} description="把团队的知识与方法，变成随时可用的能力。" actions={admin ? <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}><Icon name="plus" /> 新建模块</button> : undefined} />}
     {!projectId && !embedded && <section className="wb-purpose-band"><span className="wb-purpose-symbol" aria-hidden="true">▤</span><div><h2>模块提供方法 · 职能体承接业务</h2><p>同一份能力，可以用于不同项目。</p></div><Link className="wb-text-link" to="/agents">查看职能体</Link></section>}
     {error && <ErrorNotice message={error} />}{notice && <p className="wb-notice" role="status">{notice}</p>}
     {loading ? <p role="status">正在读取能力模块…</p> : <div className={`mod-layout ${projectId ? 'has-composition' : 'has-guide'}`}>
@@ -84,13 +85,13 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
         <div className="mod-grid">{visible.map(m => {
           const chosen = selected.find(x => x.id === m.id)
           return <article className={`mod-card ${chosen || focused === m.id ? 'is-selected' : ''}`} id={`module-${m.id}`} key={m.id}>
-            <div className="mod-card-head"><span className="mod-symbol" aria-hidden="true">{({style:'◫',knowledge:'▤',workflow:'↗',delivery:'▱'})[m.category]}</span><h2>{m.name}</h2><small>v{m.version}</small></div>
+            <div className="mod-card-head"><CategoryBadge category={m.category} /><h2>{m.name}</h2><small>v{m.version}</small></div>
             <p>{m.description || '按需搭配到项目，作为该领域的工作指导。'}</p>
             {Boolean((m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)) && <p>挂载 {(m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)} 个资料来源 · 按项目绑定查询</p>}
             {embedded && <p title="按能力来源运行中保存的模块记录关联，仅统计当前可见记录。">由它沉淀的能力 {provenance.error ? '暂不可用' : !provenance.loaded ? '读取中' : `${provenance.counts.get(m.id) || 0} 项`}</p>}
             <p>{m.status === 'draft' && 'skill 草稿 · '}被 {m.agent_reference_count ?? 0} 个职能体引用</p>
-            <details><summary>查看内容</summary><p className="mod-instructions">{m.instructions}</p></details>
-            <footer><span>{categories[m.category]}</span>{projectId && admin ? <button className="mod-toggle" aria-pressed={Boolean(chosen)} disabled={busy || (!chosen && selected.length >= 12)} onClick={() => toggle(m)}>{chosen ? `已添加 v${chosen.version} ✓` : '添加 ＋'}</button> : admin ? <button className="wb-text-link" onClick={() => { setEditing(m); setEditor({name:m.name,category:m.category,description:m.description,instructions:m.instructions,source_refs:m.source_refs ?? [],source_slots:m.source_slots ?? []}) }}>编辑模块</button> : null}</footer>
+            <details><summary className="wb-text-link mod-content-action"><Icon name="triangle" className="wb-disclosure-icon" />查看内容</summary><p className="mod-instructions">{m.instructions}</p></details>
+            <footer><span>{categories[m.category]}</span>{projectId && admin ? <button className="mod-toggle" aria-pressed={Boolean(chosen)} disabled={busy || (!chosen && selected.length >= 12)} onClick={() => toggle(m)}>{chosen ? `已添加 v${chosen.version} ✓` : <>添加 <Icon name="plus" /></>}</button> : admin ? <button className="wb-text-link" onClick={() => { setEditing(m); setEditor({name:m.name,category:m.category,description:m.description,instructions:m.instructions,source_refs:m.source_refs ?? [],source_slots:m.source_slots ?? []}) }}>编辑模块</button> : null}</footer>
           </article>
         })}</div>
         {!visible.length && <div className="wb-empty-state"><h2>还没有这类模块</h2><p>将团队已有的规范、知识或方法整理成模块，就能反复使用。</p></div>}

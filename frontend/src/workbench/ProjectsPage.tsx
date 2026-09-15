@@ -1,3 +1,4 @@
+import Icon from './Icon'
 import { ListTime } from './presentation'
 import type { Helper } from './ProjectKnowledge'
 import { useEffect, useRef, useState } from 'react'
@@ -130,9 +131,9 @@ export default function ProjectsPage({ csrfToken, onUnauthorized, user }: PagePr
   }, [onUnauthorized])
 
   return <div className="wb-page">
-    <PageHeader title="项目" description="查看工程上下文和需求入口。项目设置由管理员维护。" actions={isAdmin ? <button className="wb-button wb-button-primary" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? '关闭新建' : '新建工作区'} <span aria-hidden="true">＋</span></button> : undefined} />
+    <PageHeader title="项目" description="查看工程上下文和需求入口。项目设置由管理员维护。" actions={isAdmin ? <button className="wb-button wb-button-primary" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? '关闭新建' : '新建工作区'} <span aria-hidden="true"><Icon name="plus" /></span></button> : undefined} />
     {createOpen && isAdmin && <ProjectForm csrfToken={csrfToken} onUnauthorized={onUnauthorized} onCancel={() => setCreateOpen(false)} onCreated={(project, warning) => { setProjects((current) => current ? [project, ...current] : [project]); setCreateOpen(false); if (warning) { setNotice(warning); setImportedProjectId(String(project.id)) } else void navigate(`/projects/${encodeURIComponent(String(project.id))}`) }} />}
-    {error && <ErrorNotice message={error} />}{notice && <div className="wb-notice" role="status">{notice}{importedProjectId && <p><Link className="wb-button wb-button-primary" to={`/projects/${encodeURIComponent(importedProjectId)}`}>进入项目，开始维护 →</Link></p>}</div>}
+    {error && <ErrorNotice message={error} />}{notice && <div className="wb-notice" role="status">{notice}{importedProjectId && <p><Link className="wb-button wb-button-primary" to={`/projects/${encodeURIComponent(importedProjectId)}`}>进入项目，开始维护 <Icon name="arrow" /></Link></p>}</div>}
     {projects === null && !error && <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>}
     {projects && projects.length === 0 && <div className="wb-card"><EmptyState title="还没有项目" description={isAdmin ? '填写名称即可创建工作区，之后再描述具体需求。' : '管理员登记项目后，你可以在已分配的项目中提交需求。'} action={isAdmin ? <button className="wb-button wb-button-primary" onClick={() => setCreateOpen(true)}>创建第一个工作区</button> : undefined} /></div>}
     {projects && projects.length > 0 && <div className="wb-project-list">{projects.map((project) => { const meta = project as ProjectRecord & { updated_at?: string; created_at?: string }; return <Link aria-label={`打开项目：${project.name}`} className="wb-project-card" to={`/projects/${encodeURIComponent(String(project.id))}`} key={String(project.id)}><div className="wb-project-card-main"><span className="wb-project-glyph">{project.name.slice(0, 1).toUpperCase()}</span><div><h2>{project.name}</h2><p>{project.managed_workspace ? '系统管理的工作区' : project.repository}</p></div></div><div className="wb-project-card-meta"><span><b>分支</b>{project.base_branch}</span><span><b>检查</b>{Object.keys(project.checks ?? {}).length} 条</span><span><b>更新</b><ListTime value={meta.updated_at ?? meta.created_at ?? ''} /></span></div></Link>})}</div>}
