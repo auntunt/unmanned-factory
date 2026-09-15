@@ -36,6 +36,11 @@ class Continuation(Body):
     resume_count: int = Field(default=0, ge=0)
 
 
+class BudgetContinuation(Continuation):
+    # Analysis may pause before the first spec/plan revision exists.
+    revision: int = Field(ge=0)
+
+
 class Clarification(Body):
     answer: str = Field(min_length=1, max_length=50_000)
 
@@ -104,7 +109,7 @@ def router(store, svc, operations):
 
 
     @api.post('/api/v2/runs/{rid}/resume-budget')
-    def resume_budget(rid: str, body: Continuation, request: Request):
+    def resume_budget(rid: str, body: BudgetContinuation, request: Request):
         return budget_resume.resume(svc, rid, body.revision, body.resume_count, request.state.user['username'])
 
     @api.post('/api/v2/runs/{rid}/confirm-spec')

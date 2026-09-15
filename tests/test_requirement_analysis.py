@@ -303,3 +303,24 @@ def test_analysis_opt_in_participates_in_fingerprint(env):
         body={'project_id':env.project['id'],'request':'排查启动','operation':'startup','idempotency_key':'analysis-opt-in'}
         assert client.post('/api/v2/runs',json=body,headers=headers).status_code==201
         assert client.post('/api/v2/runs',json={**body,'requirement_analysis':True},headers=headers).status_code==409
+
+
+def test_analysis_can_resume_before_first_revision_via_http(env):
+    from fastapi.testclient import TestClient
+    from factory.control.app import create_app
+    from tests.test_control_app import login
+    from pathlib import Path
+    root=Path(env.project['workspace']).parent
+    app=create_app(data_dir=root,workspace_root=root,public_origin='http://testserver',service=env.svc)
+    app.state.auth.create_user('owner','a-long-test-password')
+    rid=env.run['id']
+    env.store.update(rid,{'status':'needs_human'})
+    assert env.store.get(rid)['revision']==0
+    with TestClient(app) as client:
+        headers=login(client)
+        response=client.post(f'/api/v2/runs/{rid}/resume-budget',json={'revision':0,'resume_count':0},headers=headers)
+        assert response.status_code==200, response.text
+        assert response.json()['status']=='received'
+        assert response.json()['requirement_analysis_credit_usd']==2
+        assert env.queued[-1]==('_analyze',rid)
+        assert client.post(f'/api/v2/runs/{rid}/resume-budget',json={'revision':0,'resume_count':0},headers=headers).status_code==409
