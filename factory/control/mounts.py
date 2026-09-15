@@ -127,6 +127,15 @@ class MountedRunner:
         from factory.control.providers import ProviderCancelled
         if cancel is not None and cancel.is_set():
             raise ProviderCancelled('execution cancelled before mount dispatch')
+        if request.tools_disabled:
+            # Inert transformations must never inherit project data tools.
+            return self.runner.run(replace(request, reference_mount=None), emit, cancel=cancel)
+        from factory.control.skill_ingestion_runs import require_authorization
+        current_run = self.store.get(self.rid)
+        require_authorization(self.store, current_run)
+        if current_run.get('authorized_skill_targets'):
+            request = replace(request, prompt=request.prompt + '\n\n平台人工授权目标（本次运行范围，不得扩展）：\n'
+                              + encoded(current_run['authorized_skill_targets']))
         from factory.control.scope_declaration import wrap_emit
         emit = wrap_emit(self.store, self.rid, request, emit)
         manifest = self.preflight(request.provider)

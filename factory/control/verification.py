@@ -19,6 +19,7 @@ from factory.control.spec_tree import evidence as spec_evidence, apply_evidence
 from factory.control.spec_refs import render as render_spec_refs
 from factory.control.scope_declaration import evidence as scope_evidence
 from factory.control.verification_evidence import browser_evidence, browser_review_failure, render_evidence
+from factory.control import skill_ingestion_runs
 
 
 _VERIFIER_CONTRACT_MAX_CHARS = 80_000
@@ -87,6 +88,8 @@ def _verifier_request_contract(run):
 
 
 def _independent_verify(self, rid, run, project, configuration, artifacts):
+    if run.get('source', {}).get('skill_ingestion_id'):
+        return skill_ingestion_runs.verify(self, rid, run, project, configuration, artifacts)
     source = artifacts.get('worktree') or artifacts.get('integration_worktree') or project['workspace']
     try:
         self._remaining_dollar_budget(rid, project)

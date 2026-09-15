@@ -8,6 +8,7 @@ import { ErrorNotice, EmptyState, formatDate, PageHeader, errorText, type PagePr
 import Deliverables from './Deliverables'
 import AgentManifest from './AgentManifest'
 import AgentEvolution from './AgentEvolution'
+import SkillIngestion from './SkillIngestion'
 import './agents.css'
 
 type Mode = 'do' | 'maintain'
@@ -163,6 +164,7 @@ export default function AgentsPage(props: PageProps) {
     <PageHeader title="职能体工作台" description="让反复出现的业务，有一个持续维护的入口。" actions={<button className="wb-button wb-button-primary" onClick={() => setCreating(true)}>＋ 新建职能体</button>} />
     {!params.agentId && <section className="wb-purpose-band"><span className="wb-purpose-symbol" aria-hidden="true">↗</span><div><h2>一类业务，一个长期伙伴</h2><p>上传 Skill、维护方法，再把任务交给它。</p></div><Link className="wb-text-link" to="/modules">查看能力模块</Link></section>}
     {error && <ErrorNotice message={error} />}
+    {props.user?.role === 'admin' && <SkillIngestion {...props} />}
     {props.user?.role==='admin' && <label className="wb-text-link agent-pack-upload">导入职能包 v1/v2 ZIP<input type="file" accept=".zip" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;const body=new FormData();body.append('file',file);try{const r=await fetch('/api/v4/agent-packs/import',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':props.csrfToken},body});if(!r.ok)throw new Error(`导入失败（${r.status}）`);const a=await r.json() as Agent;choose(a.id)}catch(cause){setError(errorText(cause))}}}/></label>}
     {params.agentId && selected && <><AgentManifest key={`${selected.id}:${manifestEpoch}`} agentId={selected.id} {...props}/><AgentEvolution key={selected.id} agentId={selected.id} {...props} onChanged={()=>setManifestEpoch(v=>v+1)}/></>}
     {creating && <NewAgent {...props} onCancel={() => setCreating(false)} onCreated={(agent) => { setCreating(false); setAgents((current) => [agent, ...current]); navigate(`/agents/${encodeURIComponent(agent.id)}`) }} />}

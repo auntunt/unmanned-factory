@@ -14,6 +14,7 @@ import TaskGraph from '../workspace/TaskGraph'
 import type { AuditEvent, ConversationMessage, PlanTask, Run, RunStatus, TaskStatus } from '../workspace/types'
 import type { RuntimeLimits, RuntimeProfiles } from './runtime-types'
 import { StopReason } from './StopReason'
+import SkillTargetAuthorization from './SkillTargetAuthorization'
 import PlanVersions from './PlanVersions'
 import { canGenerateNextPlan, frozenPolicy, runGuidance, runView } from './run-guidance'
 import { checkPassed, executionFailure, verificationScopeNote } from './run-guidance'
@@ -397,18 +398,23 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   const canCancel = canActOnRun && ACTIVE_STATUSES.includes(run.status)
   const canDiscard = canActOnRun && ['needs_clarification', 'awaiting_approval', 'needs_human', 'failed', 'cancelled'].includes(run.status)
   const canPublish = isAdmin && run.status === 'ready_for_review'
-  const canRetry = run.source?.type !== 'inspection' && canActOnRun && ['failed', 'needs_human', 'cancelled'].includes(run.status)
+  const isIngestion = typeof run.source?.skill_ingestion_id === 'string'
+  const canRetry = !isIngestion && run.source?.type !== 'inspection' && canActOnRun && ['failed', 'needs_human', 'cancelled'].includes(run.status)
   const canDistill = isAdmin && ['ready_for_review', 'published'].includes(run.status)
   const guidance = runGuidance(run)
   const activeView = runView(searchParams.get('view'), guidance.view)
   const projectHref = `/projects/${encodeURIComponent(String(run.project_id))}?stage=${guidance.stage}`
   const canManualApprove = canActOnRun && run.status === 'awaiting_approval' && questions.length === 0
   const canClarify = canGenerateNextPlan(run, canActOnRun)
-  const canContinue = run.source?.type !== 'inspection' && canActOnRun && run.status === 'needs_human' && Boolean(run.plan && run.artifacts?.base_sha && Array.isArray(run.artifacts?.tasks) && run.artifacts.tasks.length)
+  const ingestionVerification = run.artifacts?.verification
+  const ingestionVerified = isRecord(ingestionVerification) && ingestionVerification.verdict === 'pass'
+  const canContinue = run.source?.type !== 'inspection' && canActOnRun && run.status === 'needs_human' && (isIngestion ? !ingestionVerified : Boolean(run.plan && run.artifacts?.base_sha && Array.isArray(run.artifacts?.tasks) && run.artifacts.tasks.length))
   return <div className="wb-detail-page wb-run-page"><PageHeader title={<>{runTitle(run)}<RunMode run={run} /></>} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<RunActions run={run} canClarify={canClarify} canDiscard={canDiscard} canCancel={canCancel} busy={busy !== null} onDiscard={() => void act('discard')} onCancel={() => void act('cancel')} />} />
     {error && <ErrorNotice message={error} />}
     <p className="wb-run-breadcrumb"><Link to={projectHref}>返回项目闭环</Link><span>·</span><Link to="/runs">运行看板</Link></p>
     <RunJourney run={run} activeView={activeView} guidanceContent={<StopReason run={run} canConfigure={isAdmin} busy={busy !== null} onContinue={canContinue ? () => void act('continue') : undefined} onRetry={!canContinue && canRetry ? () => void retry() : undefined} />} />
+    <SkillTargetAuthorization run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} user={user} />
+    {typeof run.source?.skill_ingestion_id === 'string' && <section className="wb-card"><h2>职能包适配结果</h2><p>独立验收通过后需要管理员核对映射并签署，才会生成正式职能体。</p><Link className="wb-button wb-button-primary" to={`/agents?project=${encodeURIComponent(String(run.project_id))}&ingestion=${encodeURIComponent(run.source.skill_ingestion_id)}`}>查看映射与人签评审</Link></section>}
 
     <div className="wb-detail-grid"><div className="wb-detail-main"><section className="wb-detail-card" role="tabpanel" id="run-view-panel" aria-labelledby={`run-tab-${activeView}`}><div className="wb-detail-meta"><span>状态：<StatusBadge status={runDisplayStatus(run)} /></span><span>当前计划版本：<strong>{run.revision}</strong></span><span>创建于：<strong>{formatDate(run.created_at)}</strong></span></div>
       {activeView === 'requirements' && <><div className="wb-detail-kicker">原始需求</div><h2>需求与澄清</h2><p className="wb-message-content">{run.request}</p><RunSpecReferences source={run.source} projectId={run.project_id}/>{run.triage?.reasons?.length ? <details><summary>规划时的判断（历史记录）</summary><p className="wb-runtime-note">{run.triage.reasons.join('；')}</p></details> : null}{questions.length > 0 && <><h3>需要补充的事实</h3><ul>{questions.map((question) => <li key={question}>{question}</li>)}</ul></>}{canClarify && <div className="wb-field"><label htmlFor="run-clarification">{questions.length ? `补充要求并生成下一版计划（当前 v${run.revision}）` : '补充目标、范围或验收标准并生成下一版计划'}</label><textarea id="run-clarification" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder={questions.length ? '提供事实、边界或选择，提交后会生成下一版计划。' : '当前没有可展示的具体问题；请补充需要系统据以规划的事实。'} /></div>}{canClarify && <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={!answer.trim() || busy !== null} onClick={() => void act('clarify')}>{busy === 'clarify' ? '正在生成下一版计划…' : '补充要求并生成下一版计划'}</button></div>}{!canClarify && guidance.kind !== 'requirements' && <p className="wb-runtime-note">当前无需补充需求。请根据上方状态指引进入对应工作视图。</p>}</>}

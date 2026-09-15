@@ -62,9 +62,26 @@ def import_pack(manifests, raw, actor):
                     skill={'id':mid,'version':1,'name':str(meta.get('name','导入能力'))[:120],'description':'从职能包导入',
                            'category':meta.get('category') if meta.get('category') in ('style','knowledge','workflow','delivery') else 'workflow',
                            'instructions':text,'status':'ready','source':{'type':'pack','id':ref['id'],'version':ref['version']},'actor':str(actor),'updated_at':at}
-                    db.execute('INSERT INTO instruction_modules VALUES(?,?,?)',(mid,1,encoded(scrub(skill))))
+                    for field in ('requires_authorization', 'external_source'):
+                        if field in meta:
+                            skill[field] = meta[field]
+                    clean_skill = scrub(skill)
+                    if skill.get('external_source'):
+                        clean_skill['instructions'] = text
+                    db.execute('INSERT INTO instruction_modules VALUES(?,?,?)',(mid,1,encoded(clean_skill)))
                     imported.append({'id':mid,'version':1})
                 payload={'identity':m.get('identity'),'skills':imported,'assertions':m.get('assertions')}
+                if m.get('adaptation'):
+                    if not isinstance(m['adaptation'], dict) or not isinstance(m['adaptation'].get('steps', []), list):
+                        raise ValueError('职能包适配结构无效')
+                    payload['adaptation'] = m['adaptation']
+                    remapped = {ref['id']: new for ref,new in zip(refs,imported)}
+                    for step in payload['adaptation'].get('steps', []):
+                        if not isinstance(step, dict) or not isinstance(step.get('skill', {}), dict):
+                            raise ValueError('SOP skill 引用无效')
+                        old_ref = step.get('skill') or {}
+                        if old_ref.get('id') in remapped:
+                            step['skill'] = remapped[old_ref['id']]
                 manifests._validate(payload,db)
                 compiler='legacy-exact-v1' if m.get('compiler')=='legacy-exact-v1' else 'composition-v2'
                 if compiler=='legacy-exact-v1' and len(imported)!=1:raise ValueError('遗留兼容清单必须引用一个完整 skill')

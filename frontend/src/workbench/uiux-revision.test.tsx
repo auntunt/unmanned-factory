@@ -207,3 +207,11 @@ it('does not offer same-run continuation to another member or an inspection', as
     view.unmount()
   }
 })
+
+it('resumes an ingestion without a coding worktree and links its human review', async () => {
+  api.mockResolvedValue({ ...run, source: { type: 'skill_ingestion', skill_ingestion_id: 'draft', actor_id: 1 }, plan: null, artifacts: {} } as never)
+  render(<MemoryRouter initialEntries={[`/runs/${run.id}?view=requirements`]}><Routes><Route path="/runs/:runId" element={<RunPage {...props} />} /></Routes></MemoryRouter>)
+  await screen.findByRole('button', { name: '继续工作' })
+  expect(screen.getByRole('link', { name: '查看映射与人签评审' }).getAttribute('href')).toContain('ingestion=draft')
+  expect(screen.queryByRole('button', { name: '按当前配置重试' })).toBeNull()
+})

@@ -104,6 +104,19 @@ def clarify(self, rid, answer, actor, *, feedback_message_ids=None):
 
 
 def continue_run(self, rid, answer, revision, resume_count, actor):
+    if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
+        with self.lock:
+            run = self.store.get(rid)
+            record = self.skill_ingestions.get(run['source']['skill_ingestion_id'])
+            if record['status'] in ('review', 'signed'):
+                raise Conflict('适配已完成，请到导入 skill 包评审区签署')
+            if (run['status'] != 'needs_human' or run['revision'] != revision
+                    or run.get('resume_count', 0) != resume_count or rid in self.active_jobs):
+                raise Conflict('运行已变化或仍在执行')
+            updated = self.store.update(rid, {'status': 'received', 'resume_count': resume_count + 1,
+                'error': None}, expected=('needs_human',), event=('run.continued', {'actor': actor}))
+            self.start_plan(rid)
+            return updated
     if self.store.get(rid).get('source', {}).get('type') == 'inspection':
         raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
     """Resume the same authorized plan; optional context is not an approval requirement."""
@@ -202,6 +215,8 @@ def approve(self, rid, revision, actor):
 
 
 def retry(self, rid, actor, actor_id=None):
+    if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
+        raise Conflict('职能包适配请继续原运行，避免丢失来源与人签记录')
     if self.store.get(rid).get('source', {}).get('type') == 'inspection':
         raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
     with self.lock:

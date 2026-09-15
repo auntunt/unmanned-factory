@@ -14,6 +14,7 @@ import uuid
 from factory.control import recovery, run_billing, run_execution, run_lifecycle, verification
 from factory.control.agent_evolution import EvolutionStore
 from factory.control.agent_manifests import ManifestStore
+from factory.control.skill_ingestion_runs import IngestionStore
 from factory.control.agents import AgentStore
 from factory.control.autonomy import DurableQueue, PolicyStore, policy_decision
 from factory.control.codegraph import baseline_sha
@@ -83,6 +84,7 @@ class Service:
         self.scheduler = None
         self.agents = AgentStore(store)
         self.agent_manifests = ManifestStore(store)
+        self.skill_ingestions = IngestionStore(store)
         self.agent_manifests.migrate_all()
         self.operations = OperationStore(store)
         self._inspection_tick_at = 0
@@ -244,6 +246,9 @@ class Service:
         return recovery.recover(self)
 
     def start_plan(self, rid):
+        if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
+            self._submit(self._plan, rid)
+            return
         if self.store.get(rid).get('source', {}).get('type') == 'inspection':
             raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
         with self.lock:

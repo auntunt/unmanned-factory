@@ -19,10 +19,13 @@ from factory.control.store import Conflict, now
 from factory.control.verification import verify_spec_only
 from factory.control.spec_tree import enrich_tasks
 from factory.control.spec_refs import render as render_spec_refs, focus as spec_ref_focus
+from factory.control import skill_ingestion_runs
 
 
 def _plan(self, rid):
     try:
+        if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
+            return skill_ingestion_runs.plan(self, rid)
         run = self.store.update(rid, {'status': 'planning'}, expected=('received',),
                                 event=('run.planning', {'message': '正在梳理需求与验收条件'}))
         module_state = ModuleStore(self.store).freeze(run)
@@ -164,6 +167,8 @@ def _plan(self, rid):
 
 def _run(self, rid):
     try:
+        if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
+            return skill_ingestion_runs.execute(self, rid)
         run = self.store.update(rid, {'status': 'running'}, expected=('queued',),
                                 event=('run.started', {}))
         project = self._project_for_run(run)
