@@ -64,7 +64,9 @@ def enforce(store, rid, run, verdict, ledger):
     failed = [i for i in ledger['items'] if i.get('class') == 'fidelity' and i['status'] == 'fail']
     missing = [i for i in ledger['items'] if i.get('class') == 'fidelity' and i['status'] == 'unverified']
     if failed:
-        return {**verdict, 'verdict': 'fail', 'error_type': 'fidelity_mismatch',
+        # A visual mismatch is a repairable implementation failure, not an
+        # environment error that should skip coding on checkpoint continuation.
+        return {**verdict, 'verdict': 'fail', 'error_type': None,
                 'reason': '保真验收未通过：' + '；'.join(f"{i['screen']} / {i['aspect']}: {i['evidence']}" for i in failed)[:2500]}
     if missing and verdict['verdict'] != 'fail':
         return {**verdict, 'verdict': 'unverified', 'error_type': 'fidelity_unverified',

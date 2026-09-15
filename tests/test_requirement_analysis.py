@@ -100,6 +100,10 @@ def test_fidelity_unlike_fails_and_like_requires_real_screenshot(env):
     ledger = coverage(items, verdict, 'HEAD')
     assert fidelity.enforce(env.store, run['id'], run, verdict, ledger)['verdict'] == 'fail'
     assert ledger['counts']['fail'] == 4
+    from factory.control.recovery import _continuous_resume_stage
+    mismatch = fidelity.enforce(env.store, run['id'], run, verdict, ledger)
+    assert not mismatch.get('error_type')
+    assert _continuous_resume_stage({'commit':'checked', 'tasks':[{'status':'verified'}], 'verification':mismatch}) is None
     for row in verdict['criteria']: row['judgment']='like'
     ledger = coverage(items, verdict, 'HEAD')
     assert fidelity.enforce(env.store, run['id'], run, verdict, ledger)['verdict'] == 'unverified'
