@@ -104,6 +104,11 @@ def clarify(self, rid, answer, actor, *, feedback_message_ids=None):
 
 
 def continue_run(self, rid, answer, revision, resume_count, actor):
+    # Local import breaks the budget_resume -> requirement analysis/lifecycle cycle.
+    from factory.control import budget_resume, requirement_analysis
+    current = self.store.get(rid)
+    if requirement_analysis.required(current) and not current.get('plan'):
+        return budget_resume.resume(self, rid, revision, resume_count, actor)
     if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
         with self.lock:
             run = self.store.get(rid)

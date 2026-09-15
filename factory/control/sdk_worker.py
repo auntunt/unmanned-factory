@@ -19,7 +19,14 @@ from .providers import (
 
 
 def _write(event_type: str, payload: Any) -> None:
-    message = {"type": event_type, "payload": _safe_json(payload)}
+    clean = _safe_json(payload)
+    # Result text is a structured response, not a preview event. Truncating it
+    # at the log-preview limit corrupts otherwise valid large Analysis JSON.
+    result = payload if event_type == 'complete' else payload.get('partial_result') if event_type == 'error' else None
+    if isinstance(result, dict) and isinstance(result.get('text'), str) and len(result['text']) <= 128_000:
+        target = clean if event_type == 'complete' else clean['partial_result']
+        target['text'] = result['text']
+    message = {"type": event_type, "payload": clean}
     sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
@@ -30,7 +37,8 @@ def _failure_payload(exc):
         if getattr(exc, key, None) is not None:
             metadata[key] = getattr(exc, key)
     return {'message': str(exc), 'kind': type(exc).__name__,
-            'session_id': getattr(exc, 'session_id', None), **metadata}
+            'session_id': getattr(exc, 'session_id', None),
+            **({'partial_result': asdict(exc.partial_result)} if getattr(exc, 'partial_result', None) is not None else {}), **metadata}
 
 
 def main() -> int:

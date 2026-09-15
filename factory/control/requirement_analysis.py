@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from factory.control.autonomy import valid_cost
 from factory.control.modules import ModuleStore
 from factory.control.mounts import compile_mounts, manifest_summary
-from factory.control.providers import ProviderRequest
+from factory.control.providers import ProviderError, ProviderRequest
 from factory.control.project_assistants import ProjectAssistants
 from factory.control.store import Conflict, now, scrub
 
@@ -186,8 +186,10 @@ def analyze(self, rid):
                     for r in ownership.get(m['id'], []) if r['agent_id'] in agents]}
                    for m in catalog if (m.get('source') or {}).get('agent_id') != analyst['id']][:200]
         configuration = run.get('runtime_configuration') or self.runtime_settings.get()
-        profile = configuration['profiles']['planner']
-        budget = project.get('requirement_analysis_budget_usd', 2.0)
+        # Independent bounded-output profile; never inherit the planner's expensive model.
+        profile = {'provider': os.getenv('FACTORY_REQUIREMENT_ANALYSIS_PROVIDER', 'claude'),
+                   'model': os.getenv('FACTORY_REQUIREMENT_ANALYSIS_MODEL', 'sonnet')}
+        budget = project.get('requirement_analysis_budget_usd', 5.0)
         if budget is not None:
             budget += run.get('requirement_analysis_credit_usd', 0)
         previous = self._usage(rid, profile='requirement_analysis')
@@ -216,6 +218,15 @@ def analyze(self, rid):
                 result = self._runner_for(rid).run(ProviderRequest(provider=profile['provider'], model=profile['model'], prompt=prompt, workspace=workspace,
                     read_only=True, tools_disabled=profile['provider'] == 'claude', max_budget_usd=ceiling,
                     timeout_s=min(600, configuration['limits']['timeout_s'])), emit, self.cancels[rid])
+        except ProviderError as exc:
+            result = exc.partial_result
+            if exc.error_kind != 'budget_exhausted' or result is None:
+                raise
+            try:
+                validate(json.loads(result.text.strip().removeprefix('```json').removesuffix('```').strip()), catalog)
+            except (ValueError, TypeError, AttributeError):
+                raise exc
+            self._emit(rid, 'requirement_analysis.budget_salvaged', {'call_id': call_id}, 'requirement_analysis')
         finally:
             self._emit(rid, 'usage.recorded', {'profile': 'requirement_analysis', **profile, 'call_id': call_id,
                 'max_budget_usd': ceiling, 'cost_usd': valid_cost(getattr(result, 'cost_usd', None)) if result else valid_cost(streamed.get('cost_usd')),

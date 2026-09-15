@@ -678,7 +678,14 @@ def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monke
         usage = {"input_tokens": 100, "output_tokens": 20}
         model_usage = None
 
+    class TextBlock:
+        text = '{"spec_draft": {}}'
+
+    class AssistantMessage:
+        content = [TextBlock()]
+
     async def query(*, prompt, options):
+        yield AssistantMessage()
         yield ResultMessage()
 
     mod.ClaudeAgentOptions = mod.HookMatcher = mod.PermissionResultAllow = mod.PermissionResultDeny = Options
@@ -692,6 +699,8 @@ def test_claude_budget_result_is_recoverable_and_retains_usage_and_session(monke
     assert stopped.value.error_kind == "budget_exhausted"
     assert stopped.value.transient is False
     assert stopped.value.session_id == "budget-session"
+    assert stopped.value.partial_result.text == '{"spec_draft": {}}'
+    assert stopped.value.partial_result.cost_usd == 1.5
     assert ("provider.usage", {"input_tokens": 100, "output_tokens": 20,
         "cached_input_tokens": None, "cache_creation_input_tokens": None,
         "cache_usage_schema": "separate_read_write_v1",
@@ -825,3 +834,23 @@ def test_claude_glob_accepts_absolute_workspace_but_not_escape(tmp_path):
     assert _claude_tool_allowed('Glob', {'path': str(tmp_path), 'pattern': '**/*.py'}, tmp_path, False)
     assert not _claude_tool_allowed('Glob', {'path': str(tmp_path.parent)}, tmp_path, False)
     assert not _claude_tool_allowed('Glob', {'path': '../'}, tmp_path, False)
+
+
+def test_budget_partial_result_survives_worker_transport(tmp_path):
+    python, script = _worker(tmp_path, '''
+        import json, sys
+        from factory.control.providers import ProviderError, ProviderResult
+        from factory.control.sdk_worker import _failure_payload, _write
+        json.loads(sys.stdin.readline())
+        error = ProviderError('budget reached', error_kind='budget_exhausted',
+            partial_result=ProviderResult(json.dumps({'text': '界' * 40000}, ensure_ascii=False), cost_usd=5.1, tokens_out=9000))
+        _write('error', _failure_payload(error))
+        sys.exit(3)
+    ''')
+    with pytest.raises(ProviderError) as stopped:
+        SDKRunner(worker_command=[python,str(script)]).run(
+            ProviderRequest('claude','sonnet','analysis',str(tmp_path)),lambda *_:None)
+    assert stopped.value.error_kind == 'budget_exhausted'
+    assert json.loads(stopped.value.partial_result.text) == {'text': '界' * 40000}
+    assert stopped.value.partial_result.cost_usd == 5.1
+    assert stopped.value.partial_result.tokens_out == 9000

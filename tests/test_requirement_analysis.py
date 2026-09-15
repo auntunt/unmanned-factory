@@ -60,7 +60,7 @@ def test_general_waits_for_single_confirmation_and_freezes_skills(env):
     from pathlib import Path
     raw = (Path(run['requirement_workspace']) / run['requirement_spec_path']).read_text()
     assert '## raw source' in raw and '构建团购工具' in raw and '尚未人签' in raw
-    assert env.requests[0].tools_disabled and env.requests[0].max_budget_usd == 2
+    assert env.requests[0].tools_disabled and env.requests[0].max_budget_usd == 5
     body = ra.Confirmation(revision=run['revision'], spec_draft=run['spec_draft'], selected_skills=run['recommended_skills'], fidelity_target=run['fidelity_target'])
     ra.confirm(env.svc, run['id'], body, 'owner')
     signed = env.store.get(run['id'])
@@ -315,7 +315,8 @@ def test_analysis_opt_in_participates_in_fingerprint(env):
         assert client.post('/api/v2/runs',json={**body,'requirement_analysis':True},headers=headers).status_code==409
 
 
-def test_analysis_can_resume_before_first_revision_via_http(env):
+@pytest.mark.parametrize('endpoint', ['resume-budget', 'continue'])
+def test_analysis_can_resume_before_first_revision_via_http(env, endpoint):
     from fastapi.testclient import TestClient
     from factory.control.app import create_app
     from tests.test_control_app import login
@@ -328,9 +329,56 @@ def test_analysis_can_resume_before_first_revision_via_http(env):
     assert env.store.get(rid)['revision']==0
     with TestClient(app) as client:
         headers=login(client)
-        response=client.post(f'/api/v2/runs/{rid}/resume-budget',json={'revision':0,'resume_count':0},headers=headers)
+        response=client.post(f'/api/v2/runs/{rid}/{endpoint}',json={'revision':0,'resume_count':0},headers=headers)
         assert response.status_code==200, response.text
         assert response.json()['status']=='received'
-        assert response.json()['requirement_analysis_credit_usd']==2
+        assert response.json()['requirement_analysis_credit_usd']==5
         assert env.queued[-1]==('_analyze',rid)
-        assert client.post(f'/api/v2/runs/{rid}/resume-budget',json={'revision':0,'resume_count':0},headers=headers).status_code==409
+        assert client.post(f'/api/v2/runs/{rid}/{endpoint}',json={'revision':0,'resume_count':0},headers=headers).status_code==409
+
+@pytest.mark.parametrize('valid,error_kind', [(True,'budget_exhausted'), (False,'budget_exhausted'), (True,'timeout')])
+def test_budget_boundary_salvages_only_complete_valid_analysis(env, valid, error_kind):
+    from factory.control.providers import ProviderError
+    value = proposal(reference=True)
+    value['spec_draft']['screens'] = [{'name':f'页面{i}', 'purpose':'商品浏览'} for i in range(20)]
+    value['fidelity_target']['screens'] = [{**value['fidelity_target']['screens'][0], 'screen':f'页面{i}',
+        'layout':['搜索与分类，保留导航与商品卡片。' * 100]} for i in range(20)]
+    text = json.dumps(value, ensure_ascii=False) if valid else '{"spec_draft":'
+    class Runner:
+        def run(self, request, emit, cancel):
+            raise ProviderError('budget boundary', error_kind=error_kind,
+                partial_result=ProviderResult(text, cost_usd=5.1, tokens_in=100, tokens_out=9000))
+    env.svc.runner = Runner()
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    assert run['status'] == ('awaiting_spec_confirmation' if valid and error_kind=='budget_exhausted' else 'needs_human')
+    assert run['plan'] is None
+    assert env.svc._usage(run['id'],profile='requirement_analysis')['known_cost_usd'] == 5.1
+    assert env.svc._remaining_dollar_budget(run['id'],env.project).remaining_usd == 10
+    if valid and error_kind=='budget_exhausted':
+        assert len(run['fidelity_target']['screens']) == 20
+        assert any(e['type']=='requirement_analysis.budget_salvaged' for e in env.store.events(run['id']))
+
+@pytest.mark.parametrize('entry', ['resume', 'continue'])
+def test_analysis_renewal_reruns_analysis_and_still_requires_confirmation(env, entry):
+    from factory.control.budget_resume import resume
+    rid = env.run['id']
+    env.store.update(rid, {'status':'needs_human'})
+    env.svc._emit(rid,'usage.recorded',{'profile':'requirement_analysis','call_id':'old','cost_usd':5})
+    if entry == 'resume':
+        resume(env.svc,rid,0,0,'owner')
+    else:
+        env.svc.continue_run(rid,'',0,0,'owner')
+    assert env.queued == [('_analyze',rid)]
+    env.svc._analyze(rid)
+    assert env.requests[-1].max_budget_usd == 5
+    assert env.requests[-1].model == 'sonnet'
+    assert env.store.get(rid)['status'] == 'awaiting_spec_confirmation'
+    assert env.store.get(rid)['plan'] is None
+    assert env.store.get(rid)['requirement_analysis_credit_usd'] == 5
+
+
+def test_analysis_independent_profile_override(env, monkeypatch):
+    monkeypatch.setenv('FACTORY_REQUIREMENT_ANALYSIS_MODEL','my-sonnet')
+    env.svc._analyze(env.run['id'])
+    assert env.requests[-1].model == 'my-sonnet'

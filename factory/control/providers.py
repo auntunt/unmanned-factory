@@ -61,9 +61,10 @@ class ProviderResult:
 class ProviderError(RuntimeError):
     """Provider failure, optionally retaining a resumable session and retry category."""
 
-    def __init__(self, message="", *, session_id=None, transient=None, error_kind=None, status_code=None):
+    def __init__(self, message="", *, session_id=None, transient=None, error_kind=None, status_code=None, partial_result=None):
         super().__init__(message)
         self.session_id = session_id
+        self.partial_result = partial_result
         metadata = failure_metadata(message, status_code=status_code)
         self.transient = metadata['transient'] if transient is None else bool(transient)
         self.error_kind = error_kind or metadata['error_kind']
@@ -760,6 +761,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
                     session_id=(session_id or getattr(exc, 'session_id', None)),
                     transient=False,
                     error_kind='budget_exhausted',
+                    partial_result=ProviderResult(''.join(text_parts), session_id, cost_usd, tokens_in, tokens_out),
                 ) from exc
             raise
         outcome = 'failed' if result is None or bool(_value(result, 'is_error', False)) else 'completed'
@@ -775,6 +777,9 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
             "Claude stopped this call after reaching its USD budget; the session and workspace were preserved for continuation",
             transient=False,
             error_kind="budget_exhausted",
+            session_id=session_id,
+            partial_result=ProviderResult("".join(text_parts) or _value(result, "result") or "",
+                session_id, cost_usd, tokens_in, tokens_out),
         )
     if result is not None and bool(_value(result, "is_error", False)):
         detail = _value(result, "result") or _value(result, "errors") or "Claude returned an error"
@@ -1510,7 +1515,8 @@ class SDKRunner:
                 metadata['error_kind'] = error_payload['error_kind']
             error_cls = ProviderTimeout if error_payload.get('kind') == 'ProviderTimeout' else ProviderCancelled if error_payload.get('kind') == 'ProviderCancelled' else ProviderError
             raise error_cls(str(error_payload.get("message") or "provider worker failed"),
-                session_id=error_payload.get('session_id'), **metadata)
+                session_id=error_payload.get('session_id'),
+                partial_result=ProviderResult(**error_payload['partial_result']) if isinstance(error_payload.get('partial_result'), dict) else None, **metadata)
         if rc != 0:
             raise ProviderError(f"provider worker exited with status {rc}")
         if result_payload is None:

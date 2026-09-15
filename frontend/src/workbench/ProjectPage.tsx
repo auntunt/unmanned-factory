@@ -53,7 +53,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const [autoIssues, setAutoIssues] = useState(Boolean(project.auto_issues))
   const [autoPublish, setAutoPublish] = useState(Boolean(project.auto_publish))
   const [autoSpecConfirm, setAutoSpecConfirm] = useState(Boolean(project.auto_spec_confirm))
-  const [analysisBudget, setAnalysisBudget] = useState(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 2))
+  const [analysisBudget, setAnalysisBudget] = useState(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 5))
   const [budget, setBudget] = useState(String(project.budget_usd ?? 100))
   const [enforceBudget, setEnforceBudget] = useState(project.budget_usd != null)
   const [busy, setBusy] = useState(false)
@@ -68,7 +68,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
-  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoSpecConfirm(Boolean(project.auto_spec_confirm)); setAnalysisBudget(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 2)); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
+  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoSpecConfirm(Boolean(project.auto_spec_confirm)); setAnalysisBudget(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 5)); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
 
   const save = async (event: FormEvent) => {
     event.preventDefault(); setError(null); setConflict(null); setSaved(false)
