@@ -115,7 +115,8 @@ export function runGuidance(run: Run): RunGuidance {
   const questions = requirements(run)
   const stopReason = runError(run) ?? executionFailure(run) ?? textArtifact(run, 'needs_human')
   const failure = runError(run) ?? stopReason
-  const budgetStopped = run.artifacts?.budget_exhausted === true || /\bbudget\b|预算/i.test(stopReason || '')
+  // A historical budget flag must not mask a later, explicitly reported failure.
+  const budgetStopped = /\bbudget\b|预算/i.test(stopReason || '') || (run.artifacts?.budget_exhausted === true && !runError(run))
   if (run.status === 'needs_human' && budgetStopped) return result(run, {
     kind: 'budget',
     label: '预算已用尽',

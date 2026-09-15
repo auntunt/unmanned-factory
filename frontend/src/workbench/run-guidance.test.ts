@@ -109,3 +109,10 @@ it('shows failed inspections as terminal findings with preserved evidence', () =
   expect(canGenerateNextPlan(failed, true)).toBe(false)
   expect(runGuidance({ ...failed, inspection_superseded_by: 'next' }).label).toBe('巡检已被取代')
 })
+
+it('shows the latest verification failure instead of a retained budget flag', () => {
+  const current = Object.assign(run({ artifacts: { budget_exhausted: true, needs_human: stoppedCost, verification: { verdict: 'fail', reason: '验收证据不完整' } } }), { error: '独立验证未通过：验收证据不完整' })
+  expect(runGuidance(current).kind).not.toBe('budget')
+  expect(runGuidance(current).rawEvidence).toContain('验收证据不完整')
+  expect(runGuidance({ ...current, status: 'running' }).kind).toBe('progress')
+})

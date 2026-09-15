@@ -179,3 +179,31 @@ it('attention rows use short guidance, request title and date without a long sum
   expect(screen.queryByText(runGuidance(run).summary)).toBeNull()
   expect(screen.getByRole('link', { name: '查看记录' }).getAttribute('href')).toContain('#run-recovery')
 })
+
+it('continues the same paused run from the top guidance in any view', async () => {
+  const paused = { ...run, source: { type: 'web', actor_id: 1 }, resume_count: 2, artifacts: { base_sha: 'base', tasks: [{ id: 'coding' }], budget_exhausted: true } } as unknown as Run
+  let current = paused
+  api.mockImplementation(async (url, options) => {
+    if (options?.method === 'POST' && url.endsWith('/continue')) { current = { ...paused, status: 'running' }; return current as never }
+    if (url.includes('/events')) return { events: [], cursor: 0 } as never
+    return current as never
+  })
+  render(<MemoryRouter initialEntries={[`/runs/${run.id}?view=requirements`]}><Routes><Route path="/runs/:runId" element={<RunPage {...props} />} /></Routes></MemoryRouter>)
+  const button = await screen.findByRole('button', { name: '继续工作' })
+  expect(button.closest('.wb-run-journey')).toBeTruthy()
+  fireEvent.click(button)
+  await waitFor(() => expect(api.mock.calls.find(([url, options]) => url.endsWith('/continue') && options?.method === 'POST')?.[1]?.body).toEqual({ answer: '', revision: 1, resume_count: 2 }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: '继续工作' })).toBeNull())
+  expect(screen.queryByText('预算已用尽')).toBeNull()
+  expect(api.mock.calls.some(([url, options]) => url.endsWith('/retry') && options?.method === 'POST')).toBe(false)
+})
+
+it('does not offer same-run continuation to another member or an inspection', async () => {
+  for (const source of [{ type: 'web', actor_id: 2 }, { type: 'inspection', actor_id: 1 }]) {
+    api.mockResolvedValue({ ...run, source, artifacts: { base_sha: 'base', tasks: [{ id: 'coding' }] } } as never)
+    const view = render(<MemoryRouter initialEntries={[`/runs/${run.id}?view=requirements`]}><Routes><Route path="/runs/:runId" element={<RunPage {...props} user={{ ...props.user, role: 'member' }} />} /></Routes></MemoryRouter>)
+    await screen.findByRole('heading', { name: /修复工时导出/, level: 1 })
+    expect(screen.queryByRole('button', { name: '继续工作' })).toBeNull()
+    view.unmount()
+  }
+})
