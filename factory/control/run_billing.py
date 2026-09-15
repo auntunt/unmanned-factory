@@ -184,7 +184,8 @@ def _record_interrupted_provider_usage(self, run):
         latest_by_lane[lane] = event
     if not latest_by_lane:
         return
-    project = self.store.project(run['project_id'])
+    project = (self._project_for_run(run) if run.get('project_id') is None and run.get('source', {}).get('type') == 'skill_ingestion'
+               else self.store.project(run['project_id']))
     fallback_ceiling = valid_cost(project.get('budget_usd'))
     for lane, started in latest_by_lane.items():
         payload = started['payload']

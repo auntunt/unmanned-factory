@@ -18,6 +18,7 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
   const provenance = useProvenance()
   const [params] = useSearchParams()
   const focused = params.get('selected')
+  const ownerAgent = projectId ? null : params.get('agent_id')
   const [sources, setSources] = useState<DataSource[]>([])
   const [modules, setModules] = useState<Module[]>([])
   const [binding, setBinding] = useState<Selection | null>(null)
@@ -49,13 +50,13 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
   const base = `/api/v4/projects/${encodeURIComponent(String(projectId))}/modules`
   const load = useCallback(async (signal?: AbortSignal) => {
     const [catalog, selection, dataSources] = await Promise.all([
-      request<{ modules: Module[] }>('/api/v4/modules', { onUnauthorized, signal }),
+      request<{ modules: Module[] }>(ownerAgent ? `/api/v4/modules?agent_id=${encodeURIComponent(ownerAgent)}` : '/api/v4/modules', { onUnauthorized, signal }),
       projectId ? request<Selection>(base, { onUnauthorized, signal }) : Promise.resolve(null),
       projectId ? request<{ sources: DataSource[] }>(`/api/v4/projects/${encodeURIComponent(String(projectId))}/sources`, { onUnauthorized, signal }) : Promise.resolve({ sources: [] }),
     ])
     if (signal?.aborted) return
     setSources(dataSources.sources); setModules(catalog.modules); setBinding(selection); setSelected(selection?.modules ?? [])
-  }, [base, projectId, onUnauthorized])
+  }, [base, projectId, onUnauthorized, ownerAgent])
   useEffect(() => { const c = new AbortController(); setLoading(true); void load(c.signal).catch(e => { if (!c.signal.aborted) setError(errorText(e)) }).finally(() => { if (!c.signal.aborted) setLoading(false) }); return () => c.abort() }, [load])
   const mutate = async (operation: () => Promise<void>) => { setBusy(true); setError(''); setNotice(''); try { await operation() } catch(e) { setError(errorText(e)) } finally { setBusy(false) } }
   const toggle = (m: Module) => {

@@ -92,6 +92,15 @@ def recover(self):
                 continue
             rid = run['id']
             self._record_interrupted_provider_usage(run)
+            if run.get('source', {}).get('type') == 'skill_ingestion':
+                # No source scripts or external writes can occur in this zero-tool workflow.
+                from factory.control.skill_ingestion_runs import clean_interrupted_scratch
+                clean_interrupted_scratch(self, rid)
+                self.queue.reset(rid)
+                self.store.update(rid, {'status': 'received'}, expected=(run['status'],),
+                    event=('run.resumed', {'phase': 'plan', 'message': '接续适配与独立验收的已保存分片'}))
+                self.queue.enqueue(rid, 'plan')
+                continue
             try:
                 policy = run.get('policy') or self.policies.get(run['project_id'])
             except KeyError:

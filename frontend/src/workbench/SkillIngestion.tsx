@@ -14,12 +14,14 @@ type Mapping = {
   injection_risks: { path: string; reason: string; text?: string }[]
   skills: { path: string; name: string; requires_authorization: boolean; sha256: string; body: string }[]
 }
-type Draft = { id: string; run_id: string; revision: number; status: string; source_sha256: string; mapping?: Mapping; agent_id?: string }
+type Draft = { available_slots?: number; target_agent_id?: string; target_identity?: string; id: string; run_id: string; revision: number; status: string; source_sha256: string; mapping?: Mapping; agent_id?: string }
 
 export function IngestionReview({ draft, onChanged, ...props }: PageProps & { draft: Draft; onChanged: () => void }) {
   const [mapping, setMapping] = useState(draft.mapping)
-  const [identity, setIdentity] = useState(draft.mapping?.identity || '')
+  const [identity, setIdentity] = useState(draft.target_identity ?? draft.mapping?.identity ?? '')
   const [flags, setFlags] = useState<Record<string, boolean>>(Object.fromEntries((draft.mapping?.skills || []).map(s => [s.path, s.requires_authorization])))
+  const largeLibrary = (draft.mapping?.skills.length || 0) > (draft.available_slots ?? 24)
+  const [selected, setSelected] = useState<string[]>([])
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -34,7 +36,7 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
         authorization_required: mapping.authorization_required || [] }
       await request(`/api/v4/skill-ingestions/${draft.id}${sign ? '/sign' : ''}`, {
         method: sign ? 'POST' : 'PUT', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized,
-        body: sign ? { revision: draft.revision, identity, authorization: flags } : { revision: draft.revision, mapping: body },
+        body: sign ? { revision: draft.revision, identity, authorization: flags, ...(largeLibrary ? { selected_paths: selected } : {}) } : { revision: draft.revision, mapping: body },
       })
       onChanged()
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
@@ -45,7 +47,7 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
     <p>来源 SHA256：<code>{draft.source_sha256}</code></p>
     {draft.agent_id && <Link to={`/agents/${draft.agent_id}`}>打开正式职能体</Link>}
     {mapping && <>
-      <label>人签身份段<textarea disabled={!editable} maxLength={1200} value={identity} onChange={e => setIdentity(e.target.value)} /></label>
+      <label>人签身份段<textarea disabled={!editable || Boolean(draft.target_agent_id)} maxLength={1200} value={identity} onChange={e => setIdentity(e.target.value)} /></label>
       <h4>结构映射与步骤断言</h4>
       <ol>{mapping.steps.map((step, index) => <li key={`${step.skill_path}-${index}`}>
         <strong>{step.role === 'router' ? '路由根' : '叶子能力'}：{step.title}</strong><p>{step.skill_path}</p>
@@ -59,7 +61,9 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       {mapping.decisions.map((d, i) => <div key={i}><strong>{d.primitive} → {d.target === 'unsupported' ? '该能力在本平台不可用' : d.target}</strong><p>{d.path}</p><label>映射依据<textarea disabled={!editable} value={d.basis} onChange={e => setMapping({ ...mapping, decisions: mapping.decisions.map((v, j) => j === i ? { ...v, basis: e.target.value } : v) })} /></label></div>)}
       <h4>工具与 MCP 前置条件</h4>{mapping.dependencies.length ? mapping.dependencies.map((d, i) => <p key={i}>{d.path}：{d.reason}</p>) : <p>未识别到额外依赖；签署前请复核。</p>}
       <h4>注入风险条目</h4>{mapping.injection_risks.map((r, i) => <blockquote key={i}>{r.path}：{r.reason} {r.text}</blockquote>)}
+      {largeLibrary && <p>这是能力库。人签保存全部能力；本次最多选择 {draft.available_slots ?? 24} 项加入岗位清单，其余保留为随附能力，后续可在清单中选择。</p>}
       <h4>安全映射与来源</h4>{mapping.skills.map(s => <div key={s.path}>
+        {largeLibrary && <label><input type="checkbox" disabled={!editable || (!selected.includes(s.path) && selected.length >= (draft.available_slots ?? 24))} checked={selected.includes(s.path)} onChange={e => setSelected(e.target.checked ? [...selected, s.path] : selected.filter(p => p !== s.path))} />将 {s.name} 加入岗位清单</label>}
         <label><input type="checkbox" disabled={!editable} checked={flags[s.path]} onChange={e => setFlags({ ...flags, [s.path]: e.target.checked })} />{s.name}：执行前需要逐目标授权</label>
         <p>{s.path} · <code>{s.sha256}</code></p><details><summary><Icon name="triangle" className="wb-disclosure-icon" />原始正文（不可信资料）</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{s.body}</pre></details>
       </div>)}
@@ -76,27 +80,27 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       {editable && <><p>修改映射后请先保存，刷新核对，再签署。签署不会执行外部脚本或自动安装工具。</p>
         <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void act(false)}>保存评审修改</button>
         <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已核对身份、全部授权标记、映射及不可用能力，同意启用</label>
-        <button className="wb-button wb-button-primary" disabled={busy || !confirmed || JSON.stringify(mapping) !== JSON.stringify(draft.mapping)} onClick={() => void act(true)}>人签并启用职能包</button></>}
+        <button className="wb-button wb-button-primary" disabled={busy || !confirmed || (largeLibrary && !selected.length) || JSON.stringify(mapping) !== JSON.stringify(draft.mapping)} onClick={() => void act(true)}>人签并启用职能包</button></>}
     </>}
     {error && <p role="alert">{error}</p>}
   </section>
 }
 
-export default function SkillIngestion(props: PageProps) {
+export default function SkillIngestion(props: PageProps & { agentId?: string; reviewOnly?: boolean; onSigned?: () => void }) {
   const [params] = useSearchParams()
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([])
   const [pid, setPid] = useState(params.get('project') || ''); const [path, setPath] = useState('')
   const [items, setItems] = useState<Draft[]>([]); const [epoch, setEpoch] = useState(0)
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
   const [uploaded, setUploaded] = useState<Draft | null>(null)
-  useEffect(() => { let active = true; void request<{ projects: { id: string; name: string }[] }>('/api/v2/projects', { onUnauthorized: props.onUnauthorized }).then(r => { if (active) setProjects(r.projects) }).catch(e => { if (active) setError(errorText(e)) }); return () => { active = false } }, [props.onUnauthorized])
+  useEffect(() => { if (props.agentId || props.reviewOnly) return; let active = true; void request<{ projects: { id: string; name: string }[] }>('/api/v2/projects', { onUnauthorized: props.onUnauthorized }).then(r => { if (active) setProjects(r.projects) }).catch(e => { if (active) setError(errorText(e)) }); return () => { active = false } }, [props.onUnauthorized, props.agentId, props.reviewOnly])
   useEffect(() => {
-    if (!pid) { setItems([]); return }
+    if (!pid && !props.agentId) { setItems([]); return }
     let active = true
-    const load = () => request<{ items: Draft[] }>(`/api/v4/skill-ingestions?project_id=${encodeURIComponent(pid)}`, { onUnauthorized: props.onUnauthorized }).then(r => { if (active) setItems(r.items) }).catch(e => { if (active) setError(errorText(e)) })
+    const load = () => request<{ items: Draft[] }>(`/api/v4/skill-ingestions?${props.agentId ? `agent_id=${encodeURIComponent(props.agentId)}` : `project_id=${encodeURIComponent(pid)}`}`, { onUnauthorized: props.onUnauthorized }).then(r => { if (active) setItems(r.items) }).catch(e => { if (active) setError(errorText(e)) })
     void load(); const timer = window.setInterval(() => void load(), 5000)
     return () => { active = false; window.clearInterval(timer) }
-  }, [pid, epoch, props.onUnauthorized])
+  }, [pid, epoch, props.onUnauthorized, props.agentId])
   const submit = async (file?: File) => {
     if (busy || !pid) return
     setBusy(true); setError(''); setUploaded(null)
@@ -108,6 +112,10 @@ export default function SkillIngestion(props: PageProps) {
       setEpoch(v => v + 1)
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
+  if (props.agentId || props.reviewOnly) return <div aria-label="能力适配与人签草稿">
+    {error && <p role="alert">{error}</p>}
+    {items.map(draft => <IngestionReview key={`${draft.id}:${draft.revision}`} draft={draft} {...props} onChanged={() => { setEpoch(v => v + 1); props.onSigned?.() }} />)}
+  </div>
   return <section className="wb-card" aria-label="导入外部 skill 包"><h2>导入外部 skill 包</h2>
     <p>第三方下载或自己整理的 skill ZIP 都从这里导入。先选择所属项目，再上传文件。</p>
     <p>只读取、分类和映射。独立验收后进入评审，签署前不会启用。执行与验收须配置支持零工具模式的 Claude。</p>

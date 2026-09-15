@@ -10,10 +10,10 @@ from pathlib import PurePosixPath
 
 import yaml
 
-from factory.control.agents import inspect_skill, MAX_PACK_FILES, macos_junk
+from factory.control.agents import inspect_skill, MAX_PACK_FILES, MAX_UNPACKED, macos_junk
 
 
-MAX_TEXT = 100_000
+MAX_TEXT = MAX_UNPACKED
 PRIMITIVES = {
     'master-route': 'sop', 'case-init': 'run_queue',
     'tool-index': 'mcp_registry', 'bootstrap-manifest': 'manifest',
@@ -58,7 +58,7 @@ def read_package(raw: bytes) -> dict:
                 continue
             total += len(text)
             if total > MAX_TEXT:
-                raise ValueError('包内文本超过 100000 字符，请按职能拆包；不会静默截断')
+                raise ValueError('包内文本超过 100 MiB')
             entry['text'] = text
             files.append(entry)
             for number, line in enumerate(text.splitlines(), 1):
@@ -77,10 +77,12 @@ def read_package(raw: bytes) -> dict:
             if match:
                 try:
                     metadata = yaml.safe_load(match.group(1)) or {}
-                except yaml.YAMLError as exc:
-                    raise ValueError(f'{item.filename}: 非法 frontmatter') from exc
+                except yaml.YAMLError:
+                    metadata = {}
+                    risks.append({'path': item.filename, 'reason': 'frontmatter 非法，保留原文供人审；未猜测字段'})
                 if not isinstance(metadata, dict):
-                    raise ValueError(f'{item.filename}: frontmatter 必须为对象')
+                    metadata = {}
+                    risks.append({'path': item.filename, 'reason': 'frontmatter 不是对象，保留原文供人审'})
                 body = text[match.end():]
             if PurePosixPath(item.filename).name.lower() != 'skill.md' and 'name' not in metadata:
                 continue
@@ -99,8 +101,6 @@ def read_package(raw: bytes) -> dict:
                            'assertions': assertions})
     if not skills:
         raise ValueError('包内没有 SKILL.md 或带 name frontmatter 的 Markdown skill')
-    if len(skills) > 24:
-        raise ValueError('一个职能包最多 24 个 skill，请拆包')
     return {'sha256': sha(raw), 'files': files, 'skills': skills,
             'injection_risks': risks, 'host_primitives': primitives}
 
@@ -114,7 +114,7 @@ def validate_mapping(package: dict, proposal: dict) -> dict:
     if not isinstance(proposal['identity'], str) or len(proposal['identity']) > 1200:
         raise ValueError('身份建议不得超过 1200 字符')
     steps = proposal['steps']
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 48:
+    if not isinstance(steps, list) or not (0 if package.get('partial') and not package['skills'] else 1) <= len(steps) <= MAX_PACK_FILES * 2:
         raise ValueError('SOP 步骤数量无效')
     paths = {skill['path']: skill for skill in package['skills']}
     authorization_required = proposal.get('authorization_required', [])
@@ -162,7 +162,7 @@ def validate_mapping(package: dict, proposal: dict) -> dict:
         if not decision or decision['target'] not in {item['candidate'], 'unsupported'}:
             raise ValueError('宿主入口不得遗漏或虚构替代')
     for field in ('dependencies', 'injection_risks'):
-        if not isinstance(proposal[field], list) or len(proposal[field]) > 500 or any(
+        if not isinstance(proposal[field], list) or len(proposal[field]) > MAX_PACK_FILES * 10 or any(
             not isinstance(item, dict) or not isinstance(item.get('path'), str)
             or item['path'] not in {f['path'] for f in package['files']}
             or not isinstance(item.get('reason'), str) or not item['reason'].strip() or len(item['reason']) > 4000
@@ -173,7 +173,8 @@ def validate_mapping(package: dict, proposal: dict) -> dict:
     return {**proposal, 'skills': [{**skill, 'requires_authorization':
             skill['requires_authorization'] or skill['path'] in authorization_required} for skill in package['skills']],
             'source_sha256': package['sha256'],
-            'injection_risks': package['injection_risks'] + proposal['injection_risks']}
+            'injection_risks': list({json.dumps(r, sort_keys=True, ensure_ascii=False): r
+                                     for r in [*package['injection_risks'], *proposal['injection_risks']]}.values())}
 
 
 ADAPTER_PROMPT = '''你负责将外部 skill 包翻译为 webuddy 职能包 v2 草稿。
@@ -198,4 +199,6 @@ ADAPTER_PROMPT = '''你负责将外部 skill 包翻译为 webuddy 职能包 v2 �
 
 
 def adaptation_prompt(package):
-    return ADAPTER_PROMPT + json.dumps(package, ensure_ascii=False)
+    note = ('本次为大包的一个资料分片；只映射本片列出的 skill。若 skills 为空，steps 必须为空，仍需核对本片宿主原语、依赖与风险。text_offset 标注同一文件的分片位置，不代表遗漏。\n'
+            if package.get('partial') else '')
+    return ADAPTER_PROMPT.replace('以下 JSON', note + '以下 JSON') + json.dumps(package, ensure_ascii=False)

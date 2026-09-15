@@ -81,3 +81,15 @@ it('displays the specific ingestion file limit instead of a generic HTTP error',
  fireEvent.change(screen.getByLabelText('上传外部 ZIP'),{target:{files:[new File(['zip'],'large.zip')]}})
  expect((await screen.findByRole('alert')).textContent).toContain('文件数超过 3000')
 })
+
+it('keeps existing job identity and allows explicit selection from a large signed library', async () => {
+  const skills = Array.from({ length: 25 }, (_, i) => ({ path: `s${i}/SKILL.md`, name: `skill-${i}`, requires_authorization: true, sha256: `hash-${i}`, body: 'data' }))
+  render(<MemoryRouter><IngestionReview draft={{ ...draft, target_agent_id: 'a1', target_identity: '原岗位身份', available_slots: 2, mapping: { ...draft.mapping, skills } }} onChanged={vi.fn()} {...props} /></MemoryRouter>)
+  expect((screen.getByLabelText('人签身份段') as HTMLTextAreaElement).value).toBe('原岗位身份')
+  expect((screen.getByLabelText('人签身份段') as HTMLTextAreaElement).disabled).toBe(true)
+  fireEvent.click(screen.getByLabelText(/我已核对身份/))
+  expect((screen.getByRole('button', { name: '人签并启用职能包' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.click(screen.getByLabelText('将 skill-0 加入岗位清单'))
+  fireEvent.click(screen.getByRole('button', { name: '人签并启用职能包' }))
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/v4/skill-ingestions/draft/sign', expect.objectContaining({ body: expect.objectContaining({ identity: '原岗位身份', selected_paths: ['s0/SKILL.md'] }) })))
+})

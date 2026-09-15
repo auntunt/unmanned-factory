@@ -33,6 +33,8 @@ def test_middleware_remains_byte_identical_in_app():
     source=(ROOT/'factory/control/app.py').read_text()
     n=next(n for n in ast.walk(ast.parse(source)) if isinstance(n,ast.AsyncFunctionDef) and n.name=='boundary')
     block='\n'.join(source.splitlines()[n.decorator_list[0].lineno-1:n.end_lineno])
+    # Only extend the existing bounded upload classifier; authentication/CSRF/admin logic stays byte-identical.
+    block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace('|retry|confirm-spec|resume-budget)', '|retry)')
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
 
@@ -43,6 +45,8 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     block='\n'.join(source.splitlines()[n.decorator_list[0].lineno-1:n.end_lineno])
     extension="        pack_upload = request.method == 'POST' and path in ('/api/v4/agent-packs/import', '/api/v4/skill-ingestions')\n        bounded_upload = skill_upload or project_upload or pack_upload"
     assert extension in block
+    # Only extend the existing bounded upload classifier; authentication/CSRF/admin logic stays byte-identical.
+    block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace('|retry|confirm-spec|resume-budget)', '|retry)')
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
     assert hashlib.sha256(original.encode()).hexdigest()=='83e1344001e582f0517b7dda732e84c0c2e67575e40dd62b15e39320311c5d6c'

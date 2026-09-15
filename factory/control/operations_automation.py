@@ -210,7 +210,11 @@ class OperationsAutomation:
         if not claimed:
             return
         try:
-            project = {'name': run['project_name']} if run.get('workbench_path') == '/settings/runtime' else self.store.project(run['project_id'])
+            if run.get('project_id') is None and run.get('source', {}).get('target_agent_id'):
+                with self.store.connect() as db:
+                    project = json.loads(db.execute('SELECT data FROM agents WHERE id=?', (run['source']['target_agent_id'],)).fetchone()[0])
+            else:
+                project = {'name': run['project_name']} if run.get('workbench_path') == '/settings/runtime' else self.store.project(run['project_id'])
             ongoing = (run.get('source', {}).get('type') == 'inspection'
                        and self.history(run['project_id'])['consecutive_failures'] >= 3)
             link = '/settings/runtime' if run.get('workbench_path') == '/settings/runtime' else '/runs/' + quote(str(run['id']), safe='')

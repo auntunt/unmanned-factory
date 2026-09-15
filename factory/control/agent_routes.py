@@ -101,9 +101,9 @@ def router(store, service):
         })
 
     @api.get('/modules')
-    def list_modules():
+    def list_modules(agent_id: str | None = None):
         refs = manifests.references()
-        return {'modules': [{**m, 'agent_references': refs.get(m['id'], []), 'agent_reference_count': len(refs.get(m['id'], []))} for m in modules.list()]}
+        return {'modules': [{**m, 'agent_references': refs.get(m['id'], []), 'agent_reference_count': len(refs.get(m['id'], []))} for m in modules.list(agent_id)]}
 
     @api.post('/modules', status_code=201)
     def create_module(body: ModuleBody, request: Request):

@@ -109,7 +109,7 @@ export interface Run {
   inspection_superseded_by?: string
   execution_mode?: 'continuous' | 'dag'
   id: string | number
-  project_id: string | number
+  project_id: string | number | null
   request: string
   source?: Record<string, unknown>
   status: RunStatus

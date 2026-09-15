@@ -215,6 +215,10 @@ class Service:
 
     def _project_for_run(self, run):
         """Use the verified predecessor checkout without changing project refs."""
+        if run.get('project_id') is None and run.get('source', {}).get('type') == 'skill_ingestion':
+            record = self.skill_ingestions.get(run['source']['skill_ingestion_id'])
+            agent = self.agents.get(record['target_agent_id'])
+            return {'id': None, 'name': agent['name'], 'budget_usd': None, 'checks': {}}
         project = self.store.project(run['project_id'])
         if run.get('spec_confirmation') and run.get('requirement_workspace'):
             if self.governance is not None:

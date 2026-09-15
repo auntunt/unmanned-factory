@@ -4,12 +4,13 @@ import json
 import os
 import stat
 import zipfile
+import uuid
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from factory.control.agents import MAX_ZIP, MAX_PACK_FILES, MAX_FILE, macos_junk
+from factory.control.agents import MAX_ZIP, MAX_PACK_FILES, MAX_FILES, MAX_FILE, macos_junk, inspect_skill, strip_macos_junk
 from factory.control.skill_ingestion import validate_mapping
 from factory.control.skill_ingestion_runs import authorization_snapshot
 from factory.control.store import Conflict, now
@@ -26,11 +27,13 @@ class Sign(BaseModel):
     revision: int = Field(ge=1)
     identity: str = Field(max_length=1200)
     authorization: dict[str, bool]
+    selected_paths: list[str] | None = None
 
 
 class Directory(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    project_id: str
+    project_id: str | None = None
+    agent_id: str | None = None
     path: str = Field(min_length=1, max_length=1000)
 
 
@@ -94,25 +97,37 @@ def router(service):
     api = APIRouter(prefix='/api/v4')
     ingestions = service.skill_ingestions
 
-    def access(request, pid):
-        service.governance.require_project(request.state.user['id'], pid)
+    def access(request, pid, aid=None):
+        if pid:
+            service.governance.require_project(request.state.user['id'], pid)
+        else:
+            if request.state.user.get('role') != 'admin':
+                raise HTTPException(403, '职能体范围的适配仅管理员可管理')
+            if not aid:
+                raise HTTPException(422, '未选择项目时必须指定职能体 agent_id')
+        if aid:
+            service.agents.get(aid)
 
     def get(request, iid):
         try:
             record = ingestions.get(iid)
         except KeyError:
             raise HTTPException(404, '摄取记录不存在') from None
-        access(request, record['project_id'])
+        access(request, record['project_id'], record.get('target_agent_id'))
+        if record.get('target_agent_id'):
+            manifest = service.agent_manifests.get(record['target_agent_id'])
+            record['target_identity'] = manifest['identity']
+            record['available_slots'] = max(0, 24 - len(manifest['skills']))
         return record
 
-    def create(request, pid, raw):
-        access(request, pid)
+    def create(request, pid, raw, aid=None):
+        access(request, pid, aid)
         try:
-            record = ingestions.create(pid, raw, request.state.user['id'])
+            record = ingestions.create(pid, raw, request.state.user['id'], agent_id=aid)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
         run, _ = service.store.create_run(pid, '职能包适配：只读分类、映射、独立验收后交人签',
-            source={'type': 'skill_ingestion', 'skill_ingestion_id': record['id'],
+            source={'type': 'skill_ingestion', 'skill_ingestion_id': record['id'], 'target_agent_id': aid,
                     'actor_id': request.state.user['id'], 'actor': request.state.user['username']})
         record = ingestions.update(record['id'], {'run_id': run['id']}, record['revision'], request.state.user['id'])
         try:
@@ -123,24 +138,57 @@ def router(service):
         return record
 
     @api.post('/skill-ingestions', status_code=201)
-    def upload(request: Request, project_id: str = Form(...), file: UploadFile = File(...)):
-        return create(request, project_id, file.file.read(MAX_ZIP + 1))
+    def upload(request: Request, project_id: str | None = Form(None),
+               agent_id: str | None = Form(None), file: UploadFile = File(...)):
+        return create(request, project_id, file.file.read(MAX_ZIP + 1), agent_id)
+
+    def equip(request, aid, raw, filename):
+        access(request, None, aid)
+        try:
+            meta = inspect_skill(raw, max_files=MAX_PACK_FILES)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        count = sum(PurePosixPath(f['path']).name.lower() == 'skill.md' for f in meta['files'])
+        if count > 1 or len(meta['files']) > MAX_FILES:
+            return {'channel': 'adaptation', 'skill_count': count, 'file_count': len(meta['files']),
+                    'message': f'检测到 {count} 个 skill、{len(meta["files"])} 个文件的外部包，将走适配与人签',
+                    'ingestion': create(request, None, raw, aid)}
+        sid = uuid.uuid4().hex
+        asset = {**meta, 'id': sid, 'agent_id': aid, 'filename': filename,
+                 'source': 'upload', 'created_at': now()}
+        with service.store.connect() as db:
+            db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',
+                       (sid, aid, json.dumps(asset, ensure_ascii=False), strip_macos_junk(raw), asset['created_at']))
+        return {'channel': 'attachment', 'skill_count': count, 'file_count': len(meta['files']),
+                'message': ('单 skill，直接添加' if count else '未发现 SKILL.md，保存为维护资料') + '为维护附件；在维护对话整理并应用后生效', 'asset': asset}
+
+    @api.post('/agents/{aid}/abilities', status_code=201)
+    def ability(aid: str, request: Request, file: UploadFile = File(...)):
+        return equip(request, aid, file.file.read(MAX_ZIP + 1), file.filename or 'skill.zip')
 
     @api.post('/skill-ingestions/directory', status_code=201)
     def directory(body: Directory, request: Request):
-        access(request, body.project_id)
+        access(request, body.project_id, body.agent_id)
         try:
-            raw = directory_zip(service.store.project(body.project_id)['workspace'], body.path)
+            # Admin provisions a dedicated mount root; never read arbitrary server paths.
+            root = (service.store.project(body.project_id)['workspace'] if body.project_id
+                    else os.environ.get('FACTORY_SKILL_IMPORT_DIR'))
+            if not root:
+                raise ValueError('尚未配置职能体资料挂载目录 FACTORY_SKILL_IMPORT_DIR，请上传 ZIP')
+            raw = directory_zip(root, body.path)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
-        return create(request, body.project_id, raw)
+        return create(request, body.project_id, raw, body.agent_id)
 
     @api.get('/skill-ingestions')
-    def records(request: Request, project_id: str):
-        access(request, project_id)
+    def records(request: Request, project_id: str | None = None, agent_id: str | None = None):
+        access(request, project_id, agent_id)
+        column = "json_extract(data,'$.target_agent_id')" if agent_id else 'project_id'
         with service.store.connect() as db:
-            return {'items': [json.loads(row[0]) for row in db.execute(
-                'SELECT data FROM skill_ingestions WHERE project_id=? ORDER BY rowid DESC LIMIT 50', (project_id,))]}
+            ids = [json.loads(row[0])['id'] for row in db.execute(
+                f'SELECT data FROM skill_ingestions WHERE {column}=? ORDER BY rowid DESC LIMIT 50',
+                (agent_id or project_id,))]
+        return {'items': [get(request, iid) for iid in ids]}
 
     @api.get('/skill-ingestions/{iid}')
     def detail(iid: str, request: Request):
@@ -163,7 +211,9 @@ def router(service):
         get(request, iid)
         try:
             return ingestions.sign(iid, body.revision, body.identity, body.authorization,
-                                   request.state.user['id'], service.agent_manifests)
+                                   request.state.user['id'], service.agent_manifests, selected_paths=body.selected_paths)
+        except Conflict:
+            raise
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 

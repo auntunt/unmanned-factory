@@ -3,7 +3,6 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import Icon, { CategoryBadge } from './Icon'
-import PackImport from './PackImport'
 import Workbench from './Workbench'
 import ModulesPage from './ModulesPage'
 import { request } from '../workspace/api'
@@ -27,21 +26,6 @@ it('renders navigation, logout, menu and rehearsal icons as SVG without glyph te
  expect(screen.getByRole('status').querySelector('svg')).toBeTruthy()
  expect(document.body.textContent).not.toMatch(/[↗☰◌▶▼←＋→]/)
 })
-it('groups import controls into switchable keyboard-accessible tabs, preserving input state', async () => {
- render(<MemoryRouter><PackImport {...props} onImported={vi.fn()} /></MemoryRouter>)
- const summary = screen.getByText('导入'); expect(summary.querySelector('svg[data-icon="triangle"]')).toBeTruthy()
- expect(summary.closest('details')?.open).toBe(false); fireEvent.click(summary)
- expect(screen.getByRole('tabpanel').getAttribute('id')).toBe('pack-panel-0')
- expect(screen.getByLabelText('选择 webuddy 职能包 ZIP').closest('[role=tabpanel]')?.hasAttribute('hidden')).toBe(false)
- const external = screen.getByRole('tab', { name: '外部 skill 包·适配人签' }); fireEvent.click(external)
- expect(screen.getByRole('tabpanel').getAttribute('id')).toBe('pack-panel-1')
- fireEvent.change(screen.getByLabelText('已挂载目录（相对项目工作区）'), { target: { value: 'skills/example' } })
- fireEvent.keyDown(external, { key: 'ArrowLeft' })
- expect(screen.getByRole('tab', { name: '职能包 v1/v2' }).getAttribute('aria-selected')).toBe('true')
- fireEvent.click(external)
- expect((screen.getByLabelText('已挂载目录（相对项目工作区）') as HTMLInputElement).value).toBe('skills/example')
- await screen.findByText('请选择项目')
-})
 it('renders module category and disclosure with SVG and gives content/edit matching link styles', async () => {
  render(<MemoryRouter><ModulesPage {...props} /></MemoryRouter>)
  const card = (await screen.findByText('代码梳理')).closest('article')!
@@ -51,10 +35,4 @@ it('renders module category and disclosure with SVG and gives content/edit match
  expect(content.querySelector('svg[data-icon=triangle]')).toBeTruthy()
  fireEvent.click(content); expect(card.querySelector('details')?.open).toBe(true)
  expect(card.textContent).not.toMatch(/[↗☰◌▶▼←＋→]/)
-})
-it('opens the external ingestion tab from the maintenance upload guidance link', async () => {
- render(<MemoryRouter initialEntries={['/agents?import=external']}><PackImport {...props} onImported={vi.fn()} /></MemoryRouter>)
- expect(screen.getByText('导入').closest('details')?.open).toBe(true)
- expect(screen.getByRole('tab', {name:'外部 skill 包·适配人签'}).getAttribute('aria-selected')).toBe('true')
- expect(screen.getByRole('tabpanel').id).toBe('pack-panel-1')
 })

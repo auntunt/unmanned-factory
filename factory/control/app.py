@@ -171,7 +171,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         path = request.url.path
         public_api = path in ('/api/auth/login', '/api/v2/github/webhook')
         is_api = path.startswith('/api/')
-        skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/skills', path) is not None
+        skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/(skills|abilities)', path) is not None
         project_upload = request.method == 'POST' and path == '/api/v2/projects/import-zip'
         pack_upload = request.method == 'POST' and path in ('/api/v4/agent-packs/import', '/api/v4/skill-ingestions')
         bounded_upload = skill_upload or project_upload or pack_upload

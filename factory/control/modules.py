@@ -25,9 +25,9 @@ class ModuleStore:
                 value = dict(id=mid, version=1, name=name, category=category, description=description, instructions=instructions, actor='platform', updated_at=now())
                 db.execute('INSERT OR IGNORE INTO instruction_modules VALUES(?,?,?)', (mid, 1, json.dumps(value, ensure_ascii=False)))
 
-    def list(self):
+    def list(self, agent_id=None):
         with self.store.connect() as db:
-            return [json.loads(r[0]) for r in db.execute('SELECT m.data FROM instruction_modules m WHERE version=(SELECT MAX(version) FROM instruction_modules WHERE id=m.id) ORDER BY m.rowid')]
+            return [m for r in db.execute('SELECT m.data FROM instruction_modules m WHERE version=(SELECT MAX(version) FROM instruction_modules WHERE id=m.id) ORDER BY m.rowid') if not (m := json.loads(r[0])).get('owner_agent_id') or m['owner_agent_id'] == agent_id]
 
     def save(self, payload, actor, mid=None, expected_revision=0):
         value = {}
@@ -51,7 +51,7 @@ class ModuleStore:
             if current:
                 prior = json.loads(db.execute('SELECT data FROM instruction_modules WHERE id=? AND version=?', (mid,current)).fetchone()[0])
                 # Editing a body cannot strip imported authorization/provenance.
-                for key in ('requires_authorization', 'external_source'):
+                for key in ('requires_authorization', 'external_source', 'owner_agent_id'):
                     if key in prior:
                         value[key] = prior[key]
             value.update(id=mid or uuid.uuid4().hex, version=(current or 0)+1, actor=str(actor), updated_at=now())
@@ -80,7 +80,10 @@ class ModuleStore:
                 seen.add(mid)
                 item=db.execute('SELECT data FROM instruction_modules WHERE id=? AND version=?',(mid,ref['version'])).fetchone()
                 if not item: raise ValueError('模块版本不存在，请刷新模块库')
-                selected.append(json.loads(item[0]))
+                value = json.loads(item[0])
+                if value.get('owner_agent_id'):
+                    raise ValueError('此 skill 属于职能体，请通过该职能体执行或显式导入职能包')
+                selected.append(value)
             versions = {}
             for module in selected:
                 for ref in [*module.get('source_refs', []), *sources.resolve_slots(pid, module.get('source_slots', []))]:
