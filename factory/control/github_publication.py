@@ -195,7 +195,9 @@ class GitHubPublication:
                 head = git(root, 'rev-parse', 'HEAD')
                 if head == artifacts['commit']:
                     return {'status': 'synced', 'commit': head}
-                if head != artifacts['base_sha']:
+                # Requirement drafts add signed commits on an isolated branch;
+                # first publication may fast-forward only the unchanged original baseline.
+                if head != run.get('requirement_project_base_sha', artifacts['base_sha']):
                     raise ValueError('项目基线已变化')
                 git(root, 'merge', '--ff-only', '--no-edit', artifacts['commit'])
                 return {'status': 'synced', 'commit': artifacts['commit']}

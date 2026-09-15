@@ -116,7 +116,8 @@ def save_spec(self, run, *, confirmed=False):
         parent.mkdir(exist_ok=True)
         workspace = str(parent / run['id'])
         # Store the intended location first; recovery can reuse this same checkout.
-        self.store.update(run['id'], {'requirement_workspace': workspace, 'requirement_branch': branch})
+        self.store.update(run['id'], {'requirement_workspace': workspace, 'requirement_branch': branch,
+            'requirement_project_base_sha': _git(root, 'rev-parse', project['base_branch'])})
     if not (Path(workspace) / '.git').exists():
         root = Path(project['workspace']).resolve()
         exists = subprocess.run(['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + branch], cwd=root).returncode == 0

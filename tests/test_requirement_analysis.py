@@ -267,6 +267,12 @@ def test_general_complete_delivery_uses_scope_and_independent_acceptance(env, mo
     assert len([r for r in requests if not r.read_only])==1
     assert len([e for e in env.store.events(rid) if e['type']=='spec.confirmed'])==1
     assert env.svc._usage(rid,profile='requirement_analysis')['known_cost_usd']==0.2
+    # Initial GitHub upload can still safely advance the untouched project baseline.
+    from factory.control.github_publication import GitHubPublication
+    published={**run,'artifacts':{**run['artifacts'],'publication_type':'initial'}}
+    synced=GitHubPublication(env.svc).sync_initial_baseline(published)
+    assert synced['status']=='synced', synced
+    assert env.git('rev-parse','HEAD')==run['artifacts']['commit']
 
 
 @pytest.mark.parametrize('action', ['confirm-spec', 'resume-budget'])
