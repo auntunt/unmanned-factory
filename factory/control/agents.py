@@ -655,8 +655,10 @@ class AgentStore:
 
 
 def macos_junk(path: str) -> bool:
+    # Shared package filter; keep the existing name for callers.
     parts = path.replace('\\', '/').split('/')
-    return any(part == '__MACOSX' or part == '.DS_Store' or part.startswith('._') for part in parts)
+    excluded = {'__MACOSX', '.DS_Store', '.git', '.svn', '.hg', 'node_modules'}
+    return any(part in excluded or part.startswith('._') for part in parts)
 
 
 def strip_macos_junk(raw: bytes) -> bytes:

@@ -113,3 +113,51 @@ def test_mounted_directory_uses_package_count_and_filters_macos(tmp_path):
     (root / '__MACOSX').mkdir()
     (root / '__MACOSX' / '._bad').symlink_to('/missing')
     assert len(inspect_skill(directory_zip(tmp_path,'skills'),max_files=3000)['files']) == 636
+
+@pytest.mark.parametrize('directory', ['.git', '.svn', '.hg', 'node_modules'])
+def test_repository_debris_is_skipped_before_size_checks_and_reads(directory, monkeypatch):
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w') as z:
+        z.writestr('project/SKILL.md', 'Root skill')
+        z.writestr(f'project/{directory}/objects/pack/history.pack', b'x' * 3_800_000)
+    original_read = zipfile.ZipFile.read
+    def checked_read(self, name, *args, **kwargs):
+        path = name.filename if isinstance(name, zipfile.ZipInfo) else name
+        assert f'/{directory}/' not in path, 'ignored content must never be decompressed'
+        return original_read(self, name, *args, **kwargs)
+    monkeypatch.setattr(zipfile.ZipFile, 'read', checked_read)
+    raw = out.getvalue()
+    assert inspect_skill(raw)['unpacked_bytes'] == len('Root skill')
+    assert [f['path'] for f in read_package(raw)['files']] == ['project/SKILL.md']
+    with zipfile.ZipFile(io.BytesIO(strip_macos_junk(raw))) as z:
+        assert z.namelist() == ['project/SKILL.md']
+
+
+def test_dependency_tree_does_not_count_or_enter_storage(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    p = project(client, repo, login(client))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w') as z:
+        z.writestr('SKILL.md', 'Root skill')
+        z.writestr('.github/README.md', 'Keep real project content')
+        z.writestr('.git/objects/pack/history.pack', b'x' * 3_800_000)
+        for i in range(3100): z.writestr(f'node_modules/dependency/{i}.js', 'ignored')
+    raw = out.getvalue()
+    assert len(inspect_skill(raw, max_files=500)['files']) == 2
+    record = service.skill_ingestions.create(p['id'], raw, 'owner')
+    assert record['source_sha256'] == hashlib.sha256(raw).hexdigest()
+    assert len(service.skill_ingestions.get(record['id'], package=True)['files']) == 2
+    with store.connect() as db:
+        saved = db.execute('SELECT package FROM skill_ingestions WHERE id=?', (record['id'],)).fetchone()[0]
+    with zipfile.ZipFile(io.BytesIO(saved)) as z:
+        assert set(z.namelist()) == {'SKILL.md', '.github/README.md'}
+
+
+def test_directory_ingestion_skips_repository_and_dependency_trees(tmp_path):
+    root = tmp_path / 'skills'; root.mkdir()
+    (root / 'SKILL.md').write_text('Root skill')
+    for name in ('.git', '.svn', '.hg', 'node_modules'):
+        (root / name).mkdir()
+        (root / name / 'large.pack').write_bytes(b'x' * 3_800_000)
+        (root / name / 'link').symlink_to('/missing')
+    assert len(inspect_skill(directory_zip(tmp_path, 'skills'))['files']) == 1
