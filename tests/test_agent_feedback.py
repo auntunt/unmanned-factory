@@ -621,6 +621,11 @@ def test_message_during_execution_is_automatically_planned_at_completion(app_env
     client, store, svc, repo = app_env
     headers = login(client)
     project = create_project(client, repo, headers)
+    # This test asserts the stable planning boundary, not the transient state
+    # before an autonomous project immediately dispatches its next run.
+    policy = svc.policies.get(project['id'])
+    revision = policy.pop('revision')
+    svc.policies.update(project['id'], {**policy, 'mode': 'supervised'}, revision, 'test')
     aid = client.post('/api/v4/agents', json={'name': 'Helper'}, headers=headers).json()['id']
     cid = client.post(f'/api/v4/agents/{aid}/conversations',
         json={'mode': 'do', 'project_id': project['id']}, headers=headers).json()['id']
