@@ -87,6 +87,7 @@ export default function SkillIngestion(props: PageProps) {
   const [pid, setPid] = useState(params.get('project') || ''); const [path, setPath] = useState('')
   const [items, setItems] = useState<Draft[]>([]); const [epoch, setEpoch] = useState(0)
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const [uploaded, setUploaded] = useState<Draft | null>(null)
   useEffect(() => { let active = true; void request<{ projects: { id: string; name: string }[] }>('/api/v2/projects', { onUnauthorized: props.onUnauthorized }).then(r => { if (active) setProjects(r.projects) }).catch(e => { if (active) setError(errorText(e)) }); return () => { active = false } }, [props.onUnauthorized])
   useEffect(() => {
     if (!pid) { setItems([]); return }
@@ -96,23 +97,26 @@ export default function SkillIngestion(props: PageProps) {
     return () => { active = false; window.clearInterval(timer) }
   }, [pid, epoch, props.onUnauthorized])
   const submit = async (file?: File) => {
-    setBusy(true); setError('')
+    if (busy || !pid) return
+    setBusy(true); setError(''); setUploaded(null)
     try {
       if (file) {
         const body = new FormData(); body.append('file', file); body.append('project_id', pid)
-        const response = await fetch('/api/v4/skill-ingestions', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': props.csrfToken }, body })
-        if (!response.ok) throw new Error(`导入未接收（${response.status}）：${await response.text()}`)
-      } else await request('/api/v4/skill-ingestions/directory', { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { project_id: pid, path } })
+        setUploaded(await request<Draft>('/api/v4/skill-ingestions', { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body }))
+      } else setUploaded(await request<Draft>('/api/v4/skill-ingestions/directory', { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { project_id: pid, path } }))
       setEpoch(v => v + 1)
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
-  return <details className="wb-card" open={params.has('ingestion') || undefined}><summary>导入 skill 包 · 适配与人签</summary>
+  return <section className="wb-card" aria-label="导入外部 skill 包"><h2>导入外部 skill 包</h2>
+    <p>第三方下载或自己整理的 skill ZIP 都从这里导入。先选择所属项目，再上传文件。</p>
     <p>只读取、分类和映射。独立验收后进入评审，签署前不会启用。执行与验收须配置支持零工具模式的 Claude。</p>
-    <label>所属项目<select value={pid} onChange={e => setPid(e.target.value)}><option value="">请选择项目</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+    <label>所属项目<select disabled={busy} value={pid} onChange={e => setPid(e.target.value)}><option value="">请选择项目</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
     <label>上传外部 ZIP<input type="file" accept=".zip" disabled={!pid || busy} onChange={e => { const file = e.target.files?.[0]; if (file) void submit(file); e.target.value = '' }} /></label>
     <label>已挂载目录（相对项目工作区）<input value={path} onChange={e => setPath(e.target.value)} placeholder="external-skills/example" /></label>
     <button className="wb-button wb-button-secondary" disabled={!pid || !path || busy} onClick={() => void submit()}>读取目录并开始适配</button>
     {error && <p role="alert">{error}</p>}
+    {busy && <p role="status">正在上传并创建适配运行…</p>}
+    {uploaded && <p role="status">上传已接收，尚未启用。<Link to={`/runs/${uploaded.run_id}`}>查看适配运行</Link></p>}
     {items.map(draft => <IngestionReview key={`${draft.id}:${draft.revision}`} draft={draft} {...props} onChanged={() => setEpoch(v => v + 1)} />)}
-  </details>
+  </section>
 }

@@ -37,7 +37,7 @@ it('never exposes signing for an unverified package', () => {
 it('submits only a selected project and mounted relative path', async () => {
   api.mockImplementation(async path => path === '/api/v2/projects' ? { projects: [{ id: 'p1', name: '测试项目' }] } : { items: [] })
   render(<MemoryRouter><SkillIngestion {...props} /></MemoryRouter>)
-  fireEvent.click(screen.getByText('导入 skill 包 · 适配与人签'))
+  expect(screen.getByRole('region', { name: '导入外部 skill 包' }).closest('details')).toBeNull()
   await screen.findByRole('option', { name: '测试项目' })
   fireEvent.change(screen.getByLabelText('所属项目'), { target: { value: 'p1' } })
   fireEvent.change(screen.getByLabelText(/已挂载目录/), { target: { value: 'skills/demo' } })
@@ -53,4 +53,20 @@ it('requires explicit confirmation of targets and posts the current run revision
   fireEvent.click(screen.getByLabelText(/我有权授权/))
   fireEvent.click(button)
   await waitFor(() => expect(api).toHaveBeenCalledWith('/api/v4/runs/paused/skill-target-authorization', expect.objectContaining({ body: { revision: 2, targets: ['test.example', '127.0.0.1'] } })))
+})
+
+it('uploads an external ZIP to adaptation with its project and shows the received run', async () => {
+  api.mockImplementation(async (path, options) => options?.method === 'POST' ? { id: 'd1', run_id: 'r1' } : path === '/api/v2/projects' ? { projects: [{ id: 'p1', name: '测试项目' }] } : { items: [] })
+  render(<MemoryRouter><SkillIngestion {...props} /></MemoryRouter>)
+  await screen.findByRole('option', { name: '测试项目' })
+  const input = screen.getByLabelText('上传外部 ZIP') as HTMLInputElement
+  expect(input.disabled).toBe(true)
+  fireEvent.change(screen.getByLabelText('所属项目'), { target: { value: 'p1' } })
+  const file = new File(['zip'], 'reverse-skill.zip')
+  fireEvent.change(input, { target: { files: [file] } })
+  expect((await screen.findByRole('link', { name: '查看适配运行' })).getAttribute('href')).toBe('/runs/r1')
+  const options = api.mock.calls.find(([path, opts]) => path === '/api/v4/skill-ingestions' && opts?.method === 'POST')?.[1]
+  expect((options?.body as FormData).get('project_id')).toBe('p1')
+  expect((options?.body as FormData).get('file')).toBe(file)
+  expect(api.mock.calls.some(([path]) => path === '/api/v4/agent-packs/import')).toBe(false)
 })

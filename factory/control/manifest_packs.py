@@ -33,7 +33,8 @@ def import_pack(manifests, raw, actor):
         files=set(z.namelist())
         v2='manifest.json' in files
         name='manifest.json' if v2 else 'agent.json'
-        if name not in files:raise ValueError('ZIP 缺少职能包清单')
+        if name not in files:
+            raise ValueError('此入口仅支持 webuddy 导出的职能包（缺少 manifest.json 或 agent.json）。外部 skill ZIP 请使用“导入外部 skill 包”，选择所属项目后开始适配；通过独立验收并人签后才会启用。')
         try:pack=json.loads(z.read(name))
         except (ValueError,UnicodeError):raise ValueError('职能包清单不是有效 JSON') from None
         if not isinstance(pack,dict) or pack.get('schema')!=('webuddy.agent-pack/v2' if v2 else 'webuddy.agent-pack/v1'):

@@ -138,3 +138,18 @@ def test_large_pack_upload_uses_bounded_authenticated_stream(app_env):
     assert client.post('/api/v4/agent-packs/import',headers={'Origin':'http://testserver'},files={'file':('pack.zip',pack)}).status_code==403
     client.cookies.clear()
     assert client.post('/api/v4/agent-packs/import',headers={'Origin':'http://testserver'},files={'file':('pack.zip',pack)}).status_code==401
+
+
+def test_external_zip_wrong_entry_explains_adaptation_without_creating_agent(app_env):
+    client, store, service, repo = app_env
+    headers = login(client)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('reverse-skill/SKILL.md', '---\nname: reverse-skill\n---\nRead and classify only.')
+    before = len(service.agents.list())
+    response = client.post('/api/v4/agent-packs/import', headers=headers,
+        files={'file': ('reverse-skill.zip', archive.getvalue(), 'application/zip')})
+    assert response.status_code == 400
+    assert '导入外部 skill 包' in response.json()['detail']
+    assert '人签' in response.json()['detail']
+    assert len(service.agents.list()) == before
