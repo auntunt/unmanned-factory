@@ -92,7 +92,7 @@ def router(store, service, allowed_root):
         p = project(pid, request)
         if not p.get('spec_tree_enabled'): raise Conflict('请先启用规格树')
         run, created = store.create_run(pid, BOOTSTRAP_REQUEST,
-            source={'type': 'web', 'actor': request.state.user['username'], 'actor_id': request.state.user['id'], 'operation': 'general', 'spec_bootstrap': True},
+            source={'type': 'web', 'actor': request.state.user['username'], 'actor_id': request.state.user['id'], 'operation': 'spec_bootstrap', 'spec_bootstrap': True},
             delivery_id=f"spec-bootstrap:{request.state.user['id']}:{pid}:{body.idempotency_key}")
         if created:
             try: service.start_plan(run['id'])

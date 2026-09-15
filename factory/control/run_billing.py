@@ -60,7 +60,7 @@ def _reconciled_usage_calls(self, rid, *, profile=None):
         known = [cost for cost in known if cost is not None]
         ceilings = [valid_cost(payload.get('max_budget_usd')) for payload in payloads]
         ceilings = [ceiling for ceiling in ceilings if ceiling is not None]
-        calls.append({'call_id': key[1] if key[0] == 'call' else None,
+        calls.append({'profile': payloads[-1].get('profile'), 'call_id': key[1] if key[0] == 'call' else None,
                       'cost_usd': known[-1] if known else None,
                       'max_budget_usd': max(ceilings) if ceilings else None})
     return calls
@@ -75,6 +75,7 @@ def _budget_usage(self, rid, project):
         unenforceable after a restart.
         """
     calls = self._reconciled_usage_calls(rid)
+    calls = [call for call in calls if call.get('profile') != 'requirement_analysis']
     known = sum(call['cost_usd'] for call in calls
                 if call['cost_usd'] is not None)
     unresolved = [call['max_budget_usd'] for call in calls
@@ -96,7 +97,10 @@ def _dollar_budget(self, rid, project):
     """Read durable usage immediately before a paid project call."""
     try:
         usage = self._budget_usage(rid, project)
-        return dollar_budget(project.get('budget_usd'), {
+        limit = project.get('budget_usd')
+        if limit is not None:
+            limit += self.store.get(rid).get('budget_credit_usd', 0)
+        return dollar_budget(limit, {
             'known_cost_usd': usage['effective_cost_usd'],
             'unknown_cost_calls': usage['unknown_cost_calls'],
         })

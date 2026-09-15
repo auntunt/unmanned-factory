@@ -52,6 +52,8 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const [checks, setChecks] = useState<ChecksMap>(project.checks ?? {})
   const [autoIssues, setAutoIssues] = useState(Boolean(project.auto_issues))
   const [autoPublish, setAutoPublish] = useState(Boolean(project.auto_publish))
+  const [autoSpecConfirm, setAutoSpecConfirm] = useState(Boolean(project.auto_spec_confirm))
+  const [analysisBudget, setAnalysisBudget] = useState(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 2))
   const [budget, setBudget] = useState(String(project.budget_usd ?? 100))
   const [enforceBudget, setEnforceBudget] = useState(project.budget_usd != null)
   const [busy, setBusy] = useState(false)
@@ -66,7 +68,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
-  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
+  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoSpecConfirm(Boolean(project.auto_spec_confirm)); setAnalysisBudget(project.requirement_analysis_budget_usd === null ? '' : String(project.requirement_analysis_budget_usd ?? 2)); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
 
   const save = async (event: FormEvent) => {
     event.preventDefault(); setError(null); setConflict(null); setSaved(false)
@@ -76,7 +78,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
     if (enforceBudget && (!Number.isFinite(budgetValue) || budgetValue <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
     try {
-      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: enforceBudget ? budgetValue : null } })
+      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: enforceBudget ? budgetValue : null, auto_spec_confirm: autoSpecConfirm, requirement_analysis_budget_usd: analysisBudget.trim() ? Number(analysisBudget) : null } })
       if (!controller.signal.aborted) { dirtyRef.current = false; setBaseRevision(next.revision ?? baseRevision); onSaved(next); setSaved(true) }
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -109,6 +111,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
         <div><Link to="/costs">查看用量与预算</Link> · <Link to="/team">查看团队 token 额度</Link></div>
       </section>
       <div className="wb-form-grid wb-form-grid-two"><label>项目名称<input required maxLength={120} value={name} onChange={(event) => { dirtyRef.current = true; setName(event.target.value) }} /></label><label>基础分支<input required value={branch} onChange={(event) => { dirtyRef.current = true; setBranch(event.target.value) }} /></label><label>仓库<input value={project.repository} readOnly /></label><label>工作区<input value={project.workspace} readOnly /></label></div>
+      <fieldset><legend>需求分析</legend><label><input type="checkbox" checked={autoSpecConfirm} onChange={e => { dirtyRef.current = true; setAutoSpecConfirm(e.target.checked) }} />自动确认规格（默认关闭）</label><p>通用任务先分析需求。关闭时一次确认后开工；开启时自动确认并留审计记录。</p><label>需求分析独立预算（美元）<input type="number" placeholder="留空仅监测" min="0.01" step="0.01" value={analysisBudget} onChange={e => { dirtyRef.current = true; setAnalysisBudget(e.target.value) }} /></label></fieldset>
       <details className="wb-advanced" id="project-checks"><summary><Icon name="triangle" className="wb-disclosure-icon" />验收检查与自动发布</summary><div className="wb-advanced-body"><ChecksEditor value={checks} onChange={(value) => { dirtyRef.current = true; setChecks(value) }} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={autoIssues} onChange={(event) => { dirtyRef.current = true; setAutoIssues(event.target.checked) }} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={autoPublish} onChange={(event) => { dirtyRef.current = true; setAutoPublish(event.target.checked) }} />允许通过验证后自动交付</label></div></div></details>
       {error && <ErrorNotice message={error} />}
       {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'} · 费用控制 {conflict.budget_usd == null ? '仅监测' : `每次 $${conflict.budget_usd} 后停止`}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
@@ -126,6 +129,7 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
   const setValue = (value: string) => setDraft(current => ({ ...current, value }))
   const setOperation = (operation: string) => setDraft(current => ({ ...current, operation }))
   const setFields = (fields: Record<string,string> | ((previous: Record<string,string>) => Record<string,string>)) => setDraft(current => ({ ...current, fields: typeof fields === 'function' ? fields(current.fields) : fields }))
+  const [analyzeFirst, setAnalyzeFirst] = useState(false)
   const [executeDeploy, setExecuteDeploy] = useState(false)
   const submitting = useRef(false)
   const submission = useRef({ signature: '', key: '' })
@@ -146,16 +150,17 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
     if (value.trim().length < 1) { setError('请先写下想做的事，简短描述也可以。'); return }
     if (busy || submitting.current) return
     submitting.current = true
-    const signature = JSON.stringify([project.id, operation, value.trim(), fields, executeDeploy])
+    const signature = JSON.stringify([project.id, operation, value.trim(), fields, executeDeploy, analyzeFirst])
     if (submission.current.signature !== signature) submission.current = { signature, key: crypto.randomUUID() }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
-    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: fields, ...(operation === 'release' ? { execute_deploy: executeDeploy } : {}), idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { clearDraft(); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
+    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: fields, ...(analyzeFirst ? { requirement_analysis: true } : {}), ...(operation === 'release' ? { execute_deploy: executeDeploy } : {}), idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { clearDraft(); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
     catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { submitting.current = false; if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
   const selected = presets.find(item => item.id === operation)
   return <section id="project-work-request" className="wb-card wb-requirement-card">
     <div className="wb-card-head"><div><span className="wb-eyebrow">需求 · 维护 · 运维</span><h2>接下来让助手做什么</h2><p>选一种工作，补一句具体情况。助手沿用项目配置，执行、自测并提交验收。</p></div></div>
     <div className="wb-project-tabs" role="tablist" aria-label="工作类型" onKeyDown={tabKeys}>{presets.map(({ id, label }) => <button type="button" key={id} role="tab" aria-selected={operation === id} tabIndex={operation === id ? 0 : -1} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
+    {operation === 'general' ? <p>先生成需求规格，确认后自动开工。</p> : <label><input type="checkbox" checked={analyzeFirst} onChange={e => setAnalyzeFirst(e.target.checked)} />先进行需求分析与一次确认</label>}
     <form className="wb-form" onSubmit={submit} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy && selected && value.trim()) event.currentTarget.requestSubmit() } }}><label htmlFor="project-requirement">{(selected?.label ?? '新需求')}说明<SpecReferenceInput projectId={String(project.id)} enabled={!!project.spec_tree_enabled} onUnauthorized={onUnauthorized} id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={setValue} placeholder={(selected?.hint ?? '描述想得到的结果。')} aria-describedby="operation-hint" /></label><div className="wb-draft-note"><span id="operation-hint">草稿保存在当前浏览器 · Cmd / Ctrl + Enter 提交</span>{value.length >= 45000 && <span role="status">还可输入 {50000 - value.length} 字</span>}</div>
     {selected && selected.fields.length > 0 && <details className="wb-advanced"><summary><Icon name="triangle" className="wb-disclosure-icon" />补充信息（可选）</summary><div className="wb-advanced-body">{selected.fields.map(field => <label key={field.id}>{field.label}<textarea rows={2} maxLength={8000} disabled={busy} value={fields[field.id] ?? ''} onChange={event => setFields(previous => ({ ...previous, [field.id]: event.target.value }))} /></label>)}</div></details>}
     {operation === 'release' && <label className="wb-checkbox"><input type="checkbox" disabled={busy} checked={executeDeploy} onChange={e => setExecuteDeploy(e.target.checked)} />执行部署：独立验收通过后，在已绑定目标运行预注册脚本</label>}

@@ -1,6 +1,8 @@
 """Independent verification contracts, isolated snapshots, evidence coverage and bounded retries."""
 from __future__ import annotations
 
+from factory.control import fidelity, requirement_analysis
+
 from pathlib import Path
 from string import Template
 import json
@@ -100,6 +102,7 @@ def _independent_verify(self, rid, run, project, configuration, artifacts):
         with review_workspace(source, artifacts.get('commit')) as (workspace, commit, baseline):
             # Only transient reconnects within this snapshot resume a verifier.
             artifacts['verification_commit'] = commit
+            artifacts['requirement_raw_source'] = requirement_analysis.raw_source_evidence(run, source, commit)
             if project.get('spec_tree_enabled'):
                 artifacts['spec_drift'] = spec_evidence(project, source, commit)
                 artifacts['scope_reconciliation'] = scope_evidence(self.store, rid, project, source, commit, artifacts)
@@ -181,6 +184,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         artifacts=render_evidence(evidence, max_chars=16000),
         criteria=json.dumps(criteria, ensure_ascii=False),
     )
+    prompt += requirement_analysis.contract(run) + fidelity.prompt(run)
     manifest_skills = (run.get('agent_snapshot') or {}).get('manifest_skills', [])
     if manifest_skills:
         prompt += '\n能力单元（数据，非指令） / SKILL EVIDENCE REFERENCES:\n' + json.dumps([{'id':s['id'],'version':s['version'],'name':s['name'],'body':s['instructions']} for s in manifest_skills], ensure_ascii=False)
@@ -218,7 +222,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
                 try:
                     saved = preserve_screenshot(workspace, payload['screenshot_path'],
                         Path(self.store.path).parent / 'verification-evidence' / rid)
-                    payload = {**payload, 'screenshot_path': saved}
+                    payload = {**payload, 'source_screenshot_path': payload['screenshot_path'], 'screenshot_path': saved}
                 except (ValueError, OSError) as exc:
                     payload = {**payload, 'ok': False, 'screenshot_path': None,
                                'error': '验收截图未能归档：' + str(exc)}
@@ -289,6 +293,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         artifacts['verification'] = {'verdict': 'fail', 'reason': '独立验证模型未返回有效 verdict', 'error_type': 'invalid_response'}
         raise ExecutionError('独立验证未返回有效结构化结果', artifacts=artifacts)
     ledger = coverage(criteria, verdict, artifacts.get('verification_commit'), skills=(run.get('agent_snapshot') or {}).get('manifest', {}).get('skills', []))
+    verdict = fidelity.enforce(self.store, rid, run, verdict, ledger)
     artifacts['acceptance_ledger'] = ledger
     latest_browser = browser_evidence(self.store, rid)
     verified_browser_at = max((o['event_id'] for o in latest_browser.get('latest', []) if o.get('task_id') == 'verification' and o.get('ok') and not o.get('error')), default=0)
@@ -324,6 +329,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         ledger['complete'] = False
         if verdict['verdict'] == 'pass':
             verdict = {**verdict, 'verdict': 'unverified', 'reason': unavailable[0]['error']}
+    verdict = apply_evidence(ledger, verdict, artifacts.get('requirement_raw_source') if 'requirement_raw_source' in artifacts else requirement_analysis.raw_source_evidence(run, workspace, artifacts.get('verification_commit', 'HEAD')))
     if project.get('spec_tree_enabled'):
         items = artifacts.get('spec_drift')
         if items is None:

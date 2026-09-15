@@ -1,3 +1,4 @@
+import RequirementConfirmation, { BudgetResume } from './RequirementConfirmation'
 import Icon from './Icon'
 import { RunSpecReferences } from './SpecReferences'
 import { SpecEvidenceLink } from './SpecTree'
@@ -29,7 +30,7 @@ import { safeRepositoryUrl } from './GithubDelivery'
 
 type RunPageProps = PageProps
 
-const ACTIVE_STATUSES: RunStatus[] = ['received', 'planning', 'needs_clarification', 'awaiting_approval', 'queued', 'running', 'verifying', 'needs_human', 'ready_for_review']
+const ACTIVE_STATUSES: RunStatus[] = ['requirement_analysis', 'awaiting_spec_confirmation', 'received', 'planning', 'needs_clarification', 'awaiting_approval', 'queued', 'running', 'verifying', 'needs_human', 'ready_for_review']
 const taskStatuses = new Set<TaskStatus>(['pending', 'queued', 'running', 'verified', 'completed', 'failed', 'blocked', 'cancelled'])
 const runtimeRoles = ['planner', 'cheap', 'standard', 'strong'] as const
 
@@ -413,6 +414,9 @@ export default function RunPage({ csrfToken, onUnauthorized, user }: RunPageProp
   return <div className="wb-detail-page wb-run-page"><PageHeader title={<>{runTitle(run)}<RunMode run={run} /></>} description={`需求运行 · 更新于 ${formatDate(run.updated_at)}`} actions={<RunActions run={run} canClarify={canClarify} canDiscard={canDiscard} canCancel={canCancel} busy={busy !== null} onDiscard={() => void act('discard')} onCancel={() => void act('cancel')} />} />
     {error && <ErrorNotice message={error} />}
     <p className="wb-run-breadcrumb"><Link to={projectHref}>返回项目闭环</Link><span>·</span><Link to="/runs">运行看板</Link></p>
+    {run.status === 'requirement_analysis' && <p role="status">需求分析职能体正在整理规格、推荐 skill 与保真标尺…</p>}
+    {run.status === 'awaiting_spec_confirmation' && run.spec_draft && <RequirementConfirmation key={`${run.id}:${run.revision}`} run={run} canAct={canActOnRun} csrfToken={csrfToken} onUnauthorized={onUnauthorized} user={user} onChanged={next => { setRun(next); notifyDataChanged() }} />}
+    {run.status === 'needs_human' && canActOnRun && (run.artifacts?.budget_exhausted || run.artifacts?.budget_stop || (!run.plan && (run.source?.operation === 'general' || run.source?.requirement_analysis === true))) && <BudgetResume run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onChanged={next => { setRun(next); notifyDataChanged() }} />}
     <RunJourney run={run} activeView={activeView} guidanceContent={<StopReason run={run} canConfigure={isAdmin} busy={busy !== null} onContinue={canContinue ? () => void act('continue') : undefined} onRetry={!canContinue && canRetry ? () => void retry() : undefined} />} />
     <SkillTargetAuthorization run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} user={user} />
     {typeof run.source?.skill_ingestion_id === 'string' && <section className="wb-card"><h2>职能包适配结果</h2><p>独立验收通过后需要管理员核对映射并签署，才会生成正式职能体。</p><Link className="wb-button wb-button-primary" to={`/agents?project=${encodeURIComponent(String(run.project_id))}&ingestion=${encodeURIComponent(run.source.skill_ingestion_id)}`}>查看映射与人签评审</Link></section>}

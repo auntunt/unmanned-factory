@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import pytest
 from fastapi.testclient import TestClient
 from tests.test_runtime_execution import ServiceRunner, Publisher, _app_env, _plan, _task, _login, _create_project, _update_runtime, _wait
@@ -14,7 +15,7 @@ def test_gateway_owns_billing_through_publish(tmp_path, worker_cost):
         service.governance.set_limit('workspace', 'all', 0, 'test')
         from factory.control.autonomy import DEFAULT_POLICY
         service.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-        rid = client.post('/api/v2/runs', headers=headers, json={'project_id': p['id'], 'request': 'greeting'}).json()['id']
+        rid = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'greeting'}).json()['id']
         planned = _wait(store, rid, {'awaiting_approval'})
         assert client.post(f'/api/v2/runs/{rid}/approve', headers=headers, json={'revision': planned['revision']}).status_code == 200
         run = _wait(store, rid, {'published'})

@@ -109,6 +109,9 @@ export function runEvidence(run: Run): RunEvidence {
 
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
+  if (run.status === 'awaiting_spec_confirmation') return result(run, { kind: 'requirements', label: '待确认规格', summary: '一次核对规格、推荐 skill 和保真标尺后开工。', view: 'requirements', stage: 'intake', primaryLabel: '确认规格并开工' })
+  if (run.status === 'requirement_analysis') return result(run, { kind: 'progress', label: '需求分析中', summary: '正在整理规格、方法建议与保真标尺。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求分析' })
+
   const verification = run.artifacts?.verification as { verdict?: string; reason?: string } | undefined
   if (run.source?.type === 'inspection') return result(run, { kind: ['inspection_failed', 'needs_human'].includes(run.status) ? 'paused' : 'progress', label: run.inspection_superseded_by ? '巡检已被取代' : run.status === 'inspection_completed' ? '巡检通过' : ['inspection_failed', 'needs_human'].includes(run.status) ? '巡检未通过' : '巡检中', summary: runError(run) || verification?.reason || '只检查本机项目副本，不改代码或部署。', view: 'verification', stage: 'verify', primaryLabel: '查看巡检证据' })
   if (verification?.verdict === 'unverified') return result(run, { kind: 'paused', label: '验收未验证', summary: verification.reason || '浏览器证据暂不可用，其余证据已保留。', view: 'verification', stage: 'verify', primaryLabel: '查看未验证项' })
@@ -180,6 +183,8 @@ export function runGuidance(run: Run): RunGuidance {
 export function runView(value: string | null, fallback: RunView = 'requirements'): RunView { return RUN_VIEWS.includes(value as RunView) ? value as RunView : fallback }
 
 export function nextRunAction(run: Run): { label: string; href: string } {
+  if (run.status === 'awaiting_spec_confirmation') return { label: '确认规格并开工', href: `/runs/${encodeURIComponent(String(run.id))}?view=requirements` }
+
   const guidance = runGuidance(run)
   if (run.status === 'needs_human') return { label: '查看处理情况', href: `/runs/${encodeURIComponent(String(run.id))}?view=execution#run-recovery` }
   if (run.status === 'awaiting_approval') return { label: '确认计划并开始执行', href: `/runs/${encodeURIComponent(String(run.id))}?view=plan` }

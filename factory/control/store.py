@@ -15,8 +15,8 @@ from pathlib import Path
 
 from factory.redact import redact_text
 
-ACTIVE = ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
-PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
+ACTIVE = ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'publishing')
+PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_spec_confirmation', 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
 PROJECT_BUDGET_INCREASE_BLOCKING = PROJECT_EDIT_BLOCKING - {'ready_for_review'}
 PROJECT_BUDGET_DECREASE_BLOCKING = PROJECT_EDIT_BLOCKING | {'needs_human'}
 SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key|webhook)$')
@@ -136,9 +136,15 @@ class Store:
             raise ValueError('项目 revision 必须是正整数')
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError('项目设置修改人不能为空')
-        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd', 'spec_tree_enabled'}
+        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd', 'spec_tree_enabled', 'auto_spec_confirm', 'requirement_analysis_budget_usd'}
         if not isinstance(changes, dict) or set(changes) - allowed:
             raise ValueError('项目设置包含不可修改字段')
+        if 'auto_spec_confirm' in changes and type(changes['auto_spec_confirm']) is not bool:
+            raise ValueError('auto_spec_confirm must be boolean')
+        if 'requirement_analysis_budget_usd' in changes:
+            v = changes['requirement_analysis_budget_usd']
+            if v is not None and (type(v) not in (int, float) or not math.isfinite(v) or not 0 < v <= 1000000):
+                raise ValueError('需求分析预算必须为正数或 null')
         if 'spec_tree_enabled' in changes and type(changes['spec_tree_enabled']) is not bool:
             raise ValueError('规格树配置须为开关')
         with self.connect() as db:

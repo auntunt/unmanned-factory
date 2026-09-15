@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import hashlib
 import hmac
 import json
@@ -98,7 +99,7 @@ def test_requirement_to_verified_git_delivery_and_conversation(app_env):
     p = project(client, repo, headers)
     from factory.control.autonomy import DEFAULT_POLICY
     svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-    response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update the greeting'}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update the greeting'}, headers=headers)
     assert response.status_code == 201, response.text
     rid = response.json()['id']
     run = wait_state(store, rid, {'awaiting_approval', 'needs_human'})
@@ -131,7 +132,7 @@ def test_clarification_invalidates_approval(app_env):
     p = project(client, repo, headers)
     from factory.control.autonomy import DEFAULT_POLICY
     svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
     first = wait_state(store, rid, {'awaiting_approval'})
     assert client.post(f'/api/v2/runs/{rid}/clarify', json={'answer': 'Also keep the format'}, headers=headers).status_code == 200
     second = wait_state(store, rid, {'awaiting_approval'})
@@ -213,7 +214,7 @@ def test_paused_clarification_carries_failure_evidence_to_new_plan(app_env, monk
     p = project(client, repo, headers)
     from factory.control.autonomy import DEFAULT_POLICY
     svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
     first = wait_state(store, rid, {'awaiting_approval'})
     error = 'out-of-scope changes: src/api.py, tests/__init__.py'
     store.update(rid, {'status': 'needs_human', 'tasks': [{'id': 'scaffold', 'status': 'failed', 'attempts': [{'error': error}]}]})
@@ -236,7 +237,7 @@ def test_continue_queues_execution_without_replanning_or_changing_revision(app_e
     p = project(client, repo, headers)
     from factory.control.autonomy import DEFAULT_POLICY
     svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
     first = wait_state(store, rid, {'awaiting_approval'})
     deadline = time.monotonic() + 5
     while rid in svc.active_jobs and time.monotonic() < deadline:
@@ -287,7 +288,7 @@ def test_continue_http_finishes_same_plan_and_counts_only_new_execution(app_env,
             (root / 'greeting.txt').write_text('hello world')
         return ProviderResult('done', cost_usd=.01)
     monkeypatch.setattr(svc.runner, 'run', runner)
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}, headers=headers).json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
     assert client.post(f'/api/v2/runs/{rid}/approve', json={'revision': planned['revision']}, headers=headers).status_code == 200
     paused = wait_state(store, rid, {'needs_human'})
@@ -323,7 +324,7 @@ def test_operation_submission_is_compiled_and_retry_does_not_replan(app_env, mon
     again = client.post('/api/v2/runs', json=body, headers=headers)
     assert again.json()['id'] == run['id']
     assert calls == [run['id']]
-    changed = client.post('/api/v2/runs', json={**body, 'request': '不同问题'}, headers=headers)
+    changed = client.post('/api/v2/runs', json={'operation': 'bugfix', **body, 'request': '不同问题'}, headers=headers)
     assert changed.status_code == 409
     assert len(calls) == 1
 

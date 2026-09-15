@@ -114,7 +114,7 @@ def _attention(run, events, latest_inspections=None):
     artifacts = run.get('artifacts') if isinstance(run.get('artifacts'), dict) else {}
     run_events = events.get(str(run.get('id')), [])
     status = run.get('status')
-    active_attention = status in {'needs_clarification', 'awaiting_approval', 'needs_human', 'failed', 'inspection_failed'}
+    active_attention = status in {'awaiting_spec_confirmation', 'needs_clarification', 'awaiting_approval', 'needs_human', 'failed', 'inspection_failed'}
     has_needs_human = bool(artifacts.get('needs_human'))
     if not active_attention:
         return None
@@ -287,8 +287,8 @@ def overview(store, project_id=None):
         project_summaries.append({
             'id': project['id'], 'name': project['name'], 'repository': project.get('repository'),
             'budget_usd': project.get('budget_usd'), 'run_count': len(project_runs),
-            'next_run': next(iter(sorted(project_runs, key=lambda run: (run.get('status') not in ('needs_human', 'needs_clarification', 'awaiting_approval'), run.get('status') not in ('received', 'planning', 'queued', 'running', 'verifying', 'ready_for_review', 'publishing'), project_runs.index(run)))), None),
-            'active_runs': sum(run.get('status') in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing')
+            'next_run': next(iter(sorted(project_runs, key=lambda run: (run.get('status') not in ('awaiting_spec_confirmation', 'needs_human', 'needs_clarification', 'awaiting_approval'), run.get('status') not in ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'ready_for_review', 'publishing'), project_runs.index(run)))), None),
+            'active_runs': sum(run.get('status') in ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'publishing')
                                for run in project_runs),
             'attention_runs': project_attention,
             'engineering': engineering_for(project['id'], project_runs),
@@ -297,7 +297,7 @@ def overview(store, project_id=None):
         'project_id': project_id, 'project_summaries': project_summaries,
         'snapshot_at': now(), 'run_snapshots': runs if project_id is not None else [],
         'projects': 1 if project_id is not None else len(projects), 'runs': len(runs),
-        'active_runs': sum(r['status'] in ('received', 'planning', 'queued', 'running', 'verifying', 'publishing') for r in runs),
+        'active_runs': sum(r['status'] in ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'publishing') for r in runs),
         'attention_runs': attention_runs,
         'delivered_runs': sum(r.get('status') in delivered for r in runs),
         'known_cost_usd': known, 'unknown_cost_runs': len(unknown_runs),

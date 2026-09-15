@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import json
 import os
 from pathlib import Path
@@ -165,8 +166,8 @@ def test_release_consent_fingerprint_and_members_cannot_manage(remote_env, monke
     body = {'project_id': p['id'], 'request': 'prepare', 'operation': 'release', 'idempotency_key': 'release-once'}
     first = client.post('/api/v2/runs', headers=headers, json=body)
     assert first.status_code == 201 and first.json()['source']['execute_deploy'] is False
-    assert client.post('/api/v2/runs', headers=headers, json={**body, 'execute_deploy': True}).status_code == 409
-    allowed = client.post('/api/v2/runs', headers=headers, json={**body, 'execute_deploy': True, 'idempotency_key': 'release-twice'})
+    assert client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', **body, 'execute_deploy': True}).status_code == 409
+    allowed = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', **body, 'execute_deploy': True, 'idempotency_key': 'release-twice'})
     assert allowed.json()['source']['execute_deploy'] is True
     assert target['host'] not in allowed.json()['request']
     client.app.state.auth.create_user('remote-member', 'very-long-password', role='member')

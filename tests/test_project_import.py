@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import io
 import json
 import stat
@@ -155,7 +156,7 @@ def test_imported_cli_is_maintained_and_functionally_verified(app_env, monkeypat
         (root / 'main.py').write_text('import sys\nprint(int(sys.argv[1]) * 3)\n')
         return ProviderResult('倍数已修改并准备验证', cost_usd=.01)
     monkeypatch.setattr(service.runner, 'run', runner)
-    response = client.post('/api/v2/runs', json={'project_id': project['id'], 'request': '把计算倍数改成三'}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': project['id'], 'request': '把计算倍数改成三'}, headers=headers)
     assert response.status_code == 201, response.text
     run = wait_state(store, response.json()['id'], {'ready_for_review', 'failed', 'needs_human', 'needs_clarification'})
     assert run['status'] == 'ready_for_review', (run, store.events(run['id']))

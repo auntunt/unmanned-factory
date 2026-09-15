@@ -199,6 +199,8 @@ smoke 的花费实测在 $0.5 到 $2.5 之间浮动：一轮过是前者，第�
 
 [规格树与机械漂移检查（SpexCode L0）](docs/spec-tree.md)：可选地将项目意图绑定到代码与提交历史，在验收和巡检中发现漂移。
 
+[需求分析职能体与保真验收](docs/requirement-analysis-fidelity.md)：通用编码先确认规格、推荐 skill 和逐屏保真标尺，再自动推进；分析预算独立，暂停可复用现场续跑。
+
 [职能体清单与证据驱动进化](docs/agent-composition.md)：skill 是工具、职能体是岗位、运行是任务；按固定版本编排，依据验收证据提出改进。
 
 [外部 skill 包摄取与适应化](docs/external-skill-ingestion.md)：ZIP 或挂载目录经零工具适配、独立验收和人签，成为带来源、SOP 与安全映射的职能包 v2。

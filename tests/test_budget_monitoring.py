@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 """Monitoring is a project setting, never a hidden finite provider ceiling."""
 import threading
 from dataclasses import replace
@@ -61,7 +62,7 @@ def test_monitoring_planner_and_worker_receive_no_ceiling(app_env, monkeypatch):
         result = original(request, emit, cancel)
         return replace(result, cost_usd=100)
     monkeypatch.setattr(service.runner, 'run', capture)
-    response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': 'Update greeting'}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}, headers=headers)
     assert response.status_code == 201
     rid = response.json()['id']
     run = wait_state(store, rid, {'awaiting_approval', 'needs_human'})

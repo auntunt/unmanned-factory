@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 from tests.review_helpers import passing_review
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -72,7 +73,7 @@ def test_first_spoken_requirement_runs_in_fresh_workspace(app_env, monkeypatch):
         (root / 'hello.txt').write_text('你好')
         return ProviderResult('文件已创建', cost_usd=.01)
     monkeypatch.setattr(service.runner, 'run', runner)
-    response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': '帮我写一个文件说你好'}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': '帮我写一个文件说你好'}, headers=headers)
     assert response.status_code == 201, response.text
     run = wait_state(store, response.json()['id'], {'ready_for_review', 'failed', 'needs_human', 'needs_clarification'})
     assert run['status'] == 'ready_for_review', run
@@ -87,7 +88,7 @@ def test_short_spoken_goal_is_accepted_for_planning(app_env, monkeypatch):
     p = client.post('/api/v2/projects/create-workspace', json={'name': '口语入口', 'idempotency_key': 'short-goal-workspace'}, headers=headers).json()
     planning = []
     monkeypatch.setattr(service, 'start_plan', planning.append)
-    response = client.post('/api/v2/runs', json={'project_id': p['id'], 'request': '画图'}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': '画图'}, headers=headers)
     assert response.status_code == 201, response.text
     assert planning == [response.json()['id']]
-    assert client.post('/api/v2/runs', json={'project_id': p['id'], 'request': '   '}, headers=headers).status_code == 422
+    assert client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'], 'request': '   '}, headers=headers).status_code == 422

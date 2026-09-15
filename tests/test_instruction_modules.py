@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import pytest
 from factory.control.modules import ModuleStore, module_prompt
 from tests.test_control_app import login, project
@@ -14,7 +15,7 @@ def test_modules_are_pinned_and_frozen_at_task_start(app_env, monkeypatch):
     url = f"/api/v4/projects/{p['id']}/modules"
     refs = [{'id':first['id'],'version':1}, {'id':'builtin-clean-ui','version':1}]
     assert client.put(url, headers=headers, json={'expected_revision':0,'modules':refs}).status_code == 200
-    r = client.post('/api/v2/runs', headers=headers, json={'project_id':p['id'],'request':'构建应用'}).json()
+    r = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id':p['id'],'request':'构建应用'}).json()
     frozen = store.get(r['id'])
     assert 'VERSION_ONE_MARKER' in module_prompt(frozen)
     assert len(frozen['module_snapshot']) == 2

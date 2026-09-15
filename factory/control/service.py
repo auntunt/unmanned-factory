@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
+import hashlib
 import logging
 import os
 import subprocess
@@ -11,7 +12,7 @@ import threading
 import time
 import uuid
 
-from factory.control import recovery, run_billing, run_execution, run_lifecycle, verification
+from factory.control import requirement_analysis, recovery, run_billing, run_execution, run_lifecycle, verification
 from factory.control.agent_evolution import EvolutionStore
 from factory.control.agent_manifests import ManifestStore
 from factory.control.skill_ingestion_runs import IngestionStore
@@ -131,7 +132,7 @@ class Service:
                     if rid in self.active_jobs:
                         continue
                     run = self.store.get(rid)
-                    expected = 'received' if phase == 'plan' else 'queued'
+                    expected = 'received' if phase in ('plan', 'requirement_analysis') else 'queued'
                     if run['status'] != expected:
                         self.queue.reset(rid)
                         continue
@@ -184,13 +185,41 @@ class Service:
     def _authorization_request(run):
         # Context compaction must never drop an earlier authorization signal.
         # Keep submitted intent distinct from model-generated history or errors.
-        return '\n\n'.join(dict.fromkeys([
+        original = Service._submitted_request(run)
+        def intent(text):
+            return original if original is not None and text == run.get('request') else text
+        return '\n\n'.join(dict.fromkeys(intent(text) for text in [
             run.get('root_request', run.get('request', '')),
             *run.get('authorization_requests', []), run.get('request', '')]))
+
+    @staticmethod
+    def _submitted_request(run):
+        source = run.get('source') or {}
+        current = run.get('request', '')
+        # A continuation/retry may replace the request. Never substitute its new
+        # intent with the predecessor's original input.
+        if source.get('compiled_request_sha256') == hashlib.sha256(current.encode()).hexdigest():
+            return source.get('original_request', current)
+        return current
+
+    @staticmethod
+    def _triage_plan(run, plan):
+        # Only the platform-built continuous owner prompt can contain trusted
+        # operation boilerplate. Model-generated plans retain every risk signal.
+        original = Service._submitted_request(run)
+        compiled = run.get('request', '')
+        if run.get('execution_mode') != 'continuous' or original is None or not compiled:
+            return plan
+        return {**plan, 'tasks': [{**task, 'prompt': task['prompt'].replace(compiled, original)}
+                                 for task in plan['tasks']]}
 
     def _project_for_run(self, run):
         """Use the verified predecessor checkout without changing project refs."""
         project = self.store.project(run['project_id'])
+        if run.get('spec_confirmation') and run.get('requirement_workspace'):
+            if self.governance is not None:
+                self.governance.require_project(run.get('source', {}).get('actor_id'), run['project_id'])
+            return {**project, 'workspace': run['requirement_workspace'], 'base_branch': run['requirement_branch'], 'spec_tree_enabled': True}
         predecessor = run.get('feedback_predecessor_id')
         if (predecessor or run.get('execution_mode') == 'continuous') and self.governance is not None:
             self.governance.require_project(run.get('source', {}).get('actor_id'), run['project_id'])
@@ -219,7 +248,7 @@ class Service:
             if self.store.get(rid).get('source', {}).get('type') == 'inspection':
                 inspect_run(self, rid)
             else:
-                (self._plan if phase == 'plan' else self._run)(rid)
+                (self._analyze if phase == 'requirement_analysis' else self._plan if phase == 'plan' else self._run)(rid)
         finally:
             with self.lock:
                 self.queue.finish(rid, phase)
@@ -229,7 +258,7 @@ class Service:
     def _submit(self, fn, rid):
         with self.lock:
             self._ensure_scheduler()
-            phase = 'plan' if fn == self._plan else 'execute'
+            phase = 'requirement_analysis' if fn == self._analyze else 'plan' if fn == self._plan else 'execute'
             # A user can answer a just-created clarification before the old
             # planning worker's finally block has released its slot. Preserve
             # that continuation; the same-run active slot prevents overlap.
@@ -245,7 +274,13 @@ class Service:
         'Recover unstarted work automatically; preserve ambiguous writes for reconciliation.'
         return recovery.recover(self)
 
+    def _analyze(self, rid):
+        return requirement_analysis.analyze(self, rid)
+
     def start_plan(self, rid):
+        if requirement_analysis.required(self.store.get(rid)):
+            self._submit(self._analyze, rid)
+            return
         if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
             self._submit(self._plan, rid)
             return
@@ -253,7 +288,7 @@ class Service:
             raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
         with self.lock:
             run = self.store.get(rid)
-            if 'execution_mode' not in run and run.get('revision', 0) == 0:
+            if 'execution_mode' not in run and not run.get('plan'):
                 policy = run.get('policy') or self.policies.get(run['project_id'])
                 eligible = run.get('source', {}).get('type') in ('web', 'agent', 'capability', 'retry')
                 mode = 'continuous' if eligible and policy['mode'] == 'autonomous' else 'dag'
@@ -361,7 +396,7 @@ class Service:
         issue_auto = (project.get('auto_issues', False) and source.get('type') == 'github'
                       and source.get('trusted_label', False) and not source.get('previous_run_id'))
         eligible = source.get('type') in ('web', 'capability', 'retry', 'agent') or issue_auto
-        decision = fresh_triage(plan, self._authorization_request(run), auto_enabled=eligible)
+        decision = fresh_triage(self._triage_plan(run, plan), self._authorization_request(run), auto_enabled=eligible)
         prior_triage = run.get('triage') if isinstance(run.get('triage'), dict) else {}
         questions = list(dict.fromkeys([
             *(question for question in prior_triage.get('questions', []) if isinstance(question, str)),

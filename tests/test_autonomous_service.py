@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 from __future__ import annotations
 
 from tests.review_helpers import passing_review
@@ -119,7 +120,7 @@ def _supervised(client, project, headers, *, risk="medium"):
 
 
 def _new_run(client, project, headers, request="Update greeting automatically"):
-    response = client.post("/api/v2/runs", json={"project_id": project["id"], "request": request}, headers=headers)
+    response = client.post("/api/v2/runs", json={'operation': 'bugfix', "project_id": project["id"], "request": request}, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["id"]
 

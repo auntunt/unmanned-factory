@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import json
 from pathlib import Path
 import subprocess
@@ -225,7 +226,7 @@ def test_normal_run_mounts_spec_and_archives_spec_with_code(app_env,monkeypatch,
         return result
     monkeypatch.setattr(service.runner,'run',runner)
     response=(client.post(f"/api/v2/projects/{p['id']}/spec-tree/generate",headers=headers,json={'idempotency_key':'pipeline-spec-01'}) if bootstrap else
-              client.post('/api/v2/runs',headers=headers,json={'project_id':p['id'],'request':'Update greeting to hello world'}))
+              client.post('/api/v2/runs',headers=headers,json={'operation': 'bugfix', 'project_id':p['id'],'request':'Update greeting to hello world'}))
     assert response.status_code==201,response.text
     rid=response.json()['id'];run=wait_state(store,rid,{'awaiting_approval','needs_human'})
     assert run['status']=='awaiting_approval',run

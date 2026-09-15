@@ -1,4 +1,5 @@
 """Acceptance coverage belongs to the controller, not a model's total count."""
+from factory.control.fidelity import criteria as fidelity_criteria
 import hashlib
 import json
 
@@ -13,6 +14,15 @@ def criteria_for(run):
         result.append({'id': f'agent:{index + 1}', 'task_id': None, 'text': text})
     if not result:
         result = [{'id': 'request:1', 'task_id': None, 'text': run.get('root_request') or run.get('request', '')}]
+    if run.get('spec_confirmation'):
+        draft = run.get('spec_draft') or {}
+        specifications = [draft.get('goal', '')]
+        specifications.extend(f"页面 {s['name']}: {s['purpose']}" for s in draft.get('screens', []))
+        for key, label in [('flows', '关键流程'), ('data_model', '数据模型'), ('non_goals', '非目标边界')]:
+            specifications.extend(f'{label}: {text}' for text in draft.get(key, []))
+        result.extend({'id': f'requirement:{i}', 'task_id': None, 'class': 'requirement', 'text': text}
+                      for i, text in enumerate(specifications) if text.strip())
+    result.extend(fidelity_criteria(run))
     return result
 
 

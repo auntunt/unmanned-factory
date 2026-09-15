@@ -111,7 +111,7 @@ class DurableQueue:
             self.handle = None
 
     def enqueue(self, rid, phase, *, continuation=False):
-        if phase not in ('plan', 'execute'):
+        if phase not in ('plan', 'execute', 'requirement_analysis'):
             raise ValueError('unknown queue phase')
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')

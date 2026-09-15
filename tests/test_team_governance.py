@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import threading
@@ -186,13 +187,13 @@ def test_team_api_role_assignment_ownership_and_audit(app_env):
         ('post', '/api/v2/runtime/probe', {}), ('post', '/api/future/new-write', {}),
     ]:
         assert getattr(client, method)(path, json=body, headers=headers).status_code == 403
-    body = {'project_id': p['id'], 'request': 'Update greeting'}
+    body = {'operation': 'bugfix', 'project_id': p['id'], 'request': 'Update greeting'}
     assert client.post('/api/v2/runs', json=body, headers=headers).status_code == 403
     assert client.get('/api/v2/projects').status_code == 200
     assert [m['id'] for m in client.get('/api/v3/team').json()['members']] == [member['id']]
     svc.governance.assign(member['id'], [p['id']], 'owner')
     svc.governance.set_limit('member', member['id'], 0, 'owner')
-    response = client.post('/api/v2/runs', json={**body, 'actor_id': other['id']}, headers=headers)
+    response = client.post('/api/v2/runs', json={'operation': 'bugfix', **body, 'actor_id': other['id']}, headers=headers)
     assert response.status_code == 422
     response = client.post('/api/v2/runs', json=body, headers=headers)
     assert response.status_code == 201, response.text

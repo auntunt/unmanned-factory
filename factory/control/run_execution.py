@@ -19,11 +19,13 @@ from factory.control.store import Conflict, now
 from factory.control.verification import verify_spec_only
 from factory.control.spec_tree import enrich_tasks
 from factory.control.spec_refs import render as render_spec_refs, focus as spec_ref_focus
-from factory.control import skill_ingestion_runs
+from factory.control import skill_ingestion_runs, requirement_analysis
 
 
 def _plan(self, rid):
     try:
+        if requirement_analysis.required(self.store.get(rid)):
+            return requirement_analysis.analyze(self, rid)
         if self.store.get(rid).get('source', {}).get('skill_ingestion_id'):
             return skill_ingestion_runs.plan(self, rid)
         run = self.store.update(rid, {'status': 'planning'}, expected=('received',),
@@ -33,6 +35,8 @@ def _plan(self, rid):
             run = self.store.update(rid, module_state, expected=('planning',),
                 event=('modules.frozen', {'modules': [{'id': m['id'], 'version': m['version'], 'name': m['name']} for m in module_state['module_snapshot']]}))
         project = self._project_for_run(run)
+        if run.get('spec_confirmation'):
+            run = {**run, 'request': run['request'] + requirement_analysis.contract(run)}
         policy = run.get('policy') or self.policies.get(project['id'])
         snapshots = run.get('capabilities')
         if snapshots is None:
@@ -141,13 +145,16 @@ def _plan(self, rid):
         source = run['source']
         auto = (project.get('auto_issues', False) and source.get('type') == 'github'
                 and source.get('trusted_label', False) and not source.get('previous_run_id'))
-        decision = triage(plan, self._authorization_request(run), auto_enabled=auto)
+        decision = triage(self._triage_plan(run, plan), self._authorization_request(run), auto_enabled=auto)
         # Web input and explicitly invoked capability contracts are owner
         # requests. An untrusted issue body cannot grant itself autonomy.
         decision = policy_decision(decision, policy,
             eligible=source.get('type') in ('web', 'capability', 'retry', 'agent') or auto)
         if source.get('previous_run_id'):
             decision['reasons'].append('该 Issue 已有运行记录；内容更新后需要人工核对前次变更和当前计划')
+        if run.get('spec_confirmation'):
+            plan['questions'] = []
+            decision = {**decision, 'decision': 'auto_execute', 'questions': [], 'reasons': ['用户已在规格确认屏授权开工；按已确认范围执行']}
         status = 'needs_clarification' if decision['decision'] == 'needs_clarification' else 'awaiting_approval'
         updated = self.store.update(rid, {'status': status, 'revision': run['revision'] + 1,
             'plan': plan, 'triage': decision,
@@ -174,6 +181,8 @@ def _run(self, rid):
         project = self._project_for_run(run)
         configuration = run.get('runtime_configuration') or self.runtime_settings.get()
         limits = configuration['limits']
+        if run.get('spec_confirmation'):
+            run = {**run, 'request': run['request'] + requirement_analysis.contract(run)}
         continuous = run.get('execution_mode') == 'continuous'
         deadline = time.monotonic() + limits['timeout_s']
         progress = {}
@@ -250,7 +259,7 @@ def _run(self, rid):
         if run.get('context'):
             project = {**project, 'expected_base_sha': run['context']['commit_sha']}
         plan = {**run['plan'], 'tasks': [
-            {**task, '_routing_prompt': (run['request'] if continuous else task['prompt']),
+            {**task, '_routing_prompt': (self._submitted_request(run) if continuous else task['prompt']),
              'prompt': task['prompt'] + context_prompt(run.get('context')) +
                 agent_guidance(run) + capability_prompt(run.get('capabilities', [])) + module_prompt({**run, 'spec_tree_enabled': project.get('spec_tree_enabled', False)})}
             for task in run['plan']['tasks']]}
@@ -336,6 +345,8 @@ def _run(self, rid):
                 artifacts['verification_repair_count'] = 1
                 progress['artifacts'] = artifacts
                 self._independent_verify(rid, run, {**project, 'budget_usd': total_budget}, verification_configuration(), artifacts)
+        elif run.get('spec_confirmation'):
+            self._independent_verify(rid, run, {**project, 'budget_usd': total_budget}, verification_configuration(), artifacts)
         elif project.get('spec_tree_enabled'):
             verify_spec_only(self, rid, project, artifacts)
         execution_known = valid_cost(artifacts.get('known_cost_usd')) or 0.0

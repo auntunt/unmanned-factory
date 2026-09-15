@@ -49,7 +49,7 @@ def wrap_emit(store, rid, request, emit):
     if request.read_only or request.verification:
         return emit
     run = store.get(rid)
-    if not store.project(run['project_id']).get('spec_tree_enabled'):
+    if not (run.get('spec_tree_enabled') or store.project(run['project_id']).get('spec_tree_enabled')):
         return emit
     base = baseline(run)
 

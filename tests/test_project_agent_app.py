@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import hashlib
 import hmac
 import json
@@ -146,7 +147,7 @@ def test_frozen_context_ignores_candidates_and_preserves_historical_revisions(ap
     assert candidate.status_code == 201
     indexed = client.post(f"/api/v2/projects/{p['id']}/code-index", headers=headers)
     assert indexed.status_code == 200, indexed.text
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'],
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'],
                                             'request': 'Update greeting architecture'}, headers=headers).json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
     frozen = planned['context']
@@ -170,7 +171,7 @@ def test_baseline_drift_refuses_approval(app_env):
     headers = login(client)
     p = project(client, repo, headers)
     svc.policies.update(p['id'], {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'owner')
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'],
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'],
                                             'request': 'Update greeting safely'}, headers=headers).json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
     (repo / 'baseline-only.txt').write_text('drift')
@@ -272,7 +273,7 @@ def test_planning_rejects_dirty_initial_checkout_without_running_provider(app_en
         return original(request, emit, cancel)
 
     monkeypatch.setattr(svc.runner, 'run', counted)
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'],
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'],
                                             'request': 'Plan with a dirty checkout'}, headers=headers).json()['id']
     failed = wait_state(store, rid, {'needs_human'})
     assert failed['status'] == 'needs_human'
@@ -292,7 +293,7 @@ def test_planning_rejects_checkout_changed_during_provider_readonly_phase(app_en
         return original(request, emit, cancel)
 
     monkeypatch.setattr(svc.runner, 'run', mutating)
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'],
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'],
                                             'request': 'Plan while checkout changes'}, headers=headers).json()['id']
     failed = wait_state(store, rid, {'needs_human'})
     assert failed['status'] == 'needs_human'
@@ -333,7 +334,7 @@ def test_agent_profile_caps_are_bounded_in_frozen_context(app_env):
     }
     response = client.put(f"/api/v2/projects/{p['id']}/agent", json=update, headers=headers)
     assert response.status_code == 200, response.text
-    rid = client.post('/api/v2/runs', json={'project_id': p['id'],
+    rid = client.post('/api/v2/runs', json={'operation': 'bugfix', 'project_id': p['id'],
                                             'request': 'Plan with a bounded profile'}, headers=headers).json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
     assert planned['context']['agent']['mission'] == 'm' * 700

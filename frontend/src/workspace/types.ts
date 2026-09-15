@@ -1,4 +1,7 @@
+import type { SpecDraft, FidelityTarget, RecommendedSkill } from '../workbench/RequirementConfirmation'
 export type RunStatus =
+  | 'requirement_analysis'
+  | 'awaiting_spec_confirmation'
   | 'inspection_completed'
   | 'inspection_failed'
   | 'received'
@@ -28,6 +31,8 @@ export interface User {
 }
 
 export interface Project {
+  auto_spec_confirm?: boolean
+  requirement_analysis_budget_usd?: number | null
   spec_tree_enabled?: boolean
   id: string | number
   name: string
@@ -94,6 +99,13 @@ export interface Artifacts {
 }
 
 export interface Run {
+  resume_count?: number
+  spec_draft?: SpecDraft
+  recommended_skills?: RecommendedSkill[]
+  requirement_skill_catalog?: { id: string; name: string; version: number }[]
+  fidelity_target?: FidelityTarget | null
+  spec_confirmation?: { actor: string; automatic: boolean; at: string }
+
   inspection_superseded_by?: string
   execution_mode?: 'continuous' | 'dag'
   id: string | number

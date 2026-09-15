@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field
 from factory.control.auth_routes import Body
 from pydantic import BaseModel
 from factory.control.store import Conflict
+from factory.control import requirement_analysis, budget_resume
 from factory.control.spec_refs import resolve as resolve_refs, fingerprint as refs_fingerprint
 
 class GitHubPublishRequest(BaseModel):
@@ -23,6 +24,7 @@ class NewRun(Body):
     project_id: str
     request: str = Field(min_length=1, max_length=50_000)
     operation: str = Field(default="general", max_length=60)
+    requirement_analysis: bool = Field(default=False, strict=True)
     execute_deploy: bool = Field(default=False, strict=True)
     operation_fields: dict[str, str] = Field(default_factory=dict, max_length=8)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
@@ -65,6 +67,8 @@ def router(store, svc, operations):
                 compiled += '\n[用户明确授权：独立验收通过后，由平台执行绑定目标的预注册部署动作。]'
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        if body.requirement_analysis:
+            fingerprint = hashlib.sha256((fingerprint + '\0requirement_analysis=true').encode()).hexdigest()
         spec_resolution = resolve_refs(project, body.request)
         fingerprint = refs_fingerprint(fingerprint, spec_resolution)
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
@@ -75,6 +79,8 @@ def router(store, svc, operations):
         run, created = store.create_run(body.project_id, compiled,
                                  source={'type': 'web', 'actor': request.state.user['username'],
                                          'actor_id': request.state.user['id'],
+                                         'original_request': body.request, 'compiled_request_sha256': hashlib.sha256(compiled.encode()).hexdigest(),
+                                         'requirement_analysis': body.requirement_analysis,
                                          'operation': body.operation, 'operation_version': preset['version'],
                                          'execute_deploy': body.execute_deploy, 'remote_targets': remote_targets,
                                          'request_fingerprint': fingerprint, **spec_resolution}, delivery_id=key)
@@ -96,6 +102,19 @@ def router(store, svc, operations):
         run = svc.remote.evidence(store.get(rid))
         return {**run, 'progress': current_evidence(run)}
 
+
+    @api.post('/api/v2/runs/{rid}/resume-budget')
+    def resume_budget(rid: str, body: Continuation, request: Request):
+        return budget_resume.resume(svc, rid, body.revision, body.resume_count, request.state.user['username'])
+
+    @api.post('/api/v2/runs/{rid}/confirm-spec')
+    def confirm_spec(rid: str, body: requirement_analysis.Confirmation, request: Request):
+        try:
+            return requirement_analysis.confirm(svc, rid, body, request.state.user['username'])
+        except Conflict:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @api.post('/api/v2/runs/{rid}/clarify')
     def clarify(rid: str, body: Clarification, request: Request):

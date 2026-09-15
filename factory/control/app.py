@@ -41,6 +41,8 @@ class Project(Body):
 
 
 class ProjectUpdate(Body):
+    auto_spec_confirm: bool = Field(default=False, strict=True)
+    requirement_analysis_budget_usd: float | None = Field(default=2.0, gt=0, le=1000000, allow_inf_nan=False)
     revision: int = Field(ge=1, strict=True)
     name: str = Field(min_length=1, max_length=120)
     base_branch: str = Field(min_length=1, max_length=200)
@@ -221,7 +223,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     # assigned projects and act on their own runs. New write
                     # endpoints are admin-only unless explicitly listed here.
                     own_account = path in ('/api/auth/logout', '/api/auth/password') and request.method == 'POST'
-                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry)', path)
+                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget)', path)
                     creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
                     try:
                         if request.method == 'POST' and (run_action or creation):
@@ -376,8 +378,9 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         validate_project_git(root, body.base_branch)
         try:
             changes = body.model_dump(exclude={'revision'})
-            if 'budget_usd' not in body.model_fields_set:
-                changes.pop('budget_usd', None)
+            for field in ('budget_usd', 'auto_spec_confirm', 'requirement_analysis_budget_usd'):
+                if field not in body.model_fields_set:
+                    changes.pop(field, None)
             return store.update_project(pid, changes, body.revision,
                                         request.state.user['username'])
         except Conflict:

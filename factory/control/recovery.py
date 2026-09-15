@@ -84,6 +84,10 @@ def recover(self):
                     self.agents.attach_run(c['id'], run['id'])
             if run['status'] in ('ready_for_review', 'published') and run.get('policy') and not run.get('capability_candidate_id'):
                 self._capture_capability(run['id'])
+            if run['status'] == 'requirement_analysis':
+                self._record_interrupted_provider_usage(run)
+                self.store.update(run['id'], {'status': 'needs_human', 'error': '需求分析被重启中断，费用保留，请续跑分析'}, expected=('requirement_analysis',), event=('requirement_analysis.interrupted', {}))
+                continue
             if run['status'] not in ACTIVE:
                 continue
             rid = run['id']

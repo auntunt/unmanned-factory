@@ -49,6 +49,7 @@ const STATUS_LABELS: Record<string, string> = {
   pass: '通过',
   fail: '未通过',
   inspection_failed: '巡检未通过', inspection_completed: '巡检通过',
+  requirement_analysis: '需求分析中', awaiting_spec_confirmation: '待确认规格',
   received: '已接收',
   planning: '规划中',
   needs_clarification: '需要补充需求',
@@ -80,8 +81,8 @@ function statusTone(status?: string | null): string {
   if (['published', 'completed', 'verified', 'ready_for_review', 'inspection_completed', 'pass'].includes(status)) return 'success'
   if (['failed', 'discarded', 'cancelled'].includes(status)) return 'danger'
   if (status === 'blocked') return 'neutral'
-  if (['needs_clarification', 'awaiting_approval', 'needs_human', 'inspection_failed', 'unverified'].includes(status)) return 'warning'
-  if (['running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
+  if (['awaiting_spec_confirmation', 'needs_clarification', 'awaiting_approval', 'needs_human', 'inspection_failed', 'unverified'].includes(status)) return 'warning'
+  if (['requirement_analysis', 'running', 'planning', 'queued', 'verifying'].includes(status)) return 'active'
   return 'neutral'
 }
 

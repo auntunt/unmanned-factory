@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import json
 import threading
 from pathlib import Path
@@ -78,7 +79,7 @@ def test_planner_and_verifier_use_pinned_references(app_env,monkeypatch,mode):
         store.update(rid,{'execution_mode':mode})
         return start(rid)
     monkeypatch.setattr(service,'start_plan',start_with_mode)
-    response=client.post('/api/v2/runs',headers=headers,json={'project_id':p['id'],'request':'更新 [[应用]]'})
+    response=client.post('/api/v2/runs',headers=headers,json={'operation': 'bugfix', 'project_id':p['id'],'request':'更新 [[应用]]'})
     rid=response.json()['id'];run=wait_state(store,rid,{'awaiting_approval','needs_human'})
     assert run['status']=='awaiting_approval',run
     assert 'greeting.txt' in run['plan']['tasks'][0]['paths']

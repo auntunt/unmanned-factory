@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import hashlib
 import json
 import threading
@@ -39,11 +40,11 @@ def test_fields_fingerprint_conflict_and_reordered_retry(app_env, monkeypatch):
     first = client.post('/api/v2/runs', json=body, headers=headers)
     assert first.status_code == 201
     assert '启动命令：npm start' in first.json()['request']
-    again = client.post('/api/v2/runs', json={**body, 'operation_fields': {'command': ' npm start ', 'port': '8080'}}, headers=headers)
+    again = client.post('/api/v2/runs', json={'operation': 'bugfix', **body, 'operation_fields': {'command': ' npm start ', 'port': '8080'}}, headers=headers)
     assert again.json()['id'] == first.json()['id'] and len(calls) == 1
-    changed = client.post('/api/v2/runs', json={**body, 'operation_fields': {'port': '9090'}}, headers=headers)
+    changed = client.post('/api/v2/runs', json={'operation': 'bugfix', **body, 'operation_fields': {'port': '9090'}}, headers=headers)
     assert changed.status_code == 409 and len(calls) == 1
-    invalid = client.post('/api/v2/runs', json={**body, 'operation_fields': {'remote_password': 'abc'}}, headers=headers)
+    invalid = client.post('/api/v2/runs', json={'operation': 'bugfix', **body, 'operation_fields': {'remote_password': 'abc'}}, headers=headers)
     assert invalid.status_code == 422
 
 

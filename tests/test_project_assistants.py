@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import json
 import threading
 import time
@@ -28,7 +29,7 @@ def test_project_binding_freezes_agent_and_models_for_normal_run(app_env, monkey
     response = client.put(f"/api/v4/projects/{p['id']}/assistant", headers=headers, json={'agent_id': a['id'], 'expected_revision': 0})
     assert response.status_code == 200
     monkeypatch.setattr(service, '_submit', lambda *args: None)
-    response = client.post('/api/v2/runs', headers=headers, json={'project_id': p['id'], 'request': '修复兼容性'})
+    response = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': p['id'], 'request': '修复兼容性'})
     run = store.get(response.json()['id'])
     assert run['agent_id'] == a['id']
     assert run['agent_snapshot']['instructions'] == '保留既有兼容性'

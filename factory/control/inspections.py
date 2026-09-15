@@ -79,7 +79,7 @@ class InspectionStore:
             due = db.execute('SELECT * FROM project_inspections WHERE enabled=1 AND next_at<=? ORDER BY next_at LIMIT 16', (timestamp,)).fetchall()
             for config in due:
                 pid = config['project_id']
-                busy = db.execute("SELECT 1 FROM runs WHERE json_extract(data,'$.project_id')=? AND json_extract(data,'$.status') IN (?,?,?,?,?,?) LIMIT 1", (pid, *ACTIVE)).fetchone()
+                busy = db.execute("SELECT 1 FROM runs WHERE json_extract(data,'$.project_id')=? AND json_extract(data,'$.status') IN (%s) LIMIT 1" % ",".join("?" for _ in ACTIVE), (pid, *ACTIVE)).fetchone()
                 if busy:
                     continue
                 rid = uuid.uuid4().hex

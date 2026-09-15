@@ -1,0 +1,20 @@
+{
+  "fixture": true,
+  "report": [
+    {
+      "theme": "light",
+      "oneForm": true,
+      "oneConfirmationRequest": true,
+      "skillsAndFidelitySubmitted": true,
+      "mobileOverflow": false
+    },
+    {
+      "theme": "dark",
+      "oneForm": true,
+      "oneConfirmationRequest": true,
+      "skillsAndFidelitySubmitted": true,
+      "mobileOverflow": false
+    }
+  ],
+  "errors": []
+}

@@ -251,7 +251,7 @@ def cancel(self, rid, actor):
         raise Conflict('成果正在完成原子归档，本次取消未生效')
     with self.lock:
         return self.store.update(rid, {'status': 'cancelled'},
-            expected=('received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval',
+            expected=('requirement_analysis', 'awaiting_spec_confirmation', 'received', 'planning', 'queued', 'running', 'verifying', 'awaiting_approval',
                       'needs_clarification', 'needs_human', 'ready_for_review'),
             event=('run.cancelled', {'message': '用户取消执行，保留日志和工作区', 'actor': actor}))
 
@@ -265,7 +265,7 @@ def discard(self, rid, actor):
             'artifacts': {**(run.get('artifacts') or {}), 'discarded': {
                 'actor': actor, 'previous_status': run['status'], 'at': now(),
             }},
-        }, expected=('needs_clarification', 'awaiting_approval', 'needs_human',
+        }, expected=('awaiting_spec_confirmation', 'needs_clarification', 'awaiting_approval', 'needs_human',
                      'failed', 'ready_for_review', 'cancelled'),
            event=('run.discarded', {
                'message': '旧任务已标记废弃；保留计划、费用、日志和工作区记录',

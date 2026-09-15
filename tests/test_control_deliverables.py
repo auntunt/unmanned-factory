@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 from tests.review_helpers import passing_review
 import io
 import json
@@ -89,7 +90,7 @@ def test_http_download_survives_worktree_removal_and_github_failure(app_env, cap
     pid = project(client, repo, headers)['id']
     from factory.control.autonomy import DEFAULT_POLICY
     svc.policies.update(pid, {**DEFAULT_POLICY, 'mode': 'supervised'}, 0, 'test')
-    response = client.post('/api/v2/runs', headers=headers, json={'project_id': pid, 'request': 'Update greeting to hello world'})
+    response = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': pid, 'request': 'Update greeting to hello world'})
     rid = response.json()['id']
     planned = wait_state(store, rid, {'awaiting_approval'})
     client.post(f'/api/v2/runs/{rid}/approve', headers=headers, json={'revision': planned['revision']})
@@ -147,7 +148,7 @@ def test_auto_publish_failure_preserves_verified_delivery(app_env, monkeypatch):
         return original_run(request, emit, cancel)
     monkeypatch.setattr(svc.runner, 'run', with_review)
     svc.publisher = BrokenPublisher()
-    rid = client.post('/api/v2/runs', headers=headers, json={'project_id': pid, 'request': 'Update greeting to hello world'}).json()['id']
+    rid = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': pid, 'request': 'Update greeting to hello world'}).json()['id']
     import time
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -172,7 +173,7 @@ def test_svg_preview_is_image_data_and_download_is_attachment(app_env):
     svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><circle r="10"/></svg>'
     (repo / 'pelican.svg').write_text(svg)
     git(repo, 'add', 'pelican.svg'); git(repo, 'commit', '-qm', 'svg')
-    rid = client.post('/api/v2/runs', headers=headers, json={'project_id': pid, 'request': 'Update greeting to hello world'}).json()['id']
+    rid = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': pid, 'request': 'Update greeting to hello world'}).json()['id']
     run = wait_state(store, rid, {'awaiting_approval'})
     client.post(f'/api/v2/runs/{rid}/approve', headers=headers, json={'revision': run['revision']})
     assert wait_state(store, rid, {'ready_for_review', 'failed'})['status'] == 'ready_for_review'

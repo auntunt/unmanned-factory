@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 import asyncio
 import copy
 import io
@@ -152,7 +153,7 @@ def test_module_api_preserves_refs_and_rejects_mixed_revisions(app_env):
 def test_real_plan_freezes_mount_and_dispatch_receives_body_outside_prompt(app_env, monkeypatch):
     client, store, service, p, headers, sources, body, configured = setup_source(app_env)
     monkeypatch.setattr(service, '_submit', lambda *args: None)
-    result = client.post('/api/v2/runs', headers=headers, json={'project_id': p['id'], 'request': '修复工时字段'}).json()
+    result = client.post('/api/v2/runs', headers=headers, json={'operation': 'bugfix', 'project_id': p['id'], 'request': '修复工时字段'}).json()
     # The test fake uses Codex; compile is independent of provider selection.
     service._plan(result['id'])
     run = store.get(result['id'])

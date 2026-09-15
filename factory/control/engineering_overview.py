@@ -19,6 +19,7 @@ STAGES = (
 )
 
 STATUS_DETAILS = {
+    "requirement_analysis": "需求分析中", "awaiting_spec_confirmation": "待确认规格",
     "inspection_completed": "巡检通过",
     "inspection_failed": "巡检未通过",
     "received": "已接收",

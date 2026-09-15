@@ -1,3 +1,4 @@
+# Legacy execution assertions explicitly use maintenance; default general confirmation is covered in test_requirement_analysis.py.
 from __future__ import annotations
 
 import json
@@ -239,7 +240,7 @@ def test_planned_run_uses_frozen_profiles_after_runtime_update(tmp_path):
         project = _create_project(client, repo, headers)
         from factory.control.autonomy import DEFAULT_POLICY
         service.policies.update(project["id"], {**DEFAULT_POLICY, "mode": "supervised"}, 0, "test")
-        first_id = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "first"}, headers=headers).json()["id"]
+        first_id = client.post("/api/v2/runs", json={'operation': 'bugfix', "project_id": project["id"], "request": "first"}, headers=headers).json()["id"]
         planned = _wait(store, first_id, {"awaiting_approval"})
         old_config = planned["runtime_configuration"]
         _update_runtime(service, prefix="new")
@@ -251,7 +252,7 @@ def test_planned_run_uses_frozen_profiles_after_runtime_update(tmp_path):
         assert planner_models[0] == old_config["profiles"]["planner"]["model"]
         assert worker_models[0] == old_config["profiles"]["strong"]["model"]
 
-        second_id = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "second"}, headers=headers).json()["id"]
+        second_id = client.post("/api/v2/runs", json={'operation': 'bugfix', "project_id": project["id"], "request": "second"}, headers=headers).json()["id"]
         second = _wait(store, second_id, {"awaiting_approval"})
         assert second["runtime_configuration"]["revision"] > old_config["revision"]
         assert runner.calls[-1][1] == "new-planner"
@@ -269,7 +270,7 @@ def test_unknown_cost_is_recorded_without_blocking_authorized_auto_publish(tmp_p
         project = _create_project(client, repo, headers, auto_publish=True)
         from factory.control.autonomy import DEFAULT_POLICY
         service.policies.update(project["id"], {**DEFAULT_POLICY, "mode": "supervised"}, 0, "test")
-        rid = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "publish"}, headers=headers).json()["id"]
+        rid = client.post("/api/v2/runs", json={'operation': 'bugfix', "project_id": project["id"], "request": "publish"}, headers=headers).json()["id"]
         planned = _wait(store, rid, {"awaiting_approval"})
         assert client.post(f"/api/v2/runs/{rid}/approve", json={"revision": planned["revision"]}, headers=headers).status_code == 200
         run = _wait(store, rid, {"published"})
@@ -312,7 +313,7 @@ def test_missing_planner_model_enters_needs_human_with_visible_error(tmp_path):
     with TestClient(app) as client:
         headers = _login(client)
         project = _create_project(client, repo, headers)
-        rid = client.post("/api/v2/runs", json={"project_id": project["id"], "request": "missing model"}, headers=headers).json()["id"]
+        rid = client.post("/api/v2/runs", json={'operation': 'bugfix', "project_id": project["id"], "request": "missing model"}, headers=headers).json()["id"]
         run = _wait(store, rid, {"needs_human"})
         assert "model" in store.events(rid)[-1]["payload"]["message"] or "模型" in store.events(rid)[-1]["payload"]["message"]
         assert not runner.calls
