@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 import zipfile
 
-from factory.control.agents import AgentStore, _validate_payload, inspect_skill
+from factory.control.agents import AgentStore, _validate_payload, inspect_skill, MAX_PACK_FILES
 from factory.control.modules import ModuleStore
 from factory.control.store import now
 
@@ -68,7 +68,7 @@ def pack_zip(slug):
             info.external_attr = 0o100644 << 16
             z.writestr(info, content.encode('utf-8'))
     raw = output.getvalue()
-    inspect_skill(raw)
+    inspect_skill(raw, max_files=MAX_PACK_FILES)
     return raw
 
 
@@ -98,7 +98,7 @@ def install_builtins(store):
             agent = {'id': aid, 'name': pack['name'], 'purpose': pack['purpose'],
                 'active_version': 1, 'created_at': at, 'updated_at': at, 'actor': 'platform',
                 'builtin_pack': pack['id'], 'builtin_pack_version': pack['version']}
-            skill = {**inspect_skill(raw), 'id': sid, 'agent_id': aid, 'filename': pack['id'] + '.zip',
+            skill = {**inspect_skill(raw, max_files=MAX_PACK_FILES), 'id': sid, 'agent_id': aid, 'filename': pack['id'] + '.zip',
                 'source': 'builtin-pack', 'created_at': at}
             db.execute('INSERT INTO agents VALUES(?,?)', (aid, json.dumps(agent, ensure_ascii=False)))
             db.execute('INSERT INTO agent_versions VALUES(?,?,?,?,?)',

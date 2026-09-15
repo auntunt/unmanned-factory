@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field
-from factory.control.agents import AgentStore, inspect_skill
+from factory.control.agents import AgentStore, inspect_skill, MAX_FILES, strip_macos_junk
 from factory.control.store import Conflict
 
 class Body(BaseModel): model_config=ConfigDict(extra='forbid')
@@ -384,7 +384,19 @@ def router(store, service):
     @api.post('/agents/{aid}/skills',status_code=201)
     def skill(aid:str,request:Request,file:UploadFile=File(...)):
         guarded(agents.get, aid)
-        raw=file.file.read(MAX_ZIP+1); meta=guarded(inspect_skill,raw); sid=__import__('uuid').uuid4().hex
+        raw=file.file.read(MAX_ZIP+1)
+        guidance = '请改用职能体页的“外部 skill 包·适配与人签”通道'
+        try:
+            meta = inspect_skill(raw, max_files=MAX_FILES)
+        except ValueError as exc:
+            message = str(exc)
+            if '文件数超过' in message:
+                message += '；' + guidance
+            raise HTTPException(400, message) from None
+        if sum(f['path'].replace('\\', '/').rsplit('/', 1)[-1].casefold() == 'skill.md' for f in meta['files']) > 1:
+            raise HTTPException(400, '单附件包含多个 SKILL.md；' + guidance)
+        raw = strip_macos_junk(raw)
+        sid=__import__('uuid').uuid4().hex
         data={**meta,'id':sid,'agent_id':aid,'filename':file.filename or 'skill.zip','source':'upload','created_at':__import__('factory.control.store',fromlist=['now']).now()}
         with store.connect() as db: db.execute('INSERT INTO skill_assets VALUES (?,?,?,?,?)',(sid,aid,json.dumps(data,ensure_ascii=False),raw,data['created_at']))
         return data

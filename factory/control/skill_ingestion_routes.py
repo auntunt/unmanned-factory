@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from factory.control.agents import MAX_ZIP, MAX_FILES, MAX_FILE
+from factory.control.agents import MAX_ZIP, MAX_PACK_FILES, MAX_FILE, macos_junk
 from factory.control.skill_ingestion import validate_mapping
 from factory.control.skill_ingestion_runs import authorization_snapshot
 from factory.control.store import Conflict, now
@@ -58,6 +58,8 @@ def directory_zip(workspace, relative):
             def visit(parent, prefix=''):
                 nonlocal count, total
                 for name in sorted(os.listdir(parent)):
+                    if macos_junk(name):
+                        continue
                     info = os.stat(name, dir_fd=parent, follow_symlinks=False)
                     if stat.S_ISDIR(info.st_mode):
                         child = os.open(name, flags, dir_fd=parent)
@@ -67,8 +69,10 @@ def directory_zip(workspace, relative):
                             os.close(child)
                     elif stat.S_ISREG(info.st_mode):
                         count += 1
-                        if count > MAX_FILES or info.st_size > MAX_FILE:
-                            raise ValueError('目录文件数量或大小超出限额')
+                        if count > MAX_PACK_FILES:
+                            raise ValueError(f'目录文件数超过 {MAX_PACK_FILES}')
+                        if info.st_size > MAX_FILE:
+                            raise ValueError('Skill 单文件超过 2 MiB')
                         file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                         with os.fdopen(file_fd, 'rb') as stream:
                             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):

@@ -6,6 +6,7 @@ import uuid
 from factory.control.acceptance_ledger import coverage, criteria_for
 from factory.control.execution import ExecutionError
 from factory.control.providers import ProviderRequest
+from factory.control.agents import strip_macos_junk
 from factory.control.skill_ingestion import adaptation_prompt, read_package, validate_mapping
 from factory.control.store import Conflict, now
 from factory.control.agent_manifests import encoded, compile_instructions
@@ -54,7 +55,7 @@ class IngestionStore:
                  'actor': str(actor), 'created_at': now()}
         with self.store.connect() as db:
             db.execute('INSERT INTO skill_ingestions VALUES(?,?,?,?)',
-                       (value['id'], pid, raw, json.dumps(value, ensure_ascii=False)))
+                       (value['id'], pid, strip_macos_junk(raw), json.dumps(value, ensure_ascii=False)))
         return value
 
     def sign(self, iid, revision, identity, authorization, actor, manifests):
@@ -125,7 +126,7 @@ class IngestionStore:
             row = db.execute('SELECT data,package FROM skill_ingestions WHERE id=?', (iid,)).fetchone()
         if not row:
             raise KeyError(iid)
-        return read_package(row[1]) if package else json.loads(row[0])
+        return {**read_package(row[1]), 'sha256': json.loads(row[0])['source_sha256']} if package else json.loads(row[0])
 
     def update(self, iid, patch, revision, actor, db=None):
         if db is None:

@@ -4,7 +4,7 @@ import json
 import uuid
 import zipfile
 
-from factory.control.agents import _validate_payload, inspect_skill
+from factory.control.agents import _validate_payload, inspect_skill, MAX_PACK_FILES, strip_macos_junk, macos_junk
 from factory.control.agent_manifests import encoded, compile_instructions
 from factory.control.store import now, scrub
 
@@ -28,9 +28,9 @@ def export_pack(manifests, agents, aid):
 
 
 def import_pack(manifests, raw, actor):
-    inspect_skill(raw)  # Bound size, reject traversal, symlinks and ambiguous names.
+    inspect_skill(raw, max_files=MAX_PACK_FILES)  # Bound size, reject traversal, symlinks and ambiguous names.
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        files=set(z.namelist())
+        files={path for path in z.namelist() if not macos_junk(path)}
         v2='manifest.json' in files
         name='manifest.json' if v2 else 'agent.json'
         if name not in files:
@@ -94,14 +94,15 @@ def import_pack(manifests, raw, actor):
                 for old_sid in assets:
                     path=f'assets/{old_sid}.zip'
                     if path not in files:raise ValueError('职能包缺少附件')
-                    content=z.read(path); meta=inspect_skill(content); sid=uuid.uuid4().hex
+                    content=z.read(path); meta=inspect_skill(content, max_files=MAX_PACK_FILES); sid=uuid.uuid4().hex
+                    content=strip_macos_junk(content)
                     data={**meta,'id':sid,'agent_id':aid,'filename':'imported.zip','source':'pack','created_at':at}
                     db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',(sid,aid,encoded(data),content,at));config['skill_ids'].append(sid)
             else:
                 config['skill_ids']=[]  # v1 ids are instance-local; preserve its whole archive as an asset.
-                sid=uuid.uuid4().hex; meta=inspect_skill(raw)
+                sid=uuid.uuid4().hex; meta=inspect_skill(raw, max_files=MAX_PACK_FILES)
                 data={**meta,'id':sid,'agent_id':aid,'filename':'legacy-pack.zip','source':'pack-v1','created_at':at}
-                db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',(sid,aid,encoded(data),raw,at));config['skill_ids']=[sid]
+                db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',(sid,aid,encoded(data),strip_macos_junk(raw),at));config['skill_ids']=[sid]
             agent={'id':aid,'name':pack['name'],'purpose':pack.get('purpose',''),'active_version':1,'actor':str(actor),'created_at':at,'updated_at':at}
             version={'id':uuid.uuid4().hex,'agent_id':aid,'version':1,**config,'source':'pack','previous_version':None,'created_at':at}
             db.execute('INSERT INTO agents VALUES(?,?)',(aid,encoded(scrub(agent))))

@@ -16,6 +16,7 @@ from factory.control.store import Conflict, now, scrub
 MAX_ZIP = 20 * 1024 * 1024
 MAX_UNPACKED = 100 * 1024 * 1024
 MAX_FILES = 500
+MAX_PACK_FILES = 3000
 MAX_FILE = 2 * 1024 * 1024
 KNOWN_PROVIDERS = frozenset(("codex", "claude", "dsh"))
 MODEL_STAGES = frozenset(("default", "planning", "analysis", "execution", "verification", "maintenance"))
@@ -653,13 +654,31 @@ class AgentStore:
         raise KeyError(path)
 
 
-def inspect_skill(raw: bytes):
+def macos_junk(path: str) -> bool:
+    parts = path.replace('\\', '/').split('/')
+    return any(part == '__MACOSX' or part == '.DS_Store' or part.startswith('._') for part in parts)
+
+
+def strip_macos_junk(raw: bytes) -> bytes:
+    """Call only after inspection; ignored members are never decompressed or stored."""
+    with zipfile.ZipFile(io.BytesIO(raw)) as source:
+        if not any(macos_junk(info.filename) for info in source.infolist()):
+            return raw
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w') as target:
+            for info in source.infolist():
+                if not macos_junk(info.filename):
+                    target.writestr(info, source.read(info))
+        return out.getvalue()
+
+
+def inspect_skill(raw: bytes, *, max_files=MAX_FILES):
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_ZIP: raise ValueError("Skill 压缩包超过 20 MiB")
     digest = hashlib.sha256(raw).hexdigest(); total = 0; names = []; folded = set(); files = set()
     try: z = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile: raise ValueError("Skill 必须是有效 ZIP") from None
-    infos = z.infolist()
-    if len(infos) > MAX_FILES: raise ValueError("Skill 文件数超过 500")
+    infos = [info for info in z.infolist() if not macos_junk(info.filename)]
+    if sum(not info.is_dir() for info in infos) > max_files: raise ValueError(f"Skill 文件数超过 {max_files}")
     for info in infos:
         name, key = _safe_name(info.filename.rstrip("/") if info.is_dir() else info.filename)
         if key in folded: raise ValueError("Skill 包含 Unicode/大小写重复路径")

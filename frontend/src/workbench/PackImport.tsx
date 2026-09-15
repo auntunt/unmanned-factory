@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Icon from './Icon'
 import NativePackImport from './NativePackImport'
@@ -8,8 +8,9 @@ import type { PageProps } from './ui'
 const tabs = ['职能包 v1/v2', '外部 skill 包·适配人签']
 export default function PackImport(props: PageProps & { onImported: (id: string) => void }) {
   const [params] = useSearchParams()
-  const hasReview = Boolean(params.get('project'))
+  const hasReview = Boolean(params.get('project')) || params.get('import') === 'external'
   const [tab, setTab] = useState(hasReview ? 1 : 0)
+  useEffect(() => { if (hasReview) setTab(1) }, [hasReview])
   const buttons = useRef<(HTMLButtonElement | null)[]>([])
   return <details className="wb-card wb-pack-import" open={hasReview || undefined}>
     <summary><Icon name="triangle" className="wb-disclosure-icon" />导入</summary>

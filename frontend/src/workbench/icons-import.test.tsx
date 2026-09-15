@@ -52,3 +52,9 @@ it('renders module category and disclosure with SVG and gives content/edit match
  fireEvent.click(content); expect(card.querySelector('details')?.open).toBe(true)
  expect(card.textContent).not.toMatch(/[↗☰◌▶▼←＋→]/)
 })
+it('opens the external ingestion tab from the maintenance upload guidance link', async () => {
+ render(<MemoryRouter initialEntries={['/agents?import=external']}><PackImport {...props} onImported={vi.fn()} /></MemoryRouter>)
+ expect(screen.getByText('导入').closest('details')?.open).toBe(true)
+ expect(screen.getByRole('tab', {name:'外部 skill 包·适配人签'}).getAttribute('aria-selected')).toBe('true')
+ expect(screen.getByRole('tabpanel').id).toBe('pack-panel-1')
+})

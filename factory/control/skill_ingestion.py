@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 
 import yaml
 
-from factory.control.agents import inspect_skill
+from factory.control.agents import inspect_skill, MAX_PACK_FILES, macos_junk
 
 
 MAX_TEXT = 100_000
@@ -34,12 +34,12 @@ def sha(raw):
 
 def read_package(raw: bytes) -> dict:
     """Validate before reading; retain exact UTF-8 text and hashes, including CRLF."""
-    inspect_skill(raw)
+    inspect_skill(raw, max_files=MAX_PACK_FILES)
     files, skills, risks, primitives = [], [], [], []
     total = 0
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         for item in sorted(archive.infolist(), key=lambda entry: entry.filename):
-            if item.is_dir():
+            if item.is_dir() or macos_junk(item.filename):
                 continue
             content = archive.read(item)
             entry = {'path': item.filename, 'sha256': sha(content), 'size': len(content)}

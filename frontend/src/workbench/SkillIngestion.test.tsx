@@ -70,3 +70,14 @@ it('uploads an external ZIP to adaptation with its project and shows the receive
   expect((options?.body as FormData).get('file')).toBe(file)
   expect(api.mock.calls.some(([path]) => path === '/api/v4/agent-packs/import')).toBe(false)
 })
+it('displays the specific ingestion file limit instead of a generic HTTP error', async () => {
+ api.mockImplementation(async (path, options) => {
+  if (options?.method === 'POST') throw new Error('Skill 文件数超过 3000')
+  return path === '/api/v2/projects' ? {projects:[{id:'p1',name:'测试项目'}]} : {items:[]}
+ })
+ render(<MemoryRouter><SkillIngestion {...props} /></MemoryRouter>)
+ await screen.findByRole('option',{name:'测试项目'})
+ fireEvent.change(screen.getByLabelText('所属项目'),{target:{value:'p1'}})
+ fireEvent.change(screen.getByLabelText('上传外部 ZIP'),{target:{files:[new File(['zip'],'large.zip')]}})
+ expect((await screen.findByRole('alert')).textContent).toContain('文件数超过 3000')
+})
