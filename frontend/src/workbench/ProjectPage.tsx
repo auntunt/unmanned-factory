@@ -125,7 +125,9 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
 function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { project: ProjectRecord }) {
   const navigate = useNavigate()
   const { draft, setDraft, clear: clearDraft } = useRequestDraft(project.id)
-  const { value, operation, fields } = draft
+  const [advanced, setAdvanced] = useState(draft.operation !== 'general')
+  const { value, fields } = draft
+  const operation = advanced ? draft.operation : 'general'
   const setValue = (value: string) => setDraft(current => ({ ...current, value }))
   const setOperation = (operation: string) => setDraft(current => ({ ...current, operation }))
   const setFields = (fields: Record<string,string> | ((previous: Record<string,string>) => Record<string,string>)) => setDraft(current => ({ ...current, fields: typeof fields === 'function' ? fields(current.fields) : fields }))
@@ -150,22 +152,24 @@ function RequirementForm({ project, csrfToken, onUnauthorized }: PageProps & { p
     if (value.trim().length < 1) { setError('请先写下想做的事，简短描述也可以。'); return }
     if (busy || submitting.current) return
     submitting.current = true
-    const signature = JSON.stringify([project.id, operation, value.trim(), fields, executeDeploy, analyzeFirst])
+    const signature = JSON.stringify([project.id, operation, value.trim(), fields, executeDeploy, analyzeFirst, advanced])
     if (submission.current.signature !== signature) submission.current = { signature, key: crypto.randomUUID() }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
-    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: fields, ...(analyzeFirst ? { requirement_analysis: true } : {}), ...(operation === 'release' ? { execute_deploy: executeDeploy } : {}), idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { clearDraft(); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
+    try { const run = await request<Run>('/api/v2/runs', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { project_id: project.id, request: value.trim(), operation, operation_fields: advanced ? fields : {}, interaction_mode: advanced ? 'review' : 'automatic', ...(advanced && analyzeFirst ? { requirement_analysis: true } : {}), ...(operation === 'release' ? { execute_deploy: executeDeploy } : {}), idempotency_key: submission.current.key } }); if (!controller.signal.aborted) { clearDraft(); void navigate(`/runs/${encodeURIComponent(String(run.id))}`) } }
     catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { submitting.current = false; if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
   const selected = presets.find(item => item.id === operation)
   return <section id="project-work-request" className="wb-card wb-requirement-card">
-    <div className="wb-card-head"><div><span className="wb-eyebrow">需求 · 维护 · 运维</span><h2>接下来让助手做什么</h2><p>选一种工作，补一句具体情况。助手沿用项目配置，执行、自测并提交验收。</p></div></div>
-    <div className="wb-project-tabs" role="tablist" aria-label="工作类型" onKeyDown={tabKeys}>{presets.map(({ id, label }) => <button type="button" key={id} role="tab" aria-selected={operation === id} tabIndex={operation === id ? 0 : -1} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
-    {operation === 'general' ? <p>先生成需求规格，确认后自动开工。</p> : <label><input type="checkbox" checked={analyzeFirst} onChange={e => setAnalyzeFirst(e.target.checked)} />先进行需求分析与一次确认</label>}
-    <form className="wb-form" onSubmit={submit} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy && selected && value.trim()) event.currentTarget.requestSubmit() } }}><label htmlFor="project-requirement">{(selected?.label ?? '新需求')}说明<SpecReferenceInput projectId={String(project.id)} enabled={!!project.spec_tree_enabled} onUnauthorized={onUnauthorized} id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={setValue} placeholder={(selected?.hint ?? '描述想得到的结果。')} aria-describedby="operation-hint" /></label><div className="wb-draft-note"><span id="operation-hint">草稿保存在当前浏览器 · Cmd / Ctrl + Enter 提交</span>{value.length >= 45000 && <span role="status">还可输入 {50000 - value.length} 字</span>}</div>
+    <div className="wb-card-head"><div><span className="wb-eyebrow">继续制作</span><h2>接下来让助手做什么</h2><p>直接描述想得到的结果，系统会自动准备规格、实现并验证。</p></div></div>
+    <details className="wb-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}><summary>高级操作</summary>
+    {advanced && <><div className="wb-project-tabs" role="tablist" aria-label="工作类型" onKeyDown={tabKeys}>{presets.map(({ id, label }) => <button type="button" key={id} role="tab" aria-selected={operation === id} tabIndex={operation === id ? 0 : -1} disabled={busy} className={`wb-project-tab ${operation === id ? 'is-active' : ''}`} onClick={() => { setOperation(id); setFields({}); setExecuteDeploy(false) }}>{label}</button>)}</div>
+    {operation === 'general' ? <p>先生成需求规格，确认后自动开工。</p> : <label><input type="checkbox" checked={analyzeFirst} onChange={e => setAnalyzeFirst(e.target.checked)} />先进行需求分析与一次确认</label>}</>}
+    </details>
+    <form className="wb-form" onSubmit={submit} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy && value.trim()) event.currentTarget.requestSubmit() } }}><label htmlFor="project-requirement">{(selected?.label ?? '新需求')}说明<SpecReferenceInput projectId={String(project.id)} enabled={!!project.spec_tree_enabled} onUnauthorized={onUnauthorized} id="project-requirement" required minLength={1} maxLength={50000} rows={4} value={value} disabled={busy} onChange={setValue} placeholder={(selected?.hint ?? '描述想得到的结果。')} aria-describedby="operation-hint" /></label><div className="wb-draft-note"><span id="operation-hint">草稿保存在当前浏览器 · Cmd / Ctrl + Enter 提交</span>{value.length >= 45000 && <span role="status">还可输入 {50000 - value.length} 字</span>}</div>
     {selected && selected.fields.length > 0 && <details className="wb-advanced"><summary><Icon name="triangle" className="wb-disclosure-icon" />补充信息（可选）</summary><div className="wb-advanced-body">{selected.fields.map(field => <label key={field.id}>{field.label}<textarea rows={2} maxLength={8000} disabled={busy} value={fields[field.id] ?? ''} onChange={event => setFields(previous => ({ ...previous, [field.id]: event.target.value }))} /></label>)}</div></details>}
     {operation === 'release' && <label className="wb-checkbox"><input type="checkbox" disabled={busy} checked={executeDeploy} onChange={e => setExecuteDeploy(e.target.checked)} />执行部署：独立验收通过后，在已绑定目标运行预注册脚本</label>}
     {operation === 'bugfix'  && <p className="wb-runtime-note">如果是下方已有任务失败，请先打开该任务继续修复，以保留工作成果与会话。</p>}
-    {error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || !selected || value.trim().length < 1}>{busy ? '正在接收…' : <>开始{selected?.label ?? '新需求'} <Icon name="arrow" /></>}</button></div></form>
+    {error && <ErrorNotice message={error} />}<div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || (advanced && !selected) || value.trim().length < 1}>{busy ? '正在接收…' : <>开始{advanced ? selected?.label ?? '新需求' : '制作'} <Icon name="arrow" /></>}</button></div></form>
   </section>
 }
 
@@ -246,7 +250,7 @@ export default function ProjectPage({ csrfToken, onUnauthorized, user }: PagePro
     <div className="pw-context"><Link to="/overview">工程总览</Link><span>/</span><Link to="/projects">项目</Link><span>/</span><span>{project.name}</span></div>
     <PageHeader title={project.name} description={project.managed_workspace ? '工作区已准备好，可以开始描述需求。' : `${project.repository} · ${project.base_branch}`} actions={isAdmin ? <Link className="wb-runtime-note" to={`/projects/${project.id}?tab=settings#project-budget`}>{project.budget_usd == null ? '费用：仅监测' : `预算：每次 $${project.budget_usd}`}</Link> : <span className="wb-runtime-note">配置由项目管理员维护</span>} />
     <nav className="wb-project-tabs" aria-label="项目工作区">{(isAdmin ? [['overview', '工程闭环'], ['agent', '能力与知识'], ['automation', 'Auto 与能力'], ['settings', '项目设置']] as const : [['overview', '工程闭环'], ['settings', '项目设置']] as const).map(([key, label]) => <button key={key} aria-current={tab === key ? 'page' : undefined} className={`wb-project-tab ${tab === key ? 'is-active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}{project.spec_tree_enabled && <button className={`wb-project-tab ${tab === 'spec' ? 'is-active' : ''}`} aria-current={tab === 'spec' ? 'page' : undefined} onClick={() => setTab('spec')}>规格树</button>}</nav>
-    <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
+    {tab !== 'overview' && <ProjectMode key={`${projectId}:${policyRefresh}`} projectId={String(project.id)} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />}
     {tab === 'overview' && <>
       {error && <ErrorNotice message={error} />}{overviewError && <ErrorNotice message={overviewError} />}{runsError && <ErrorNotice message={runsError} />}
       {overview?.snapshot_at && <p className="wb-runtime-note">最近同步：{formatDate(overview.snapshot_at)} · 统计和任务来自同一次记录</p>}

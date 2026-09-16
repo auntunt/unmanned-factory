@@ -87,6 +87,30 @@ def test_auto_confirm_is_audited_and_non_general_is_optional(env):
     assert ra.required({'source':{'operation':'bugfix','requirement_analysis':True}})
 
 
+def test_automatic_submission_freezes_spec_without_changing_project_policy(env):
+    env.store.update(env.run['id'], {'source': {**env.run['source'], 'interaction_mode': 'automatic'}})
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    assert run['status'] == 'received'
+    assert run['spec_confirmation']['automatic'] is True
+    assert run['spec_confirmation']['policy'] == 'submission'
+    assert run['spec_confirmation']['actor'] == 'submission-policy'
+    assert not env.store.project(env.project['id']).get('auto_spec_confirm', False)
+    assert not run['source'].get('execute_deploy')
+    assert run['mount_snapshot']['digest']
+    assert env.queued[-1][0] == '_plan'
+    assert any(e['type'] == 'spec.auto_confirmed' for e in env.store.events(run['id']))
+
+
+def test_automatic_confirmation_cannot_be_called_without_delegation(env):
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    with pytest.raises(Conflict, match='未授权自动确认'):
+        ra.confirm(env.svc, run['id'], ra.Confirmation(revision=run['revision'],
+            spec_draft=run['spec_draft'], selected_skills=[]), 'submission-policy', automatic=True)
+    assert env.store.get(run['id'])['status'] == 'awaiting_spec_confirmation'
+
+
 def test_analysis_cost_never_uses_coding_budget(env):
     env.svc._emit(env.run['id'], 'usage.recorded', {'profile':'requirement_analysis','cost_usd':1.5,'call_id':'analysis'})
     assert env.svc._remaining_dollar_budget(env.run['id'], env.project).remaining_usd == 10
@@ -158,6 +182,32 @@ def test_skill_version_is_frozen_and_unknown_selection_is_rejected(env):
     assert env.store.get(run['id'])['status']=='awaiting_spec_confirmation'
 
 
+def test_http_automatic_submission_is_audited_and_idempotent(env):
+    from fastapi.testclient import TestClient
+    from pathlib import Path
+    from factory.control.app import create_app
+    from tests.test_control_app import login
+    root = Path(env.project['workspace'])
+    app = create_app(data_dir=root.parent, workspace_root=root.parent,
+                     public_origin='http://testserver', service=env.svc)
+    app.state.auth.create_user('owner', 'a-long-test-password')
+    with TestClient(app) as client:
+        headers = login(client)
+        body = {'project_id': env.project['id'], 'request': '制作一个订单应用',
+                'interaction_mode': 'automatic', 'idempotency_key': 'automatic-request-1'}
+        response = client.post('/api/v2/runs', json=body, headers=headers)
+        assert response.status_code == 201
+        rid = response.json()['id']
+        env.svc.cancels[rid] = threading.Event()
+        env.svc._analyze(rid)
+        run = client.get('/api/v2/runs/' + rid).json()
+        assert run['spec_confirmation']['policy'] == 'submission'
+        assert run['status'] == 'received'
+        assert client.post('/api/v2/runs', json=body, headers=headers).json()['id'] == rid
+        assert client.post('/api/v2/runs', json={**body, 'interaction_mode': 'review'}, headers=headers).status_code == 409
+        assert client.post('/api/v2/runs', json={**body, 'interaction_mode': 'unknown'}, headers=headers).status_code == 422
+
+
 def test_fidelity_pass_requires_current_verifier_screenshot_and_raw_source_is_immutable(env):
     run={**env.run,**proposal(reference=True),'spec_confirmation':{'actor':'owner'}}
     env.store.append(run['id'],'browser.observed',{'ok':True,'screenshot_path':'verified/home.png'},task_id='verification')
@@ -226,7 +276,8 @@ def test_platform_operation_text_does_not_authorize_or_inflate_continuous_risk()
 
 
 @pytest.mark.parametrize('budget_pause', [False, True])
-def test_general_complete_delivery_uses_scope_and_independent_acceptance(env, monkeypatch, budget_pause):
+@pytest.mark.parametrize('automatic', [False, True])
+def test_general_complete_delivery_uses_scope_and_independent_acceptance(env, monkeypatch, budget_pause, automatic):
     from pathlib import Path
     from tests.review_helpers import passing_review
     requests=[]
@@ -243,9 +294,15 @@ def test_general_complete_delivery_uses_scope_and_independent_acceptance(env, mo
             return ProviderResult('Implemented and checked',cost_usd=0.3)
     env.svc.runner=FullRunner()
     rid=env.run['id']
+    if automatic:
+        env.store.update(rid, {'source': {**env.run['source'], 'interaction_mode': 'automatic'}})
     env.svc.start_plan(rid); env.svc._analyze(rid)
     waiting=env.store.get(rid)
-    ra.confirm(env.svc,rid,ra.Confirmation(revision=waiting['revision'],spec_draft=waiting['spec_draft'],selected_skills=[]),'owner')
+    if automatic:
+        assert waiting['spec_confirmation']['policy'] == 'submission'
+        assert waiting['status'] == 'received'
+    else:
+        ra.confirm(env.svc,rid,ra.Confirmation(revision=waiting['revision'],spec_draft=waiting['spec_draft'],selected_skills=[]),'owner')
     original_verify=env.svc._independent_verify
     if budget_pause:
         from factory.control.execution import ExecutionError
@@ -269,7 +326,8 @@ def test_general_complete_delivery_uses_scope_and_independent_acceptance(env, mo
     assert any(i['id']=='requirement:raw_source' and i['status']=='pass' for i in ledger['items'])
     assert any(i['id']=='scope:reconciliation' and i['status']=='pass' for i in ledger['items'])
     assert len([r for r in requests if not r.read_only])==1
-    assert len([e for e in env.store.events(rid) if e['type']=='spec.confirmed'])==1
+    expected_confirmation = 'spec.auto_confirmed' if automatic else 'spec.confirmed'
+    assert len([e for e in env.store.events(rid) if e['type']==expected_confirmation])==1
     assert env.svc._usage(rid,profile='requirement_analysis')['known_cost_usd']==0.2
     # Initial GitHub upload can still safely advance the untouched project baseline.
     from factory.control.github_publication import GitHubPublication

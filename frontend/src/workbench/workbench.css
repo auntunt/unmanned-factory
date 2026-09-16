@@ -226,3 +226,9 @@ a { color: inherit; text-decoration: none; }
 .wb-form .wb-checkbox { margin-block: 12px; }
 .wb-server-form { padding: 0; }
 .wb-form select:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
+
+/* Keep the one-input action readable on narrow screens. */
+@media (max-width: 600px) {
+  .wb-start-page .wb-form-actions { flex-direction: column; align-items: stretch; }
+  .wb-start-page .wb-form-actions .wb-button { width: 100%; white-space: nowrap; }
+}

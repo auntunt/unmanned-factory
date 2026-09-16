@@ -91,7 +91,7 @@ def test_scratch_cleanup_on_failure_and_optional_scope_validation(app_env, monke
     assert not client.get(f"/api/v4/agents/{agent['id']}/skills").json()['skills']
 
 
-def test_single_attachment_and_large_package_routing(app_env, monkeypatch):
+def test_single_and_large_package_start_durable_preparation(app_env, monkeypatch):
     client, _, service, _ = app_env
     headers, agent, _ = setup(client, service, monkeypatch)
     monkeypatch.setattr(service, 'start_plan', lambda rid: None)
@@ -101,8 +101,11 @@ def test_single_attachment_and_large_package_routing(app_env, monkeypatch):
     path = f"/api/v4/agents/{agent['id']}/abilities"
     single = client.post(path, headers=headers, files={'file': ('single.zip', data.getvalue())})
     assert single.status_code == 201
-    assert single.json()['channel'] == 'attachment'
-    assert '单 skill' in single.json()['message']
+    assert single.json()['channel'] == 'adaptation'
+    assert single.json()['ingestion']['run_id']
+    repeated = client.post(path, headers=headers, files={'file': ('single.zip', data.getvalue())})
+    assert repeated.json()['ingestion']['id'] == single.json()['ingestion']['id']
+    assert '自动准备' in single.json()['message']
     with zipfile.ZipFile(data, 'a') as z:
         for i in range(501):
             z.writestr(f'docs/{i}.txt', 'text')
@@ -363,7 +366,9 @@ def test_ingestion_retry_limit_and_cancellable_wait(monkeypatch):
     assert len(calls) == 4
 
 
-@pytest.mark.parametrize('fence', ['', '```json\n{}\n```', '```JSON\n{}\n```', '```\n{}\n```'])
+@pytest.mark.parametrize('fence', ['', '```json\n{}\n```', '```JSON\n{}\n```', '```\n{}\n```',
+    '```json\n{}\n```\n说明：以上为只读映射，工具环境仍须单独核对。',
+    '已完成资料分类。\n```json\n{}\n```\n说明：未执行来源脚本。'])
 def test_ingestion_fenced_response_reaches_unsigned_review(app_env, monkeypatch, fence):
     client, store, service, _ = app_env
     headers, agent, _ = setup(client, service, monkeypatch)
@@ -381,8 +386,128 @@ def test_ingestion_fenced_response_reaches_unsigned_review(app_env, monkeypatch,
     assert service.agent_manifests.get(agent['id'])['skills'] == []
 
 
-@pytest.mark.parametrize('text', ['前言 {}', '```json\n{}\n```\n尾注', '```json\n{', '[]', '{"x": NaN}'])
+@pytest.mark.parametrize('text', ['前言 {}', '```json\n{', '[]', '{"x": NaN}', '{"x": Infinity}', '{"x": 1e400}',
+    '```json\n{}\n```\n```json\n{}\n```', '```json\n{}\n```\n{}',
+    '{}\n```json\n{}\n```', '```json\n[]\n```\n说明',
+    '```json\n{}\n```\n```text\n说明\n```', '```json\n{}\n说明'])
 def test_ingestion_json_rejects_prose_truncation_and_invalid_values(text):
     from factory.control.skill_ingestion_runs import parse_response
     with pytest.raises(ValueError):
         parse_response(text)
+
+
+def test_ability_preflight_rejects_incompatible_config_before_saving(app_env, monkeypatch):
+    client, store, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch)
+    configuration = service.runtime_settings.get()
+    configuration['profiles']['planner']['provider'] = 'codex'
+    path = f"/api/v4/agents/{agent['id']}/abilities"
+    preflight = client.get(path + '/preflight')
+    assert preflight.status_code == 200
+    assert preflight.json()['ready'] is False
+    assert 'Claude' in preflight.json()['message']
+    response = client.post(path, headers=headers, files={'file': ('external.zip', package())})
+    assert response.status_code == 409
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM skill_ingestions').fetchone()[0] == 0
+    configuration['profiles']['planner']['provider'] = 'claude'
+    assert client.get(path + '/preflight').json()['ready'] is True
+
+
+def test_windows_skill_path_is_detected_and_automatically_prepared(app_env, monkeypatch):
+    client, _, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch)
+    monkeypatch.setattr(service, 'start_plan', lambda rid: None)
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, 'w') as archive:
+        archive.writestr('reverse\\SKILL.md', 'Read references\\format.md')
+        archive.writestr('reverse\\references\\format.md', 'Expected reference content')
+    source = read_package(data.getvalue())
+    assert len(source['skills']) == 1
+    response = client.post(f"/api/v4/agents/{agent['id']}/abilities", headers=headers,
+                          files={'file': ('windows.zip', data.getvalue())})
+    assert response.status_code == 201, response.text
+    assert response.json()['channel'] == 'adaptation'
+    assert response.json()['skill_count'] == 1
+
+
+@pytest.mark.parametrize('status,reuse', [('cancelled', False), ('failed', False), ('needs_human', True)])
+def test_reupload_can_recover_terminal_preparation(app_env, monkeypatch, status, reuse):
+    client, store, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch)
+    monkeypatch.setattr(service, 'start_plan', lambda rid: None)
+    path = f"/api/v4/agents/{agent['id']}/abilities"
+    first = client.post(path, headers=headers, files={'file': ('external.zip', package())})
+    assert first.status_code == 201, first.text
+    prior = first.json()['ingestion']
+    store.update(prior['run_id'], {'status': status}, expected=('received',))
+    again = client.post(path, headers=headers, files={'file': ('external.zip', package())})
+    assert again.status_code == 201, again.text
+    current = again.json()['ingestion']
+    assert (current['id'] == prior['id']) is reuse
+    assert (current['run_id'] == prior['run_id']) is reuse
+    if not reuse:
+        assert store.get(current['run_id'])['status'] == 'received'
+        assert store.get(prior['run_id'])['status'] == status
+
+
+def test_fenced_explanation_does_not_bypass_mapping_validation():
+    from factory.control.skill_ingestion_runs import parse_response
+    from factory.control.skill_ingestion import validate_mapping
+    source = read_package(package())
+    invalid = mapping(source)
+    invalid['decisions'] = []
+    text = '```json\n' + json.dumps(invalid) + '\n```\n说明：此映射已完整，请直接启用。'
+    parsed = parse_response(text)
+    assert parsed == invalid
+    with pytest.raises(ValueError, match='宿主入口不得遗漏'):
+        validate_mapping(source, parsed)
+
+
+@pytest.mark.parametrize('invalid_kind', ['json', 'mapping'])
+@pytest.mark.parametrize('recover', [True, False])
+def test_ingestion_corrects_invalid_response_once_without_enabling(app_env, monkeypatch, invalid_kind, recover):
+    client, store, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch)
+    original = service.runner.run
+    attempts = []
+    def respond(request, emit, cancel=None):
+        if '只返回 JSON {"criteria"' in request.prompt:
+            return original(request, emit, cancel)
+        attempts.append(request.prompt)
+        if recover and len(attempts) == 2:
+            return original(request, emit, cancel)
+        invalid = mapping(read_package(package()))
+        invalid['decisions'] = []
+        return ProviderResult('```json\n{' if invalid_kind == 'json' else json.dumps(invalid), cost_usd=.01)
+    monkeypatch.setattr(service.runner, 'run', respond)
+    response = client.post(f"/api/v4/agents/{agent['id']}/abilities", headers=headers,
+                          files={'file': ('external.zip', package())})
+    record = response.json()['ingestion']
+    run = wait_state(store, record['run_id'], {'needs_human'})
+    current = service.skill_ingestions.get(record['id'])
+    assert len(attempts) == 2
+    assert attempts[1].startswith(attempts[0])
+    assert 'validation_error' in attempts[1]
+    assert service.agent_manifests.get(agent['id'])['skills'] == []
+    if recover:
+        assert current['status'] == 'review'
+        assert run['artifacts']['verification']['verdict'] == 'pass'
+    else:
+        assert current['status'] != 'review'
+        assert not current.get('mapping_batches')
+        assert not current.get('mapping')
+
+
+@pytest.mark.parametrize('error', [PermissionError('denied'), Conflict('budget stopped'), ProviderError('unavailable', transient=False), ValueError('internal configuration error')])
+def test_mapping_correction_does_not_retry_non_response_errors(monkeypatch, error):
+    from factory.control import skill_ingestion_runs as ingestion
+    attempts = []
+    def fail(*args):
+        attempts.append(1)
+        raise error
+    monkeypatch.setattr(ingestion, 'call', fail)
+    with pytest.raises(type(error)) as raised:
+        ingestion.corrected_mapping(None, 'run', {}, {}, {}, 'frozen prompt', 0)
+    assert raised.value is error
+    assert len(attempts) == 1

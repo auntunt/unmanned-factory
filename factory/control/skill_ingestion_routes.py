@@ -1,5 +1,6 @@
 """Admin ingestion/review actions and project-authorized read views; no external scripts."""
 import io
+import hashlib
 import json
 import os
 import stat
@@ -12,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from factory.control.agents import MAX_ZIP, MAX_PACK_FILES, MAX_FILES, MAX_FILE, macos_junk, inspect_skill, strip_macos_junk
 from factory.control.skill_ingestion import validate_mapping
-from factory.control.skill_ingestion_runs import authorization_snapshot
+from factory.control.skill_ingestion_runs import authorization_snapshot, check_configuration
 from factory.control.store import Conflict, now
 
 
@@ -127,7 +128,22 @@ def router(service):
         return record
 
     def create(request, pid, raw, aid=None):
+        with service.lock:
+            return create_locked(request, pid, raw, aid)
+
+    def create_locked(request, pid, raw, aid=None):
         access(request, pid, aid)
+        # Reuse resumable preparation; terminal jobs must permit a fresh upload.
+        with service.store.connect() as db:
+            existing = db.execute('''SELECT data FROM skill_ingestions
+                WHERE project_id IS ? AND json_extract(data,'$.target_agent_id') IS ?
+                AND json_extract(data,'$.source_sha256')=? ORDER BY rowid DESC LIMIT 1''',
+                (pid, aid, hashlib.sha256(raw).hexdigest())).fetchone()
+        if existing and json.loads(existing[0]).get('run_id'):
+            previous = get(request, json.loads(existing[0])['id'])
+            if previous['runtime']['status'] not in ('cancelled', 'failed'):
+                return previous
+        check_configuration(service)
         try:
             record = ingestions.create(pid, raw, request.state.user['id'], agent_id=aid)
         except (ValueError, OSError) as exc:
@@ -143,6 +159,15 @@ def router(service):
             raise
         return record
 
+    @api.get('/agents/{aid}/abilities/preflight')
+    def preflight(aid: str, request: Request):
+        access(request, None, aid)
+        try:
+            check_configuration(service)
+        except (Conflict, ValueError) as exc:
+            return {'ready': False, 'message': str(exc)}
+        return {'ready': True, 'message': '上传后自动准备和验收，完成后核对启用。工具环境需单独验证。'}
+
     @api.post('/skill-ingestions', status_code=201)
     def upload(request: Request, project_id: str | None = Form(None),
                agent_id: str | None = Form(None), file: UploadFile = File(...)):
@@ -154,10 +179,10 @@ def router(service):
             meta = inspect_skill(raw, max_files=MAX_PACK_FILES)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        count = sum(PurePosixPath(f['path']).name.lower() == 'skill.md' for f in meta['files'])
-        if count > 1 or len(meta['files']) > MAX_FILES:
+        count = sum(PurePosixPath(f['path'].replace('\\', '/')).name.lower() == 'skill.md' for f in meta['files'])
+        if count or len(meta['files']) > MAX_FILES:
             return {'channel': 'adaptation', 'skill_count': count, 'file_count': len(meta['files']),
-                    'message': f'检测到 {count} 个 skill、{len(meta["files"])} 个文件的外部包，将走适配与人签',
+                    'message': f'检测到 {count} 个 skill、{len(meta["files"])} 个文件，已进入自动准备；完成后在此核对启用，无需另开维护对话',
                     'ingestion': create(request, None, raw, aid)}
         sid = uuid.uuid4().hex
         asset = {**meta, 'id': sid, 'agent_id': aid, 'filename': filename,

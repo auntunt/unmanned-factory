@@ -57,3 +57,8 @@ it('renews analysis without claiming to skip to the next stage', async()=>{
  await waitFor(()=>expect(props.onChanged).toHaveBeenCalled())
  expect(request).toHaveBeenCalledWith('/api/v2/runs/run/resume-budget',expect.objectContaining({body:{revision:0,resume_count:0}}))
 })
+it('describes automatic analysis retry as continuing without another spec confirmation', () => {
+ render(<BudgetResume {...props} run={{...run,revision:0,source:{operation:'general',interaction_mode:'automatic'},status:'needs_human'} as unknown as Run} />)
+ expect(screen.getByText('重新分析需求并自动接续制作；保留原始目标与执行权限。')).toBeTruthy()
+ expect(screen.queryByText(/完成后仍需确认规格/)).toBeNull()
+})

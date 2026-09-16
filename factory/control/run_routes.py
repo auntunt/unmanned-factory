@@ -25,6 +25,7 @@ class NewRun(Body):
     request: str = Field(min_length=1, max_length=50_000)
     operation: str = Field(default="general", max_length=60)
     requirement_analysis: bool = Field(default=False, strict=True)
+    interaction_mode: Literal['review', 'automatic'] = 'review'
     execute_deploy: bool = Field(default=False, strict=True)
     operation_fields: dict[str, str] = Field(default_factory=dict, max_length=8)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
@@ -74,6 +75,8 @@ def router(store, svc, operations):
             raise HTTPException(422, str(exc)) from None
         if body.requirement_analysis:
             fingerprint = hashlib.sha256((fingerprint + '\0requirement_analysis=true').encode()).hexdigest()
+        if body.interaction_mode == 'automatic':
+            fingerprint = hashlib.sha256((fingerprint + '\0interaction_mode=automatic').encode()).hexdigest()
         spec_resolution = resolve_refs(project, body.request)
         fingerprint = refs_fingerprint(fingerprint, spec_resolution)
         key = (f"web:{request.state.user['id']}:{body.project_id}:{body.idempotency_key}"
@@ -86,6 +89,7 @@ def router(store, svc, operations):
                                          'actor_id': request.state.user['id'],
                                          'original_request': body.request, 'compiled_request_sha256': hashlib.sha256(compiled.encode()).hexdigest(),
                                          'requirement_analysis': body.requirement_analysis,
+                                         'interaction_mode': body.interaction_mode,
                                          'operation': body.operation, 'operation_version': preset['version'],
                                          'execute_deploy': body.execute_deploy, 'remote_targets': remote_targets,
                                          'request_fingerprint': fingerprint, **spec_resolution}, delivery_id=key)

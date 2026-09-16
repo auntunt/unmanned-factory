@@ -1,5 +1,6 @@
 """Portable v2 job manifests with pinned skill bodies; read legacy v1 ZIPs."""
 import io
+import hashlib
 import json
 import uuid
 import zipfile
@@ -19,10 +20,16 @@ def export_pack(manifests, agents, aid):
     config={k:version[k] for k in ('model_settings','tool_scope','delivery')}
     with manifests.store.connect() as db:
         library_ids = [row[0] for row in db.execute("SELECT id FROM skill_assets WHERE agent_id=? AND (json_extract(data,'$.source')='skill-ingestion' OR json_extract(data,'$.library')=1)", (aid,))]
+    external_ids = [s['external_source']['asset_id'] for s in skills
+                    if s.get('external_source', {}).get('asset_id')]
     body={'schema':'webuddy.agent-pack/v2','name':agent['name'],'purpose':agent['purpose'],
           'manifest':manifest,'configuration':config,
           'skill_metadata':[{k:v for k,v in s.items() if k!='instructions'} for s in skills],
-          'assets':list(dict.fromkeys([*version.get('skill_ids',[]), *library_ids]))}
+          'assets':list(dict.fromkeys([*version.get('skill_ids',[]), *library_ids, *external_ids]))}
+    with manifests.store.connect() as db:
+        body['asset_metadata'] = {sid: {key: value for key, value in json.loads(db.execute(
+            'SELECT data FROM skill_assets WHERE id=? AND agent_id=?', (sid, aid)).fetchone()[0]).items()
+            if key in ('sha256', 'source_sha256')} for sid in body['assets']}
     asset_bodies = {sid: agents.skill_body(sid, agent_id=aid) for sid in body['assets']}
     body['asset_chunks'] = {sid: [f'assets/{sid}/part-{i}' for i in range((len(raw) + 1048575) // 1048576)]
                             for sid, raw in asset_bodies.items() if len(raw) > 2 * 1048576}
@@ -38,6 +45,21 @@ def export_pack(manifests, agents, aid):
             else:
                 z.writestr(f'assets/{sid}.zip',raw, compress_type=zipfile.ZIP_STORED)
     return out.getvalue()
+
+
+def _asset_content(archive, files, pack, old_sid):
+    path = f'assets/{old_sid}.zip'
+    chunks = pack.get('asset_chunks', {}).get(old_sid)
+    if chunks is not None:
+        if (not isinstance(chunks, list) or not 1 <= len(chunks) <= 20
+                or chunks != [f'assets/{old_sid}/part-{i}' for i in range(len(chunks))]
+                or any(p not in files for p in chunks)
+                or sum(archive.getinfo(p).file_size for p in chunks) > MAX_ZIP):
+            raise ValueError('职能包附件分片无效或超过 20 MiB')
+        return b''.join(archive.read(p) for p in chunks)
+    if path not in files:
+        raise ValueError('职能包缺少附件')
+    return archive.read(path)
 
 
 def import_pack(manifests, raw, actor):
@@ -63,6 +85,10 @@ def import_pack(manifests, raw, actor):
                 if not isinstance(m,dict):raise ValueError('职能包缺少 manifest')
                 refs=m.get('skills')
                 if not isinstance(refs,list) or len(refs)>24:raise ValueError('skill 清单无效')
+                asset_ids = pack.get('assets', [])
+                if not isinstance(asset_ids, list) or len(asset_ids) > 100 or any(not isinstance(x, str) for x in asset_ids) or len(set(asset_ids)) != len(asset_ids):
+                    raise ValueError('附件清单无效')
+                asset_remap = {sid: uuid.uuid4().hex for sid in asset_ids}
                 metadata=pack.get('skill_metadata',[])
                 if not isinstance(metadata,list):raise ValueError('skill 元数据无效')
                 available = [entry['skill'] for entry in (m.get('adaptation') or {}).get('available_skills', [])]
@@ -87,8 +113,16 @@ def import_pack(manifests, raw, actor):
                         skill['owner_agent_id'] = aid
                     if skill.get('external_source'):
                         skill['external_source'] = {**skill['external_source'], 'agent_id': aid}
-                        # The old asset id is provenance, not a live database reference.
-                        skill['external_source'].pop('asset_id', None)
+                        old_asset = skill['external_source'].get('asset_id')
+                        if old_asset is None:
+                            # Earlier exports lost the local id; recover only by exact signed ZIP hash.
+                            matches = [sid for sid in asset_ids if hashlib.sha256(
+                                _asset_content(z, files, pack, sid)).hexdigest() == skill['external_source'].get('package_sha256')]
+                            if len(matches) == 1:
+                                old_asset = matches[0]
+                        if old_asset not in asset_remap:
+                            raise ValueError('外部 Skill 缺少来源附件')
+                        skill['external_source']['asset_id'] = asset_remap[old_asset]
                     clean_skill = scrub(skill)
                     if skill.get('external_source'):
                         clean_skill['instructions'] = text
@@ -115,21 +149,15 @@ def import_pack(manifests, raw, actor):
                 if not isinstance(assets,list) or len(assets)>100:raise ValueError('附件清单无效')
                 config['skill_ids']=[]
                 for old_sid in assets:
-                    path=f'assets/{old_sid}.zip'
-                    chunks = pack.get('asset_chunks', {}).get(old_sid)
-                    if chunks is not None:
-                        if (not isinstance(chunks, list) or not 1 <= len(chunks) <= 20
-                                or chunks != [f'assets/{old_sid}/part-{i}' for i in range(len(chunks))]
-                                or any(p not in files for p in chunks)
-                                or sum(z.getinfo(p).file_size for p in chunks) > MAX_ZIP):
-                            raise ValueError('职能包附件分片无效或超过 20 MiB')
-                        content = b''.join(z.read(p) for p in chunks)
-                    else:
-                        if path not in files:raise ValueError('职能包缺少附件')
-                        content = z.read(path)
-                    meta=inspect_skill(content, max_files=MAX_PACK_FILES); sid=uuid.uuid4().hex
-                    content=strip_macos_junk(content)
+                    content = _asset_content(z, files, pack, old_sid)
+                    inspect_skill(content, max_files=MAX_PACK_FILES)
+                    imported_hash = hashlib.sha256(content).hexdigest()
+                    content = strip_macos_junk(content)
+                    meta=inspect_skill(content, max_files=MAX_PACK_FILES); sid=asset_remap[old_sid]
                     data={**meta,'id':sid,'agent_id':aid,'filename':'imported.zip','source':'pack','library':old_sid in pack.get('library_assets', []),'created_at':at}
+                    data['imported_sha256'] = imported_hash
+                    data['source_sha256'] = (pack.get('asset_metadata', {}).get(old_sid, {}).get('source_sha256')
+                                             or imported_hash)
                     db.execute('INSERT INTO skill_assets VALUES(?,?,?,?,?)',(sid,aid,encoded(data),content,at))
                     if old_sid not in pack.get('library_assets', []):
                         config['skill_ids'].append(sid)

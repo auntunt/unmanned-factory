@@ -10,6 +10,9 @@ import hashlib
 import json
 import io
 import zipfile
+import posixpath
+import re
+import unicodedata
 from dataclasses import replace
 
 from factory.control.sources import SourceStore, encoded, MAX_BYTES
@@ -22,6 +25,61 @@ def agent_guidance(run):
     return ('\n\nAGENT INSTRUCTIONS (frozen snapshot):\n' + agent.get('instructions', '')
             + '\nAGENT ACCEPTANCE (within the user request):\n' + encoded(agent.get('acceptance', []))
             + '\nAGENT DELIVERY CONTRACT (does not grant publication authority):\n' + encoded(agent.get('delivery', {})))
+
+
+def _external_documents(assets, aid, skill):
+    """Follow only pinned text references; never extract or execute package files."""
+    from factory.control.agents import _safe_name, macos_junk
+    source = skill['external_source']
+    if source.get('agent_id') != aid or skill.get('owner_agent_id', aid) != aid:
+        raise PermissionError('Skill 不属于该职能体')
+    if not source.get('asset_id'):
+        raise ValueError('外部 Skill 缺少来源附件，请重新导入职能包')
+    raw = assets.skill_body(source['asset_id'], agent_id=aid)
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != source.get('package_sha256'):
+        with assets.store.connect() as db:
+            row = db.execute('SELECT data FROM skill_assets WHERE id=? AND agent_id=?',
+                             (source['asset_id'], aid)).fetchone()
+        metadata = json.loads(row[0]) if row else {}
+        if (metadata.get('sha256') != digest
+                or metadata.get('source_sha256') != source.get('package_sha256')):
+            raise ValueError('外部 Skill 来源包摘要不匹配')
+    entry = _safe_name(source['path'])[0]
+    if hashlib.sha256(skill['instructions'].encode()).hexdigest() != source.get('body_sha256'):
+        raise ValueError('外部 Skill 正文摘要不匹配')
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        files = {_safe_name(i.filename)[0]: i for i in archive.infolist()
+                 if not i.is_dir() and not macos_junk(i.filename)}
+        if entry not in files or hashlib.sha256(archive.read(files[entry])).hexdigest() != source.get('sha256'):
+            raise ValueError('外部 Skill 入口摘要不匹配')
+        pending, seen = [(entry, skill['instructions'])], {entry}
+        while pending:
+            path, text = pending.pop(0)
+            yield {'id': 'skill/' + source['asset_id'] + '/' + path,
+                   'title': path, 'text': text, 'uri': 'skill:' + source['asset_id'] + '/' + path,
+                   'source_revision': skill['version'], 'trust': 'scoped_procedure',
+                   'sha256': hashlib.sha256(text.encode()).hexdigest(),
+                   'skill_id': skill['id'], 'package_sha256': source['package_sha256']}
+            # Markdown links (including spaces) and inline/bare file paths.
+            normalized = unicodedata.normalize('NFC', text.replace('\\', '/'))
+            refs = re.findall(r'\]\(<?([^>\n)]+?)>?(?:\s+"[^"\n]*")?\)', normalized)
+            refs += re.findall(r'(?<![\w:/])((?:[\w.-]+/)*[\w.-]+\.(?:md|txt))(?=[`\s)#\],;:。]|$)', normalized, re.I)
+            for ref in refs:
+                ref = ref.split('#', 1)[0].strip()
+                if not ref.lower().endswith(('.md', '.txt')) or ref.startswith('/') or ':' in ref:
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(path), ref))
+                if target.startswith('../') or target in seen or target not in files:
+                    continue
+                # Other skill entry points require explicit manifest selection.
+                if posixpath.basename(target).casefold() == 'skill.md':
+                    continue
+                info = files[target]
+                if info.file_size > 40_000:
+                    raise ValueError('Skill 文档超出 40 KB，请拆分参考资料')
+                seen.add(target)
+                pending.append((target, archive.read(info).decode('utf-8')))
 
 
 def compile_mounts(store, run):
@@ -74,10 +132,25 @@ def compile_mounts(store, run):
                     if info.file_size > 40_000:
                         raise ValueError('Skill 文档超出 40 KB，请拆分参考资料')
                     text = archive.read(info).decode('utf-8')
-                    append_document({'id': 'skill/' + sid + '/' + info.filename,
-                        'title': info.filename, 'text': text, 'uri': 'skill:' + sid + '/' + info.filename,
+                    append_document({'id': 'skill/' + sid + '/' + unicodedata.normalize('NFC', info.filename.replace('\\', '/')),
+                        'title': info.filename, 'text': text, 'uri': 'skill:' + sid + '/' + unicodedata.normalize('NFC', info.filename.replace('\\', '/')),
                         'source_revision': agent.get('version', 1), 'trust': 'scoped_procedure',
                         'sha256': hashlib.sha256(text.encode()).hexdigest()})
+    external = [s for s in agent.get('manifest_skills', []) if s.get('external_source')]
+    if external:
+        from factory.control.agents import AgentStore
+        assets = AgentStore(store)
+        aid = agent.get('agent_id') or run.get('agent_id')
+        if not aid:
+            raise ValueError('Skill 挂载缺少职能体归属')
+        mounted_ids = {d['id'] for d in documents}
+        for skill in external:
+            for document in _external_documents(assets, aid, skill):
+                if document['id'] not in mounted_ids:
+                    append_document(document)
+                    mounted_ids.add(document['id'])
+            skills.append({'id': skill['id'], 'version': skill['version'],
+                           'sha256': skill['external_source']['package_sha256']})
     manifest = {'schema_version': 1, 'project_id': run['project_id'], 'collections': collections,
                 'modules': [{'id': m['id'], 'version': m['version']} for m in run.get('module_snapshot', [])],
                 'agent': {'id': run.get('agent_id'), 'version': run.get('agent_version')},

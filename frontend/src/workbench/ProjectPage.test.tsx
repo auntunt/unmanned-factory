@@ -34,6 +34,7 @@ afterEach(cleanup)
 describe('ProjectPage maintenance entry', () => {
   it('uses catalog labels and optional fields from the API and submits structured input', async () => {
     show()
+    fireEvent.click(await screen.findByText('高级操作'))
     fireEvent.click(await screen.findByRole('tab', { name: '数据库里的修复入口' }))
     fireEvent.change(screen.getByLabelText('数据库里的修复入口说明'), { target: { value: '保存失败' } })
     fireEvent.change(screen.getByLabelText('错误日志'), { target: { value: 'TypeError at save' } })
@@ -46,6 +47,7 @@ describe('ProjectPage maintenance entry', () => {
   })
   it('retains idempotency key on retry and leaves optional fields empty', async () => {
     show()
+    fireEvent.click(await screen.findByText('高级操作'))
     fireEvent.click(await screen.findByRole('tab', { name: '数据库里的修复入口' }))
     fireEvent.change(screen.getByLabelText('数据库里的修复入口说明'), { target: { value: '保存失败' } })
     api.mockImplementationOnce(async () => { throw new Error('网络中断') })
@@ -72,6 +74,7 @@ describe('ProjectPage maintenance entry', () => {
 })
 it('requires an explicit release checkbox and includes it in the submission identity', async () => {
   show()
+  fireEvent.click(await screen.findByText('高级操作'))
   fireEvent.click(await screen.findByRole('tab', { name: '部署准备' }))
   const checkbox = screen.getByRole('checkbox', { name: /执行部署：/ }) as HTMLInputElement
   expect(checkbox.checked).toBe(false)
@@ -90,6 +93,7 @@ it('requires an explicit release checkbox and includes it in the submission iden
 
 it('keeps settings out of the main flow and supports arrow keys between work-type tabs', async () => {
   show()
+  fireEvent.click(await screen.findByText('高级操作'))
   const general = await screen.findByRole('tab', { name: '新需求' })
   expect(screen.queryByText('定时巡检')).toBeNull()
   expect(screen.queryByText('项目服务器')).toBeNull()
@@ -157,4 +161,15 @@ it('defaults analysis to monitoring and clears a separate ceiling when monitorin
   expect(analysis.value).toBe('')
   expect(screen.getByText('需求分析仅监测，不设美元停止线。')).toBeTruthy()
   expect(screen.getByRole('checkbox',{name:'自动确认规格（默认关闭）'}).closest('label')?.className).toContain('wb-checkbox')
+})
+
+it('submits the ordinary goal automatically without choosing a work type', async () => {
+  show()
+  const input = await screen.findByLabelText('新需求说明')
+  expect(screen.queryByRole('tab', { name: '数据库里的修复入口' })).toBeNull()
+  fireEvent.change(input, { target: { value: '做一个订单搜索页面' } })
+  api.mockImplementationOnce(async () => ({ id: 'r1' }) as never)
+  fireEvent.click(screen.getByRole('button', { name: '开始制作' }))
+  await screen.findByText('运行已接收')
+  expect(api.mock.calls.find(([url]) => url === '/api/v2/runs')?.[1]?.body).toMatchObject({ operation: 'general', operation_fields: {}, interaction_mode: 'automatic' })
 })

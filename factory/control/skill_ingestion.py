@@ -43,7 +43,7 @@ def read_package(raw: bytes) -> dict:
                 continue
             content = archive.read(item)
             entry = {'path': item.filename, 'sha256': sha(content), 'size': len(content)}
-            script = PurePosixPath(item.filename).suffix.lower() in {'.sh', '.ps1', '.bat', '.cmd'}
+            script = PurePosixPath(item.filename.replace('\\', '/')).suffix.lower() in {'.sh', '.ps1', '.bat', '.cmd'}
             if script:
                 primitives.append({'path': item.filename, 'primitive': item.filename,
                                    'candidate': 'unsupported'})
@@ -69,7 +69,7 @@ def read_package(raw: bytes) -> dict:
                 if primitive in text:
                     primitives.append({'path': item.filename, 'primitive': primitive,
                                        'candidate': target})
-            if PurePosixPath(item.filename).suffix.lower() != '.md':
+            if PurePosixPath(item.filename.replace('\\', '/')).suffix.lower() != '.md':
                 continue
             match = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)', text, re.S)
             metadata = {}
@@ -84,9 +84,9 @@ def read_package(raw: bytes) -> dict:
                     metadata = {}
                     risks.append({'path': item.filename, 'reason': 'frontmatter 不是对象，保留原文供人审'})
                 body = text[match.end():]
-            if PurePosixPath(item.filename).name.lower() != 'skill.md' and 'name' not in metadata:
+            if PurePosixPath(item.filename.replace('\\', '/')).name.lower() != 'skill.md' and 'name' not in metadata:
                 continue
-            name = metadata.get('name', PurePosixPath(item.filename).parent.name or 'root')
+            name = metadata.get('name', PurePosixPath(item.filename.replace('\\', '/')).parent.name or 'root')
             description = metadata.get('description', '')
             if not isinstance(name, str) or not isinstance(description, str):
                 raise ValueError('skill name/description 必须为文本')

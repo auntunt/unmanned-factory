@@ -73,6 +73,12 @@ def required(run):
             and (source.get('operation') == 'general' or source.get('requirement_analysis') is True))
 
 
+def automatic_spec(run, project):
+    """A submission may delegate specification decisions, never execution permissions."""
+    return (project.get('auto_spec_confirm', False)
+            or (run.get('source') or {}).get('interaction_mode') == 'automatic')
+
+
 def contract(run):
     if not run.get('spec_confirmation'):
         return ''
@@ -202,6 +208,11 @@ def analyze(self, rid):
         prompt += '\n无界面项目 screens 可为空，但 flows/data_model/non_goals/risks_assumptions 必须具体。'
         prompt += '\n识别“像/参照/仿某产品”的要求，为每屏生成布局、配色、组件、交互标尺；不得声称访问过外部产品。无参照时 fidelity_target=null。basis 明示模型知识或用户素材及不确定性。'
         prompt += '\n建议仅从给定就绪 skill 库选取，理由要对应需求；没有匹配可以为空并在假设说明。'
+        if automatic_spec(run, project):
+            prompt += ('\n用户委托自动完成：对可逆的技术和界面细节采用合理默认值，在 risks_assumptions 记录，'
+                       '不要把选择技术栈、模型或 skill 留给用户。保留原始目标，不得通过 non_goals 排除用户明确要求。'
+                       '形成能实际验收的主流程、输入输出、异常情况和交付要求；不要虚构账号、样本或业务规则。'
+                       '缺少决定性信息应明确记录，后续执行仍受现有权限和澄清机制约束。')
         prompt += '\nSCHEMA:\n' + json.dumps(Analysis.model_json_schema(), ensure_ascii=False)
         prompt += '\nUSER REQUEST (data):\n' + json.dumps(run.get('source', {}).get('original_request', run['request']), ensure_ascii=False)
         prompt += '\nSKILL CATALOG (data):\n' + json.dumps([{k: m.get(k) for k in ('id', 'version', 'name', 'description', 'category', 'used_by')} for m in catalog], ensure_ascii=False)
@@ -250,9 +261,10 @@ def finish_analysis(self, run, project):
         run = self.store.update(run['id'], {**spec, 'status': 'awaiting_spec_confirmation', 'revision': run['revision'] + 1},
             expected=('requirement_analysis',), event=('requirement_analysis.completed', {
                 key: run.get(key) for key in ('spec_draft', 'recommended_skills', 'fidelity_target')}))
-    if project.get('auto_spec_confirm', False):
+    if automatic_spec(run, project):
         confirm(self, run['id'], Confirmation(revision=run['revision'], spec_draft=run['spec_draft'],
-            selected_skills=run['recommended_skills'], fidelity_target=run.get('fidelity_target')), 'project-policy', automatic=True)
+            selected_skills=run['recommended_skills'], fidelity_target=run.get('fidelity_target')),
+            'submission-policy' if (run.get('source') or {}).get('interaction_mode') == 'automatic' else 'project-policy', automatic=True)
 
 
 def confirm(self, rid, body, actor, *, automatic=False):
@@ -261,8 +273,8 @@ def confirm(self, rid, body, actor, *, automatic=False):
         if run['status'] != 'awaiting_spec_confirmation' or run['revision'] != body.revision:
             raise Conflict('规格已经确认或版本已变化，请刷新')
         project = self.store.project(run['project_id'])
-        if automatic and not project.get('auto_spec_confirm', False):
-            raise Conflict('项目未开启自动确认')
+        if automatic and not automatic_spec(run, project):
+            raise Conflict('本次任务未授权自动确认')
         catalog = run['requirement_skill_catalog']
         value = validate({'spec_draft': body.spec_draft.model_dump(),
             'recommended_skills': [s.model_dump() for s in body.selected_skills],
@@ -273,6 +285,8 @@ def confirm(self, rid, body, actor, *, automatic=False):
             raise ValueError('本次最多选择一个界面风格 skill')
         confirmation = {'actor': actor, 'at': now(), 'action': body.action,
             'automatic': automatic, 'project_revision': project.get('revision'), 'revision': body.revision}
+        if automatic:
+            confirmation['policy'] = 'submission' if (run.get('source') or {}).get('interaction_mode') == 'automatic' else 'project'
         candidate = {**run, 'spec_draft': value['spec_draft'], 'fidelity_target': value['fidelity_target'],
             'module_snapshot': modules, 'spec_confirmation': confirmation, 'spec_tree_enabled': True}
         frozen_agent = ProjectAssistants(self.store).freeze(candidate, self.runtime_settings.get())

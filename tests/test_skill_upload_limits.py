@@ -56,6 +56,10 @@ def test_large_package_routes_and_clean_storage(app_env, monkeypatch):
     headers = login(client)
     p = project(client, repo, headers)
     monkeypatch.setattr(service, 'start_plan', lambda *_: None)
+    configuration = service.runtime_settings.get()
+    for role in ('standard', 'planner'):
+        configuration['profiles'][role]['provider'] = 'claude'
+    monkeypatch.setattr(service.runtime_settings, 'get', lambda: configuration)
     agent = service.agents.create({'name':'Reader'}, 'owner')
     raw = archive(junk=600)
     attachment = client.post(f"/api/v4/agents/{agent['id']}/skills", headers=headers,

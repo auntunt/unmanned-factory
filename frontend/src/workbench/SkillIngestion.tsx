@@ -54,9 +54,10 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
     <p>{draft.status === 'signed' ? '已签署的能力已存入本职能体；只有岗位清单引用的能力会用于新任务。' : draft.status === 'review' ? '草稿已通过独立验收。请在此核对并签署，签署前不会用于任务。' : '资料包已保存，尚未成为可用能力。不必重复上传；适配和独立验收通过后在此人签。'}</p>
     {draft.progress && <p>已适配 {draft.progress.mapped} / {draft.progress.total ?? '待统计'} 个资料分片 · 已验收 {draft.progress.verified} 个</p>}
     {paused && <div role="alert"><p>{draft.runtime?.error || '任务已暂停，请查看运行记录。'}</p>{draft.runtime?.status === 'needs_human' && <button type="button" className="wb-button wb-button-primary" disabled={busy} onClick={() => void resume()}>{busy ? '正在恢复…' : '从已保存进度继续适配'}</button>}</div>}
-    <p>来源 SHA256：<code>{draft.source_sha256}</code></p>
+    <details><summary>来源记录</summary><p>来源 SHA256：<code>{draft.source_sha256}</code></p></details>
     {draft.agent_id && <Link to={`/agents/${draft.agent_id}`}>打开正式职能体</Link>}
     {mapping && <>
+      <details><summary>查看身份、映射与验收依据</summary>
       <label>人签身份段<textarea disabled={!editable || Boolean(draft.target_agent_id)} maxLength={1200} value={identity} onChange={e => setIdentity(e.target.value)} /></label>
       <h4>结构映射与步骤断言</h4>
       <ol>{mapping.steps.map((step, index) => <li key={`${step.skill_path}-${index}`}>
@@ -69,7 +70,8 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       </li>)}</ol>
       <h4>宿主原语映射决议</h4>
       {mapping.decisions.map((d, i) => <div key={i}><strong>{d.primitive} → {d.target === 'unsupported' ? '该能力在本平台不可用' : d.target}</strong><p>{d.path}</p><label>映射依据<textarea disabled={!editable} value={d.basis} onChange={e => setMapping({ ...mapping, decisions: mapping.decisions.map((v, j) => j === i ? { ...v, basis: e.target.value } : v) })} /></label></div>)}
-      <h4>工具与 MCP 前置条件</h4>{mapping.dependencies.length ? mapping.dependencies.map((d, i) => <p key={i}>{d.path}：{d.reason}</p>) : <p>未识别到额外依赖；签署前请复核。</p>}
+      </details>
+      <h4>运行环境</h4><p>适配只准备方法与引用资料，不代表工具已安装或真实转换样例已通过。实际使用前仍需检查以下依赖。</p>{mapping.dependencies.length ? mapping.dependencies.map((d, i) => <p key={i}>{d.path}：{d.reason}</p>) : <p>未识别到额外依赖；尚未验证实际工具环境。</p>}
       <h4>注入风险条目</h4>{mapping.injection_risks.map((r, i) => <blockquote key={i}>{r.path}：{r.reason} {r.text}</blockquote>)}
       {largeLibrary && <p>这是能力库。人签保存全部能力；本次最多选择 {draft.available_slots ?? 24} 项加入岗位清单，其余保留为随附能力，后续可在清单中选择。</p>}
       <h4>安全映射与来源</h4>{mapping.skills.map(s => <div key={s.path}>
