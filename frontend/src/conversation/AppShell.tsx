@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Link, Outlet, useLocation } from 'react-router-dom'
 import Icon from '../workbench/Icon'
 import { request } from '../workspace/api'
 import type { WorkbenchProps } from '../workbench/ui'
@@ -28,6 +28,16 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
 
   useEffect(() => { try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0') } catch { /* optional */ } }, [collapsed])
   useEffect(() => { setDrawerOpen(false); setMenuOpen(false); setWorkTitle(null) }, [location.pathname])
+  // Crossing into desktop width must close the mobile drawer so its scroll lock
+  // and focus trap can't linger once the sidebar is visible again.
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(min-width: 769px)')
+    const onChange = () => { if (mq.matches) setDrawerOpen(false) }
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
   useEffect(() => { const c = new AbortController(); request<{ mode?: string; label?: string }>('/api/v3/environment', { onUnauthorized: onLogout, signal: c.signal }).then(v => { if (!c.signal.aborted) setEnv(v) }).catch(() => undefined); return () => c.abort() }, [onLogout])
 
   // account popover: outside click + Esc
@@ -64,24 +74,23 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
   const initial = Array.from(user.username || 'u')[0]?.toUpperCase() ?? 'U'
   const navItems: NavItem[] = PRIMARY_NAV
 
+  // Active state comes from resolveRoute, not NavLink's URL match, so a task page
+  // (/runs/:id) correctly marks 历史作品 with aria-current even though the URL differs.
+  const navLink = (item: NavItem, onNavigate?: () => void) => {
+    const active = resolved.activeKey === item.key
+    return <Link key={item.key} to={item.to} onClick={onNavigate}
+      className={`as-nav-item ${active ? 'is-active' : ''}`}
+      aria-current={active ? 'page' : undefined} aria-label={item.label} title={collapsed ? item.label : undefined}>
+      <span className="as-nav-icon"><Icon name={item.icon} /></span><span className="as-nav-text">{item.label}</span>
+    </Link>
+  }
   const renderNav = (onNavigate?: () => void) => (
-    <nav className="as-nav" aria-label="主导航">
-      {navItems.map(item => (
-        <NavLink key={item.key} to={item.to} end={item.to === '/'} onClick={onNavigate}
-          className={() => `as-nav-item ${resolved.activeKey === item.key ? 'is-active' : ''}`}
-          aria-current={resolved.activeKey === item.key ? 'page' : undefined} aria-label={item.label} title={collapsed ? item.label : undefined}>
-          <span className="as-nav-icon"><Icon name={item.icon} /></span><span className="as-nav-text">{item.label}</span>
-        </NavLink>
-      ))}
-    </nav>
+    <nav className="as-nav" aria-label="主导航">{navItems.map(item => navLink(item, onNavigate))}</nav>
   )
 
   const footer = (onNavigate?: () => void) => (
     <div className="as-side-footer">
-      <NavLink to={SETTINGS_NAV.to} end onClick={onNavigate} className={() => `as-nav-item ${resolved.activeKey === 'settings' ? 'is-active' : ''}`}
-        aria-current={resolved.activeKey === 'settings' ? 'page' : undefined} aria-label={SETTINGS_NAV.label} title={collapsed ? SETTINGS_NAV.label : undefined}>
-        <span className="as-nav-icon"><Icon name={SETTINGS_NAV.icon} /></span><span className="as-nav-text">{SETTINGS_NAV.label}</span>
-      </NavLink>
+      {navLink(SETTINGS_NAV, onNavigate)}
       <div className="as-account-wrap" ref={menuRef}>
         <button className="as-account" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(o => !o)} title={collapsed ? user.username : undefined}>
           <span className="as-avatar">{initial}</span>
@@ -132,7 +141,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
         {resolved.group && GROUP_TABS[resolved.group] && (
           <nav className="as-subnav" aria-label="页内导航">
             {GROUP_TABS[resolved.group].filter(t => !t.adminOnly || isAdmin).map(t => (
-              <NavLink key={t.to} to={t.to} end={t.end} className={({ isActive }) => `as-subnav-tab ${isActive ? 'is-active' : ''}`}>{t.label}</NavLink>
+              <Link key={t.to} to={t.to} className={`as-subnav-tab ${resolved.activeTab === t.to ? 'is-active' : ''}`} aria-current={resolved.activeTab === t.to ? 'page' : undefined}>{t.label}</Link>
             ))}
           </nav>
         )}

@@ -32,6 +32,8 @@ export interface Resolved {
   /** true when the top-bar title should come from the live work title (a task). */
   usesWorkTitle?: boolean
   group?: Group
+  /** the `to` of the active in-page group tab, so detail routes still light their parent tab. */
+  activeTab?: string
   /** breadcrumb trail; the last item is the current page. */
   breadcrumb: { label: string; to?: string }[]
 }
@@ -43,16 +45,16 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/')) return { activeKey: 'start', title: '开始制作', breadcrumb: [{ label: '开始制作' }] }
   if (is('/history')) return { activeKey: 'history', title: '历史作品', breadcrumb: [{ label: '历史作品' }] }
   if (is('/runs/:runId')) return { activeKey: 'history', title: '任务', usesWorkTitle: true, breadcrumb: [{ label: '历史作品', to: '/history' }, { label: '任务' }] }
-  if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', breadcrumb: [{ label: '职能体' }] }
-  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '职能体详情', group: 'agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '详情' }] }
-  if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力库', group: 'agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库' }] }
-  if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', breadcrumb: [{ label: '工程总览' }] }
-  if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
-  if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }
-  if (is('/runs')) return { activeKey: 'engineering', title: '运行记录', group: 'engineering', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '运行记录' }] }
-  if (is('/costs')) return { activeKey: 'engineering', title: '用量与预算', group: 'engineering', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '用量与预算' }] }
-  if (is('/team')) return { activeKey: 'engineering', title: '团队', group: 'engineering', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '团队' }] }
-  if (is('/settings/runtime')) return { activeKey: 'settings', title: '模型与执行', group: 'settings', breadcrumb: [{ label: '设置', to: '/settings' }, { label: '模型与执行' }] }
-  if (is('/settings')) return { activeKey: 'settings', title: '设置', group: 'settings', breadcrumb: [{ label: '设置' }] }
+  if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体' }] }
+  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '职能体详情', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '详情' }] }
+  if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力库', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库' }] }
+  if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
+  if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
+  if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }
+  if (is('/runs')) return { activeKey: 'engineering', title: '运行记录', group: 'engineering', activeTab: '/runs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '运行记录' }] }
+  if (is('/costs')) return { activeKey: 'engineering', title: '用量与预算', group: 'engineering', activeTab: '/costs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '用量与预算' }] }
+  if (is('/team')) return { activeKey: 'engineering', title: '团队', group: 'engineering', activeTab: '/team', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '团队' }] }
+  if (is('/settings/runtime')) return { activeKey: 'settings', title: '模型与执行', group: 'settings', activeTab: '/settings/runtime', breadcrumb: [{ label: '设置', to: '/settings' }, { label: '模型与执行' }] }
+  if (is('/settings')) return { activeKey: 'settings', title: '设置', group: 'settings', activeTab: '/settings', breadcrumb: [{ label: '设置' }] }
   return { activeKey: 'start', title: '开始制作', breadcrumb: [{ label: '开始制作' }] }
 }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import AppShell from './AppShell'
 import { resolveRoute } from './nav-config'
@@ -57,4 +57,29 @@ it('hides admin-only group tabs from members', () => {
   expect(within(subnav).queryByText('总览')).toBeTruthy()
   expect(within(subnav).queryByText('团队')).toBeNull()
   expect(within(subnav).queryByText('用量与预算')).toBeNull()
+})
+
+it('marks 历史作品 with aria-current on a task page, and the parent tab on a detail page', () => {
+  shell('/runs/abc')
+  expect(screen.getByLabelText('历史作品').getAttribute('aria-current')).toBe('page')
+  expect(screen.getByLabelText('开始制作').getAttribute('aria-current')).toBeNull()
+  cleanup(); shell('/agents/a1')
+  expect(screen.getByLabelText('职能体').getAttribute('aria-current')).toBe('page')
+  const tabs = document.querySelector('.as-subnav') as HTMLElement
+  expect(within(tabs).getByText('职能体').getAttribute('aria-current')).toBe('page')
+})
+
+it('closes the mobile drawer and releases the scroll lock when the viewport grows to desktop', () => {
+  let listener: (() => void) | null = null
+  const mql = { matches: false, addEventListener: (_: string, cb: () => void) => { listener = cb }, removeEventListener: () => {} }
+  vi.stubGlobal('matchMedia', vi.fn().mockReturnValue(mql))
+  shell('/overview')
+  fireEvent.click(screen.getByRole('button', { name: '打开导航' }))
+  expect(document.querySelector('.as-drawer')).toBeTruthy()
+  expect(document.body.style.overflow).toBe('hidden')
+  // Simulate crossing into desktop width.
+  act(() => { mql.matches = true; listener?.() })
+  expect(document.querySelector('.as-drawer')).toBeNull()
+  expect(document.body.style.overflow).toBe('')
+  vi.unstubAllGlobals()
 })

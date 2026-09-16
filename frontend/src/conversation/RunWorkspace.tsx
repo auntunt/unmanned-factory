@@ -34,6 +34,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
   const [actionError, setActionError] = useState<string | null>(null)
   const [queuedNote, setQueuedNote] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const stick = useRef(true)
   const seq = useRef(0)
   const sendLock = useRef(false)
   const submission = useRef({ signature: '', key: '' })
@@ -67,7 +68,18 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
     setWorkTitle(title)
     return () => setWorkTitle(null)
   }, [run?.id, run?.plan?.title, setWorkTitle])
-  useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight }, [messages.length, run?.status])
+  // The real scroll container is the shell's .as-content (the run's own wrapper is
+  // overflow:visible under AppShell). Track whether the reader is near the bottom so
+  // new messages follow only when they haven't scrolled up to read history.
+  const scroller = useCallback(() => (scrollRef.current?.closest('.as-content') as HTMLElement | null) ?? null, [])
+  useEffect(() => {
+    const el = scroller()
+    if (!el) return
+    const onScroll = () => { stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 80 }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [scroller, run?.id])
+  useEffect(() => { const el = scroller(); if (el && stick.current) el.scrollTop = el.scrollHeight }, [messages.length, run?.status, scroller])
 
   const readOnly = run?.source?.type === 'inspection' || (run ? composerMode(run.status).kind === 'readonly' : true)
   const canAct = !readOnly && !run?.retry_run_id && (user?.role !== 'member' || String(run?.source?.actor_id) === String(user?.id))
