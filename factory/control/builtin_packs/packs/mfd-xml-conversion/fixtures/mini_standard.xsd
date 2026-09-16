@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Minimal excerpt of the Jiangsu-standard shape, for the fidelity harness's
      self-test only. Not the full 江苏未来数据标准.xsd (1027 lines); it declares
-     just the element/attribute names the synthetic sample pair uses so the
-     vocabulary check has something real to check against. -->
+     just the element/attribute names and types the synthetic sample pair uses so
+     the vocabulary + typed-value check has something real to check against.
+     编号 is a string identity (compared exactly); 单价/合价 are decimals
+     (numerically normalised: "12.50" == "12.5"). -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
   <xs:element name="数据转换交换标准">
     <xs:complexType>
@@ -18,8 +20,8 @@
       </xs:sequence>
       <xs:attribute name="编号" type="xs:string"/>
       <xs:attribute name="名称" type="xs:string"/>
-      <xs:attribute name="单价" type="xs:string"/>
-      <xs:attribute name="合价" type="xs:string"/>
+      <xs:attribute name="单价" type="xs:decimal"/>
+      <xs:attribute name="合价" type="xs:decimal"/>
     </xs:complexType>
   </xs:element>
   <xs:element name="定额">
