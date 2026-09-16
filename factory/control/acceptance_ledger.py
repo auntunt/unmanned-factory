@@ -27,12 +27,17 @@ def criteria_for(run):
 
 
 def coverage(criteria, verdict, commit, *, skills=()):
-    rows = verdict.get('criteria', [])
-    if not isinstance(rows, list) or len(rows) > len(criteria):
+    # Some providers use the descriptive alias despite the requested `criteria`
+    # key. Accept the same row schema, never choose silently between conflicts.
+    conflicting = ('criteria' in verdict and 'acceptance_coverage' in verdict
+                   and verdict['criteria'] != verdict['acceptance_coverage'])
+    rows = verdict.get('criteria', verdict.get('acceptance_coverage', []))
+    invalid_rows = conflicting or not isinstance(rows, list) or len(rows) > len(criteria)
+    if invalid_rows:
         rows = []
     valid_ids = {c['id'] for c in criteria}
     allowed_skills = {(s['id'],s['version']) for s in skills}
-    by_id, invalid = {}, False
+    by_id, invalid = {}, invalid_rows
     for row in rows:
         if (not isinstance(row, dict) or not isinstance(row.get('id'), str) or row.get('id') not in valid_ids
                 or row['id'] in by_id or row.get('status') not in ('pass', 'fail', 'unverified')

@@ -144,7 +144,7 @@ def save_spec(self, run, *, confirmed=False):
     content = ('---\ntitle: ' + json.dumps(run['spec_draft']['goal'][:100], ensure_ascii=False)
         + '\nstatus: ' + ('active' if confirmed else 'draft') + '\ndesc: ' + ('已确认规格' if confirmed else '待确认草案，尚未人签')
         + '\ncode:\nrelated:\n---\n\n## raw source\n\n' + raw
-        + '\n\n## expanded\n\n由执行阶段维护实现细节，禁止改写 raw source。\n')
+        + '\n\n## expanded spec\n\n由执行阶段维护实现细节，禁止改写 raw source。\n')
     dest.write_text(content)
     config = root / '.spec/spexcode.json'
     if config.is_symlink():

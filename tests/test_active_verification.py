@@ -204,3 +204,60 @@ def test_export_attributes_cannot_remove_tests_from_review(app_env):
     subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'export attribute fixture'], check=True)
     with review_workspace(repo) as (root, _, _):
         assert (root / 'greeting.txt').read_bytes() == (repo / 'greeting.txt').read_bytes()
+
+
+def test_coverage_alias_is_validated_without_silently_resolving_conflicts():
+    criteria = [{'id': 'requirement:0', 'text': 'working output'}]
+    rows = [{'id': 'requirement:0', 'status': 'pass', 'evidence': 'python probe.py returned expected output', 'skill_refs': []}]
+    assert coverage(criteria, {'acceptance_coverage': rows}, 'sha')['complete']
+    assert coverage(criteria, {'criteria': rows, 'acceptance_coverage': rows}, 'sha')['complete']
+    for verdict in [
+        {'criteria': rows, 'acceptance_coverage': []},
+        {'criteria': [], 'acceptance_coverage': rows},
+        {'criteria': None, 'acceptance_coverage': rows},
+        {'acceptance_coverage': rows * 2},
+        {'acceptance_coverage': [{**rows[0], 'id': 'unknown'}]},
+        {'acceptance_coverage': [{**rows[0], 'evidence': ''}]},
+        {'acceptance_coverage': [{**rows[0], 'skill_refs': [{'id': 'unknown', 'version': 1}]}]},
+    ]:
+        ledger = coverage(criteria, verdict, 'sha')
+        assert not ledger['complete']
+        assert not ledger['accounted']
+
+
+def test_alias_coverage_retained_when_mechanical_gate_fails_without_retry(app_env, monkeypatch):
+    service, run, p, repo = setup_review(app_env)
+    calls = []
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        verdict = json.loads(passing_review(request, 'read greeting.txt and checked output'))
+        verdict['acceptance_coverage'] = verdict.pop('criteria')
+        return ProviderResult(json.dumps(verdict), cost_usd=.01)
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    from factory.control import requirement_analysis
+    monkeypatch.setattr(requirement_analysis, 'raw_source_evidence', lambda *args: [
+        {'id': 'requirement:raw_source', 'text': '原始规格', 'status': 'fail',
+         'evidence': '签署内容已改变', 'error_type': 'requirement_raw_source'}])
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(ExecutionError, match='签署内容已改变'):
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+    assert len(calls) == 1
+    assert artifacts['acceptance_ledger']['counts'] == {'pass': 1, 'fail': 1, 'unverified': 0}
+    assert artifacts['verification']['verdict'] == 'fail'
+
+
+@pytest.mark.parametrize('status', ['fail', 'unverified'])
+def test_explicit_criterion_result_does_not_trigger_missing_coverage_retry(app_env, monkeypatch, status):
+    service, run, p, repo = setup_review(app_env)
+    calls = []
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        verdict = json.loads(passing_review(request, 'concrete behavior could not be validated'))
+        verdict['criteria'][0]['status'] = status
+        return ProviderResult(json.dumps(verdict), cost_usd=.01)
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(ExecutionError):
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+    assert len(calls) == 1
+    assert artifacts['acceptance_ledger']['counts'][status] == 1

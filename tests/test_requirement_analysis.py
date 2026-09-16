@@ -469,3 +469,32 @@ def test_retry_preserves_analysis_contract_and_old_run_links_forward(env):
     assert prior['retry_run_id'] == retried['id']
     assert _attention(prior, {}) is None
     assert env.svc.agents.create_retry(original, 'owner', 1, [])[0]['id'] == retried['id']
+
+
+@pytest.mark.parametrize('heading', ['expanded', 'expanded spec'])
+def test_raw_source_gate_allows_implementation_updates_but_protects_intent(env, heading):
+    from pathlib import Path
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    ra.confirm(env.svc, run['id'], ra.Confirmation(revision=run['revision'],
+        spec_draft=run['spec_draft'], selected_skills=[]), 'owner')
+    run = env.store.get(run['id'])
+    workspace = run['requirement_workspace']
+    path = Path(workspace) / run['requirement_spec_path']
+    text = path.read_text().replace('## expanded spec', '## expanded')
+    text = text.replace('## expanded', '## ' + heading)
+    path.write_text(text)
+    def checkpoint(message):
+        ra._git(workspace, 'add', run['requirement_spec_path'])
+        ra._git(workspace, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+                'commit', '--allow-empty', '-m', message)
+        return ra._git(workspace, 'rev-parse', 'HEAD').strip()
+    # Simulate both pre-fix production specs and newly generated canonical specs.
+    run['requirement_spec_commit'] = checkpoint('confirmed baseline')
+    path.write_text(text.replace('code:\nrelated:', 'code:\n  - README.md\nrelated:\n  - README.md')
+                    .replace('由执行阶段维护实现细节，禁止改写 raw source。', '已实现商品浏览；验证分类筛选。'))
+    checkpoint('implementation metadata and expanded documentation')
+    assert ra.raw_source_evidence(run, workspace, 'HEAD')[0]['status'] == 'pass'
+    path.write_text(path.read_text().replace('构建团购工具', '篡改原始目标'))
+    checkpoint('change original intent')
+    assert ra.raw_source_evidence(run, workspace, 'HEAD')[0]['status'] == 'fail'

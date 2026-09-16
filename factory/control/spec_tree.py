@@ -121,7 +121,8 @@ def parse(text, path):
     for line in body.splitlines():
         is_fence = bool(re.match(r'^\s*```', line))
         h = re.match(r'^##\s+(.+?)\s*$', line) if not fence and not is_fence else None
-        if h and h[1].lower() in ('raw source', 'expanded spec'):
+        # Older platform-generated specs used the shorter `expanded` heading.
+        if h and h[1].lower() in ('raw source', 'expanded spec', 'expanded'):
             current = 'raw_source' if h[1].lower() == 'raw source' else 'expanded'
             labelled = True
             continue

@@ -302,7 +302,7 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         verdict = {**verdict, 'verdict': 'unverified', 'error_type': 'unverified', 'reason': unavailable[0]['error']}
     if verdict['verdict'] == 'pass' and not ledger['complete']:
         remaining = review_deadline - time.monotonic()
-        if not coverage_retry and remaining > 5 and not self.cancels[rid].is_set():
+        if not ledger['accounted'] and not coverage_retry and remaining > 5 and not self.cancels[rid].is_set():
             self._emit(rid, 'verification.coverage_retry', {'message': '验收证据缺项，继续当前验收补齐；不重跑开发'}, 'verification')
             bounded = {**configuration, 'limits': {**configuration['limits'], 'timeout_s': int(remaining)}}
             return self._verify_snapshot(rid, run, project, bounded, artifacts, workspace, coverage_retry=True)

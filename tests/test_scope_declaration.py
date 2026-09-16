@@ -154,3 +154,31 @@ def test_read_only_dispatches_do_not_collect(env):
     callback=lambda *a: None
     assert scope.wrap_emit(store,rid,SimpleNamespace(read_only=True,verification=False),callback) is callback
     assert scope.wrap_emit(store,rid,SimpleNamespace(read_only=False,verification=True),callback) is callback
+
+
+@pytest.mark.parametrize('prefix,suffix', [
+    ('Empty workspace apart from `.spec`. Let me declare scope before creating files.\n\n', ''),
+    ('声明本次修改范围。\n```json\n', '\n```\n随后按此范围实现。'),
+])
+def test_assistant_scope_with_explanation_is_recorded_before_edits(env, prefix, suffix):
+    root, store, project, rid, emit = env
+    declaration = json.dumps({'scope_declaration': {'files': [{'path': 'app.py', 'spec_nodes': []}]}})
+    emit('assistant.message', {'text': prefix + declaration + suffix})
+    receipts = scope.declarations(store, rid)
+    assert len(receipts) == 1
+    assert receipts[0]['payload']['files'][0]['accepted'] is True
+    (root / 'app.py').write_text('x=2')
+    assert check(env)['status'] == 'pass'
+
+
+def test_explanatory_scope_keeps_late_and_ambiguous_declarations_blocked(env):
+    root, store, project, rid, emit = env
+    declaration = json.dumps({'scope_declaration': {'files': [{'path': 'app.py'}]}})
+    emit('assistant.message', {'text': '说明\n' + declaration + '\n' + declaration})
+    assert not scope.declarations(store, rid)
+    emit('tool.result', {'text': '声明：\n' + declaration})
+    assert not scope.declarations(store, rid)
+    (root / 'app.py').write_text('x=2')
+    emit('assistant.message', {'text': '补充声明\n' + declaration})
+    assert scope.declarations(store, rid)[0]['payload']['files'][0]['late'] is True
+    assert check(env)['status'] == 'fail'

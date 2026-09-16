@@ -41,7 +41,20 @@ def payload(text):
     try:
         value = json.loads(text)
     except (ValueError, TypeError):
-        return None
+        # SDK text blocks may combine the worker's short introduction and its
+        # standalone declaration. Accept one explicit object on its own line;
+        # never mine tool output or ambiguous/multiple JSON objects.
+        starts = list(re.finditer(r'^[ \t]*(?=\{)', text, re.MULTILINE))
+        if not starts:
+            return None
+        start = starts[0].end()
+        try:
+            value, end = json.JSONDecoder().raw_decode(text[start:])
+        except (ValueError, TypeError):
+            return None
+        outside = text[:start] + text[start + end:]
+        if '{' in outside or '}' in outside:
+            return None
     return value.get('scope_declaration') if isinstance(value, dict) else None
 
 
