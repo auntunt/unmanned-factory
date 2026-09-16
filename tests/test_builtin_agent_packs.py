@@ -11,7 +11,7 @@ from tests.test_workbench_app import app_env
 
 
 def test_each_pack_is_reproducible_uploadable_and_complete():
-    assert len(catalog()) == 4
+    assert len(catalog()) == 5
     for pack in catalog():
         raw = pack_zip(pack['id'])
         assert raw == pack_zip(pack['id'])
@@ -36,7 +36,7 @@ def test_install_is_idempotent_and_preserves_team_changes(tmp_path):
     store = Store(tmp_path / 'control.db')
     install_builtins(store)
     agents = AgentStore(store)
-    assert len(agents.list()) == 4
+    assert len(agents.list()) == 5
     a = agents.list()[0]
     v = agents.version(a['id'])
     draft = agents.save_draft(a['id'], {'instructions': v['instructions'] + '\n团队自有方法'}, 0)
@@ -45,12 +45,12 @@ def test_install_is_idempotent_and_preserves_team_changes(tmp_path):
     m = next(m for m in modules.list() if m['id'] == 'builtin-code-evidence')
     modules.save({**m, 'instructions': '团队修改后的模块'}, 'tester', m['id'], 1)
     install_builtins(store)
-    assert len(agents.list()) == 4
+    assert len(agents.list()) == 5
     assert agents.version(a['id'])['version'] == 2
     assert agents.version(a['id'])['instructions'].endswith('团队自有方法')
     assert next(m for m in modules.list() if m['id'] == 'builtin-code-evidence')['version'] == 2
     with store.connect() as db:
-        assert db.execute('SELECT count(*) FROM skill_assets').fetchone()[0] == 4
+        assert db.execute('SELECT count(*) FROM skill_assets').fetchone()[0] == 5
     for agent in agents.list():
         version = agents.version(agent['id'])
         assert inspect_skill(agents.skill_body(version['skill_ids'][0], agent_id=agent['id']))

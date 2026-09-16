@@ -1,0 +1,6 @@
+case,prices,discount,note
+happy,"10,20,30",0,常规整单
+empty,"",0,空输入
+null_discount,"10,20",,折扣缺失
+locale,"1.234,56",0,地区千分位写法
+large,"999999999,1",0,超大金额

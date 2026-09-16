@@ -10,10 +10,10 @@ vi.mock('../workspace/api', async original => ({ ...await original<typeof import
 const props = { csrfToken: 'csrf', onUnauthorized: vi.fn(), user: { id: 1, username: 'admin', role: 'admin' as const } }
 beforeEach(() => vi.mocked(request).mockImplementation(async path => path === '/api/v3/environment' ? { mode: 'preview', label: '演练' } : path === '/api/v4/modules' ? { modules: [{ id: 'm', name: '代码梳理', category: 'workflow', version: 1, instructions: '读取代码', description: '整理项目' }] } : { projects: [], items: [] }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
-it('uses decorative SVG with one stroke specification and avatar fallback', () => {
+it('uses decorative fill SVG with viewBox and avatar fallback', () => {
  const { container } = render(<><Icon name="plus" /><CategoryBadge category="knowledge" /><CategoryBadge avatar="维" /><CategoryBadge avatar="" /></>)
  for (const svg of container.querySelectorAll('svg')) {
-  expect(svg.getAttribute('viewBox')).toBe('0 0 24 24'); expect(svg.getAttribute('stroke')).toBe('currentColor'); expect(svg.getAttribute('stroke-width')).toBe('1.6'); expect(svg.getAttribute('aria-hidden')).toBe('true')
+  expect(svg.getAttribute('viewBox')).toBe('0 0 256 256'); expect(svg.getAttribute('fill')).toBe('currentColor'); expect(svg.getAttribute('aria-hidden')).toBe('true')
  }
  expect(container.querySelectorAll('.wb-category-badge svg')).toHaveLength(2)
  expect(screen.getByText('维').querySelector('svg')).toBeNull()

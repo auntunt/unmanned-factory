@@ -31,7 +31,7 @@ def export(destination):
     module_files['SKILL.md'] = skill.encode()
     files['shared-modules.zip'] = archive(module_files)
     inspect_skill(files['shared-modules.zip'])
-    files['README.md'] = ('# webuddy 内置职能包\n\n四个独立职能包和共用模块 ZIP。整体合集请先解压，'
+    files['README.md'] = ('# webuddy 内置职能包\n\n五个独立职能包和共用模块 ZIP。整体合集请先解压，'
         '再选择一个职能包上传至已有职能体的维护对话；不要把合集当作单一 Skill。\n'
         '控制台已经提供内置职能体，可直接关联项目开始。下载的是平台原始模板，不包含团队后续维护变更。\n'
         'agent.json 保存配置；不自动执行脚本或赋予权限。评测样例待实际执行，不代表业务完成率。\n').encode()

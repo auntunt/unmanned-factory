@@ -1,6 +1,7 @@
 .wb-svg-icon { display:inline-block; flex-shrink:0; vertical-align:-.18em; }
 .wb-category-badge { display:grid; place-items:center; width:42px; height:42px; flex-shrink:0; border-radius:10px; background:var(--wb-teal-soft); color:var(--wb-teal-dark); font-size:24px; font-weight:600; }
 .wb-category-badge .wb-svg-icon { width:24px; height:24px; }
+.wb-category-badge--mark { background:color-mix(in srgb, var(--wb-badge-accent, var(--wb-teal-dark)) 15%, transparent); color:var(--wb-badge-accent, var(--wb-teal-dark)); }
 summary:has(> .wb-disclosure-icon) { list-style:none; cursor:pointer; }
 summary:has(> .wb-disclosure-icon)::-webkit-details-marker { display:none; }
 summary:has(> .wb-disclosure-icon)::marker { content:''; }
