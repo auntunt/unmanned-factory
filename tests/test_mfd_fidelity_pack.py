@@ -222,3 +222,16 @@ def test_mfd_pack_is_in_catalog_and_zips_with_harness_fixture():
             if "fixture" in case:
                 assert case["fixture"] in names
         assert "fixtures/fidelity_check.py" in names
+
+
+def test_nonempty_tail_text_is_unverified(tmp_path):
+    candidate = _FLAT_REF.replace('</root>', 'unexpected price 999</root>')
+    report = _report(tmp_path, _FLAT_XSD, _FLAT_REF, candidate)
+    assert report['xsd_conformance']['candidate_text_content_unverified']
+    assert HARNESS.evaluate(report)
+
+
+def test_formatting_tail_whitespace_remains_supported(tmp_path):
+    candidate = _FLAT_REF.replace('</root>', '\n  </root>')
+    report = _report(tmp_path, _FLAT_XSD, _FLAT_REF, candidate)
+    assert HARNESS.evaluate(report) == []

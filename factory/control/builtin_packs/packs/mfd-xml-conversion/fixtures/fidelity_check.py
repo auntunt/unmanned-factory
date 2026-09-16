@@ -177,7 +177,7 @@ def _conformance(root_elem, declared, target_ns):
 
     def walk(e):
         ns, local = _qn(e.tag)
-        if e.text and e.text.strip():
+        if (e.text and e.text.strip()) or (e.tail and e.tail.strip()):
             text_elems.add(local)
         if ns != target_ns:
             unverified_ns.add(f"{{{ns}}}{local}" if ns else local)
