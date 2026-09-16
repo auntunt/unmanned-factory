@@ -143,3 +143,16 @@ it('keeps the created workspace after a failed run and continues without re-rout
   await screen.findByText('工作区已打开')
   expect(api.mock.calls.map(([url]) => url)).toEqual(['/api/v4/route', '/api/v2/projects/create-workspace', '/api/v2/runs', '/api/v2/runs'])
 })
+
+it('uploads two same-named files with different content as distinct materials (by content)', async () => {
+  api.mockResolvedValueOnce({ kind: 'agent_chat', agent_id: 'a9', attach: true } as never)
+    .mockResolvedValueOnce({ id: 'c1' } as never)
+    .mockResolvedValueOnce({} as never).mockResolvedValueOnce({} as never)
+    .mockResolvedValueOnce({ job_id: 'j1' } as never)
+  show(); type('按这两版价格表报价')
+  fireEvent.change(screen.getByLabelText(/添加材料/), { target: { files: [new File(['v,1'], 'prices.csv'), new File(['v,2'], 'prices.csv')] } })
+  go()
+  await screen.findByText('对话已打开')
+  const uploads = api.mock.calls.filter(([u]) => u === '/api/v4/conversations/c1/attachments')
+  expect(uploads).toHaveLength(2) // same name, different content -> both sent, none skipped
+})

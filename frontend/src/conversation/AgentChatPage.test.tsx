@@ -82,3 +82,60 @@ it('rejects a ?cid that belongs to another role or is not a do chat, without fal
   expect(await screen.findByText(/不属于当前助手/)).toBeTruthy()
   expect(screen.queryByText('别的角色的会话')).toBeNull() // did not render the foreign conversation
 })
+
+import { useLocation, useNavigate } from 'react-router-dom'
+function Probe() {
+  const loc = useLocation(); const nav = useNavigate()
+  return <div><span data-testid="url">{loc.search}</span><button onClick={() => nav(-1)}>返回</button></div>
+}
+const twoConvs = [
+  { id: 'A', agent_id: 'a1', mode: 'do', messages: [{ id: 'ua', role: 'user', content: '会话A' }] },
+  { id: 'B', agent_id: 'a1', mode: 'do', messages: [{ id: 'ub', role: 'user', content: '会话B' }] },
+]
+function mountAt(entry: string) {
+  return render(<MemoryRouter initialEntries={[entry]}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/agents/:agentId/chat" element={<><AgentChatPage csrfToken="x" onUnauthorized={noop} user={{ id: 1, username: 'owner', role: 'admin' }} /><Probe /></>} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+}
+
+it('a late response for the previous conversation does not overwrite the newly selected one', async () => {
+  let resolveA: (v: unknown) => void = () => {}
+  const aPending = new Promise(r => { resolveA = r })
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations') return { conversations: twoConvs } as never
+    if (url === '/api/v4/conversations/A') return aPending as never // slow, resolves after we switch away
+    if (url === '/api/v4/conversations/B') return { id: 'B', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'mb', role: 'assistant', content: 'B的回答', status: 'completed' }] } as never
+    return {} as never
+  })
+  mountAt('/agents/a1/chat?cid=A')
+  fireEvent.click(await screen.findByRole('button', { name: '会话B' }))
+  await screen.findByText('B的回答')
+  // The stale A response now arrives; it must be dropped, not rendered over B.
+  resolveA({ id: 'A', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'ma', role: 'assistant', content: 'A的迟到回答', status: 'completed' }] })
+  await new Promise(r => setTimeout(r, 30))
+  expect(screen.getByText('B的回答')).toBeTruthy()
+  expect(screen.queryByText('A的迟到回答')).toBeNull()
+})
+
+it('history, new-chat and Back keep the URL and shown conversation in sync', async () => {
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations') return { conversations: twoConvs } as never
+    if (url === '/api/v4/conversations/A') return { id: 'A', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'ma', role: 'assistant', content: 'A的回答', status: 'completed' }] } as never
+    if (url === '/api/v4/conversations/B') return { id: 'B', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'mb', role: 'assistant', content: 'B的回答', status: 'completed' }] } as never
+    return {} as never
+  })
+  mountAt('/agents/a1/chat?cid=A')
+  await screen.findByText('A的回答')
+  expect(screen.getByTestId('url').textContent).toBe('?cid=A')
+  fireEvent.click(screen.getByRole('button', { name: '会话B' }))
+  await screen.findByText('B的回答')
+  expect(screen.getByTestId('url').textContent).toBe('?cid=B')
+  fireEvent.click(screen.getByRole('button', { name: /新对话/ }))
+  await screen.findByText(/聊点什么/) // empty state for a fresh conversation
+  expect(screen.getByTestId('url').textContent).toBe('?cid=new')
+  fireEvent.click(screen.getByRole('button', { name: '返回' })) // Back returns to B
+  await screen.findByText('B的回答')
+  expect(screen.getByTestId('url').textContent).toBe('?cid=B')
+})

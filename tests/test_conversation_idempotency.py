@@ -60,3 +60,33 @@ def test_attachment_is_idempotent_by_content_but_distinguishes_edits(app_env):
     assert a3.json()['attachment']['id'] != a1.json()['attachment']['id']
     conv2 = client.get(f'/api/v4/conversations/{cid}', headers=headers).json()
     assert len(conv2['attachments']) == 2
+
+
+def test_concurrent_same_key_yields_one_conversation(app_env):
+    import threading
+    client, store, service, repo = app_env
+    headers = login(client)
+    aid = _agent(client, headers)['id']
+    actor_id = client.get('/api/auth/me', headers=headers).json()['user']['id']
+
+    from factory.control.agents import AgentStore
+    store_conv = AgentStore(store)
+    key = 'concurrent-key-xyz789'
+    results, errors = [], []
+    barrier = threading.Barrier(8)
+
+    def create():
+        try:
+            barrier.wait()  # release all threads together to actually contend
+            results.append(store_conv.create_conversation(aid, 'do', None, actor_id, key)['id'])
+        except Exception as exc:  # collect, assert none below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=create) for _ in range(8)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    assert not errors, errors
+    assert len(set(results)) == 1  # every concurrent create returned the same cid
+    rows = client.get(f'/api/v4/agents/{aid}/conversations', headers=headers).json()['conversations']
+    assert len([c for c in rows if c['mode'] == 'do']) == 1  # exactly one row persisted
