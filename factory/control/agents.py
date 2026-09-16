@@ -464,6 +464,28 @@ class AgentStore:
     def conversation(self, cid):
         c = self._row("agent_conversations", "id", cid)
         c['pending_feedback_count'] = sum(m.get('feedback_status') == 'pending' for m in c['messages'])
+        # The frozen capability snapshot is internal freeze data, not for the client.
+        return {k: v for k, v in c.items() if k != 'agent_snapshot'}
+
+    def conversation_snapshot(self, cid):
+        """The capability version frozen to this conversation, or None if not yet frozen."""
+        return self._row("agent_conversations", "id", cid).get('agent_snapshot')
+
+    def freeze_conversation_snapshot(self, cid, snapshot, version):
+        """Pin the role/instructions/skill versions to this conversation once.
+        A later role update must not change an existing conversation; a new
+        conversation freezes the then-current version."""
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            c = self._decode(row)
+            if not c.get('agent_snapshot'):
+                c['agent_snapshot'] = snapshot
+                c['agent_version'] = version
+                c['updated_at'] = now()
+                db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
         return c
 
     def adopt_feedback(self, cid):

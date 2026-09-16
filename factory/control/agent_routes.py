@@ -217,20 +217,47 @@ def router(store, service):
         c=agents.conversation(cid)
         if c['mode']=='do':
             if not c.get('project_id'):
-                # A general question is answered by the real model first; an
-                # execution request can then be associated with a project.
+                # A general question is answered by the real model first, reading only
+                # this role's frozen skills and granted materials; an execution request
+                # can then be associated with a project.
+                # One answer in flight per conversation: a duplicate submit or a concurrent
+                # send while the model is still answering reuses the pending job.
+                for m in reversed(c['messages'][:-1]):
+                    if m.get('role')=='assistant' and m.get('job_id') and m.get('status') in ('pending','running','cancel_requested'):
+                        try: st=service.maintenance_status(m['job_id'])
+                        except KeyError: st={'status':'interrupted'}
+                        if st.get('status') in ('pending','running','cancel_requested'):
+                            return {'conversation':agents.conversation(cid),'run':None,'job_id':m['job_id'],'status':st['status']}
+                        break
                 version=agents.version(c['agent_id']); cfg=service.runtime_settings.get()
-                settings=(version.get('model_settings') or {}).get('default')
+                # Freeze the capability version to this conversation on first use; reuse it
+                # afterwards so a later role update never rewrites an existing chat.
+                snapshot=agents.conversation_snapshot(cid)
+                if not snapshot:
+                    snapshot=manifests.freeze(c['agent_id'],version)
+                    agents.freeze_conversation_snapshot(cid,snapshot,version['version'])
+                settings=(snapshot.get('model_settings') or {}).get('default')
                 if not isinstance(settings,dict) or not settings.get('model'): settings=cfg['profiles']['planner']
                 if not settings.get('model'): return {'conversation':agents.conversation(cid),'run':None,'needs_project':True}
+                # Bounded, read-only mount of this role's granted skills and reference
+                # materials; ownership is enforced inside compile_mounts (no cross-role/user).
+                from factory.control.mounts import compile_mounts
+                try:
+                    mount=compile_mounts(store,{'agent_snapshot':snapshot,'agent_id':c['agent_id'],'project_id':None,'module_snapshot':[],'context':{}})
+                except (ValueError, PermissionError) as exc:
+                    job_id=uuid.uuid4().hex
+                    agents.append_message(cid,'assistant','能力资料装载失败，未作答：'+str(exc),status='failed',job_id=job_id)
+                    return {'conversation':agents.conversation(cid),'run':None,'job_id':job_id,'status':'failed'}
+                reference=mount if mount.get("documents") else None
                 job_id=uuid.uuid4().hex
-                prompt='Answer the user briefly. If the request requires changing files or running checks, clearly ask them to associate a project.\nAGENT:\n'+version.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
+                catalog_note='' if reference is None else '\nYou have read-only reference tools exposing this role\'s granted skills and materials. Read them before answering and cite the source id. Do not invent facts not present in the materials or the user\'s message.'
+                prompt='Answer the user briefly. If the request requires changing files or running checks, clearly ask them to associate a project.'+catalog_note+'\nAGENT:\n'+snapshot.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
                 from factory.control.providers import ProviderRequest
                 from factory.control.governance import GovernedRunner
                 def answer(cancel):
                     with tempfile.TemporaryDirectory(prefix='factory-agent-chat-') as workspace:
                         runner=GovernedRunner(service.runner,service.governance,run_id=None,actor_id=actor(request)['id']) if service.governance else service.runner
-                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True),lambda *_:None,cancel)
+                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference),lambda *_:None,cancel)
                     agents.append_message(cid,'assistant',result.text,status='completed',job_id=job_id,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
                     return {'status':'completed'}
                 answer.on_error=lambda exc: agents.append_message(cid,'assistant','回答失败：'+str(exc),status='failed',job_id=job_id)
