@@ -11,10 +11,11 @@ export type OpState = {
   op: string
   kind: 'dev' | 'chat'
   goal: string
+  mode?: 'workspace' | 'import-files' | 'import-zip' // dev input mode, fixed at start
   agentId?: string
   cid?: string
   projectId?: string
-  manifest?: OpAttachment[]
+  manifest?: OpAttachment[] // materials the op started with (dev: name+size; chat: +content hash)
   uploaded?: string[]
 }
 

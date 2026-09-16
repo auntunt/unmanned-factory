@@ -33,6 +33,10 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
   const [focused, setFocused] = useState(false)
   const attempt = useRef<{ project?: ProjectRecord }>({})
   const lock = useRef(false)
+  // True once the user changes the file selection in THIS mount. Distinguishes an
+  // explicit remove/replace (authoritative) from a refresh that merely lost the File
+  // objects (recover the saved materials, ask to re-select — don't drop them).
+  const filesTouched = useRef(false)
   // Stable per-submission id, resumed from this tab's saved state when the (trimmed)
   // goal is unchanged, so a refresh continues the SAME operation and key rather than
   // starting over — even if the very first create response was lost.
@@ -60,32 +64,46 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
     if (g !== opGoalRef.current) { opRef.current = crypto.randomUUID(); opGoalRef.current = g; attempt.current = {}; clearOp(uid) }
   }
 
-  const runDevelopment = async () => {
+  const runDevelopment = async (resume: boolean) => {
     const g = goal.trim(); const op = opRef.current
-    const saved = readOp(uid)
-    if (!attempt.current.project && saved?.kind === 'dev' && saved.goal === g && saved.projectId) {
-      attempt.current.project = { id: saved.projectId } as ProjectRecord // resume, do not recreate
-    }
-    // Persist the op/kind/goal BEFORE the first side-effect, so a lost create
-    // response + refresh restores the same op and reuses the idempotency key.
-    writeOp(uid, { op, kind: 'dev', goal: g, projectId: attempt.current.project ? String(attempt.current.project.id) : undefined })
-    if (!attempt.current.project) {
-      setStage(files.length ? '正在准备资料…' : '正在准备工作区…')
-      const name = g.replace(/\s+/g, ' ').slice(0, 60)
-      const archive = files.length === 1 && files[0].name.toLowerCase().endsWith('.zip')
-      if (files.length) {
-        const body = new FormData()
-        if (archive) body.append('file', files[0]); else files.forEach(file => body.append('files', file))
-        body.append('name', name); body.append('idempotency_key', op)
-        const result = await request<{ project: ProjectRecord }>(archive ? '/api/v2/projects/import-zip' : '/api/v2/projects/import-files', { ...options(), body })
-        attempt.current.project = result.project
-      } else {
-        attempt.current.project = await request<ProjectRecord>('/api/v2/projects/create-workspace', { ...options(), body: { name, idempotency_key: op } })
+    const saved = resume ? readOp(uid) : null
+    // Input mode is fixed when the task starts and never switched on recovery:
+    // a task begun as an import must never fall back to an empty create-workspace.
+    const archive = files.length === 1 && files[0].name.toLowerCase().endsWith('.zip')
+    const mode: 'workspace' | 'import-files' | 'import-zip' =
+      resume && saved?.mode ? saved.mode : files.length ? (archive ? 'import-zip' : 'import-files') : 'workspace'
+    const manifest: OpAttachment[] = resume && saved?.manifest ? saved.manifest
+      : files.map(f => ({ name: f.name, hash: '', size: f.size })) // dev: name+size metadata (server verifies content)
+    let projectId = resume ? saved?.projectId : attempt.current.project ? String(attempt.current.project.id) : undefined
+    // Persist mode + manifest BEFORE any side-effect, so a lost import response +
+    // refresh restores the same op/mode/materials rather than a blank workspace.
+    writeOp(uid, { op, kind: 'dev', goal: g, mode, manifest, projectId })
+
+    if (!projectId) {
+      if (mode !== 'workspace') {
+        // The project needs materials but the File objects are gone (refresh) or were
+        // never re-provided: require the same materials again; never create an empty one.
+        const covered = files.length > 0 && manifest.every(m => files.some(f => f.name === m.name && f.size === m.size))
+        if (!covered) { setError(`材料未恢复，请重新选择后再开始：${manifest.map(m => m.name).join('、')}`); return }
       }
-      writeOp(uid, { op, kind: 'dev', goal: g, projectId: String(attempt.current.project.id) })
+      setStage(mode === 'workspace' ? '正在准备工作区…' : '正在准备资料…')
+      const name = g.replace(/\s+/g, ' ').slice(0, 60)
+      if (mode === 'workspace') {
+        attempt.current.project = await request<ProjectRecord>('/api/v2/projects/create-workspace', { ...options(), body: { name, idempotency_key: op } })
+      } else {
+        const body = new FormData()
+        if (mode === 'import-zip') body.append('file', files[0]); else files.forEach(file => body.append('files', file))
+        body.append('name', name); body.append('idempotency_key', op)
+        const result = await request<{ project: ProjectRecord }>(mode === 'import-zip' ? '/api/v2/projects/import-zip' : '/api/v2/projects/import-files', { ...options(), body })
+        attempt.current.project = result.project
+      }
+      projectId = String(attempt.current.project.id)
+      writeOp(uid, { op, kind: 'dev', goal: g, mode, manifest, projectId })
+    } else {
+      attempt.current.project = { id: projectId } as ProjectRecord
     }
     setStage('正在开始制作…')
-    const run = await request<Run>('/api/v2/runs', { ...options(), body: { project_id: attempt.current.project.id, request: g, operation: 'general', interaction_mode: 'automatic', idempotency_key: op } })
+    const run = await request<Run>('/api/v2/runs', { ...options(), body: { project_id: projectId, request: g, operation: 'general', interaction_mode: 'automatic', idempotency_key: op } })
     clearOp(uid); clearDraft(uid)
     navigate(`/runs/${encodeURIComponent(String(run.id))}`)
   }
@@ -98,10 +116,12 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
     const currentHashes = current.map(c => c.hash).slice().sort()
     let saved = readOp(uid)
     if (saved && (saved.kind !== 'chat' || saved.goal !== g || saved.agentId !== agentId)) saved = null
-    // Same goal+agent but a DIFFERENT non-empty material set is a genuine change ->
-    // new op/conversation. An empty set (files lost on refresh) keeps the saved op so
-    // the missing-material guard below can ask for the same content back.
-    if (saved && currentHashes.length) {
+    // Only an EXPLICIT change to the selection (user added/removed/replaced files this
+    // mount) is a genuine material change -> new op/conversation, honouring a removal.
+    // A refresh that merely lost the File objects (untouched, empty) keeps the saved op
+    // so the missing-material guard below asks for the same content back — it never
+    // silently resends removed material nor drops recorded material.
+    if (saved && filesTouched.current) {
       const savedHashes = (saved.manifest || []).map(m => m.hash).slice().sort()
       if (JSON.stringify(savedHashes) !== JSON.stringify(currentHashes)) { saved = null; opRef.current = crypto.randomUUID(); clearOp(uid) }
     }
@@ -142,14 +162,26 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
     if (problem) { setError(problem); return }
     lock.current = true; setBusy(true); setError(null); setDecision(null)
     try {
-      // A forced choice or an already-created project continues development directly.
-      // Everything else — including any attached files — is routed by the server
-      // first; files become a project ONLY when the server decides it is development.
-      if (override?.forceDev || attempt.current.project) { await runDevelopment(); return }
+      const g = goal.trim()
+      // A forced development choice from the clarify panel.
+      if (override?.forceDev) { await runDevelopment(false); return }
+      // Resume a saved in-flight operation for THIS goal instead of re-routing: a
+      // refresh must continue the established task (its kind, agent and input mode),
+      // never re-run routing with a now-empty file list and change the decision. An
+      // explicit role pick (override.agentId) still goes through the server so the
+      // chosen role is re-validated.
+      if (!override) {
+        const saved = readOp(uid)
+        if (saved && saved.goal === g) {
+          if (saved.kind === 'dev') { await runDevelopment(true); return }
+          if (saved.kind === 'chat' && saved.agentId) { await openAgentChat(saved.agentId, (saved.manifest?.length ?? 0) > 0 || files.length > 0); return }
+        }
+      }
+      // A new task (or an explicit role pick): let the server decide/validate the path.
       setStage('正在判断处理方式…')
       const attachments = files.map(file => ({ name: file.name, size: file.size, type: file.type }))
-      const route = await request<Decision>('/api/v4/route', { ...options(), body: { text: goal.trim(), agent_id: override?.agentId ?? null, attachments } })
-      if (route.kind === 'development') { await runDevelopment(); return }
+      const route = await request<Decision>('/api/v4/route', { ...options(), body: { text: g, agent_id: override?.agentId ?? null, attachments } })
+      if (route.kind === 'development') { await runDevelopment(false); return }
       if (route.kind === 'agent_chat' && route.agent_id) { await openAgentChat(route.agent_id, route.attach); return }
       setDecision(route) // clarify | unavailable — shown inline, goal + materials kept
     } catch (cause) { setError(errorText(cause)) } finally { lock.current = false; setBusy(false) }
@@ -174,13 +206,13 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
             <div className="cv-filechips">
               {files.map((file, index) => (
                 <span className="cv-filechip" key={`${file.name}-${index}`}><span title={file.name}>{file.name}</span>
-                  <button type="button" aria-label={`移除 ${file.name}`} disabled={locked} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="plus" style={{ transform: 'rotate(45deg)' }} width={14} height={14} /></button></span>
+                  <button type="button" aria-label={`移除 ${file.name}`} disabled={locked} onClick={() => { filesTouched.current = true; setFiles(current => current.filter((_, i) => i !== index)) }}><Icon name="plus" style={{ transform: 'rotate(45deg)' }} width={14} height={14} /></button></span>
               ))}
             </div>
           )}
           <div className="cv-composer-foot">
             <label className="cv-attach"><Icon name="delivery" width={17} height={17} /> 添加材料
-              <input type="file" multiple disabled={locked} onChange={event => { setFiles(Array.from(event.target.files || [])); setError(null) }} /></label>
+              <input type="file" multiple disabled={locked} onChange={event => { filesTouched.current = true; setFiles(Array.from(event.target.files || [])); setError(null) }} /></label>
             <button className="cv-send" type="submit" disabled={busy || !goal.trim()} aria-label="开始制作">
               {busy ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}
             </button>

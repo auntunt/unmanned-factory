@@ -225,3 +225,57 @@ it('one account does not see or reuse another account\'s draft text', async () =
   show({ id: 2, username: 'other', role: 'admin' })
   expect((screen.getByLabelText('需求') as HTMLTextAreaElement).value).toBe('') // uid 2 sees empty, not uid 1's draft
 })
+
+const fileInput = () => screen.getByLabelText(/添加材料/)
+
+it('after a lost import response, a refresh resumes the import and never creates an empty workspace', async () => {
+  // Merged from the Codex review counter-example: dev material state is saved.
+  api.mockResolvedValueOnce({ kind: 'development' } as never).mockRejectedValueOnce(new Error('导入响应丢失'))
+  show(); type('用这些材料做一个管理系统')
+  fireEvent.change(fileInput(), { target: { files: [new File(['important'], 'sample.csv')] } })
+  go(); await screen.findByText('导入响应丢失')
+  api.mockReset(); api.mockResolvedValue({} as never)
+  remount(); go()
+  await screen.findByText(/材料未恢复/)
+  expect(api.mock.calls.some(([u]) => u === '/api/v2/projects/create-workspace')).toBe(false) // no empty project
+  expect(api.mock.calls.some(([u]) => u === '/api/v4/route')).toBe(false) // resumed the task, not re-routed
+})
+
+it('re-selecting the same material after a refresh imports it and reuses the op, never create-workspace', async () => {
+  let imports = 0, creates = 0
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/route') return { kind: 'development' } as never
+    if (url === '/api/v2/projects/import-files') { imports++; if (imports === 1) throw new Error('导入响应丢失'); return { project: { id: 'p1' } } as never }
+    if (url === '/api/v2/projects/create-workspace') { creates++; return { id: 'empty' } as never }
+    if (url === '/api/v2/runs') return { id: 'r1' } as never
+    return {} as never
+  })
+  const material = () => new File(['important'], 'sample.csv')
+  show(); type('用这些材料做一个管理系统')
+  fireEvent.change(fileInput(), { target: { files: [material()] } }); go()
+  await screen.findByText('导入响应丢失')
+  remount(); go(); await screen.findByText(/材料未恢复/)
+  fireEvent.change(fileInput(), { target: { files: [material()] } }); go()
+  await screen.findByText('工作区已打开')
+  expect(imports).toBe(2) // retried the SAME import endpoint
+  expect(creates).toBe(0) // never fell back to an empty workspace
+})
+
+it('explicitly removing all attachments sends a new operation without the removed material', async () => {
+  let convs = 0, attaches = 0
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/route') return { kind: 'agent_chat', agent_id: 'a9', attach: true } as never
+    if (url === '/api/v4/agents/a9/conversations') { convs++; return { id: `c${convs}` } as never }
+    if (String(url).endsWith('/attachments')) { attaches++; throw new Error('上传失败') }
+    if (String(url).endsWith('/messages')) return { job_id: 'j1' } as never
+    return {} as never
+  })
+  show(); type('按这个材料报价')
+  fireEvent.change(fileInput(), { target: { files: [new File(['x'], 'p.csv')] } }); go()
+  await screen.findByText('上传失败') // c1 created, upload failed (material recorded)
+  fireEvent.click(screen.getByRole('button', { name: /移除 p.csv/ })) // explicit removal
+  go()
+  await screen.findByText('对话已打开')
+  expect(attaches).toBe(1) // the removed material is NOT re-sent
+  expect(convs).toBe(2) // explicit removal is a new operation/conversation
+})
