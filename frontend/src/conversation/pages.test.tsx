@@ -35,7 +35,11 @@ it('agent catalog shows a matched pack badge instead of a plain initial', async 
   // built-in pack renders an accented mark badge (svg), custom falls back to the name initial
   expect(container.querySelector('.wb-category-badge--mark svg')).toBeTruthy()
   expect(screen.getByText('我的自定义岗位')).toBeTruthy()
-  expect(screen.getAllByText('已就绪').length).toBe(2)
+  // primary action is 开始对话 (chat), maintenance is de-emphasized — no active_version 已就绪 claim
+  const chat = screen.getAllByText('开始对话')
+  expect(chat.length).toBe(2)
+  expect(chat[0].closest('a')?.getAttribute('href')).toBe('/agents/a1/chat')
+  expect(screen.queryByText('已就绪')).toBeNull()
 })
 
 it('settings shows real account and env, no fabricated toggles', async () => {

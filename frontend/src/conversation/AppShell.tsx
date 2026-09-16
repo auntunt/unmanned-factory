@@ -138,7 +138,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
           </div>
         </header>
 
-        {resolved.group && GROUP_TABS[resolved.group] && (
+        {resolved.group && resolved.showTabs !== false && GROUP_TABS[resolved.group] && (
           <nav className="as-subnav" aria-label="页内导航">
             {GROUP_TABS[resolved.group].filter(t => !t.adminOnly || isAdmin).map(t => (
               <Link key={t.to} to={t.to} className={`as-subnav-tab ${resolved.activeTab === t.to ? 'is-active' : ''}`} aria-current={resolved.activeTab === t.to ? 'page' : undefined}>{t.label}</Link>

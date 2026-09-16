@@ -19,6 +19,7 @@ import StartChat from './conversation/StartChat'
 import HistoryPage from './conversation/HistoryPage'
 import AgentCatalog from './conversation/AgentCatalog'
 import SettingsPage from './conversation/SettingsPage'
+import AgentChatPage from './conversation/AgentChatPage'
 import type { PageProps, WorkbenchProps } from './workbench/ui'
 import './workbench/workbench.css'
 import './workbench/studio.css'
@@ -93,6 +94,7 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="runs/:runId" element={<RunWorkspace {...pageProps} />} />
       <Route path="history" element={<HistoryPage {...pageProps} />} />
       <Route path="agents" element={<AgentCatalog {...pageProps} />} />
+      <Route path="agents/:agentId/chat" element={<AgentChatPage {...pageProps} />} />
       <Route path="agents/:agentId" element={<AgentsPage {...pageProps} />} />
       <Route path="ability-center" element={<CapabilityCenter {...pageProps} />} />
       <Route path="modules" element={<LegacyCapabilityRedirect tab="modules" />} />

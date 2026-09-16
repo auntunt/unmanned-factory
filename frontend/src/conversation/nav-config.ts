@@ -34,6 +34,8 @@ export interface Resolved {
   group?: Group
   /** the `to` of the active in-page group tab, so detail routes still light their parent tab. */
   activeTab?: string
+  /** whether the group's in-page tab strip should show (hidden on focused detail/chat views). */
+  showTabs?: boolean
   /** breadcrumb trail; the last item is the current page. */
   breadcrumb: { label: string; to?: string }[]
 }
@@ -46,6 +48,7 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/history')) return { activeKey: 'history', title: '历史作品', breadcrumb: [{ label: '历史作品' }] }
   if (is('/runs/:runId')) return { activeKey: 'history', title: '任务', usesWorkTitle: true, breadcrumb: [{ label: '历史作品', to: '/history' }, { label: '任务' }] }
   if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体' }] }
+  if (is('/agents/:agentId/chat')) return { activeKey: 'agents', title: '对话', usesWorkTitle: true, group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '对话' }] }
   if (is('/agents/:agentId')) return { activeKey: 'agents', title: '职能体详情', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '详情' }] }
   if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力库', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库' }] }
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
