@@ -17,8 +17,8 @@ from pathlib import Path
 from factory.control.store import Conflict, now
 from factory.control.workspaces import WorkspaceError, initialize_repository
 
-MAX_ARCHIVE = 20 * 1024 * 1024
-MAX_EXPANDED = 100 * 1024 * 1024
+MAX_ARCHIVE = 1024 * 1024 * 1024
+MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_FILES = 5000
 _SECRET = re.compile(r'(?i)^(?:\.env(?:\..*)?|\.npmrc|\.netrc|id_rsa(?:\..*)?|.*\.(?:pem|key|p12|pfx))$')
 _EXAMPLES = {'.env.example', '.env.sample', '.env.template'}
@@ -51,7 +51,7 @@ def import_files(store, root, uploads, **options):
                     while chunk := upload.file.read(65536):
                         total += len(chunk)
                         if total > MAX_ARCHIVE - 65536:
-                            raise ImportError('资料文件总量不能超过 20 MiB（含归档开销）')
+                            raise ImportError('资料文件总量不能超过 1 GB（含归档开销）')
                         target.write(chunk)
         bundle.seek(0)
         return import_project(store, root, bundle, filename='上传资料.zip', **options)
@@ -130,7 +130,7 @@ def _extract(archive, target, filename, digest):
 def import_project(store, root: Path, upload, *, filename, name, budget_usd, actor_id, idempotency_key, agent_id=None):
     upload.seek(0, 2)
     if upload.tell() > MAX_ARCHIVE:
-        raise ImportError('ZIP 文件不能超过 20 MiB')
+        raise ImportError('ZIP 文件不能超过 1 GB')
     upload.seek(0)
     digest = hashlib.sha256()
     while chunk := upload.read(65536):
@@ -168,7 +168,7 @@ def import_project(store, root: Path, upload, *, filename, name, budget_usd, act
                 env.update(HOME=git_home, XDG_CONFIG_HOME=git_home, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
                 initialize_repository(owned, env=env)
                 for args in (['add', '-f', '--all'], ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Import project baseline']):
-                    subprocess.run(['git', *args], cwd=owned, env=env, check=True, capture_output=True, timeout=30)
+                    subprocess.run(['git', *args], cwd=owned, env=env, check=True, capture_output=True, timeout=300)
             evidence_root = root / '.imports'
             evidence_root.mkdir(mode=0o700, exist_ok=True)
             evidence = evidence_root / key

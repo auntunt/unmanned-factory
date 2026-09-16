@@ -18,8 +18,8 @@ describe('项目压缩包导入', () => {
     expect(validateProjectZip(null)).toBeTruthy()
     expect(validateProjectZip({ name: 'project.tar', size: 10 })).toBeTruthy()
     expect(validateProjectZip({ name: 'project.zip', size: 0 })).toBeTruthy()
-    expect(validateProjectZip({ name: 'project.zip', size: 20 * 1024 * 1024 + 1 })).toBeTruthy()
-    expect(validateProjectZip({ name: 'project.ZIP', size: 20 * 1024 * 1024 })).toBeNull()
+    expect(validateProjectZip({ name: 'project.zip', size: 1024 * 1024 * 1024 + 1 })).toBeTruthy()
+    expect(validateProjectZip({ name: 'project.ZIP', size: 1024 * 1024 * 1024 })).toBeNull()
   })
   it('导入结果明确区分文件识别和实际运行验证，并显示服务端提醒', () => {
     const notice = projectImportNotice({ filename: 'agent.zip', file_count: 12, manifests: ['package.json'], warnings: ['未发现入口'], baseline_status: 'not_run' })

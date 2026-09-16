@@ -51,4 +51,5 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget)', '|retry)')
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
-    assert hashlib.sha256(original.encode()).hexdigest()=='83e1344001e582f0517b7dda732e84c0c2e67575e40dd62b15e39320311c5d6c'
+    # Reviewed 1 GiB project-upload limits and explicit 413 handling; auth order retained.
+    assert hashlib.sha256(original.encode()).hexdigest()=='6437d9ef8a4912dae455da64b31254dcc5e9689279b19d666b95544b279467a9'

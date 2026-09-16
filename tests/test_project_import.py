@@ -179,7 +179,7 @@ def test_archive_limit_and_multipart_stream_over_default_json_limit(app_env, mon
     payload = archive([('sample.bin', os.urandom(1100000))])
     assert post(client, headers, payload).status_code == 201
     monkeypatch.setattr(project_import, 'MAX_ARCHIVE', 50)
-    assert post(client, headers, payload, idempotency_key='oversized-import').status_code == 400
+    assert post(client, headers, payload, idempotency_key='oversized-import').status_code == 413
     assert len(store.projects()) == 1
 
 
@@ -255,4 +255,56 @@ def test_sample_files_authorization_and_size_limit(app_env, monkeypatch):
                        headers={'Origin': 'http://testserver'}).status_code == 403
     monkeypatch.setattr(project_import, 'MAX_ARCHIVE', 65538)
     assert client.post('/api/v2/projects/import-files', data=data, files=files, headers=headers).status_code == 400
+    assert not store.projects()
+
+
+def test_project_zip_over_old_upload_limit_is_imported(app_env):
+    client, store, _, _ = app_env
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive_file:
+        archive_file.writestr('sample.bin', b'x' * (22 * 1024 * 1024))
+    response = post(client, login(client), output.getvalue())
+    assert response.status_code == 201, response.text
+    assert response.json()['import_summary']['total_bytes'] == 22 * 1024 * 1024
+
+
+def test_project_archive_one_gib_boundary_rejects_before_reading():
+    assert project_import.MAX_ARCHIVE == 1024 ** 3
+    class OversizedUpload:
+        def seek(self, *args): pass
+        def tell(self): return 1024 ** 3 + 1
+        def read(self, *args): raise AssertionError('oversized body must not be read')
+    with pytest.raises(project_import.ImportError, match='1 GB'):
+        project_import.import_project(None, None, OversizedUpload(), filename='large.zip',
+            name='large', budget_usd=None, actor_id=1, idempotency_key='oversized')
+
+
+def test_expanded_limit_allows_large_projects_but_stays_bounded():
+    class ArchiveMetadata:
+        def __init__(self, size): self.size = size
+        def infolist(self):
+            item = zipfile.ZipInfo('sample.bin')
+            item.file_size = item.compress_size = self.size
+            return [item]
+    assert project_import.MAX_EXPANDED == 2 * 1024 ** 3
+    assert len(project_import._members(ArchiveMetadata(2 * 1024 ** 3))) == 1
+    with pytest.raises(project_import.ImportError, match='展开体积'):
+        project_import._members(ArchiveMetadata(2 * 1024 ** 3 + 1))
+
+
+@pytest.mark.parametrize('content_length', [True, False])
+def test_project_upload_stream_remains_bounded(app_env, monkeypatch, content_length):
+    client, store, _, _ = app_env
+    headers = login(client)
+    monkeypatch.setattr(project_import, 'MAX_ARCHIVE', 1024)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive_file:
+        archive_file.writestr('large.bin', b'x' * (2 * 1024 * 1024))
+    request = client.build_request('POST', '/api/v2/projects/import-zip', headers=headers,
+        data={'name': 'large', 'idempotency_key': 'too-large'},
+        files={'file': ('project.zip', output.getvalue(), 'application/zip')})
+    if not content_length:
+        request.headers.pop('content-length', None)
+    response = client.send(request)
+    assert response.status_code == 413, response.text
     assert not store.projects()

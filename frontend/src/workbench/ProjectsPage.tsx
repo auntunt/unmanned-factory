@@ -31,14 +31,14 @@ export interface ProjectImportSummary {
 export function validateProjectZip(file: Pick<File, 'name' | 'size'> | null): string | null {
   if (!file) return '请选择项目 ZIP 压缩包。'
   if (!file.name.toLowerCase().endsWith('.zip')) return '项目文件需要是 ZIP 格式。'
-  if (file.size > 20 * 1024 * 1024) return '压缩包不能超过 20 MiB。'
+  if (file.size > 1024 * 1024 * 1024) return '压缩包不能超过 1 GB。'
   if (file.size === 0) return '压缩包为空，请重新选择。'
   return null
 }
 
 export function validateProjectFiles(files: Pick<File, 'name' | 'size'>[]): string | null {
   if (!files.length || files.length > 100) return '请选择 1 至 100 个资料文件。'
-  if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024 - 65536) return '资料文件总量不能超过 20 MiB（含归档开销）。'
+  if (files.reduce((total, file) => total + file.size, 0) > 1024 * 1024 * 1024 - 65536) return '资料文件总量不能超过 1 GB（含归档开销）。'
   return null
 }
 
@@ -109,7 +109,7 @@ export function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel, ag
     <form className="wb-form" onSubmit={submit}>
       <label>选择智能体帮助<select disabled={Boolean(agentId)} value={helperId} onChange={(event) => setHelperId(event.target.value)}><option value="">使用平台通用助手</option>{helpers.map((helper) => <option key={helper.id} value={helper.id}>{helper.name} · v{helper.active_version}</option>)}</select><small>{helpers.find((helper) => helper.id === helperId)?.purpose || '选择相应职能体，把它的 Skill 与工作方法带入项目；后续可在项目知识中维护。'}</small></label>
       <label>工程来源<select disabled={busy} value={mode} onChange={(event) => { setMode(event.target.value as typeof mode); setError(null) }}><option value="workspace">新建空白工作区</option><option value="zip">上传文件 / ZIP</option><option value="connect">连接服务器上的已有工程</option></select></label>
-      {mode === 'zip' && <label>项目与样例文件<input type="file" multiple disabled={busy} onChange={event => { const selected = Array.from(event.target.files || []); setFiles(selected); setError(null); if (selected[0] && !draft.name.trim()) update('name', selected[0].name.replace(/\.[^.]+$/, '').slice(0,120)) }} /><small>单个 ZIP 自动解包；其他文件或多文件原样存入项目根目录（最多 100 个、总计约 20 MiB）。支持格式转换样本、文档、图片和二进制资料。上传不执行文件。</small>{files.length > 0 && <span role="status">已选择 {files.length} 个文件：{files.map(file => file.name).join('、')}。{archive ? 'ZIP 将安全解包，建立项目基线。' : '原始文件直接保存，供助手读取。'}</span>}{uploadProblem && files.length > 0 && <small role="alert">{uploadProblem}</small>}</label>}
+      {mode === 'zip' && <label>项目与样例文件<input type="file" multiple disabled={busy} onChange={event => { const selected = Array.from(event.target.files || []); setFiles(selected); setError(null); if (selected[0] && !draft.name.trim()) update('name', selected[0].name.replace(/\.[^.]+$/, '').slice(0,120)) }} /><small>单个 ZIP 自动解包；其他文件或多文件原样存入项目根目录（最多 100 个、总计约 1 GB）。支持格式转换样本、文档、图片和二进制资料。上传不执行文件。</small>{files.length > 0 && <span role="status">已选择 {files.length} 个文件：{files.map(file => file.name).join('、')}。{archive ? 'ZIP 将安全解包，建立项目基线。' : '原始文件直接保存，供助手读取。'}</span>}{uploadProblem && files.length > 0 && <small role="alert">{uploadProblem}</small>}</label>}
 
       <div className="wb-form-grid wb-form-grid-two">
         {mode === 'connect' && <label className="wb-span-two">选择工程，系统自动连接<select required value={draft.candidate_id} onChange={(event) => { const candidate = candidates?.find((item) => item.id === event.target.value); update('candidate_id', event.target.value); if (candidate) update('name', candidate.name) }} disabled={!candidates || availableProjectCandidates(candidates).length === 0}><option value="">{candidates ? availableProjectCandidates(candidates).length ? '请选择工程' : '没有发现可登记的工程' : '正在发现工程…'}</option>{candidates && availableProjectCandidates(candidates).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select><small>{rootAvailable ? '工程位置由服务器维护。' : '服务器工程目录当前不可用，请稍后刷新。'}</small></label>}

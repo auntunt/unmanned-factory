@@ -192,13 +192,18 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         if bounded_upload:
             # Let UploadFile spool multipart parts; do not buffer the archive
             # again in the control-plane middleware before parsing it.
+            from factory.control.project_import import MAX_ARCHIVE
+            upload_limit = (MAX_ARCHIVE if project_upload else 20 * 1024 * 1024) + 1024 * 1024
+            declared_length = request.headers.get('content-length', '')
+            if declared_length.isdigit() and int(declared_length) > upload_limit:
+                return JSONResponse({'detail': '上传请求体超过限制'}, status_code=413)
             upstream_receive = request._receive
             upload_size = 0
             async def limited_receive():
                 nonlocal upload_size
                 message = await upstream_receive()
                 upload_size += len(message.get('body', b''))
-                if upload_size > 21 * 1024 * 1024:
+                if upload_size > upload_limit:
                     raise HTTPException(413, '请求体过大')
                 return message
             request._receive = limited_receive
@@ -249,6 +254,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     except (ValueError, TypeError):
                         return JSONResponse({'detail': '请求格式无效'}, status_code=422)
         response = await call_next(request)
+        if bounded_upload and upload_size > upload_limit:
+            response = JSONResponse({'detail': '上传请求体超过限制'}, status_code=413)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
