@@ -35,7 +35,7 @@ export default function HistoryPage({ onUnauthorized }: PageProps) {
             <div className="cv-li-body"><strong>{run.plan?.title || run.request}</strong><small>{run.request.slice(0, 80)}{run.request.length > 80 ? '…' : ''}</small></div>
             <div className="cv-li-meta">
               <span className={`cv-pill ${PILL[head] || ''}`}><i />{statusLabel(run.status)}</span>
-              {run.revision ? <span>v{run.revision}</span> : null}
+              {run.revision ? <span>计划 {run.revision}</span> : null}
               <span>{formatDate(run.updated_at)}</span>
               <Icon name="arrow" width={16} height={16} />
             </div>

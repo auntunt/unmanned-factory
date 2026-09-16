@@ -52,6 +52,7 @@ class Approval(Body):
 
 class FollowUp(Body):
     content: str = Field(min_length=1, max_length=50_000)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
 
 
 def router(store, svc, operations):
@@ -146,20 +147,46 @@ def router(store, svc, operations):
 
     @api.post('/api/v2/runs/{rid}/follow-up')
     def follow_up(rid: str, body: FollowUp, request: Request):
-        # One composer, one endpoint: at a human gate the note drives the run
-        # forward; while the run is actively executing it is recorded in the
-        # conversation and surfaced (not silently dropped, never faked as done).
         from factory.control.store import ACTIVE
-        run = store.get(rid)
-        status, actor = run['status'], request.state.user['username']
-        if status in ('needs_clarification', 'awaiting_approval'):
-            return svc.clarify(rid, body.content, actor)
-        if status == 'needs_human':
-            return svc.continue_run(rid, body.content, run['revision'], run.get('resume_count', 0), actor)
-        if status in ACTIVE:
-            store.append(rid, 'user.message', {'text': body.content, 'followup': True, 'queued': True, 'actor': actor})
-            return {'queued': True, 'message': '补充已记录并保留在对话中；当前步骤完成、需要你确认时可以继续。'}
-        raise HTTPException(409, '任务已结束，请在下方开始新一轮修改。')
+        content = body.content.strip()
+        if not content:
+            raise HTTPException(422, '请填写补充内容')
+        actor, actor_id = request.state.user['username'], request.state.user['id']
+        fingerprint = hashlib.sha256(content.encode()).hexdigest()
+        # Serialize state selection with other lifecycle actions and make client
+        # retries reuse the same persisted receipt, even after the run finishes.
+        with svc.lock:
+            run = store.get(rid)
+            if body.idempotency_key:
+                for event in store.export_events(rid, kind='followup.received'):
+                    receipt = event['payload']
+                    if receipt.get('actor_id') == actor_id and receipt.get('key') == body.idempotency_key:
+                        if receipt.get('fingerprint') != fingerprint:
+                            raise HTTPException(409, '这条补充已接收；内容变化后请重新提交')
+                        return receipt['response']
+            status = run['status']
+            message = None
+            if status in ('needs_clarification', 'awaiting_approval'):
+                result = svc.clarify(rid, content, actor)
+                response = {'recorded': True, 'applied': True, 'queued': False, 'run_id': rid, 'status': result['status']}
+            elif status == 'needs_human':
+                result = svc.continue_run(rid, content, run['revision'], run.get('resume_count', 0), actor)
+                response = {'recorded': True, 'applied': True, 'queued': False, 'run_id': rid, 'status': result['status']}
+            elif status in ACTIVE:
+                message = {'text': content, 'followup': True, 'queued': False,
+                    'applied': False, 'actor': actor, 'actor_id': actor_id}
+                response = {'recorded': True, 'applied': False, 'queued': False,
+                    'message': '补充已保存在对话中，尚未加入当前任务；任务暂停或完成后，请再次提交这些要求。'}
+            else:
+                raise HTTPException(409, '任务已结束，请在下方开始新一轮修改。')
+            # An active note and its retry receipt are one durable transaction.
+            with store.connect() as db:
+                if message is not None:
+                    store._event(db, rid, 'user.message', message)
+                if body.idempotency_key:
+                    store._event(db, rid, 'followup.received', {'actor_id': actor_id, 'key': body.idempotency_key,
+                        'fingerprint': fingerprint, 'response': response})
+            return response
 
 
     @api.post('/api/v2/runs/{rid}/cancel')

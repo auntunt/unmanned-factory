@@ -11,7 +11,8 @@ import './conversation.css'
 export default function SettingsPage({ user }: WorkbenchProps) {
   const isAdmin = user.role !== 'member'
   const [env, setEnv] = useState<{ mode?: string; label?: string } | null>(null)
-  useEffect(() => { request<{ mode?: string; label?: string }>('/api/v3/environment').then(setEnv).catch(() => setEnv(null)) }, [])
+  const [envError, setEnvError] = useState(false)
+  useEffect(() => { request<{ mode?: string; label?: string }>('/api/v3/environment').then(setEnv).catch(() => setEnvError(true)) }, [])
   return (
     <div className="cv-page">
       <Link to="/" className="cv-page-back"><Icon name="back" width={16} height={16} /> 返回对话</Link>
@@ -22,7 +23,7 @@ export default function SettingsPage({ user }: WorkbenchProps) {
         <h2>运行环境</h2>
         <div className="cv-settings-row">
           <div className="cv-sr-label">当前环境<small>制作在隔离工作区中进行，验证结果来自真实运行状态。</small></div>
-          <div className="cv-sr-value"><span className="cv-online"><i />{env?.label || (env?.mode === 'preview' ? '演练' : '已连接')}</span></div>
+          <div className="cv-sr-value"><span className={env && !envError ? 'cv-online' : ''}>{env && !envError && <i />}{envError ? '环境状态读取失败' : !env ? '正在检查…' : env.label || (env.mode === 'preview' ? '演练' : env.mode === 'live' ? '已连接' : '状态未知')}</span></div>
         </div>
         <div className="cv-settings-row">
           <div className="cv-sr-label">模型与工具<small>模型、阶段配置、工具与预算在运行配置中维护。</small></div>

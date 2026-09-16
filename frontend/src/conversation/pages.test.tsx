@@ -10,7 +10,7 @@ vi.mock('../workspace/api', async original => ({ ...await original<typeof import
 const api = vi.mocked(request)
 const noop = vi.fn()
 const props = { csrfToken: 'x', onUnauthorized: noop, user: { id: 1, username: 'owner', role: 'admin' as const } }
-beforeEach(() => api.mockReset())
+beforeEach(() => { api.mockReset() })
 afterEach(cleanup)
 
 it('history lists works with real status and links back to the run', async () => {
@@ -43,4 +43,12 @@ it('settings shows real account and env, no fabricated toggles', async () => {
   render(<MemoryRouter><SettingsPage {...props} onLogout={noop} /></MemoryRouter>)
   expect(await screen.findByText(/owner · 管理员/)).toBeTruthy()
   expect(screen.getByText('打开运行配置').closest('a')?.getAttribute('href')).toBe('/settings/runtime')
+})
+
+it('does not report connected when reading the environment fails', async () => {
+  api.mockRejectedValue(new Error('offline'))
+  render(<MemoryRouter><SettingsPage {...props} onLogout={noop} /></MemoryRouter>)
+  expect(screen.getByText('正在检查…')).toBeTruthy()
+  await screen.findByText('环境状态读取失败')
+  expect(screen.queryByText('已连接')).toBeNull()
 })

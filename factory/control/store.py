@@ -348,10 +348,12 @@ class Store:
                 break
             for e in events:
                 p = e['payload']
-                role = 'user' if e['type'] == 'user.message' else 'assistant'
+                role = 'user' if e['type'] in ('user.message', 'human.continued') else 'assistant'
                 content = None
                 if e['type'] in ('user.message', 'assistant.message'):
                     content = p.get('text') or p.get('content')
+                elif e['type'] == 'human.continued':
+                    content = p.get('answer')
                 elif e['type'] == 'plan.created':
                     content = p.get('summary', '')
                 elif e['type'] == 'triage.decided':
@@ -360,7 +362,9 @@ class Store:
                     content = p.get('message') or p.get('pr_url')
                 if content:
                     messages.append(dict(id=e['id'], role=role, content=content,
-                                         event_ids=[e['id']], at=e['at'], task_id=e['task_id']))
+                                         event_ids=[e['id']], at=e['at'], task_id=e['task_id'],
+                                         **({'followup': True, 'applied': p.get('applied', False)}
+                                            if p.get('followup') else {})))
             after = events[-1]['id']
         return messages
 

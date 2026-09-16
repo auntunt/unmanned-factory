@@ -21,7 +21,7 @@ function mount(run: Record<string, unknown>, messages: unknown[] = []) {
   </WorkTitleContext.Provider></MemoryRouter>)
 }
 const base = { id: 'r1', project_id: 'p1', request: '做预约工具', revision: 1, plan: { title: '预约管理工具', summary: '', questions: [], tasks: [] }, artifacts: {}, created_at: '', updated_at: '' }
-beforeEach(() => api.mockReset())
+beforeEach(() => { api.mockReset() })
 afterEach(cleanup)
 
 it('shows the real progress head for an active run and queues a follow-up instead of dropping it', async () => {
@@ -40,4 +40,79 @@ it('routes a clarification answer to the clarify endpoint', async () => {
   fireEvent.change(screen.getByLabelText('补充或修改'), { target: { value: '客户名和时间' } })
   fireEvent.click(screen.getByLabelText('发送'))
   await waitFor(() => expect(api.mock.calls.some(([u, o]) => u === '/api/v2/runs/r1/clarify' && (o as { method?: string })?.method === 'POST')).toBe(true))
+})
+
+it('does not re-fetch repeatedly when each response is a fresh JSON object', async () => {
+  mount({ ...base, status: 'running' })
+  api.mockImplementation(async url => url?.endsWith('/conversation') ? { messages: [] } as never : { ...base, status: 'running' } as never)
+  await screen.findByText('正在处理')
+  await new Promise(resolve => setTimeout(resolve, 35))
+  expect(api.mock.calls.filter(([url]) => url === '/api/v2/runs/r1')).toHaveLength(1)
+})
+
+it('submits the complete edited specification required by the real confirmation API', async () => {
+  const spec = { goal: '做预约工具', screens: [], flows: ['预约'], data_model: ['时间'], non_goals: ['无支付'], risks_assumptions: ['本地使用'] }
+  mount({ ...base, status: 'awaiting_spec_confirmation', spec_draft: spec, recommended_skills: [] })
+  fireEvent.change(await screen.findByLabelText('目标'), { target: { value: '做预约和取消工具' } })
+  fireEvent.click(screen.getByRole('button', { name: '开工' }))
+  await waitFor(() => expect(api.mock.calls.some(([url]) => url === '/api/v2/runs/r1/confirm-spec')).toBe(true))
+  expect(api.mock.calls.find(([url]) => url.endsWith('/confirm-spec'))?.[1]?.body).toEqual({ revision: 1, action: 'start', spec_draft: { ...spec, goal: '做预约和取消工具' }, selected_skills: [], fidelity_target: null })
+})
+
+it('continues the saved execution without forcing an invented explanation', async () => {
+  mount({ ...base, status: 'needs_human', artifacts: { base_sha: 'abc', tasks: [{ id: 'a' }] }, resume_count: 2 })
+  fireEvent.click(await screen.findByRole('button', { name: '继续处理' }))
+  await waitFor(() => expect(api.mock.calls.some(([url]) => url.endsWith('/continue'))).toBe(true))
+  expect(api.mock.calls.find(([url]) => url.endsWith('/continue'))?.[1]?.body).toEqual({ answer: '', revision: 1, resume_count: 2 })
+})
+
+it('renders a real preview response including file id zero and downloads the full archive', async () => {
+  mount({ ...base, status: 'ready_for_review' })
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [{ id: 0, name: 'README.md', kind: 'source', preview: true }], recommended_preview_id: 0 } as never
+    if (url?.endsWith('/files/0?preview=true')) return { name: 'README.md', kind: 'source', content: '实际使用说明' } as never
+    return {} as never
+  })
+  fireEvent.click(await screen.findByRole('button', { name: '预览成果' }))
+  await screen.findByText('实际使用说明')
+  expect(screen.getByRole('link', { name: '下载全部成果 ZIP' }).getAttribute('href')).toBe('/api/v3/runs/r1/deliverables/download')
+  expect(screen.queryByText('下载源码')).toBeNull()
+})
+
+it('reuses follow-up identity after a network error and reports that it is only recorded', async () => {
+  mount({ ...base, status: 'running' })
+  await screen.findByText('正在处理')
+  api.mockImplementation(async url => {
+    if (url.endsWith('/follow-up')) {
+      const count = api.mock.calls.filter(([value]) => value.endsWith('/follow-up')).length
+      if (count === 1) throw new Error('网络中断')
+      return { recorded: true, applied: false, queued: false } as never
+    }
+    return url.endsWith('/conversation') ? { messages: [] } as never : { ...base, status: 'running' } as never
+  })
+  fireEvent.change(screen.getByLabelText('补充或修改'), { target: { value: '再加搜索' } })
+  fireEvent.click(screen.getByLabelText('发送'))
+  await screen.findByText('网络中断')
+  fireEvent.click(screen.getByLabelText('发送'))
+  await screen.findByText(/补充已记录，尚未执行/)
+  const bodies = api.mock.calls.filter(([url]) => url.endsWith('/follow-up')).map(([, options]) => options?.body)
+  expect(bodies[0]).toEqual(bodies[1])
+})
+
+it('shows completed inspection evidence without a product card or active composer', async () => {
+  mount({ ...base, status: 'inspection_completed', source: { type: 'inspection', operation: 'startup' }, artifacts: { operation_results: { health: { status: 'pass', evidence: 'GET /health returned 200' } } } })
+  await screen.findByText('巡检已完成')
+  expect(screen.getByText('GET /health returned 200')).toBeTruthy()
+  expect(screen.getByText('巡检结果 · 只诊断')).toBeTruthy()
+  expect(screen.queryByText('正在处理')).toBeNull()
+  expect(screen.queryByLabelText('补充或修改')).toBeNull()
+  expect(api.mock.calls.some(([url]) => url.endsWith('/deliverables'))).toBe(false)
+})
+
+it('keeps real deployment evidence visible for non-general completed work', async () => {
+  mount({ ...base, status: 'published', source: { operation: 'release' }, artifacts: { operation_results: { rollback: { status: 'pass', evidence: '恢复 release-17 并探测健康状态' } } } })
+  await screen.findByText('恢复 release-17 并探测健康状态')
+  expect(screen.getByRole('region', { name: '维护结果' })).toBeTruthy()
 })

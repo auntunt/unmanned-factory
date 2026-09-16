@@ -22,7 +22,7 @@ const MSGS: Record<string, unknown[]> = {
   recover: [ { id: 1, role: 'user', content: '按我上传的表格导入客户名单。', at: now } ],
   delivered: [ { id: 1, role: 'user', content: '帮我做一个预约管理工具，能新增预约、修改时间并导出记录。', at: now } ],
 }
-const DELIVERABLES: Record<string, unknown> = { items: [
+const DELIVERABLES: Record<string, unknown> = { saved: true, items: [
   { id: 'p1', name: 'preview', kind: 'web', preview: true },
   { id: 'f1', name: '预约管理源码.zip', kind: 'source', size: 12400000 } ], recommended_preview_id: 'p1', can_collect: true }
 
@@ -39,15 +39,56 @@ const AGENTS = [
   { id: 'a5', name: '需求分析', purpose: '把一句话需求整理成规格草案与可验收样例。', active_version: 1, builtin_pack: 'requirements' },
 ]
 
-export async function request<T>(path: string): Promise<T> {
-  const run = (id: string) => RUNS[id] || RUNS.active
+const PROJECTS = [{ id: 'p1', name: '预约管理工具（示例）', repository: 'preview/appointments', workspace: '/preview/appointments', base_branch: 'main', checks: {}, auto_issues: false, auto_publish: false, revision: 1, agent_id: 'a3' }]
+const ENGINEERING = { stages: [], verified_runs: 1, published_runs: 0, distilled_runs: 0, reused_runs: 0, draft_capabilities: 0, ready_capabilities: 0 }
+const OVERVIEW = { snapshot_at: now, projects: 1, runs: 3, active_runs: 1, attention_runs: 1, delivered_runs: 1,
+  known_cost_usd: 0, unknown_cost_runs: 3, model_usage: [], activity: [], capabilities: 0, recent_events: [],
+  run_snapshots: RUN_LIST, engineering: ENGINEERING, project_summaries: PROJECTS.map(p => ({ ...p, run_count: 3, active_runs: 1, attention_runs: 1, engineering: ENGINEERING })),
+  attention: [{ ...RUNS.recover, title: '客户名单导入', reason: '示例：需要补充预约时间列' }] }
+const QUOTA = { limit_tokens: null, used_tokens: 0, reserved_tokens: 0, unknown_calls: 0, remaining_tokens: null }
+
+export async function request<T>(path: string, options: { method?: string; signal?: AbortSignal; [key: string]: unknown } = {}): Promise<T> {
+  if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  if (options.method && !['GET', 'HEAD'].includes(options.method)) throw new WorkspaceApiError(405, '这是只读界面预览，未连接执行服务；本次操作没有保存或执行。')
+  const url = new URL(path, 'http://preview.local')
+  const pathname = url.pathname
+  if (pathname === '/api/v2/projects') return { projects: PROJECTS } as T
+  if (pathname === '/api/v3/overview') return OVERVIEW as T
+  if (pathname === '/api/v3/team') return { month: now.slice(0, 7), timezone: 'Asia/Shanghai', reservation_tokens: 1000, workspace: QUOTA,
+    members: [{ id: 1, username: 'owner', role: 'admin', active: true, project_ids: ['p1'], quota: QUOTA }],
+    projects: [{ id: 'p1', name: PROJECTS[0].name, member_ids: [1], quota: QUOTA }], calls: [], audit: [] } as T
+  if (pathname === '/api/v2/runtime/operations') return { revision: 0, webhook_configured: false, knowledge_enabled: false } as T
+  if (pathname === '/api/v2/deploy-targets') return { targets: [] } as T
+  if (pathname === '/api/v2/runtime') return { revision: 0, profiles: {}, tools: [], blockers: ['只读预览，未连接执行服务'], last_probes: [], updated_at: null } as T
+  if (pathname === '/api/v3/capabilities') return { capabilities: [] } as T
+  if (pathname.endsWith('/abilities/preflight')) return { ready: false, message: '只读预览：能力加载需在真实工作台进行。' } as T
+  if (/^\/api\/v4\/agents\/[^/]+\/skills$/.test(pathname)) return { skills: [] } as T
+  if (pathname === '/api/v4/skill-ingestions') return { items: [] } as T
+  if (pathname === '/api/v4/modules') return { modules: [] } as T
+  if (pathname === '/api/v2/project-candidates') return { candidates: [], root_available: false } as T
+  if (pathname === '/api/v2/operation-presets') return { presets: [] } as T
+  if (pathname.endsWith('/readiness')) return { project_id: 'p1', ready: false, checks: [{ id: 'preview', label: '预览环境', status: 'warning', message: '未连接真实执行服务' }] } as T
+  const agentMatch = pathname.match(/^\/api\/v4\/agents\/([^/]+)(\/conversations|\/versions|\/evolution|\/draft|\/manifest)?$/)
+  if (agentMatch) {
+    const agent = AGENTS.find(a => a.id === agentMatch[1])
+    if (!agent) throw new WorkspaceApiError(404, '示例职能体不存在')
+    const version = { version: agent.active_version, instructions: agent.purpose, tool_scope: [], acceptance: [], skill_ids: [], model_settings: {} }
+    if (agentMatch[2] === '/draft') return { agent_id: agent.id, base_version: agent.active_version, revision: 0, patch: {} } as T
+    if (agentMatch[2] === '/manifest') return { revision: 1, identity: agent.purpose, skills: [], assertions: [], history: [] } as T
+    if (agentMatch[2] === '/conversations') return { conversations: [] } as T
+    if (agentMatch[2] === '/versions') return { versions: [version] } as T
+    if (agentMatch[2] === '/evolution') return { proposals: [] } as T
+    return { ...agent, version } as T
+  }
+  const run = (id: string) => { if (!RUNS[id]) throw new WorkspaceApiError(404, '预览中没有这条任务'); return RUNS[id] }
   const m = path.match(/\/api\/v2\/runs\/([^/?]+)(\/conversation)?$/)
   if (m && m[2]) return { messages: MSGS[m[1]] || [] } as T
   if (m) return { ...run(m[1]), progress: {} } as T
   if (path === '/api/v2/runs') return { runs: RUN_LIST } as T
   if (path === '/api/v4/agents') return { agents: AGENTS } as T
   if (path === '/api/v3/environment') return { mode: 'preview', label: '演练' } as T
+  if (pathname.endsWith('/deliverables/files/p1') && url.searchParams.get('preview') === 'true') return { name: '预约管理工具（示例）', kind: 'web', content: '<main style="padding:32px;font-family:system-ui;background:#fafaf7;color:#202b2a"><h1>预约管理工具</h1><p>只读界面样例</p><table><tr><th>客户</th><th>预约时间</th></tr><tr><td>示例客户</td><td>周三 10:00</td></tr></table></main>' } as T
   if (path.endsWith('/deliverables')) return DELIVERABLES as T
   if (path === '/api/auth/me') return { user: { id: 1, username: 'owner', role: 'admin' }, csrf_token: 'x' } as T
-  return {} as T
+  throw new WorkspaceApiError(501, `该数据尚无预览样例：${pathname}。请在真实服务中查看。`)
 }

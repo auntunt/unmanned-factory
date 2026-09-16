@@ -230,7 +230,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     # assigned projects and act on their own runs. New write
                     # endpoints are admin-only unless explicitly listed here.
                     own_account = path in ('/api/auth/logout', '/api/auth/password') and request.method == 'POST'
-                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget)', path)
+                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget|follow-up)', path)
                     creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
                     try:
                         if request.method == 'POST' and (run_action or creation):

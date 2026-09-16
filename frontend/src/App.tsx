@@ -87,7 +87,7 @@ function WorkbenchLayout(props: WorkbenchProps) {
   return <Workbench {...props}><Suspense fallback={<div className="wb-page"><div className="wb-card wb-loading-card"><span className="wb-spinner" aria-hidden="true" />正在打开页面…</div></div>}><Outlet /></Suspense></Workbench>
 }
 
-function RoutedWorkbench({ session, logout }: { session: AuthResponse; logout: () => void }) {
+export function RoutedWorkbench({ session, logout }: { session: AuthResponse; logout: () => void }) {
   const pageProps: PageProps = { csrfToken: session.csrf_token, onUnauthorized: logout, user: session.user }
   const shell: WorkbenchProps = { ...pageProps, user: session.user, onLogout: logout }
   const isAdmin = session.user.role !== 'member'

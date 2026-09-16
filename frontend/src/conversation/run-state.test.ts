@@ -38,3 +38,15 @@ it('treats only terminal statuses as terminal for polling', () => {
   expect(isTerminal('failed')).toBe(true)
   expect(isTerminal('cancelled')).toBe(true)
 })
+
+it('distinguishes completed inspections, interruptions and unknown statuses from active work', () => {
+  expect(headState('inspection_completed')).toBe('done')
+  expect(stageIndex('inspection_completed')).toBe(2)
+  expect(isTerminal('inspection_completed')).toBe(true)
+  expect(composerMode('inspection_completed').kind).toBe('readonly')
+  expect(headState('interrupted')).toBe('paused')
+  expect(isTerminal('interrupted')).toBe(true)
+  expect(composerMode('interrupted').kind).toBe('readonly')
+  expect(headState('future_status')).toBe('unknown')
+  expect(composerMode('future_status').kind).toBe('readonly')
+})

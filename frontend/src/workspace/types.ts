@@ -99,6 +99,8 @@ export interface Artifacts {
 }
 
 export interface Run {
+  root_request?: string
+  error?: string | null
   retry_run_id?: string
   resume_count?: number
   spec_draft?: SpecDraft
@@ -124,6 +126,8 @@ export interface Run {
 }
 
 export interface ConversationMessage {
+  followup?: boolean
+  applied?: boolean
   id: string | number
   role: string
   content: string
