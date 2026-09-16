@@ -484,6 +484,22 @@ class AgentStore:
     def conversation_attachments(self, cid):
         return self._row("agent_conversations", "id", cid).get('attachments', [])
 
+    def link_answer_job(self, cid, job_id, client_key=None):
+        """Bind an answer job to the user message it answers, so a duplicate submit
+        replays that message's real job state rather than any other run."""
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            c = self._decode(row)
+            for m in reversed(c['messages']):
+                if m.get('role') == 'user' and not m.get('answer_job') and (client_key is None or m.get('client_key') == client_key):
+                    m['answer_job'] = job_id
+                    db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+                    break
+        return c
+
     def add_export(self, cid, actor_id, title, fmt, content):
         """A controlled, conversation-scoped write: store a document the chat produced
         as a downloadable artifact. Not a project, repo or coding run."""

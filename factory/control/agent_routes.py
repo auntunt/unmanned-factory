@@ -18,13 +18,14 @@ class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); proje
 class Message(Body):
     content:str=Field(min_length=1,max_length=50000)
     idempotency_key:str|None=Field(default=None,min_length=8,max_length=100,pattern=r'^[A-Za-z0-9_-]+$')
+_DEC=r'^\d{1,15}(\.\d{1,6})?$'  # explicit non-negative decimal string; magnitude/range checked in quote_calc
 class QuoteItem(Body):
     name:str=Field(default='',max_length=200)
-    unit_price:float=Field(ge=0)
-    quantity:float=Field(ge=0)
+    unit_price:str=Field(pattern=_DEC)
+    quantity:str=Field(pattern=_DEC)
 class QuoteCalc(Body):
     items:list[QuoteItem]=Field(min_length=1,max_length=500)
-    discount_rate:float=Field(default=1.0,gt=0,le=1)
+    discount_rate:str=Field(default='1',pattern=_DEC)
 class ExportDoc(Body):
     title:str=Field(default='',max_length=200)
     format:str=Field(pattern='^(md|txt|csv)$')
@@ -271,17 +272,23 @@ def router(store, service):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
         key=getattr(body,'idempotency_key',None)
+        import hashlib as _hashlib
+        content_sha=_hashlib.sha256(body.content.encode()).hexdigest()
         # No-project daily chat: distinguish a duplicate submit from a genuinely new
         # message BEFORE persisting anything.
         if not retry and c['mode']=='do' and not c.get('project_id'):
             if key:
-                # Same client key already recorded → idempotent replay: never re-save or re-answer.
                 for m in c['messages']:
                     if m.get('role')=='user' and m.get('client_key')==key:
-                        active=_chat_active_job(c)
-                        return {'conversation':agents.conversation(cid),'run':None,
-                                'job_id':active[0] if active else None,
-                                'status':active[1] if active else 'completed','idempotent_replay':True}
+                        # Same key, different content is a mistake, not a replay: reject clearly.
+                        if m.get('content_sha') and m['content_sha']!=content_sha:
+                            raise HTTPException(409,'这个提交标识已用于不同内容，请刷新或改用新标识。')
+                        # Replay the ORIGINAL message's real job state (never fake completed,
+                        # never another message's run).
+                        jid=m.get('answer_job')
+                        try: st=service.maintenance_status(jid)['status'] if jid else 'completed'
+                        except KeyError: st='interrupted'
+                        return {'conversation':agents.conversation(cid),'run':None,'job_id':jid,'status':st,'idempotent_replay':True}
             active=_chat_active_job(c)
             if active:
                 # A different message arrived while answering: reject clearly and keep the
@@ -295,6 +302,7 @@ def router(store, service):
         if not retry:
             extra = {'feedback_status': 'pending'} if queued else {}
             if key: extra['client_key']=key
+            if c['mode']=='do' and not c.get('project_id'): extra['content_sha']=content_sha
             agents.append_message(cid, 'user', body.content, **extra)
         c=agents.conversation(cid)
         if c['mode']=='do':
@@ -325,16 +333,22 @@ def router(store, service):
                 job_id=uuid.uuid4().hex
                 catalog_note='' if reference is None else '\nYou have read-only reference tools exposing this role\'s granted skills and materials. Read them before answering and cite the source id. Do not invent facts not present in the materials or the user\'s message.'
                 prompt='Answer the user briefly. If the request requires changing files or running checks, clearly ask them to associate a project.'+catalog_note+'\nAGENT:\n'+snapshot.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
+                # Chat tools (calc/export) bound to THIS conversation and user; the model
+                # cannot target another conversation. Exposed as mcp__session__*.
+                from factory.control.conversation_tools import ConversationTools
+                tools=ConversationTools(store,cid,actor(request)['id'])
+                prompt+='\nYou may use mcp__session__calc for any money arithmetic (decimal strings) and mcp__session__export to save a downloadable md/txt/csv document for the user; both act only on this conversation.'
                 from factory.control.providers import ProviderRequest
                 from factory.control.governance import GovernedRunner
                 def answer(cancel):
                     with tempfile.TemporaryDirectory(prefix='factory-agent-chat-') as workspace:
                         runner=GovernedRunner(service.runner,service.governance,run_id=None,actor_id=actor(request)['id']) if service.governance else service.runner
-                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference),lambda *_:None,cancel)
+                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference,conversation_tools=tools),lambda *_:None,cancel)
                     agents.append_message(cid,'assistant',result.text,status='completed',job_id=job_id,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
                     return {'status':'completed'}
                 answer.on_error=lambda exc: agents.append_message(cid,'assistant','回答失败：'+str(exc),status='failed',job_id=job_id)
                 job=service.start_maintenance(answer,job_id=job_id,conversation_id=cid,actor_id=actor(request)['id'])
+                agents.link_answer_job(cid,job_id,key)  # bind this job to the message it answers
                 _append_pending(cid,'正在回答；如需修改文件，请随后关联项目',job_id)
                 return {'conversation':agents.conversation(cid),'run':None,'job_id':job['id'],'status':'pending'}
             # A conversation has at most one active run.

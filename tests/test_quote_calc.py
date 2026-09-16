@@ -17,3 +17,16 @@ def test_rejects_bad_inputs():
             quote(bad)
     with pytest.raises(ValueError):
         quote([{'unit_price': 1, 'quantity': 1}], discount_rate=0)
+
+
+def test_rejects_non_finite_out_of_range_and_over_precision():
+    for bad in ('inf', 'Infinity', 'nan', '-1', '1e13'):
+        with pytest.raises(ValueError):
+            quote([{'unit_price': bad, 'quantity': '1'}])
+    with pytest.raises(ValueError):
+        quote([{'unit_price': '1.1234567', 'quantity': '1'}])  # > 6 dp
+    with pytest.raises(ValueError):
+        quote([{'unit_price': '1', 'quantity': '1'}], discount_rate='1.5')  # > 1
+    # booleans are not numbers
+    with pytest.raises(ValueError):
+        quote([{'unit_price': True, 'quantity': '1'}])

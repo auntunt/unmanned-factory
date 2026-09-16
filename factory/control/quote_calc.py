@@ -7,13 +7,24 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 
+_MAX = Decimal('1000000000000')  # 1e12 magnitude ceiling for money and quantities
+
+
 def _money(value, label):
+    # Explicit decimal contract: accept a decimal string or a plain number, never
+    # non-finite (inf/nan) or out-of-range values; numeric errors become input errors.
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f'{label} 不是有效数字')
     try:
         d = Decimal(str(value))
-    except (InvalidOperation, TypeError):
+    except (InvalidOperation, TypeError, ValueError):
         raise ValueError(f'{label} 不是有效数字：{value!r}') from None
-    if d != d:  # NaN
-        raise ValueError(f'{label} 不是有效数字')
+    if not d.is_finite():
+        raise ValueError(f'{label} 必须是有限数值')
+    if abs(d) > _MAX:
+        raise ValueError(f'{label} 超出允许范围')
+    if -d.as_tuple().exponent > 6:
+        raise ValueError(f'{label} 小数位过多（最多 6 位）')
     return d
 
 

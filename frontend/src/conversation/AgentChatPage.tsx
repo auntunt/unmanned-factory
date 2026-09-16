@@ -8,7 +8,7 @@ import { useWorkTitle } from './title-context'
 import './conversation.css'
 
 type Msg = { id?: string; role: string; content: string; at?: string; created_at?: string; status?: string; job_id?: string }
-type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string; attachments?: Array<{ id: string; name: string; size?: number }> }
+type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string; attachments?: Array<{ id: string; name: string; size?: number }>; exports?: Array<{ id: string; title: string; format: string; size?: number }> }
 type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number }
 const base = '/api/v4'
 
@@ -135,15 +135,19 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
           : <div className="cv-msg is-assistant" key={m.id || m.at}><div className="cv-msg-head"><span className="cv-msg-avatar">{Array.from(agent?.name || 'w')[0]}</span>{agent?.name || 'webuddy'}<span style={{ marginLeft: 'auto', color: 'var(--cv-faint)', fontWeight: 400 }}>{formatDate(m.at || m.created_at)}</span></div><div className="cv-msg-body">{m.content}</div></div>)}
         {pending && <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">{Array.from(agent?.name || 'w')[0]}</span>{agent?.name || 'webuddy'}</div><div className="cv-msg-body"><span className="cv-typing"><i /><i /><i /></span></div></div>}
       </div>
+      {(conv?.exports?.length ?? 0) > 0 && <div className="cv-chat-history" style={{ marginBottom: 8 }}>
+        {conv!.exports!.map(e => <a key={e.id} className="cv-filechip" style={{ textDecoration: 'none' }} href={`/api/v4/conversations/${encodeURIComponent(conv!.id)}/exports/${encodeURIComponent(e.id)}/download`}>
+          <Icon name="download" width={13} height={13} /><span title={e.title}>{e.title}.{e.format}</span></a>)}
+      </div>}
       <div className="cv-dock">
         <div className="cv-dock-inner">
           <form onSubmit={send}>
             <div className="cv-composer">
-              <textarea rows={2} value={text} disabled={sending} onChange={e => setText(e.target.value)} placeholder={`和 ${agent?.name || '职能体'} 聊…`} aria-label="消息"
+              <textarea rows={2} value={text} disabled={sending} onChange={e => { setText(e.target.value); submitKey.current = null }} placeholder={`和 ${agent?.name || '职能体'} 聊…`} aria-label="消息"
                 onKeyDown={e => { if (!e.shiftKey && e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }} />
               {(conv?.attachments?.length ?? 0) > 0 && <div className="cv-filechips">{conv!.attachments!.map(a => <span className="cv-filechip" key={a.id}><Icon name="delivery" width={13} height={13} /><span title={a.name}>{a.name}</span></span>)}</div>}
               <div className="cv-composer-foot">
-                <label className="cv-attach"><Icon name="delivery" width={16} height={16} /> {attaching ? '上传中…' : '添加材料'}<input type="file" accept=".txt,.md,.csv,text/plain" disabled={attaching || sending} onChange={attach} /></label>
+                <label className="cv-attach" title="仅支持 UTF-8 文本：.txt / .md / .csv，单个 ≤40KB（暂不支持 PDF / Word / Excel）"><Icon name="delivery" width={16} height={16} /> {attaching ? '上传中…' : '添加材料'}<input type="file" accept=".txt,.md,.csv,text/plain" disabled={attaching || sending} onChange={attach} /></label>
                 <button className="cv-send" type="submit" disabled={sending || !text.trim()} aria-label="发送">{sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}</button>
               </div>
             </div>

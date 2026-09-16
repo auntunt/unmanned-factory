@@ -269,7 +269,7 @@ def test_conversation_calc_is_deterministic_and_verifiable(app_env, monkeypatch)
     agent = _agent(client, headers, service, '报价助手')
     cid = _do_convo(client, headers, agent['id'])
     r = client.post(f'/api/v4/conversations/{cid}/calc',
-                    json={'items': [{'name': '演示', 'unit_price': 100, 'quantity': 3}], 'discount_rate': 0.9}, headers=headers)
+                    json={'items': [{'name': '演示', 'unit_price': '100', 'quantity': '3'}], 'discount_rate': '0.9'}, headers=headers)
     assert r.status_code == 200 and r.json()['total'] == '270.00' and r.json()['subtotal'] == '300.00'
     # bad input is a clear 422, not a fabricated number
     assert client.post(f'/api/v4/conversations/{cid}/calc', json={'items': []}, headers=headers).status_code == 422
@@ -308,7 +308,7 @@ def test_quote_and_summary_agents_multi_turn_with_isolation(app_env, monkeypatch
     _wait_job(service, store, _send(client, headers, q, '客户是 VIP，再算一次').json()['job_id'])
     qtexts = ' '.join(d.get('text', '') for d in (reqs[-1].reference_mount or {'documents': []})['documents'])
     assert '报价规则' in qtexts and '演示,100,3' in qtexts and '纪要方法' not in qtexts  # only its own materials
-    calc = client.post(f'/api/v4/conversations/{q}/calc', json={'items': [{'name': '演示', 'unit_price': 100, 'quantity': 3}], 'discount_rate': 0.9}, headers=headers)
+    calc = client.post(f'/api/v4/conversations/{q}/calc', json={'items': [{'name': '演示', 'unit_price': '100', 'quantity': '3'}], 'discount_rate': '0.9'}, headers=headers)
     assert calc.json()['total'] == '270.00'  # verifiable, from the given rule
     exp = client.post(f'/api/v4/conversations/{q}/export', json={'title': '报价单', 'format': 'md', 'content': '# 报价单\n总价：270.00（VIP 9 折）'}, headers=headers)
     assert exp.status_code == 201
@@ -323,3 +323,72 @@ def test_quote_and_summary_agents_multi_turn_with_isolation(app_env, monkeypatch
 
     # 两个角色的会话各自独立，互不串资料；日常聊天全程未创建开发运行。
     assert store.runs() == []
+
+
+def test_chat_loop_model_invokes_bound_calc_and_export_tools(app_env, monkeypatch):
+    """From a user message, the (fake) model invokes the session-bound tools: calc
+    returns a verifiable total, export writes a downloadable doc to THIS conversation.
+    Covers tool registration on the request, invocation, result and the download loop."""
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+
+    captured = {}
+    def model(req, emit, cancel):
+        # The tools are registered on the request, bound to this conversation + user.
+        tools = req.conversation_tools
+        assert tools is not None and tools.cid == cid
+        result = tools.calc([{'name': '演示', 'unit_price': '100', 'quantity': '3'}], '0.9')
+        captured['total'] = result['total']
+        item = tools.export('报价单', 'md', f"# 报价单\n总价：{result['total']}")
+        captured['export_id'] = item['id']
+        from factory.control.providers import ProviderResult
+        return ProviderResult(text=f"总价 {result['total']}，已生成报价单。")
+    monkeypatch.setattr(service.runner, 'run', model)
+
+    _wait_job(service, store, _send(client, headers, cid, '按 3 台演示、VIP 9 折报价').json()['job_id'])
+    assert captured['total'] == '270.00'  # deterministic tool result
+    # The exported file is downloadable from this conversation.
+    conv = client.get(f'/api/v4/conversations/{cid}', headers=headers).json()
+    assert any(e['id'] == captured['export_id'] for e in conv.get('exports', []))
+    dl = client.get(f"/api/v4/conversations/{cid}/exports/{captured['export_id']}/download", headers=headers)
+    assert dl.status_code == 200 and '270.00' in dl.text
+    assert store.runs() == []  # daily chat, no dev run
+
+
+def test_bound_tool_validates_input_and_cannot_target_another_user(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    seen = {}
+    def model(req, emit, cancel):
+        tools = req.conversation_tools
+        import pytest as _p
+        with _p.raises(ValueError):
+            tools.calc([], '1')  # invalid params rejected by the tool
+        # The binding is fixed: the tool writes only to its own conversation/actor.
+        seen['bound'] = (tools.cid, tools.actor_id)
+        from factory.control.providers import ProviderResult
+        return ProviderResult(text='ok')
+    monkeypatch.setattr(service.runner, 'run', model)
+    _wait_job(service, store, _send(client, headers, cid, '算一下').json()['job_id'])
+    assert seen['bound'][0] == cid
+
+
+def test_idempotent_replay_reports_real_state_not_fake_completed(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    monkeypatch.setattr(service.runner, 'run', lambda req, emit, cancel: (_ for _ in ()).throw(RuntimeError('模型出错')))
+    cid = _do_convo(client, headers, agent['id'])
+    key = 'stablekey-abcdef'
+    r = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '会失败的问题', 'idempotency_key': key}, headers=headers)
+    assert _wait_job(service, store, r.json()['job_id']) == 'failed'
+    # Replaying the same key reports the REAL failed state, not a fabricated 'completed'.
+    replay = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '会失败的问题', 'idempotency_key': key}, headers=headers)
+    assert replay.json()['idempotent_replay'] is True and replay.json()['status'] == 'failed'
+    # Same key, different content is rejected explicitly.
+    diff = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '换了内容', 'idempotency_key': key}, headers=headers)
+    assert diff.status_code == 409
