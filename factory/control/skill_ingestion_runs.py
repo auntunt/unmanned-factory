@@ -1,5 +1,6 @@
 """Adaptation jobs use the durable run scheduler, metered providers and independent ledger."""
 import json
+import re
 import tempfile
 from pathlib import Path
 import shutil
@@ -252,6 +253,20 @@ def call(service, rid, project, configuration, prompt, role):
                 raise ProviderCancelled('等待上游恢复时已取消') from exc
 
 
+def parse_response(text):
+    """Accept one JSON object, optionally fenced; never extract from surrounding prose."""
+    source = text.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\s*```", source, re.IGNORECASE | re.DOTALL)
+    if fence:
+        source = fence.group(1).strip()
+    def reject_constant(value):
+        raise ValueError('适配结果包含非法 JSON 常量: ' + value)
+    value = json.loads(source, parse_constant=reject_constant)
+    if not isinstance(value, dict):
+        raise ValueError('适配结果必须是 JSON 对象')
+    return value
+
+
 def _call_once(service, rid, project, configuration, prompt, role):
     profile = configuration['profiles'][role]
     budget = service._remaining_dollar_budget(rid, project)
@@ -273,7 +288,7 @@ def _call_once(service, rid, project, configuration, prompt, role):
                 tools_disabled=True, timeout_s=configuration['limits']['timeout_s'],
                 max_budget_usd=remaining),
                 lambda kind, payload: service._emit(rid, kind, payload, role), service.cancels[rid])
-        return json.loads(result.text)
+        return parse_response(result.text)
     finally:
         service._emit(rid, 'usage.recorded', {'profile': role, **profile, 'call_id': call_id,
             'max_budget_usd': remaining, 'cost_usd': getattr(result, 'cost_usd', None),

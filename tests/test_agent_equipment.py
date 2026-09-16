@@ -361,3 +361,28 @@ def test_ingestion_retry_limit_and_cancellable_wait(monkeypatch):
     with pytest.raises(ProviderCancelled):
         ingestion.call(svc, 'r', {}, {}, '', 'standard')
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize('fence', ['', '```json\n{}\n```', '```JSON\n{}\n```', '```\n{}\n```'])
+def test_ingestion_fenced_response_reaches_unsigned_review(app_env, monkeypatch, fence):
+    client, store, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch)
+    original = service.runner.run
+    def fenced(request, emit, cancel=None):
+        result = original(request, emit, cancel)
+        return ProviderResult(fence.format(result.text) if fence else result.text, cost_usd=.01)
+    monkeypatch.setattr(service.runner, 'run', fenced)
+    response = client.post(f"/api/v4/agents/{agent['id']}/abilities", headers=headers,
+                          files={'file': ('external.zip', package())})
+    record = response.json()['ingestion']
+    run = wait_state(store, record['run_id'], {'needs_human'})
+    assert run['artifacts']['verification']['verdict'] == 'pass'
+    assert service.skill_ingestions.get(record['id'])['status'] == 'review'
+    assert service.agent_manifests.get(agent['id'])['skills'] == []
+
+
+@pytest.mark.parametrize('text', ['前言 {}', '```json\n{}\n```\n尾注', '```json\n{', '[]', '{"x": NaN}'])
+def test_ingestion_json_rejects_prose_truncation_and_invalid_values(text):
+    from factory.control.skill_ingestion_runs import parse_response
+    with pytest.raises(ValueError):
+        parse_response(text)
