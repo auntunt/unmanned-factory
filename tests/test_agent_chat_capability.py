@@ -392,3 +392,155 @@ def test_idempotent_replay_reports_real_state_not_fake_completed(app_env, monkey
     # Same key, different content is rejected explicitly.
     diff = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '换了内容', 'idempotency_key': key}, headers=headers)
     assert diff.status_code == 409
+
+
+class _ResultMessage:
+    is_error = False
+    result = 'done'
+    session_id = 'exec-test'
+    total_cost_usd = 0
+
+
+def _capture_req(client, headers, service, monkeypatch, cid):
+    """Drive one real chat turn and capture the ProviderRequest the route builds,
+    so executor tests run against a genuinely bound ConversationTools."""
+    captured = {}
+    def grab(req, emit, cancel):
+        captured['req'] = req
+        return ProviderResult(text='ok')
+    monkeypatch.setattr(service.runner, 'run', grab)
+    _wait_job(service, None, _send(client, headers, cid, '算一下').json()['job_id'])
+    return captured['req']
+
+
+def test_executor_registers_and_gates_bound_session_tools(app_env, monkeypatch):
+    """Executor layer: the session MCP server is registered, and the PreToolUse hook
+    plus can_use_tool allow calc/export ONLY because this request is bound; unknown
+    MCP tools are denied. This is the gate that rejected calc before the fix."""
+    import pytest
+    sdk = pytest.importorskip('claude_agent_sdk')
+    from factory.control.providers import _run_claude
+    from factory.control.conversation_tools import TOOL_NAMES
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    req = _capture_req(client, headers, service, monkeypatch, cid)
+    assert req.conversation_tools is not None
+
+    seen = {}
+    async def query(*, prompt, options):
+        assert 'session' in options.mcp_servers                       # registration
+        assert set(TOOL_NAMES) <= set(options.allowed_tools)
+        hook = options.hooks['PreToolUse'][0].hooks[0]
+        allow_calc = await hook({'tool_name': 'mcp__session__calc', 'tool_input': {}}, None, {})
+        allow_export = await hook({'tool_name': 'mcp__session__export', 'tool_input': {}}, None, {})
+        deny_unknown = await hook({'tool_name': 'mcp__evil__do', 'tool_input': {}}, None, {})
+        assert allow_calc['hookSpecificOutput']['permissionDecision'] == 'allow'
+        assert allow_export['hookSpecificOutput']['permissionDecision'] == 'allow'
+        assert deny_unknown['hookSpecificOutput']['permissionDecision'] == 'deny'
+        can = await options.can_use_tool('mcp__session__calc', {}, {})           # can_use_tool
+        assert type(can).__name__ == 'PermissionResultAllow'
+        cannot = await options.can_use_tool('mcp__evil__do', {}, {})
+        assert type(cannot).__name__ == 'PermissionResultDeny'
+        seen['ok'] = True
+        yield _ResultMessage()
+    monkeypatch.setattr(sdk, 'query', query)
+    result = _run_claude(req, lambda *e: None)
+    assert result.text == 'done' and seen.get('ok')
+
+
+def test_executor_denies_session_tools_when_request_is_unbound(app_env, monkeypatch):
+    """Same executor, no binding: the session server is not registered and the gate
+    denies calc/export. The whitelist never globally allows MCP tools."""
+    import dataclasses
+    import pytest
+    sdk = pytest.importorskip('claude_agent_sdk')
+    from factory.control.providers import _run_claude
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    bound = _capture_req(client, headers, service, monkeypatch, cid)
+    unbound = dataclasses.replace(bound, conversation_tools=None)
+
+    seen = {}
+    async def query(*, prompt, options):
+        assert 'session' not in options.mcp_servers
+        hook = options.hooks['PreToolUse'][0].hooks[0]
+        denied = await hook({'tool_name': 'mcp__session__calc', 'tool_input': {}}, None, {})
+        assert denied['hookSpecificOutput']['permissionDecision'] == 'deny'
+        seen['ok'] = True
+        yield _ResultMessage()
+    monkeypatch.setattr(sdk, 'query', query)
+    _run_claude(unbound, lambda *e: None)
+    assert seen.get('ok')
+
+
+def test_real_session_mcp_server_calc_and_export_handlers(app_env, monkeypatch):
+    """The actual @tool handlers over the real SDK MCP protocol: calc returns a
+    verifiable total, invalid params return is_error, and export writes a
+    downloadable document to THIS conversation (permission enforced by binding)."""
+    import asyncio
+    import json
+    import pytest
+    pytest.importorskip('claude_agent_sdk')
+    from factory.control import conversation_tools as ct
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    req = _capture_req(client, headers, service, monkeypatch, cid)
+    tools = req.conversation_tools
+    events = []
+    server = ct.create_server(tools, lambda *e: events.append(e))
+    assert server['name'] == 'session'
+
+    export_id = {}
+    async def roundtrip():
+        import anyio
+        from mcp import ClientSession
+        csend, sread = anyio.create_memory_object_stream(10)
+        ssend, cread = anyio.create_memory_object_stream(10)
+        instance = server['instance']
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(instance.run, sread, ssend, instance.create_initialization_options())
+            async with ClientSession(cread, csend) as session:
+                await session.initialize()
+                inventory = await session.list_tools()
+                assert {t.name for t in inventory.tools} == {'calc', 'export'}
+                ok = await session.call_tool('calc', {'items': [{'name': '演示', 'unit_price': '100', 'quantity': '3'}], 'discount_rate': '0.9'})
+                assert not ok.is_error
+                assert json.loads(ok.content[0].text)['total'] == '270.00'          # verifiable result
+                bad = await session.call_tool('calc', {'items': []})
+                assert bad.is_error                                                   # param validation
+                wrote = await session.call_tool('export', {'title': '报价单', 'format': 'md', 'content': '# 报价单\n总价：270.00'})
+                assert not wrote.is_error
+                export_id['id'] = json.loads(wrote.content[0].text.split('：', 1)[1])['id']
+            tasks.cancel_scope.cancel()
+    asyncio.run(roundtrip())
+    # The document the handler wrote is downloadable from this conversation.
+    dl = client.get(f"/api/v4/conversations/{cid}/exports/{export_id['id']}/download", headers=headers)
+    assert dl.status_code == 200 and '270.00' in dl.text
+    assert any(e[0] == 'session.calc' for e in events)
+    assert any(e[0] == 'session.export' for e in events)
+
+
+def test_tools_disabled_with_conversation_tools_is_rejected(app_env):
+    """A no-tools request must not silently keep the session tools; the executor
+    rejects the combination instead of only guarding the system_prompt type."""
+    import pytest
+    from factory.control.providers import _run_claude, ProviderRequest, ProviderError
+    with pytest.raises(ProviderError):
+        _run_claude(ProviderRequest('claude', 'test', 'goal', '/tmp', read_only=True,
+                                     tools_disabled=True, conversation_tools=object()), lambda *e: None)
+
+
+def test_codex_executor_rejects_unconsumed_session_tools(app_env):
+    """The Codex executor does not consume conversation_tools; it must fail loudly
+    rather than silently drop the calc/export capability."""
+    import pytest
+    from factory.control.providers import _run_codex, ProviderRequest, ProviderError
+    with pytest.raises(ProviderError):
+        _run_codex(ProviderRequest('codex', 'test', 'goal', '/tmp', read_only=True,
+                                   conversation_tools=object()), lambda *e: None)
