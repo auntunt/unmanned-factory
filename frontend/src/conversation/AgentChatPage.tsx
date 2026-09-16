@@ -27,6 +27,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
   const [error, setError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  const submitKey = useRef<string | null>(null)
 
   useEffect(() => {
     if (!aid) return
@@ -72,21 +73,25 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
     event.preventDefault()
     if (!text.trim() || sending || !aid) return
     setSending(true); setError(null)
+    // A stable key per composed message: reused on retry so a duplicate submit is
+    // recognised server-side and never re-answered; reset only after it lands.
+    if (!submitKey.current) submitKey.current = crypto.randomUUID()
     try {
       let current = conv
       if (!current) {
         current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null } })
         setHistory(h => [current as Conv, ...h])
       }
-      const raw = await request<{ conversation?: Conv; run?: unknown; needs_project?: boolean }>(`${base}/conversations/${encodeURIComponent(current.id)}/messages`, { method: 'POST', csrfToken, onUnauthorized, body: { content: text.trim() } })
+      const raw = await request<{ conversation?: Conv; run?: unknown; needs_project?: boolean; busy?: boolean; message?: string }>(`${base}/conversations/${encodeURIComponent(current.id)}/messages`, { method: 'POST', csrfToken, onUnauthorized, body: { content: text.trim(), idempotency_key: submitKey.current } })
+      if (raw.conversation) { setConv(raw.conversation); setHistory(h => [raw.conversation as Conv, ...h.filter(x => x.id !== (raw.conversation as Conv).id)]) }
+      if (raw.busy) { setError(raw.message || '上一条还在回答，请稍候再发送。'); return }  // keep draft + key
       const res = unwrapAgentMessageResponse(raw as never)
       if (res.needsProject) setError('这个职能体还没有配置可用模型，暂时无法回答。请在维护里配置模型后再聊。')
-      if (res.conversation) { setConv(res.conversation as unknown as Conv); setHistory(h => [res.conversation as unknown as Conv, ...h.filter(x => x.id !== (res.conversation as unknown as Conv).id)]) }
-      setText('')
+      submitKey.current = null; setText('')
     } catch (cause) { setError(errorText(cause)) } finally { setSending(false) }
   }
 
-  const startNew = () => { setConv(null); setText(''); setError(null) }
+  const startNew = () => { setConv(null); setText(''); setError(null); submitKey.current = null }
   const openConv = async (id: string) => {
     setError(null)
     try { setConv(await request<Conv>(`${base}/conversations/${encodeURIComponent(id)}`, { onUnauthorized })) } catch (cause) { setError(errorText(cause)) }

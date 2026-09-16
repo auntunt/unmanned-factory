@@ -15,7 +15,9 @@ class AgentCreate(Body):
     instructions:str=Field(default='',max_length=30000); model_settings:dict|None=None
     tool_scope:list[str]=Field(default_factory=list); acceptance:list[str]=Field(default_factory=list); delivery:dict|None=None
 class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); project_id:str|None=None
-class Message(Body): content:str=Field(min_length=1,max_length=50000)
+class Message(Body):
+    content:str=Field(min_length=1,max_length=50000)
+    idempotency_key:str|None=Field(default=None,min_length=8,max_length=100,pattern=r'^[A-Za-z0-9_-]+$')
 class DraftPatch(Body): expected_revision:int=Field(ge=0); patch:dict
 class Apply(Body): expected_revision:int=Field(ge=0); idempotency_key:str|None=None
 class Rollback(Body): version:int=Field(ge=1)
@@ -206,29 +208,52 @@ def router(store, service):
             raise Conflict('请先提交需要整理的资料')
         return process_message(cid, Message(content=content), request, retry=True)
 
+    def _chat_active_job(c):
+        """The still-running answer job for a no-project chat, if any."""
+        for m in reversed(c['messages']):
+            if m.get('role')=='assistant' and m.get('job_id') and m.get('status') in ('pending','running','cancel_requested'):
+                try: st=service.maintenance_status(m['job_id'])
+                except KeyError: st={'status':'interrupted'}
+                if st.get('status') in ('pending','running','cancel_requested'):
+                    return m['job_id'], st['status']
+                return None
+        return None
+
     def process_message(cid, body, request, retry=False):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
+        key=getattr(body,'idempotency_key',None)
+        # No-project daily chat: distinguish a duplicate submit from a genuinely new
+        # message BEFORE persisting anything.
+        if not retry and c['mode']=='do' and not c.get('project_id'):
+            if key:
+                # Same client key already recorded → idempotent replay: never re-save or re-answer.
+                for m in c['messages']:
+                    if m.get('role')=='user' and m.get('client_key')==key:
+                        active=_chat_active_job(c)
+                        return {'conversation':agents.conversation(cid),'run':None,
+                                'job_id':active[0] if active else None,
+                                'status':active[1] if active else 'completed','idempotent_replay':True}
+            active=_chat_active_job(c)
+            if active:
+                # A different message arrived while answering: reject clearly and keep the
+                # draft on the client; do not persist it or pretend the old job handled it.
+                return {'conversation':agents.conversation(cid),'run':None,'busy':True,
+                        'job_id':active[0],'status':active[1],
+                        'message':'上一条还在回答，请等它完成后再发送。'}
         prior_run = store.get(c['run_id']) if c.get('run_id') else None
         queued = (c['mode'] == 'do' and prior_run and prior_run['status'] in
                   ('received','planning','queued','running','verifying','publishing','ready_for_review','published'))
         if not retry:
-            agents.append_message(cid, 'user', body.content, **({'feedback_status': 'pending'} if queued else {}))
+            extra = {'feedback_status': 'pending'} if queued else {}
+            if key: extra['client_key']=key
+            agents.append_message(cid, 'user', body.content, **extra)
         c=agents.conversation(cid)
         if c['mode']=='do':
             if not c.get('project_id'):
                 # A general question is answered by the real model first, reading only
                 # this role's frozen skills and granted materials; an execution request
                 # can then be associated with a project.
-                # One answer in flight per conversation: a duplicate submit or a concurrent
-                # send while the model is still answering reuses the pending job.
-                for m in reversed(c['messages'][:-1]):
-                    if m.get('role')=='assistant' and m.get('job_id') and m.get('status') in ('pending','running','cancel_requested'):
-                        try: st=service.maintenance_status(m['job_id'])
-                        except KeyError: st={'status':'interrupted'}
-                        if st.get('status') in ('pending','running','cancel_requested'):
-                            return {'conversation':agents.conversation(cid),'run':None,'job_id':m['job_id'],'status':st['status']}
-                        break
                 version=agents.version(c['agent_id']); cfg=service.runtime_settings.get()
                 # Freeze the capability version to this conversation on first use; reuse it
                 # afterwards so a later role update never rewrites an existing chat.

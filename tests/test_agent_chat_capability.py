@@ -109,24 +109,93 @@ def test_role_update_does_not_change_an_existing_conversation(app_env, monkeypat
     assert agents.conversation_snapshot(cid_new)['version'] == 2
 
 
-def test_duplicate_send_while_answering_reuses_the_pending_job(app_env, monkeypatch):
+def test_new_message_while_answering_is_rejected_and_draft_kept(app_env, monkeypatch):
     client, store, service, repo = app_env
     headers = login(client)
     agent = _agent(client, headers, service, '报价助手')
     import threading
     release = threading.Event()
     def slow(req, emit, cancel):
-        release.wait(2)
-        return ProviderResult(text='ok')
+        release.wait(2); return ProviderResult(text='ok')
     monkeypatch.setattr(service.runner, 'run', slow)
     cid = _do_convo(client, headers, agent['id'])
     a = _send(client, headers, cid, '问一次')
     assert a.status_code == 201 and a.json()['status'] == 'pending'
-    b = _send(client, headers, cid, '重复提交')
-    # Same in-flight job is returned, not a second answer or a 409.
-    assert b.status_code == 201 and b.json()['job_id'] == a.json()['job_id']
-    release.set()
-    _wait_job(service, store, a.json()['job_id'])
+    before = len(AgentStore(store).conversation(cid)['messages'])
+    b = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '这是一条新问题'}, headers=headers)
+    # A different message during answering is rejected (busy), NOT persisted and NOT
+    # answered by the old job.
+    assert b.status_code == 201 and b.json().get('busy') is True
+    msgs = AgentStore(store).conversation(cid)['messages']
+    assert len(msgs) == before and all(m.get('content') != '这是一条新问题' for m in msgs)
+    release.set(); _wait_job(service, store, a.json()['job_id'])
+
+
+def test_same_idempotency_key_never_double_saves_or_double_answers(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    calls = []
+    def once(req, emit, cancel):
+        calls.append(1); return ProviderResult(text='唯一回答')
+    monkeypatch.setattr(service.runner, 'run', once)
+    cid = _do_convo(client, headers, agent['id'])
+    key = 'clientkey-123456'
+    first = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '报价问题', 'idempotency_key': key}, headers=headers)
+    assert first.status_code == 201 and first.json()['status'] == 'pending'
+    _wait_job(service, store, first.json()['job_id'])
+    # Retry the SAME request after completion: idempotent replay, no re-save, no re-answer.
+    replay = client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '报价问题', 'idempotency_key': key}, headers=headers)
+    assert replay.status_code == 201 and replay.json().get('idempotent_replay') is True
+    user_msgs = [m for m in AgentStore(store).conversation(cid)['messages'] if m['role'] == 'user']
+    assert sum(m.get('content') == '报价问题' for m in user_msgs) == 1
+    assert len(calls) == 1
+
+
+def test_cross_user_and_cross_conversation_access_denied(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    _capture(monkeypatch, service)
+    cid = _do_convo(client, headers, agent['id'])
+    # A second, non-admin member must not read or post to another user's conversation.
+    client.app.state.auth.create_user('mallory', 'another-long-password', role='member')
+    other = client.post('/api/auth/login', json={'username': 'mallory', 'password': 'another-long-password'}, headers={'Origin': 'http://testserver'})
+    mh = {'Origin': 'http://testserver', 'X-CSRF-Token': other.json()['csrf_token']}
+    assert client.get(f'/api/v4/conversations/{cid}', headers=mh).status_code == 403
+    assert client.post(f'/api/v4/conversations/{cid}/messages', json={'content': '偷看'}, headers=mh).status_code == 403
+
+
+def test_mount_failure_does_not_call_the_model(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手', skill=_skill())
+    called = []
+    monkeypatch.setattr(service.runner, 'run', lambda req, emit, cancel: called.append(1) or ProviderResult(text='x'))
+    import factory.control.mounts as mounts
+    monkeypatch.setattr(mounts, 'compile_mounts', lambda *a, **k: (_ for _ in ()).throw(ValueError('资料损坏')))
+    cid = _do_convo(client, headers, agent['id'])
+    r = _send(client, headers, cid, '报价问题')
+    # Fail-closed: a failed assistant message, and the model was never invoked.
+    assert r.status_code == 201
+    msgs = AgentStore(store).conversation(cid)['messages']
+    assert any(m['role'] == 'assistant' and m.get('status') == 'failed' for m in msgs)
+    assert called == []
+
+
+def test_conversation_snapshot_hidden_in_list_detail_and_message(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手', skill=_skill())
+    _capture(monkeypatch, service)
+    cid = _do_convo(client, headers, agent['id'])
+    msg = _send(client, headers, cid, '报价问题'); _wait_job(service, store, msg.json()['job_id'])
+    # The internal frozen snapshot leaks in none of the three conversation responses.
+    lst = client.get(f"/api/v4/agents/{agent['id']}/conversations", headers=headers).json()['conversations']
+    assert lst and all('agent_snapshot' not in c for c in lst)
+    detail = client.get(f'/api/v4/conversations/{cid}', headers=headers).json()
+    assert 'agent_snapshot' not in detail
+    assert 'agent_snapshot' not in msg.json()['conversation']
 
 
 def test_chat_answer_can_be_cancelled_then_retried(app_env, monkeypatch):

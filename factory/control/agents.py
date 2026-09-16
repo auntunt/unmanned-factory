@@ -461,11 +461,15 @@ class AgentStore:
             db.execute("INSERT INTO agent_versions VALUES (?,?,?,?,?)", (data["id"], aid, ver, _json(data), at)); agent.update(active_version=ver, updated_at=at); db.execute("UPDATE agents SET data=? WHERE id=?", (_json(agent), aid))
             db.execute("DELETE FROM agent_drafts WHERE agent_id=?", (aid,))
         return {**agent, "version": data}
+    @staticmethod
+    def _public_conversation(c):
+        # The frozen capability snapshot is internal freeze data, never for the client.
+        return {k: v for k, v in c.items() if k != 'agent_snapshot'}
+
     def conversation(self, cid):
         c = self._row("agent_conversations", "id", cid)
         c['pending_feedback_count'] = sum(m.get('feedback_status') == 'pending' for m in c['messages'])
-        # The frozen capability snapshot is internal freeze data, not for the client.
-        return {k: v for k, v in c.items() if k != 'agent_snapshot'}
+        return self._public_conversation(c)
 
     def conversation_snapshot(self, cid):
         """The capability version frozen to this conversation, or None if not yet frozen."""
@@ -634,7 +638,7 @@ class AgentStore:
 
     def conversations(self, aid):
         self.get(aid)
-        with self.store.connect() as db: return [self._decode(r) for r in db.execute("SELECT data FROM agent_conversations WHERE agent_id=? ORDER BY rowid DESC", (aid,))]
+        with self.store.connect() as db: return [self._public_conversation(self._decode(r)) for r in db.execute("SELECT data FROM agent_conversations WHERE agent_id=? ORDER BY rowid DESC", (aid,))]
     def create_conversation(self, aid, mode, project_id=None, actor_id=None):
         if mode not in {"do", "maintain"}: raise ValueError("会话模式无效")
         with self.store.connect() as db:
