@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { errorText, formatDate, type PageProps } from '../workbench/ui'
 import Icon, { CategoryBadge, packMark } from '../workbench/Icon'
@@ -17,6 +17,8 @@ const base = '/api/v4'
  *  维护职能体在单独入口。 */
 export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) {
   const { agentId } = useParams()
+  const [params] = useSearchParams()
+  const targetCid = params.get('cid')
   const setWorkTitle = useWorkTitle()
   const aid = agentId ? encodeURIComponent(agentId) : ''
   const [agent, setAgent] = useState<Agent | null>(null)
@@ -38,11 +40,16 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
       .then(r => {
         const rows = (Array.isArray(r) ? r : r.conversations || []).filter(x => x.mode === 'do')
         setHistory(rows)
-        if (rows[0]) return request<Conv>(`${base}/conversations/${encodeURIComponent(rows[0].id)}`, { signal: c.signal, onUnauthorized }).then(setConv)
+        // Open the conversation named in the URL (?cid=…) so a refresh or a second
+        // tab restores that exact target, not just the role's latest chat. The GET
+        // itself enforces ownership (403 for another user's conversation). Fall back
+        // to the most recent only when no cid is pinned.
+        const open = targetCid || rows[0]?.id
+        if (open) return request<Conv>(`${base}/conversations/${encodeURIComponent(open)}`, { signal: c.signal, onUnauthorized }).then(setConv)
       })
       .catch(cause => { if (!c.signal.aborted) setError(errorText(cause)) })
     return () => c.abort()
-  }, [aid, onUnauthorized])
+  }, [aid, targetCid, onUnauthorized])
 
   useEffect(() => { setWorkTitle(agent?.name || null); return () => setWorkTitle(null) }, [agent?.name, setWorkTitle])
 

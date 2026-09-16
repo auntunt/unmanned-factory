@@ -15,9 +15,12 @@ class AgentCreate(Body):
     instructions:str=Field(default='',max_length=30000); model_settings:dict|None=None
     tool_scope:list[str]=Field(default_factory=list); acceptance:list[str]=Field(default_factory=list); delivery:dict|None=None
 class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); project_id:str|None=None
+class RouteAttachment(Body):
+    name:str=Field(default='',max_length=300); size:int|None=None; type:str|None=None
 class RouteRequest(Body):
     text:str=Field(default='',max_length=50000)
     agent_id:str|None=None
+    attachments:list[RouteAttachment]=Field(default_factory=list)
 class Message(Body):
     content:str=Field(min_length=1,max_length=50000)
     idempotency_key:str|None=Field(default=None,min_length=8,max_length=100,pattern=r'^[A-Za-z0-9_-]+$')
@@ -179,14 +182,25 @@ def router(store, service):
     def list_agents(): return {'agents':agents.list()}
     @api.post('/route')
     def route_entry(body:RouteRequest,request:Request):
-        # Server-side entry routing. The actor and the available roles come from the
-        # server, never from the client; this endpoint creates nothing — it only
-        # decides. The MFD role is reported honestly as not-yet-executable because no
-        # converter is wired (only the fidelity check exists).
+        # Server-side entry routing. The actor, the available roles and each role's
+        # real chat capability come from the server, never from the client; this
+        # endpoint creates nothing — it only decides. A role is chat-capable only when
+        # its EFFECTIVE provider is claude (the one that consumes the session tools);
+        # a codex/dsh-configured role is not auto-routed into a chat that would fail.
+        # The MFD role is reported honestly as not-yet-executable (no converter).
         from factory.control import routing
         mfd_id=uuid.uuid5(uuid.NAMESPACE_URL,'webuddy:agent-pack:mfd-xml-conversion').hex
-        return routing.classify(body.text,agents.list(),explicit_agent_id=body.agent_id,
-            actor=actor(request),mfd_agent_id=mfd_id,mfd_executable=False)
+        planner=service.runtime_settings.get()['profiles'].get('planner',{})
+        def chat_provider(a):
+            try: ver=agents.version(a['id'])
+            except Exception: return planner.get('provider')
+            settings=(ver.get('model_settings') or {}).get('default')
+            if not isinstance(settings,dict) or not settings.get('model'): settings=planner
+            return settings.get('provider')
+        annotated=[{**a,'chat_capable':chat_provider(a)=='claude'} for a in agents.list()]
+        return routing.classify(body.text,annotated,explicit_agent_id=body.agent_id,
+            actor=actor(request),mfd_agent_id=mfd_id,mfd_executable=False,
+            attachments=[att.model_dump() for att in body.attachments])
     @api.post('/agents',status_code=201)
     def create(body:AgentCreate,request:Request):
         data=body.model_dump(); data={k:v for k,v in data.items() if v is not None}

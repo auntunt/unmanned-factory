@@ -15,8 +15,10 @@ type Decision = {
   kind: 'development' | 'agent_chat' | 'clarify' | 'unavailable'
   agent_id?: string; agent_name?: string; reason?: string; mode_label?: string
   question?: string; roles?: Array<{ agent_id: string; name: string }>
-  offer_development?: boolean; missing?: string[]; detail?: string
+  offer_development?: boolean; missing?: string[]; detail?: string; attach?: boolean
 }
+type RouteState = { goal: string; agentId: string; cid: string; key: string; attached: string[] }
+const ROUTE_KEY = 'webuddy:start:route'
 
 export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps) {
   const navigate = useNavigate()
@@ -53,12 +55,33 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
     navigate(`/runs/${encodeURIComponent(String(run.id))}`)
   }
 
-  const openAgentChat = async (agentId: string) => {
+  const openAgentChat = async (agentId: string, attach?: boolean) => {
     setStage('正在打开对话…')
-    const conv = await request<{ id: string }>(`/api/v4/agents/${encodeURIComponent(agentId)}/conversations`, { ...options(), body: { mode: 'do', project_id: null } })
-    await request(`/api/v4/conversations/${encodeURIComponent(conv.id)}/messages`, { ...options(), body: { content: goal.trim(), idempotency_key: attempt.current.runKey } })
-    try { localStorage.removeItem('webuddy:start:goal') } catch { /* optional */ }
-    navigate(`/agents/${encodeURIComponent(agentId)}/chat`)
+    // Resume this exact submission across retries: reuse the same conversation,
+    // idempotency key and already-uploaded attachments so a lost response never
+    // spawns a duplicate conversation or model task. The record is cleared only on
+    // success, or replaced when the request text is edited (a new key).
+    let saved: RouteState | null = null
+    try { const raw = localStorage.getItem(ROUTE_KEY); if (raw) { const p = JSON.parse(raw) as RouteState; if (p.goal === goal.trim() && p.agentId === agentId && p.cid) saved = p } } catch { /* optional */ }
+    const key = saved?.key || attempt.current.runKey
+    let cid = saved?.cid || ''
+    let attached = saved?.attached || []
+    const persist = () => { try { localStorage.setItem(ROUTE_KEY, JSON.stringify({ goal: goal.trim(), agentId, cid, key, attached })) } catch { /* optional */ } }
+    if (!cid) {
+      const conv = await request<{ id: string }>(`/api/v4/agents/${encodeURIComponent(agentId)}/conversations`, { ...options(), body: { mode: 'do', project_id: null } })
+      cid = conv.id; persist()
+    }
+    if (attach && files.length) {
+      for (const file of files) {
+        if (attached.includes(file.name)) continue
+        const body = new FormData(); body.append('file', file)
+        await request(`/api/v4/conversations/${encodeURIComponent(cid)}/attachments`, { ...options(), body })
+        attached = [...attached, file.name]; persist()
+      }
+    }
+    await request(`/api/v4/conversations/${encodeURIComponent(cid)}/messages`, { ...options(), body: { content: goal.trim(), idempotency_key: key } })
+    try { localStorage.removeItem('webuddy:start:goal'); localStorage.removeItem(ROUTE_KEY) } catch { /* optional */ }
+    navigate(`/agents/${encodeURIComponent(agentId)}/chat?cid=${encodeURIComponent(cid)}`)
   }
 
   const submit = async (event?: FormEvent, override?: { agentId?: string; forceDev?: boolean }) => {
@@ -69,13 +92,15 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
     if (problem) { setError(problem); return }
     lock.current = true; setBusy(true); setError(null); setDecision(null)
     try {
-      // Files are project material and a resumed attempt is already a project, so
-      // both go straight to development. Text-only entries are routed by the server.
-      if (files.length || override?.forceDev || attempt.current.project) { await runDevelopment(); return }
+      // A forced choice or an already-created project continues development directly.
+      // Everything else — including any attached files — is routed by the server
+      // first; files become a project ONLY when the server decides it is development.
+      if (override?.forceDev || attempt.current.project) { await runDevelopment(); return }
       setStage('正在判断处理方式…')
-      const route = await request<Decision>('/api/v4/route', { ...options(), body: { text: goal.trim(), agent_id: override?.agentId ?? null } })
+      const attachments = files.map(file => ({ name: file.name, size: file.size, type: file.type }))
+      const route = await request<Decision>('/api/v4/route', { ...options(), body: { text: goal.trim(), agent_id: override?.agentId ?? null, attachments } })
       if (route.kind === 'development') { await runDevelopment(); return }
-      if (route.kind === 'agent_chat' && route.agent_id) { await openAgentChat(route.agent_id); return }
+      if (route.kind === 'agent_chat' && route.agent_id) { await openAgentChat(route.agent_id, route.attach); return }
       setDecision(route) // clarify | unavailable — shown inline, goal + materials kept
     } catch (cause) { setError(errorText(cause)) } finally { lock.current = false; setBusy(false) }
   }
@@ -93,7 +118,7 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
         <div className={`cv-composer${focused ? ' is-focused' : ''}`}>
           <textarea required maxLength={50000} rows={3} disabled={locked}
             value={goal} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-            onChange={event => { setGoal(event.target.value); setDecision(null); try { localStorage.setItem('webuddy:start:goal', event.target.value) } catch { /* optional */ } }}
+            onChange={event => { setGoal(event.target.value); setDecision(null); attempt.current.runKey = crypto.randomUUID(); try { localStorage.setItem('webuddy:start:goal', event.target.value); localStorage.removeItem(ROUTE_KEY) } catch { /* optional */ } }}
             placeholder="描述你想做的产品，或让某个助手处理日常事务…" aria-label="需求" />
           {files.length > 0 && (
             <div className="cv-filechips">

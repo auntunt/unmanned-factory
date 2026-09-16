@@ -49,3 +49,20 @@ it('recovers the latest conversation on load (refresh), showing prior turns', as
   expect(await screen.findByText('上次的问题')).toBeTruthy()
   expect(screen.getByText('上次的回答')).toBeTruthy()
 })
+
+it('opens the exact conversation named in ?cid=, not the latest, for refresh and multi-tab', async () => {
+  const rows = [{ id: 'c-latest', agent_id: 'a1', mode: 'do', messages: [] }, { id: 'c-target', agent_id: 'a1', mode: 'do', messages: [] }]
+  api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    if (url === '/api/v4/agents/a1' && !opts?.method) return agent as never
+    if (url === '/api/v4/agents/a1/conversations' && !opts?.method) return { conversations: rows } as never
+    if (url === '/api/v4/conversations/c-target' && !opts?.method) return { id: 'c-target', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'm1', role: 'user', content: '指定会话内容' }], run_id: null } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/agents/a1/chat?cid=c-target']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/agents/:agentId/chat" element={<AgentChatPage csrfToken="x" onUnauthorized={noop} user={{ id: 1, username: 'owner', role: 'admin' }} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('指定会话内容')
+  const gets = api.mock.calls.filter(([, o]) => !(o as { method?: string })?.method).map(([u]) => u)
+  expect(gets).toContain('/api/v4/conversations/c-target')
+  expect(gets).not.toContain('/api/v4/conversations/c-latest') // did not fall back to the latest
+})
