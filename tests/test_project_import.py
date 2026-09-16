@@ -125,14 +125,19 @@ def test_mac_metadata_does_not_prevent_wrapper_detection(app_env):
     assert response.json()['import_summary']['file_count'] == 1
 
 
-def test_imported_cli_is_maintained_and_functionally_verified(app_env, monkeypatch):
+@pytest.mark.parametrize('input_kind', ['zip', 'files'])
+def test_imported_cli_is_maintained_and_functionally_verified(app_env, monkeypatch, input_kind):
     import sys
     from factory.control.providers import ProviderResult
     from tests.test_control_app import wait_state
     client, store, service, _ = app_env
     headers = login(client)
-    response = post(client, headers, archive([('cli/main.py', 'import sys\nprint(int(sys.argv[1]) * 2)\n'),
-        ('cli/README.md', 'CLI: python main.py NUMBER. Multiply input by two.')]))
+    files = [('main.py', 'import sys\nprint(int(sys.argv[1]) * 2)\n'),
+             ('README.md', 'CLI: python main.py NUMBER. Multiply input by two.')]
+    response = (post(client, headers, archive([('cli/' + name, body) for name, body in files]))
+        if input_kind == 'zip' else client.post('/api/v2/projects/import-files', headers=headers,
+            data={'name': '转换项目', 'idempotency_key': 'functional-files'},
+            files=[('files', (name, body.encode())) for name, body in files]))
     assert response.status_code == 201, response.text
     project = response.json()['project']
     # Explicitly configure a genuine functional assertion as the maintenance contract.
@@ -204,3 +209,50 @@ def test_concurrent_import_retry_creates_single_baseline(app_env):
         results = list(pool.map(create, range(2)))
     assert results[0]['project']['id'] == results[1]['project']['id']
     assert len(store.projects()) == 1 and len(list(repo.parent.glob('workspace-*'))) == 1
+
+
+def test_sample_files_are_byte_exact_tracked_and_agent_bound(app_env):
+    from tests.test_project_assistants import setup_project
+    client, store, service, headers, _, helpers, agent = setup_project(app_env)
+    files = [('files', ('sample.custom', b'\x00\xff\x01format')),
+             ('files', ('notes.txt', '只做格式转换'.encode())),
+             ('files', ('never-run.sh', b'exit 42'))]
+    data = {'name': '格式转换资料', 'idempotency_key': 'samples-one', 'agent_id': agent['id']}
+    response = client.post('/api/v2/projects/import-files', headers=headers, data=data, files=files)
+    assert response.status_code == 201, response.text
+    p = response.json()['project']; root = Path(p['workspace'])
+    for _, (name, raw) in files:
+        assert (root / name).read_bytes() == raw
+    assert helpers.binding(p['id'])['agent_id'] == agent['id']
+    assert p['budget_usd'] is None
+    assert not store.all_runs()  # Upload never runs code or a model.
+    assert subprocess.check_output(['git', 'show', 'HEAD:sample.custom'], cwd=root) == b'\x00\xff\x01format'
+    again = client.post('/api/v2/projects/import-files', headers=headers, data=data, files=files)
+    assert again.json()['project']['id'] == p['id']
+    changed = client.post('/api/v2/projects/import-files', headers=headers, data=data,
+                         files=[('files', ('sample.custom', b'changed'))])
+    assert changed.status_code == 409
+
+
+@pytest.mark.parametrize('names', [['../escape'], ['.env'], ['A.bin', 'a.bin']])
+def test_sample_files_reject_unsafe_or_conflicting_names(app_env, names):
+    client, store, _, _ = app_env
+    response = client.post('/api/v2/projects/import-files', headers=login(client),
+        data={'name': '资料', 'idempotency_key': 'reject-samples'},
+        files=[('files', (name, b'data')) for name in names])
+    assert response.status_code == 400, response.text
+    assert not store.projects()
+
+
+def test_sample_files_authorization_and_size_limit(app_env, monkeypatch):
+    client, store, _, _ = app_env
+    data = {'name': '资料', 'idempotency_key': 'auth-samples'}
+    files = [('files', ('sample.bin', b'data'))]
+    assert client.post('/api/v2/projects/import-files', data=data, files=files,
+                       headers={'Origin': 'http://testserver'}).status_code == 401
+    headers = login(client)
+    assert client.post('/api/v2/projects/import-files', data=data, files=files,
+                       headers={'Origin': 'http://testserver'}).status_code == 403
+    monkeypatch.setattr(project_import, 'MAX_ARCHIVE', 65538)
+    assert client.post('/api/v2/projects/import-files', data=data, files=files, headers=headers).status_code == 400
+    assert not store.projects()

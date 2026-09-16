@@ -11,6 +11,7 @@ import unicodedata
 import uuid
 import zipfile
 import zlib
+import tempfile
 from pathlib import Path
 
 from factory.control.store import Conflict, now
@@ -30,6 +31,30 @@ def _excluded(parts):
 
 class ImportError(ValueError):
     """An archive cannot safely become a managed project."""
+
+
+def import_files(store, root, uploads, **options):
+    """Preserve arbitrary sample bytes in the normal, tracked project baseline."""
+    if not uploads or len(uploads) > 100:
+        raise ImportError('请选择 1 至 100 个资料文件')
+    total = 0
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as bundle:
+        # Fixed metadata makes repeated multipart submissions idempotent.
+        with zipfile.ZipFile(bundle, 'w', zipfile.ZIP_STORED) as archive:
+            for upload in uploads:
+                name = upload.filename or ''
+                if (not name or len(name) > 255 or '/' in name or '\\' in name or ':' in name
+                        or any(ord(c) < 32 for c in name) or name.endswith((' ', '.'))
+                        or _excluded([name])):
+                    raise ImportError('资料文件名无效或属于凭证、保留文件；请更名或移除后上传')
+                with archive.open(zipfile.ZipInfo(name), 'w') as target:
+                    while chunk := upload.file.read(65536):
+                        total += len(chunk)
+                        if total > MAX_ARCHIVE - 65536:
+                            raise ImportError('资料文件总量不能超过 20 MiB（含归档开销）')
+                        target.write(chunk)
+        bundle.seek(0)
+        return import_project(store, root, bundle, filename='上传资料.zip', **options)
 
 
 def _members(archive):

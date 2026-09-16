@@ -8,13 +8,16 @@ import uuid
 from factory.control.ingestion_batches import batches, merge
 from factory.control.acceptance_ledger import coverage, criteria_for
 from factory.control.execution import ExecutionError
-from factory.control.providers import ProviderRequest
+from factory.control.providers import ProviderRequest, ProviderError, ProviderCancelled
 from factory.control.agents import strip_macos_junk, inspect_skill, MAX_PACK_FILES
 from factory.control.skill_ingestion import adaptation_prompt, read_package, validate_mapping
 from factory.control.store import Conflict, now
 from factory.control.agent_manifests import encoded, compile_instructions
 from factory.control.agents import _validate_payload
 from factory.control.run_billing import _verification_reserve_usd
+
+
+RETRY_DELAYS = (5, 15)
 
 
 CRITERIA = [
@@ -233,6 +236,23 @@ def plan(service, rid):
 
 
 def call(service, rid, project, configuration, prompt, role):
+    """Retry only transient transport failures, with cancellation-aware backoff."""
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            return _call_once(service, rid, project, configuration, prompt, role)
+        except ProviderError as exc:
+            if not exc.transient or attempt == len(RETRY_DELAYS):
+                raise
+            delay = RETRY_DELAYS[attempt]
+            service._emit(rid, 'provider.retry_scheduled', {
+                'profile': role, 'attempt': attempt + 1, 'delay_s': delay,
+                'error_kind': exc.error_kind, 'status_code': exc.status_code,
+                'message': f'上游暂时不可用，{delay} 秒后自动重试；已完成分片保留'}, role)
+            if service.cancels[rid].wait(delay):
+                raise ProviderCancelled('等待上游恢复时已取消') from exc
+
+
+def _call_once(service, rid, project, configuration, prompt, role):
     profile = configuration['profiles'][role]
     budget = service._remaining_dollar_budget(rid, project)
     remaining = budget.remaining_usd

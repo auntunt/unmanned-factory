@@ -312,3 +312,52 @@ def test_adapter_view_reports_failed_run_and_saved_progress(app_env, monkeypatch
     assert view['progress']=={'mapped':0,'verified':0,'total':1}
     assert run['plan']['tasks'][0]['depends_on']==[]
     assert service.agent_manifests.get(agent['id'])['skills']==[]
+
+
+def test_ingestion_transient_504_retries_without_losing_package_or_signing(app_env, monkeypatch):
+    from factory.control import skill_ingestion_runs
+    client, store, service, _ = app_env
+    headers, agent, workspaces = setup(client, service, monkeypatch)
+    monkeypatch.setattr(skill_ingestion_runs, 'RETRY_DELAYS', (0, 0))
+    original = service.runner.run
+    attempts = []
+    def flaky(request, emit, cancel=None):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise ProviderError('API Error: 504 temporary gateway failure')
+        return original(request, emit, cancel)
+    monkeypatch.setattr(service.runner, 'run', flaky)
+    response = client.post(f"/api/v4/agents/{agent['id']}/abilities", headers=headers,
+                          files={'file': ('external.zip', package())})
+    rid = response.json()['ingestion']['run_id']
+    run = wait_state(store, rid, {'needs_human'})
+    assert run['artifacts']['verification']['verdict'] == 'pass'
+    assert len(attempts) == 3  # Failed adaptation, successful adaptation, independent review.
+    assert all(r.read_only and r.tools_disabled for r in attempts)
+    assert all(not Path(r.workspace).exists() for r in attempts)
+    events = store.events(rid)
+    assert sum(e['type'] == 'provider.retry_scheduled' for e in events) == 1
+    assert service.agent_manifests.get(agent['id'])['skills'] == []
+
+
+def test_ingestion_retry_limit_and_cancellable_wait(monkeypatch):
+    from types import SimpleNamespace
+    from factory.control import skill_ingestion_runs as ingestion
+    from factory.control.providers import ProviderCancelled
+    waits, calls, events = [], [], []
+    def fail(*args):
+        calls.append(1)
+        raise ProviderError('API Error: 504')
+    monkeypatch.setattr(ingestion, '_call_once', fail)
+    def wait(delay):
+        waits.append(delay)
+        return False
+    svc = SimpleNamespace(cancels={'r': SimpleNamespace(wait=wait)},
+                          _emit=lambda *args: events.append(args))
+    with pytest.raises(ProviderError):
+        ingestion.call(svc, 'r', {}, {}, '', 'standard')
+    assert len(calls) == 3 and waits == [5, 15]
+    svc.cancels['r'].wait = lambda _: True
+    with pytest.raises(ProviderCancelled):
+        ingestion.call(svc, 'r', {}, {}, '', 'standard')
+    assert len(calls) == 4

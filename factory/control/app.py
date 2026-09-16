@@ -130,6 +130,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     from factory.control.evolution_routes import router as evolution_router
     app.include_router(evolution_router(svc))
     app.include_router(runtime_router(store, svc, allowed_root, static))
+    from factory.control.project_files_routes import router as project_files_router
+    app.include_router(project_files_router(svc, allowed_root))
     from factory.control.remote_routes import router as remote_router
     app.include_router(remote_router(svc))
     from factory.control.autonomy_routes import router as autonomy_router
@@ -172,7 +174,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         public_api = path in ('/api/auth/login', '/api/v2/github/webhook')
         is_api = path.startswith('/api/')
         skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/(skills|abilities)', path) is not None
-        project_upload = request.method == 'POST' and path == '/api/v2/projects/import-zip'
+        project_upload = request.method == 'POST' and path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')
         pack_upload = request.method == 'POST' and path in ('/api/v4/agent-packs/import', '/api/v4/skill-ingestions')
         bounded_upload = skill_upload or project_upload or pack_upload
         # Authenticate and check CSRF before opening the bounded upload stream;

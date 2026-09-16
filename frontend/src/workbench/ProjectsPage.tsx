@@ -36,8 +36,14 @@ export function validateProjectZip(file: Pick<File, 'name' | 'size'> | null): st
   return null
 }
 
+export function validateProjectFiles(files: Pick<File, 'name' | 'size'>[]): string | null {
+  if (!files.length || files.length > 100) return '请选择 1 至 100 个资料文件。'
+  if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024 - 65536) return '资料文件总量不能超过 20 MiB（含归档开销）。'
+  return null
+}
+
 export function projectImportNotice(summary: ProjectImportSummary): string {
-  return `已导入 ${summary.filename}，共 ${summary.file_count} 个文件。${summary.manifests.length ? `识别到 ${summary.manifests.length} 个项目配置。` : ''}尚未运行项目；进入项目后可让助手检查启动方式、建立运行基线。${summary.warnings.length ? ` 提醒：${summary.warnings.join('；')}` : ''}`
+  return `已导入 ${summary.filename}，共 ${summary.file_count} 个文件。${summary.manifests.length ? `识别到 ${summary.manifests.length} 个项目配置。` : ''}尚未运行项目；进入项目后说明目标格式、转换规则或开发需求，助手可直接读取这些文件。${summary.warnings.length ? ` 提醒：${summary.warnings.join('；')}` : ''}`
 }
 
 interface ProjectDraft {
@@ -53,13 +59,15 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败，请稍后重试。'
 }
 
-function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps & { onCreated: (project: ProjectRecord, warning?: string) => void; onCancel: () => void }) {
+export function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel, agentId, uploadFirst = false }: PageProps & { agentId?: string; uploadFirst?: boolean; onCreated: (project: ProjectRecord, warning?: string) => void; onCancel: () => void }) {
   const [draft, setDraft] = useState<ProjectDraft>(blankDraft)
   const [helpers, setHelpers] = useState<Helper[]>([])
-  const [helperId, setHelperId] = useState('')
+  const [helperId, setHelperId] = useState(agentId || '')
   useEffect(() => { const controller = new AbortController(); void request<{ agents: Helper[] }>('/api/v4/agents', { onUnauthorized, signal: controller.signal }).then((value) => setHelpers(value.agents)).catch((cause) => { if (!controller.signal.aborted) setError(errorText(cause)) }); return () => controller.abort() }, [onUnauthorized])
-  const [mode, setMode] = useState<'workspace' | 'connect' | 'zip'>('workspace')
-  const [archive, setArchive] = useState<File | null>(null)
+  const [mode, setMode] = useState<'workspace' | 'connect' | 'zip'>(uploadFirst ? 'zip' : 'workspace')
+  const [files, setFiles] = useState<File[]>([])
+  const archive = files.length === 1 && files[0].name.toLowerCase().endsWith('.zip') ? files[0] : null
+  const uploadProblem = archive ? validateProjectZip(archive) : validateProjectFiles(files)
   const [candidates, setCandidates] = useState<ProjectCandidate[] | null>(null)
   const [candidateError, setCandidateError] = useState<string | null>(null)
   const [rootAvailable, setRootAvailable] = useState(true)
@@ -75,7 +83,7 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     event.preventDefault(); setError(null)
     if (busy) return
     if (mode !== 'connect' && !draft.name.trim()) { setError('请填写项目名称。'); return }
-    if (mode === 'zip') { const problem = validateProjectZip(archive); if (problem) { setError(problem); return } }
+    if (mode === 'zip') { const problem = uploadProblem; if (problem) { setError(problem); return } }
     const budget = draft.budget_usd.trim() ? Number(draft.budget_usd) : null
     if (budget !== null && (!Number.isFinite(budget) || budget <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     if (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered)) { setError('请从最新列表中选择工程。'); return }
@@ -83,9 +91,9 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     controllerRef.current?.abort()
     const controller = new AbortController(); controllerRef.current = controller
     try {
-      if (mode === 'zip' && archive) {
-        const body = new FormData(); body.append('file', archive); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); if (budget !== null) body.append('budget_usd', String(budget)); if (helperId) body.append('agent_id', helperId)
-        const result = await request<{ project: ProjectRecord; import_summary: ProjectImportSummary }>('/api/v2/projects/import-zip', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body })
+      if (mode === 'zip') {
+        const body = new FormData(); if (archive) body.append('file', archive); else files.forEach(file => body.append('files', file)); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); if (budget !== null) body.append('budget_usd', String(budget)); if (helperId) body.append('agent_id', helperId)
+        const result = await request<{ project: ProjectRecord; import_summary: ProjectImportSummary }>(archive ? '/api/v2/projects/import-zip' : '/api/v2/projects/import-files', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body })
         if (!controller.signal.aborted) onCreated(result.project, projectImportNotice(result.import_summary))
         return
       }
@@ -97,19 +105,19 @@ function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel }: PagePro
     } catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
   }
   return <section className="wb-card wb-create-card" aria-labelledby="create-project-title">
-    <div className="wb-card-head"><div><span className="wb-eyebrow">登记项目</span><h2 id="create-project-title">{mode === 'workspace' ? '新建工作区' : mode === 'zip' ? '上传项目压缩包' : '连接已有工程'}</h2><p>创建工作区或上传已有项目，再用口语交代开发和维护需求。</p></div><button className="wb-icon-button wb-close-button" type="button" onClick={onCancel} aria-label="关闭">×</button></div>
+    <div className="wb-card-head"><div><span className="wb-eyebrow">登记项目</span><h2 id="create-project-title">{mode === 'workspace' ? '新建工作区' : mode === 'zip' ? '上传项目与资料' : '连接已有工程'}</h2><p>创建工作区或上传已有项目，再用口语交代开发和维护需求。</p></div><button className="wb-icon-button wb-close-button" type="button" onClick={onCancel} aria-label="关闭">×</button></div>
     <form className="wb-form" onSubmit={submit}>
-      <label>选择智能体帮助<select value={helperId} onChange={(event) => setHelperId(event.target.value)}><option value="">使用平台通用助手</option>{helpers.map((helper) => <option key={helper.id} value={helper.id}>{helper.name} · v{helper.active_version}</option>)}</select><small>{helpers.find((helper) => helper.id === helperId)?.purpose || '选择相应职能体，把它的 Skill 与工作方法带入项目；后续可在项目知识中维护。'}</small></label>
-      <label>工程来源<select disabled={busy} value={mode} onChange={(event) => { setMode(event.target.value as typeof mode); setError(null) }}><option value="workspace">新建空白工作区</option><option value="zip">上传项目 ZIP</option><option value="connect">连接服务器上的已有工程</option></select></label>
-      {mode === 'zip' && <label>项目压缩包<input type="file" accept=".zip,application/zip" disabled={busy} onChange={(event) => { const file = event.target.files?.[0] || null; setArchive(file); setError(file ? validateProjectZip(file) : null); if (file && !draft.name.trim()) update('name', file.name.replace(/\.zip$/i, '').slice(0, 120)) }} /><small>最多 20 MiB。导入代码、说明和样例，保留原始材料；启动检查将在后续任务中进行。</small></label>}
+      <label>选择智能体帮助<select disabled={Boolean(agentId)} value={helperId} onChange={(event) => setHelperId(event.target.value)}><option value="">使用平台通用助手</option>{helpers.map((helper) => <option key={helper.id} value={helper.id}>{helper.name} · v{helper.active_version}</option>)}</select><small>{helpers.find((helper) => helper.id === helperId)?.purpose || '选择相应职能体，把它的 Skill 与工作方法带入项目；后续可在项目知识中维护。'}</small></label>
+      <label>工程来源<select disabled={busy} value={mode} onChange={(event) => { setMode(event.target.value as typeof mode); setError(null) }}><option value="workspace">新建空白工作区</option><option value="zip">上传文件 / ZIP</option><option value="connect">连接服务器上的已有工程</option></select></label>
+      {mode === 'zip' && <label>项目与样例文件<input type="file" multiple disabled={busy} onChange={event => { const selected = Array.from(event.target.files || []); setFiles(selected); setError(null); if (selected[0] && !draft.name.trim()) update('name', selected[0].name.replace(/\.[^.]+$/, '').slice(0,120)) }} /><small>单个 ZIP 自动解包；其他文件或多文件原样存入项目根目录（最多 100 个、总计约 20 MiB）。支持格式转换样本、文档、图片和二进制资料。上传不执行文件。</small>{files.length > 0 && <span role="status">已选择 {files.length} 个文件：{files.map(file => file.name).join('、')}。{archive ? 'ZIP 将安全解包，建立项目基线。' : '原始文件直接保存，供助手读取。'}</span>}{uploadProblem && files.length > 0 && <small role="alert">{uploadProblem}</small>}</label>}
 
       <div className="wb-form-grid wb-form-grid-two">
         {mode === 'connect' && <label className="wb-span-two">选择工程，系统自动连接<select required value={draft.candidate_id} onChange={(event) => { const candidate = candidates?.find((item) => item.id === event.target.value); update('candidate_id', event.target.value); if (candidate) update('name', candidate.name) }} disabled={!candidates || availableProjectCandidates(candidates).length === 0}><option value="">{candidates ? availableProjectCandidates(candidates).length ? '请选择工程' : '没有发现可登记的工程' : '正在发现工程…'}</option>{candidates && availableProjectCandidates(candidates).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select><small>{rootAvailable ? '工程位置由服务器维护。' : '服务器工程目录当前不可用，请稍后刷新。'}</small></label>}
         <label>项目名称<input required={mode !== 'connect'} maxLength={120} value={draft.name} onChange={(event) => update('name', event.target.value)} placeholder={mode !== 'connect' ? '例如：我的转换器项目' : '留空使用工程名称'} /></label>
-        <p>默认仅监测费用与 token，不因本地美元额度暂停。需要停止线时可在项目设置中开启。</p>
+        <p>项目只归集用量，默认不设美元停止线。管理员可在团队页面按成员设置月度 token 额度。</p>
       </div>
       {mode === 'connect' && <><button type="button" className="wb-button wb-button-secondary" onClick={() => setRefresh((value) => value + 1)} disabled={!candidates && !candidateError}>刷新工程列表</button>{candidateError && <ErrorNotice message={`${candidateError} 可重试发现工程。`} />}</>}{error && <ErrorNotice message={error} />}
-      <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy || (mode === 'zip' && Boolean(validateProjectZip(archive))) || (mode !== 'connect' && !draft.name.trim()) || (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered))}>{busy ? mode === 'zip' ? '正在上传并识别项目…' : '准备中…' : mode === 'workspace' ? '创建工作区' : mode === 'zip' ? '导入项目' : '连接工程'}</button></div>
+      <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy || (mode === 'zip' && Boolean(uploadProblem)) || (mode !== 'connect' && !draft.name.trim()) || (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered))}>{busy ? mode === 'zip' ? '正在上传并识别项目…' : '准备中…' : mode === 'workspace' ? '创建工作区' : mode === 'zip' ? '导入项目' : '连接工程'}</button></div>
     </form>
   </section>
 }

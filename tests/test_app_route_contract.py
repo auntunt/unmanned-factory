@@ -35,6 +35,7 @@ def test_middleware_remains_byte_identical_in_app():
     block='\n'.join(source.splitlines()[n.decorator_list[0].lineno-1:n.end_lineno])
     # Only extend the existing bounded upload classifier; authentication/CSRF/admin logic stays byte-identical.
     block = block.replace('/(skills|abilities)', '/skills')
+    block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget)', '|retry)')
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
 
@@ -47,6 +48,7 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     assert extension in block
     # Only extend the existing bounded upload classifier; authentication/CSRF/admin logic stays byte-identical.
     block = block.replace('/(skills|abilities)', '/skills')
+    block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget)', '|retry)')
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
     assert hashlib.sha256(original.encode()).hexdigest()=='83e1344001e582f0517b7dda732e84c0c2e67575e40dd62b15e39320311c5d6c'
