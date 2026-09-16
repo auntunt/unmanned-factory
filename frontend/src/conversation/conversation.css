@@ -2,7 +2,7 @@
    (warm off-white, dark ink, deep-green accent); scoped to .cv-app so the rest
    of the workbench and the dark theme are untouched. Dark values keep existing
    dark-mode users usable; full dark parity is a follow-up. */
-.cv-app {
+.cv-app, .as-app {
   --cv-bg: #fafaf7;
   --cv-surface: #ffffff;
   --cv-raised: #f4f5f1;
@@ -30,7 +30,7 @@
   min-height: 100vh;
   font: 15px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
-:root[data-theme=dark] .cv-app {
+:root[data-theme=dark] :is(.cv-app, .as-app) {
   --cv-bg: #111916; --cv-surface: #1b2621; --cv-raised: #24332c; --cv-ink: #e4eee8;
   --cv-muted: #adbdb3; --cv-faint: #7d8b83; --cv-accent: #81dec0; --cv-accent-strong: #a6ecd4;
   --cv-accent-soft: #22362d; --cv-on-accent: #11291f; --cv-border: #33453b; --cv-border-strong: #3d5247;
@@ -38,7 +38,7 @@
   --cv-shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.28); --cv-shadow-soft: 0 1px 2px rgba(0,0,0,.25);
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme=light]) .cv-app {
+  :root:not([data-theme=light]) :is(.cv-app, .as-app) {
     --cv-bg: #111916; --cv-surface: #1b2621; --cv-raised: #24332c; --cv-ink: #e4eee8;
     --cv-muted: #adbdb3; --cv-faint: #7d8b83; --cv-accent: #81dec0; --cv-accent-strong: #a6ecd4;
     --cv-accent-soft: #22362d; --cv-on-accent: #11291f; --cv-border: #33453b; --cv-border-strong: #3d5247;

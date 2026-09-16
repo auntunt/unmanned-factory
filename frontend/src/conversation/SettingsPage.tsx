@@ -15,7 +15,6 @@ export default function SettingsPage({ user }: WorkbenchProps) {
   useEffect(() => { request<{ mode?: string; label?: string }>('/api/v3/environment').then(setEnv).catch(() => setEnvError(true)) }, [])
   return (
     <div className="cv-page">
-      <Link to="/" className="cv-page-back"><Icon name="back" width={16} height={16} /> 返回对话</Link>
       <h1>设置</h1>
       <p className="cv-page-sub">低频配置。日常制作会自动沿用这里的设定。</p>
 

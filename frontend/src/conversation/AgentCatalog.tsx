@@ -21,7 +21,6 @@ export default function AgentCatalog({ onUnauthorized }: PageProps) {
   }, [onUnauthorized])
   return (
     <div className="cv-page">
-      <Link to="/" className="cv-page-back"><Icon name="back" width={16} height={16} /> 返回对话</Link>
       <h1>职能体</h1>
       <p className="cv-page-sub">这些是长期沉淀的专业能力。日常制作会沿用项目已配置的能力，你不必先选择。</p>
       {error && <div className="cv-error" role="alert"><span>{error}</span></div>}

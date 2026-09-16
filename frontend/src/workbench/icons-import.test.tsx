@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import Icon, { CategoryBadge } from './Icon'
-import Workbench from './Workbench'
+import AppShell from '../conversation/AppShell'
 import ModulesPage from './ModulesPage'
 import { request } from '../workspace/api'
 vi.mock('../workspace/api', async original => ({ ...await original<typeof import('../workspace/api')>(), request: vi.fn() }))
@@ -18,13 +18,12 @@ it('uses decorative fill SVG with viewBox and avatar fallback', () => {
  expect(container.querySelectorAll('.wb-category-badge svg')).toHaveLength(2)
  expect(screen.getByText('维').querySelector('svg')).toBeNull()
 })
-it('renders navigation, logout, menu and rehearsal icons as SVG without glyph text', async () => {
- render(<MemoryRouter><Workbench {...props} onLogout={props.onUnauthorized}><p>页面</p></Workbench></MemoryRouter>)
- await screen.findByText('本地演练')
- for (const name of ['退出登录', '打开导航']) expect(screen.getByRole('button', { name }).querySelector('svg')).toBeTruthy()
- for (const link of screen.getAllByRole('link').filter(el => el.closest('nav'))) { expect(link.getAttribute('aria-label')).toBeTruthy(); expect(link.querySelector('svg')).toBeTruthy() }
- expect(screen.getByRole('status').querySelector('svg')).toBeTruthy()
- expect(document.body.textContent).not.toMatch(/[↗☰◌▶▼←＋→]/)
+it('renders the unified shell nav as SVG icons without glyph text', async () => {
+ render(<MemoryRouter initialEntries={['/overview']}><Routes><Route path="/*" element={<AppShell {...props} onLogout={props.onUnauthorized} />} /></Routes></MemoryRouter>)
+ for (const name of ['开始制作', '历史作品', '职能体', '工程总览', '设置']) expect(screen.getByLabelText(name).querySelector('svg')).toBeTruthy()
+ expect(screen.getByRole('button', { name: '打开导航' }).querySelector('svg')).toBeTruthy()
+ for (const link of screen.getAllByRole('link').filter(el => el.closest('nav.as-nav'))) expect(link.querySelector('svg')).toBeTruthy()
+ expect(document.body.textContent).not.toMatch(/[↗☰◌▶▼＋]/)
 })
 it('renders module category and disclosure with SVG and gives content/edit matching link styles', async () => {
  render(<MemoryRouter><ModulesPage {...props} /></MemoryRouter>)

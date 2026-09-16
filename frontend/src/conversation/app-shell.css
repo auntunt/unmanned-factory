@@ -1,0 +1,100 @@
+/* Single application shell. One fixed left nav + one 64px top bar for every
+   logged-in route; the shell never remounts on navigation. Tokens come from
+   .as-app (shared with .cv-app via conversation.css). */
+.as-app {
+  --cv-sidebar: #f2f4ef;
+  --as-nav: 216px;
+  --as-nav-collapsed: 68px;
+  display: flex;
+  min-height: 100dvh;
+  background: var(--cv-bg);
+  color: var(--cv-ink);
+  font: 15px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+:root[data-theme=dark] .as-app { --cv-sidebar: #17211c; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme=light]) .as-app { --cv-sidebar: #17211c; } }
+
+.as-skip { position: absolute; left: -9999px; }
+.as-skip:focus { left: 12px; top: 12px; z-index: 60; background: var(--cv-surface); padding: 8px 12px; border-radius: 8px; border: 1px solid var(--cv-border); }
+
+/* ---- left nav ---- */
+.as-side { width: var(--as-nav); flex-shrink: 0; background: var(--cv-sidebar); border-right: 1px solid var(--cv-border);
+  position: sticky; top: 0; height: 100dvh; display: flex; flex-direction: column; padding: 16px 12px; box-sizing: border-box; }
+.as-app.is-collapsed .as-side { width: var(--as-nav-collapsed); padding: 16px 10px; }
+.as-brand { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 16px; min-height: 34px; }
+.as-brand-mark { font-weight: 700; font-size: 19px; letter-spacing: -.02em; color: var(--cv-ink); text-decoration: none; }
+.as-app.is-collapsed .as-side .as-brand { justify-content: center; }
+.as-app.is-collapsed .as-side .as-brand-mark { display: none; }
+.as-collapse { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--cv-muted); cursor: pointer; }
+.as-collapse:hover { background: color-mix(in srgb, var(--cv-ink) 7%, transparent); color: var(--cv-ink); }
+.as-nav { display: flex; flex-direction: column; gap: 2px; }
+.as-nav-item { display: flex; align-items: center; gap: 12px; padding: 9px 11px; border-radius: 9px; color: var(--cv-ink); text-decoration: none; font-size: 14px; line-height: 1.3; }
+.as-nav-item:hover { background: color-mix(in srgb, var(--cv-ink) 6%, transparent); }
+.as-nav-item.is-active { background: var(--cv-surface); box-shadow: var(--cv-shadow-soft); font-weight: 600; }
+.as-nav-icon { display: grid; place-items: center; color: var(--cv-muted); flex-shrink: 0; }
+.as-nav-item.is-active .as-nav-icon { color: var(--cv-accent); }
+.as-app.is-collapsed .as-side .as-nav-item { justify-content: center; padding: 10px 0; }
+.as-app.is-collapsed .as-side .as-nav-text { display: none; }
+.as-side-footer { margin-top: auto; display: flex; flex-direction: column; gap: 4px; padding-top: 12px; border-top: 1px solid var(--cv-border); }
+.as-account-wrap { position: relative; }
+.as-account { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; padding: 8px 8px; border-radius: 9px; cursor: pointer; }
+.as-account:hover { background: color-mix(in srgb, var(--cv-ink) 6%, transparent); }
+.as-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--cv-accent); color: var(--cv-on-accent); display: grid; place-items: center; font-weight: 700; font-size: 13px; flex-shrink: 0; }
+.as-account-name { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.as-account-name strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-account-name small { font-size: 11px; color: var(--cv-muted); }
+.as-account-caret { color: var(--cv-faint); }
+.as-app.is-collapsed .as-side .as-account-name, .as-app.is-collapsed .as-side .as-account-caret { display: none; }
+.as-app.is-collapsed .as-side .as-account { justify-content: center; }
+.as-account-menu { position: absolute; left: 0; bottom: 52px; min-width: 200px; background: var(--cv-surface); border: 1px solid var(--cv-border); border-radius: 12px; box-shadow: var(--cv-shadow); padding: 6px; z-index: 40; }
+.as-account-info { padding: 8px 10px; border-bottom: 1px solid var(--cv-border); margin-bottom: 4px; }
+.as-account-info strong { display: block; font-size: 14px; }
+.as-account-info small { color: var(--cv-muted); font-size: 12px; }
+.as-account-menu button { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; background: transparent; color: var(--cv-ink); font: inherit; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.as-account-menu button:hover { background: var(--cv-raised); }
+
+/* ---- body / top bar ---- */
+.as-body { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100dvh; }
+.as-topbar { height: 64px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-bottom: 1px solid var(--cv-border);
+  background: color-mix(in srgb, var(--cv-bg) 90%, transparent); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 12; }
+.as-hamburger { display: none; border: 0; background: transparent; color: var(--cv-ink); padding: 6px; border-radius: 8px; cursor: pointer; }
+.as-crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--cv-muted); overflow: hidden; }
+.as-crumb { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.as-crumb a { color: var(--cv-muted); text-decoration: none; }
+.as-crumb a:hover { color: var(--cv-ink); }
+.as-crumb [aria-current=page] { color: var(--cv-ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.as-crumb-sep { color: var(--cv-faint); display: inline-grid; place-items: center; }
+.as-topbar-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.as-env { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--cv-muted); }
+.as-avatar-sm { width: 30px; height: 30px; background: var(--cv-raised); color: var(--cv-muted); border: 1px solid var(--cv-border); }
+
+/* ---- in-page group tabs ---- */
+.as-subnav { flex-shrink: 0; display: flex; gap: 2px; padding: 0 24px; border-bottom: 1px solid var(--cv-border); background: var(--cv-bg); overflow-x: auto; }
+.as-subnav-tab { padding: 13px 12px; color: var(--cv-muted); text-decoration: none; font-size: 14px; border-bottom: 2px solid transparent; white-space: nowrap; }
+.as-subnav-tab:hover { color: var(--cv-ink); }
+.as-subnav-tab.is-active { color: var(--cv-accent); border-bottom-color: var(--cv-accent); font-weight: 600; }
+
+/* ---- content: the single main scroll ---- */
+.as-content { flex: 1; min-width: 0; overflow-y: auto; }
+.as-pages.wb-shell { display: block; min-height: 0; background: transparent; width: 100%; }
+/* management pages get consistent gutters (their .wb-content wrapper is gone) */
+.as-content .wb-shell > :is(.wb-page, .wb-detail-page, .cl-page, .tm-page, .ov3-page) { padding: 28px 40px 56px; margin-inline: auto; box-sizing: border-box; }
+/* conversational pages own their own width/height; let the run fill the single scroll */
+.as-content .wb-shell > .cv-run { min-height: calc(100dvh - 64px); }
+.as-content .cv-run-scroll { overflow: visible; }
+.as-content .cv-dock { position: sticky; bottom: 0; }
+
+/* ---- mobile drawer ---- */
+.as-scrim, .as-drawer { display: none; }
+@media (max-width: 768px) {
+  .as-side { display: none; }
+  .as-hamburger { display: inline-grid; place-items: center; }
+  .as-topbar { height: 56px; padding: 0 14px; }
+  .as-subnav { padding: 0 14px; }
+  .as-content .wb-shell > :is(.wb-page, .wb-detail-page, .cl-page, .tm-page, .ov3-page) { padding: 20px 16px 48px; }
+  .as-scrim { display: block; position: fixed; inset: 0; z-index: 45; border: 0; background: var(--cv-overlay, rgba(15,25,20,.5)); }
+  .as-drawer { display: flex; flex-direction: column; position: fixed; z-index: 46; left: 0; top: 0; bottom: 0; width: min(244px, calc(100vw - 32px)); background: var(--cv-sidebar); border-right: 1px solid var(--cv-border); padding: 14px 12px; box-sizing: border-box; }
+  .as-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 14px; }
+  .as-drawer-close { border: 0; background: transparent; color: var(--cv-muted); padding: 6px; border-radius: 8px; cursor: pointer; }
+}
+@media (prefers-reduced-motion: reduce) { .as-nav-item, .as-collapse, .as-account { transition: none; } }

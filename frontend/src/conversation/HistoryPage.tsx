@@ -22,7 +22,6 @@ export default function HistoryPage({ onUnauthorized }: PageProps) {
   }, [onUnauthorized])
   return (
     <div className="cv-page">
-      <Link to="/" className="cv-page-back"><Icon name="back" width={16} height={16} /> 返回对话</Link>
       <h1>历史作品</h1>
       <p className="cv-page-sub">选择一个作品，回到它的对话继续。</p>
       {error && <div className="cv-error" role="alert"><span>{error}</span></div>}
