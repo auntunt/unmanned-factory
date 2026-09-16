@@ -289,3 +289,37 @@ def test_document_export_is_a_controlled_scoped_write_no_run(app_env, monkeypatc
     assert dl.status_code == 200 and '决定：上线延后' in dl.text and 'attachment' in dl.headers['content-disposition']
     # No project or coding run was created by exporting.
     assert store.runs() == []
+
+
+def test_quote_and_summary_agents_multi_turn_with_isolation(app_env, monkeypatch):
+    """Local acceptance for the two named roles: multi-turn chat over their own
+    materials, deterministic quote, controlled export, and material isolation.
+    Real-model answer correctness is verified by Codex with a live model."""
+    client, store, service, repo = app_env
+    headers = login(client)
+    quote_agent = _agent(client, headers, service, '报价助手', skill=_skill(body='报价规则：单价×数量，VIP 打 9 折。'))
+    summary_agent = _agent(client, headers, service, '会议总结助手', skill=_skill(body='纪要方法：只写记录中的事实，标注推断与未提供。'))
+    reqs = _capture(monkeypatch, service)
+
+    # 报价助手：多轮 + 附件 + 确定性计算 + 导出
+    q = _do_convo(client, headers, quote_agent['id'])
+    client.post(f'/api/v4/conversations/{q}/attachments', files={'file': ('prices.csv', '项目,单价,数量\n演示,100,3'.encode(), 'text/csv')}, headers=headers)
+    _wait_job(service, store, _send(client, headers, q, '这单报价多少？').json()['job_id'])
+    _wait_job(service, store, _send(client, headers, q, '客户是 VIP，再算一次').json()['job_id'])
+    qtexts = ' '.join(d.get('text', '') for d in (reqs[-1].reference_mount or {'documents': []})['documents'])
+    assert '报价规则' in qtexts and '演示,100,3' in qtexts and '纪要方法' not in qtexts  # only its own materials
+    calc = client.post(f'/api/v4/conversations/{q}/calc', json={'items': [{'name': '演示', 'unit_price': 100, 'quantity': 3}], 'discount_rate': 0.9}, headers=headers)
+    assert calc.json()['total'] == '270.00'  # verifiable, from the given rule
+    exp = client.post(f'/api/v4/conversations/{q}/export', json={'title': '报价单', 'format': 'md', 'content': '# 报价单\n总价：270.00（VIP 9 折）'}, headers=headers)
+    assert exp.status_code == 201
+
+    # 会议总结助手：多轮，独立资料
+    s = _do_convo(client, headers, summary_agent['id'])
+    client.post(f'/api/v4/conversations/{s}/attachments', files={'file': ('minutes.txt', '张三：预算是十万。李四：下周上线。'.encode(), 'text/plain')}, headers=headers)
+    _wait_job(service, store, _send(client, headers, s, '帮我总结要点').json()['job_id'])
+    _wait_job(service, store, _send(client, headers, s, '有没有提到验收标准？').json()['job_id'])
+    stexts = ' '.join(d.get('text', '') for d in (reqs[-1].reference_mount or {'documents': []})['documents'])
+    assert '纪要方法' in stexts and '预算是十万' in stexts and '报价规则' not in stexts  # isolation
+
+    # 两个角色的会话各自独立，互不串资料；日常聊天全程未创建开发运行。
+    assert store.runs() == []
