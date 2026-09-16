@@ -153,6 +153,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, pollMs = 5000 
                     <p>{failure || run.plan?.questions?.[0] || '请在下面的输入框补充信息或材料后继续。已有成果已保留。'}</p>
                   </div>
                 </div>
+                <VerificationDrawer run={run} ledger={ledger} />
               </div></div>}
 
             {(head === 'done' || TERMINAL_DONE.has(run.status)) && <ProductCard run={run} title={title} deliver={deliver} rid={rid} ledger={ledger} />}
@@ -214,23 +215,32 @@ function ProductCard({ run, title, deliver, rid, ledger }: { run: Run; title: st
           </div>
         </div>
         {zip && <div className="cv-file"><span className="cv-file-mark"><Icon name="delivery" width={17} height={17} /></span><div className="cv-file-meta"><strong>{zip.name}</strong><small>{sizeLabel(zip.size)}</small></div><a className="cv-btn cv-btn-secondary" href={`${base}/files/${zip.id}`}>下载</a></div>}
-        {ledger && (ledger.items?.length || ledger.counts) && <VerificationDrawer ledger={ledger} />}
+        <VerificationDrawer run={run} ledger={ledger} />
       </div>
     </div>
   )
 }
 
-function VerificationDrawer({ ledger }: { ledger: Ledger }) {
-  const c = ledger.counts || {}
+function VerificationDrawer({ run, ledger }: { run: Run; ledger: Ledger | null }) {
+  const c = ledger?.counts || {}
+  const cost = run.artifacts?.total_known_cost_usd
+  const commit = typeof run.artifacts?.commit === 'string' ? run.artifacts.commit as string : null
+  const failure = typeof run.artifacts?.failure_reason === 'string' ? run.artifacts.failure_reason as string : null
+  const hasLedger = Boolean(ledger?.items?.length || ledger?.counts)
+  if (!hasLedger && cost == null && !failure) return null
   return (
     <details className="cv-collapse">
       <summary><Icon name="triangle" className="cv-disclosure" width={13} height={13} /> 查看验证记录</summary>
       <div className="cv-collapse-body">
-        <div className="cv-verify-counts"><span>通过 {c.pass ?? 0}</span><span>未通过 {c.fail ?? 0}</span><span>未验证 {c.unverified ?? 0}</span></div>
-        {(ledger.items || []).map(item => <div className="cv-verify-row" key={item.id}><span>{item.text}</span>
+        {hasLedger && <div className="cv-verify-counts"><span>通过 {c.pass ?? 0}</span><span>未通过 {c.fail ?? 0}</span><span>未验证 {c.unverified ?? 0}</span>
+          {typeof cost === 'number' && <span>费用 ${cost.toFixed(2)}</span>}</div>}
+        {(ledger?.items || []).map(item => <div className="cv-verify-row" key={item.id}><span>{item.text}</span>
           <span className={`cv-verify-status ${item.status === 'pass' ? 'cv-verify-pass' : item.status === 'fail' ? 'cv-verify-fail' : 'cv-verify-unv'}`}>
             {item.status === 'pass' ? '通过' : item.status === 'fail' ? '未通过' : '未验证'}</span></div>)}
-        <p style={{ color: 'var(--cv-faint)', fontSize: 12, marginTop: 8 }}>验证结果来自真实检查记录。</p>
+        {failure && <div className="cv-verify-row"><span>失败原因</span><span className="cv-verify-status cv-verify-fail">见下</span></div>}
+        {failure && <p style={{ color: 'var(--cv-muted)', fontSize: 13, marginTop: 6 }}>{failure}</p>}
+        {commit && <p style={{ color: 'var(--cv-faint)', fontSize: 12, marginTop: 8 }}>验收版本 {commit.slice(0, 8)} · 结果来自真实检查记录。</p>}
+        {!commit && <p style={{ color: 'var(--cv-faint)', fontSize: 12, marginTop: 8 }}>结果来自真实检查记录。</p>}
       </div>
     </details>
   )

@@ -17,6 +17,9 @@ import TeamPage from './workbench/TeamPage'
 import AgentsPage from './workbench/AgentsPage'
 import ConversationLayout from './conversation/ConversationLayout'
 import StartChat from './conversation/StartChat'
+import HistoryPage from './conversation/HistoryPage'
+import AgentCatalog from './conversation/AgentCatalog'
+import SettingsPage from './conversation/SettingsPage'
 import type { PageProps, WorkbenchProps } from './workbench/ui'
 import './workbench/workbench.css'
 import './workbench/studio.css'
@@ -92,12 +95,13 @@ function RoutedWorkbench({ session, logout }: { session: AuthResponse; logout: (
     <Route element={<ConversationLayout {...shell} />}>
       <Route index element={<StartChat {...pageProps} />} />
       <Route path="runs/:runId" element={<Suspense fallback={<div className="cv-app"><div className="cv-loading"><span className="cv-spinner" />正在打开工作区…</div></div>}><RunWorkspace {...pageProps} /></Suspense>} />
+      <Route path="history" element={<HistoryPage {...pageProps} />} />
+      <Route path="agents" element={<AgentCatalog {...pageProps} />} />
+      <Route path="settings" element={<SettingsPage {...shell} />} />
     </Route>
     <Route element={<WorkbenchLayout {...shell} />}>
-      <Route path="history" element={<RunsPage {...pageProps} />} />
       <Route path="ability-center" element={<CapabilityCenter {...pageProps} />} />
       <Route path="modules" element={<LegacyCapabilityRedirect tab="modules" />} />
-      <Route path="agents" element={<AgentsPage {...pageProps} />} />
       <Route path="agents/:agentId" element={<AgentsPage {...pageProps} />} />
       <Route path="overview" element={<OverviewPage {...pageProps} />} />
       <Route path="runs" element={<RunsPage {...pageProps} />} />
@@ -106,7 +110,6 @@ function RoutedWorkbench({ session, logout }: { session: AuthResponse; logout: (
       <Route path="capabilities" element={<LegacyCapabilityRedirect tab="capabilities" />} />
       <Route path="costs" element={<CostsPage {...pageProps} />} />
       <Route path="team" element={<TeamPage {...pageProps} />} />
-      <Route path="settings" element={isAdmin ? <Navigate to="/settings/runtime" replace /> : <Navigate to="/" replace />} />
       {isAdmin && <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />}
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />

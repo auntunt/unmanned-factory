@@ -209,3 +209,53 @@
   .cv-artifact.is-wide { max-width: 100%; margin-left: 0; }
   .cv-dock { padding: 10px 14px 14px; }
 }
+
+/* ---- auxiliary pages (history / agent catalog / settings) ---- */
+.cv-page { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+.cv-page-back { display: inline-flex; align-items: center; gap: 6px; color: var(--cv-muted); font-size: 14px; text-decoration: none; margin-bottom: 18px; }
+.cv-page-back:hover { color: var(--cv-ink); }
+.cv-page h1 { font-size: 28px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 6px; }
+.cv-page .cv-page-sub { color: var(--cv-muted); margin: 0 0 26px; }
+.cv-page-empty { text-align: center; color: var(--cv-muted); padding: 48px 20px; border: 1px dashed var(--cv-border); border-radius: var(--cv-radius); }
+
+.cv-list { display: flex; flex-direction: column; gap: 10px; }
+.cv-list-item { display: flex; align-items: center; gap: 14px; padding: 15px 18px; border: 1px solid var(--cv-border); border-radius: var(--cv-radius); background: var(--cv-surface); text-decoration: none; color: inherit; box-shadow: var(--cv-shadow-soft); }
+.cv-list-item:hover { border-color: var(--cv-border-strong); }
+.cv-list-item .cv-li-body { flex: 1; min-width: 0; }
+.cv-list-item .cv-li-body strong { display: block; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-list-item .cv-li-body small { color: var(--cv-muted); font-size: 13px; }
+.cv-list-item .cv-li-meta { display: flex; align-items: center; gap: 12px; color: var(--cv-faint); font-size: 13px; flex-shrink: 0; }
+.cv-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 999px; }
+.cv-pill.is-active { background: var(--cv-accent-soft); color: var(--cv-accent-strong); }
+.cv-pill.is-wait { background: var(--cv-warning-bg); color: var(--cv-warning); }
+.cv-pill.is-done { background: var(--cv-accent-soft); color: var(--cv-accent-strong); }
+.cv-pill.is-fail { background: var(--cv-danger-bg); color: var(--cv-danger); }
+.cv-pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.cv-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+.cv-agent-card { border: 1px solid var(--cv-border); border-radius: var(--cv-radius); background: var(--cv-surface); box-shadow: var(--cv-shadow-soft); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.cv-agent-card header { display: flex; align-items: center; gap: 12px; }
+.cv-agent-card header strong { font-size: 16px; }
+.cv-agent-card header small { display: block; color: var(--cv-faint); font-size: 12px; }
+.cv-agent-card p { margin: 0; color: var(--cv-muted); font-size: 14px; line-height: 1.6; min-height: 42px; }
+.cv-agent-card footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cv-agent-ready { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--cv-accent-strong); }
+.cv-agent-dl { margin-left: auto; color: var(--cv-muted); font-size: 13px; text-decoration: none; display: inline-flex; gap: 5px; align-items: center; }
+.cv-agent-dl:hover { color: var(--cv-ink); }
+
+.cv-settings-section { border: 1px solid var(--cv-border); border-radius: var(--cv-radius); background: var(--cv-surface); box-shadow: var(--cv-shadow-soft); padding: 6px 18px; margin-bottom: 16px; }
+.cv-settings-section h2 { font-size: 15px; font-weight: 650; margin: 14px 0 4px; }
+.cv-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-top: 1px solid var(--cv-border); }
+.cv-settings-section > .cv-settings-row:first-of-type { border-top: 0; }
+.cv-settings-row .cv-sr-label { font-size: 14px; }
+.cv-settings-row .cv-sr-label small { display: block; color: var(--cv-muted); font-size: 12px; margin-top: 2px; }
+.cv-settings-row .cv-sr-value { color: var(--cv-muted); font-size: 14px; display: inline-flex; align-items: center; gap: 8px; }
+.cv-settings-row a { color: var(--cv-accent); text-decoration: none; }
+.cv-online { display: inline-flex; align-items: center; gap: 6px; color: var(--cv-accent-strong); font-size: 13px; }
+.cv-online i { width: 8px; height: 8px; border-radius: 50%; background: var(--cv-accent); }
+
+@media (max-width: 640px) {
+  .cv-page { padding: 22px 14px 64px; }
+  .cv-catalog { grid-template-columns: 1fr; }
+  .cv-list-item .cv-li-meta { gap: 8px; }
+}
