@@ -274,3 +274,10 @@
 .cv-chat-history button { border: 1px solid var(--cv-border); background: var(--cv-surface); border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--cv-muted); cursor: pointer; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cv-chat-history button.is-active { border-color: var(--cv-accent); color: var(--cv-accent-strong); }
 .cv-chat-history button:hover { color: var(--cv-ink); }
+
+/* Entry routing: low-emphasis clarify / unavailable panels under the chatbox. */
+.cv-route { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--cv-border); border-radius: 12px; background: var(--cv-surface); text-align: left; }
+.cv-route-blocked { border-color: var(--cv-border-strong); background: var(--cv-raised); }
+.cv-route-q { margin: 0 0 10px; color: var(--cv-ink); font-size: 15px; }
+.cv-route-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cv-route-missing { margin: 6px 0 0; padding-left: 18px; color: var(--cv-ink-soft); font-size: 13px; }
