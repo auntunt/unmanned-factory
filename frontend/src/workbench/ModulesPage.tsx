@@ -1,3 +1,4 @@
+import { skillLabel } from './skill-label'
 import Icon, { CategoryBadge } from './Icon'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProvenance } from './capability-links'
@@ -75,7 +76,7 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
   })
   useEffect(() => { if (focused && !loading) document.getElementById(`module-${focused}`)?.scrollIntoView({ block: 'nearest' }) }, [focused, loading])
   const dirty = JSON.stringify(selected.map(m => [m.id,m.version])) !== JSON.stringify((binding?.modules ?? []).map(m => [m.id,m.version]))
-  const visible = modules.filter(m => (filter === 'all' || m.category === filter) && `${m.name} ${m.description}`.includes(search))
+  const visible = modules.filter(m => (filter === 'all' || m.category === filter) && `${skillLabel(m)} ${m.description}`.includes(search))
   return <div className="wb-page mod-page">
     {embedded ? <div className="wb-form-actions">{admin && <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}>新建模块</button>}</div> : <PageHeader title={projectId ? '能力随任务组合' : '能力模块'} description="把团队的知识与方法，变成随时可用的能力。" actions={admin ? <button className="wb-button wb-button-primary" onClick={() => { setEditor({...blank}); setEditing(null) }}><Icon name="plus" /> 新建模块</button> : undefined} />}
     {!projectId && !embedded && <section className="wb-purpose-band"><span className="wb-purpose-symbol" aria-hidden="true">▤</span><div><h2>模块提供方法 · 职能体承接业务</h2><p>同一份能力，可以用于不同项目。</p></div><Link className="wb-text-link" to="/agents">查看职能体</Link></section>}
@@ -86,7 +87,7 @@ export default function ModulesPage({ projectId, csrfToken, onUnauthorized, user
         <div className="mod-grid">{visible.map(m => {
           const chosen = selected.find(x => x.id === m.id)
           return <article className={`mod-card ${chosen || focused === m.id ? 'is-selected' : ''}`} id={`module-${m.id}`} key={m.id}>
-            <div className="mod-card-head"><CategoryBadge category={m.category} /><h2>{m.name}</h2><small>v{m.version}</small></div>
+            <div className="mod-card-head"><CategoryBadge category={m.category} /><h2>{skillLabel(m)}</h2><small>v{m.version}</small></div>
             <p>{m.description || '按需搭配到项目，作为该领域的工作指导。'}</p>
             {Boolean((m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)) && <p>挂载 {(m.source_refs?.length ?? 0) + (m.source_slots?.length ?? 0)} 个资料来源 · 按项目绑定查询</p>}
             {embedded && <p title="按能力来源运行中保存的模块记录关联，仅统计当前可见记录。">由它沉淀的能力 {provenance.error ? '暂不可用' : !provenance.loaded ? '读取中' : `${provenance.counts.get(m.id) || 0} 项`}</p>}

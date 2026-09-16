@@ -30,7 +30,7 @@ def env(tmp_path):
     (root / 'README.md').write_text('Project')
     git('add', '.'); git('commit', '-m', 'seed')
     store = Store(tmp_path / 'control.db')
-    project = store.add_project(dict(name='测试', repository='local/test', workspace=str(root), base_branch='main', checks={'check':['true']}, budget_usd=10))
+    project = store.add_project(dict(name='测试', repository='local/test', workspace=str(root), base_branch='main', checks={'check':['true']}, budget_usd=10, requirement_analysis_budget_usd=5))
     requests = []
     result = proposal()
     class Runner:
@@ -382,3 +382,32 @@ def test_analysis_independent_profile_override(env, monkeypatch):
     monkeypatch.setenv('FACTORY_REQUIREMENT_ANALYSIS_MODEL','my-sonnet')
     env.svc._analyze(env.run['id'])
     assert env.requests[-1].model == 'my-sonnet'
+
+
+def test_missing_analysis_budget_means_monitoring_even_with_unknown_old_usage(env):
+    # Legacy project rows never acquired a hidden $5 ceiling merely by upgrading.
+    with env.store.connect() as db:
+        row = env.store.project(env.project['id'])
+        row.pop('requirement_analysis_budget_usd')
+        db.execute('UPDATE projects SET data=? WHERE id=?', (json.dumps(row), row['id']))
+    env.store.append(env.run['id'], 'usage.recorded', {'profile':'requirement_analysis', 'cost_usd':None, 'max_budget_usd':2})
+    env.svc._analyze(env.run['id'])
+    assert env.requests[-1].max_budget_usd is None
+    assert env.store.get(env.run['id'])['status'] == 'awaiting_spec_confirmation'
+
+
+def test_retry_preserves_analysis_contract_and_old_run_links_forward(env):
+    from factory.control.autonomy_routes import _attention
+    env.store.update(env.run['id'], {'status':'needs_human'})
+    original = env.store.get(env.run['id'])
+    retried, created = env.svc.agents.create_retry(original, 'owner', 1, [])
+    assert created
+    assert retried['source']['operation'] == 'general'
+    assert ra.required(retried)
+    env.svc.start_plan(retried['id'])
+    assert env.queued[-1] == ('_analyze', retried['id'])
+    prior = env.store.get(original['id'])
+    assert prior['status'] == 'needs_human'  # History is retained, not rewritten.
+    assert prior['retry_run_id'] == retried['id']
+    assert _attention(prior, {}) is None
+    assert env.svc.agents.create_retry(original, 'owner', 1, [])[0]['id'] == retried['id']

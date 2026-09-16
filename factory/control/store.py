@@ -157,7 +157,13 @@ class Store:
             if current != expected_revision:
                 raise Conflict('项目设置已更新，请重新加载后再保存')
             effective = {key: value for key, value in changes.items()
-                         if project.get(key) != value}
+                         if project.get(key, False if key in {'auto_spec_confirm', 'auto_issues', 'auto_publish', 'spec_tree_enabled'} else None) != value}
+            if not effective:
+                return self._project_view(project)
+            budget_fields = {'budget_usd', 'requirement_analysis_budget_usd'}
+            relaxing_budgets = set(effective) <= budget_fields and all(
+                value is None or (project.get(key) is not None and value > project[key])
+                for key, value in effective.items())
             old_budget, new_budget = project.get('budget_usd'), effective.get('budget_usd')
             numeric_budget_change = (
                 'budget_usd' in effective
@@ -170,8 +176,7 @@ class Store:
                 # A paused run may be relying on its current ceiling. Apply this
                 # protection even when the request edits other settings too.
                 blocking_statuses = PROJECT_BUDGET_DECREASE_BLOCKING
-            elif (set(effective) == {'budget_usd'}
-                    and (new_budget is None or (numeric_budget_change and new_budget > old_budget))):
+            elif relaxing_budgets:
                 blocking_statuses = PROJECT_BUDGET_INCREASE_BLOCKING
             else:
                 blocking_statuses = PROJECT_EDIT_BLOCKING
@@ -253,6 +258,12 @@ class Store:
             event = db.execute("SELECT type,payload FROM events WHERE run_id=? AND type IN ('run.failed','run.started','run.resumed','run.recovered','run.planning','run.verified') ORDER BY id DESC LIMIT 1", (run["id"],)).fetchone()
             if event and event[0] == "run.failed":
                 run["error"] = json.loads(event[1]).get("message")
+        if run.get('status') in ('needs_human', 'failed', 'cancelled'):
+            linked = db.execute("SELECT payload FROM events WHERE run_id=? AND type='run.retry_linked' ORDER BY id DESC LIMIT 1", (run['id'],)).fetchone()
+            if linked:
+                successor = json.loads(linked[0]).get('next_run_id')
+                if db.execute('SELECT 1 FROM runs WHERE id=?', (successor,)).fetchone():
+                    run['retry_run_id'] = successor
         return run
 
     def runs(self):

@@ -99,6 +99,7 @@ export interface Artifacts {
 }
 
 export interface Run {
+  retry_run_id?: string
   resume_count?: number
   spec_draft?: SpecDraft
   recommended_skills?: RecommendedSkill[]

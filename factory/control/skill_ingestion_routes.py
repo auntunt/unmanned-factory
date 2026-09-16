@@ -118,6 +118,12 @@ def router(service):
             manifest = service.agent_manifests.get(record['target_agent_id'])
             record['target_identity'] = manifest['identity']
             record['available_slots'] = max(0, 24 - len(manifest['skills']))
+        if record.get('run_id'):
+            run = service.store.get(record['run_id'])
+            record['runtime'] = {key: run.get(key) for key in ('status', 'error', 'revision', 'resume_count')}
+            record['progress'] = {'mapped': len(record.get('mapping_batches') or []),
+                                  'verified': len(record.get('verification_batches') or []),
+                                  'total': record.get('batch_count')}
         return record
 
     def create(request, pid, raw, aid=None):

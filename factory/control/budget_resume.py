@@ -11,7 +11,7 @@ def resume(self, rid, revision, resume_count, actor):
             raise Conflict('运行已变化或仍在保存，请刷新后续跑')
         project = self.store.project(run['project_id'])
         if required(run) and not run.get('plan'):
-            limit = project.get('requirement_analysis_budget_usd', 5.0)
+            limit = project.get('requirement_analysis_budget_usd')
             self.store.update(rid, {'requirement_analysis_credit_usd': run.get('requirement_analysis_credit_usd', 0) + (limit or 0),
                 'status': 'received', 'error': None, 'resume_count': resume_count + 1},
                 expected=('needs_human',), event=('budget.renewed', {'actor': actor, 'phase': 'requirement_analysis', 'additional_usd': limit}))

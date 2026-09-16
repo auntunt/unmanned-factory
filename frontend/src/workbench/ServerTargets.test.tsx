@@ -36,3 +36,9 @@ it('release results distinguish no connection and unverified remote delivery', (
   expect(screen.getByText('生产服务')).toBeTruthy()
   expect(screen.getByText(/部署：未验证 · 已执行 · 退出码 1/)).toBeTruthy()
 })
+it('uses the shared form layout for server registration controls', async () => {
+  render(<ServerTargets csrfToken="csrf" onUnauthorized={onUnauthorized} />)
+  const name = await screen.findByLabelText('目标名称')
+  expect(name.closest('form')?.className).toContain('wb-form')
+  expect(name.closest('.wb-form-grid')).toBeTruthy()
+})

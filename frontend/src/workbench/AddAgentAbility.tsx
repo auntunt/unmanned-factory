@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request } from '../workspace/api'
 import Icon from './Icon'
+import AgentAssets from './AgentAssets'
 import SkillUploadFeedback from './SkillUploadFeedback'
 import SkillIngestion from './SkillIngestion'
 import { errorText, type PageProps } from './ui'
@@ -38,7 +39,7 @@ export default function AddAgentAbility({ agentId, onChanged, ...props }: PagePr
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
   return <section aria-label="为职能体添加能力">
-    <details className="wb-card" open>
+    <details className="wb-card wb-form" open>
       <summary><Icon name="triangle" className="wb-disclosure-icon" />为职能体添加能力</summary>
       <p>装备岗位无需项目。系统会识别输入：Prompt 进入维护会话；单 skill 作为附件；多 skill 或大包进入适配与人签。</p>
       <div className="wb-import-tabs" role="group" aria-label="能力素材类型">{[['prompt', '粘贴 Prompt'], ['file', '选择文件'], ['directory', '读取目录']].map(([value, label]) => <button type="button" key={value} aria-pressed={kind === value} className="wb-button wb-button-secondary" disabled={busy} onClick={() => setKind(value)}>{label}</button>)}</div>
@@ -49,6 +50,7 @@ export default function AddAgentAbility({ agentId, onChanged, ...props }: PagePr
       {error && <SkillUploadFeedback message={error} />}
       {message && <p role="status">{message} {runId ? <Link to={`/runs/${runId}`}>查看适配运行</Link> : <Link to={`/agents/${agentId}?mode=maintain`}>打开维护对话</Link>}</p>}
     </details>
+    <AgentAssets agentId={agentId} refresh={epoch} {...props} />
     <SkillIngestion key={`${agentId}:${epoch}`} agentId={agentId} onSigned={onChanged} {...props} />
   </section>
 }

@@ -137,3 +137,24 @@ it('shows budget controls and explicitly saves monitoring without a hidden dolla
   fireEvent.click(screen.getByRole('button', { name: '保存项目设置' }))
   await waitFor(() => expect(api.mock.calls.find(([url, options]) => url === '/api/v2/projects/p1' && options?.method === 'PUT')?.[1]?.body).toMatchObject({ budget_usd: null, revision: 1 }))
 })
+
+it('does not disguise an active-run conflict as a revision conflict', async () => {
+  show(); fireEvent.click(await screen.findByRole('button', {name:'项目设置'}))
+  await screen.findByLabelText('项目名称')
+  api.mockImplementationOnce(async () => { throw new WorkspaceApiError(409, '项目存在进行中的运行，暂时不能修改设置') })
+  fireEvent.click(screen.getByRole('button', {name:'保存项目设置'}))
+  await screen.findByText('项目存在进行中的运行，暂时不能修改设置')
+  expect(screen.queryByRole('button', {name:'我已审阅，保留我的修改并重试'})).toBeNull()
+  expect((screen.getByRole('button', {name:'保存项目设置'}) as HTMLButtonElement).disabled).toBe(false)
+})
+it('defaults analysis to monitoring and clears a separate ceiling when monitoring is selected', async () => {
+  show(); fireEvent.click(await screen.findByRole('button', {name:'项目设置'}))
+  const analysis = await screen.findByLabelText('需求分析独立预算（美元）') as HTMLInputElement
+  expect(analysis.value).toBe('')
+  fireEvent.change(analysis,{target:{value:'5'}})
+  expect(screen.getByText(/需求分析达到 \$5 会暂停/)).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('费用控制', {selector:'select'}),{target:{value:'monitor'}})
+  expect(analysis.value).toBe('')
+  expect(screen.getByText('需求分析仅监测，不设美元停止线。')).toBeTruthy()
+  expect(screen.getByRole('checkbox',{name:'自动确认规格（默认关闭）'}).closest('label')?.className).toContain('wb-checkbox')
+})

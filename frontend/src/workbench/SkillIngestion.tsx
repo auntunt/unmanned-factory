@@ -14,7 +14,7 @@ type Mapping = {
   injection_risks: { path: string; reason: string; text?: string }[]
   skills: { path: string; name: string; requires_authorization: boolean; sha256: string; body: string }[]
 }
-type Draft = { available_slots?: number; target_agent_id?: string; target_identity?: string; id: string; run_id: string; revision: number; status: string; source_sha256: string; mapping?: Mapping; agent_id?: string }
+type Draft = { runtime?: {status:string; error?:string; revision:number; resume_count?:number}; progress?: {mapped:number; verified:number; total?:number}; available_slots?: number; target_agent_id?: string; target_identity?: string; id: string; run_id: string; revision: number; status: string; source_sha256: string; mapping?: Mapping; agent_id?: string }
 
 export function IngestionReview({ draft, onChanged, ...props }: PageProps & { draft: Draft; onChanged: () => void }) {
   const [mapping, setMapping] = useState(draft.mapping)
@@ -27,6 +27,13 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
   const [error, setError] = useState('')
   const [advanced, setAdvanced] = useState('')
   const editable = draft.status === 'review'
+  const paused = draft.status !== 'review' && draft.status !== 'signed' && ['needs_human','failed','cancelled'].includes(draft.runtime?.status || '')
+  const resume = async () => {
+    if (!draft.runtime || busy) return
+    setBusy(true); setError('')
+    try { await request(`/api/v2/runs/${draft.run_id}/continue`, {method:'POST', csrfToken:props.csrfToken, onUnauthorized:props.onUnauthorized, body:{revision:draft.runtime.revision,resume_count:draft.runtime.resume_count || 0,answer:''}}); onChanged() }
+    catch (e) { setError(errorText(e)) } finally {setBusy(false)}
+  }
   const act = async (sign: boolean) => {
     if (!mapping) return
     setBusy(true); setError('')
@@ -41,9 +48,12 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       onChanged()
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
-  return <section className="wb-card" aria-label="职能包适配评审">
-    <h3>职能包适配 · {draft.status === 'review' ? '等待人签' : draft.status === 'signed' ? '已签署' : '处理中'}</h3>
+  return <section className="wb-card wb-form" aria-label="职能包适配评审">
+    <h3>职能包适配 · {draft.status === 'review' ? '等待人签' : draft.status === 'signed' ? '已签署' : paused ? '适配已暂停，尚未启用' : draft.status === 'verifying' ? '独立验收中，尚未启用' : '适配中，尚未启用'}</h3>
     <Link to={`/runs/${draft.run_id}`}>查看适配运行与独立验收</Link>
+    <p>{draft.status === 'signed' ? '已签署的能力已存入本职能体；只有岗位清单引用的能力会用于新任务。' : draft.status === 'review' ? '草稿已通过独立验收。请在此核对并签署，签署前不会用于任务。' : '资料包已保存，尚未成为可用能力。不必重复上传；适配和独立验收通过后在此人签。'}</p>
+    {draft.progress && <p>已适配 {draft.progress.mapped} / {draft.progress.total ?? '待统计'} 个资料分片 · 已验收 {draft.progress.verified} 个</p>}
+    {paused && <div role="alert"><p>{draft.runtime?.error || '任务已暂停，请查看运行记录。'}</p>{draft.runtime?.status === 'needs_human' && <button type="button" className="wb-button wb-button-primary" disabled={busy} onClick={() => void resume()}>{busy ? '正在恢复…' : '从已保存进度继续适配'}</button>}</div>}
     <p>来源 SHA256：<code>{draft.source_sha256}</code></p>
     {draft.agent_id && <Link to={`/agents/${draft.agent_id}`}>打开正式职能体</Link>}
     {mapping && <>

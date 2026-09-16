@@ -297,3 +297,18 @@ def test_restart_accounts_for_projectless_call_and_removes_its_scratch(app_env, 
     usage = [e for e in store.events(run['id']) if e['type'] == 'usage.recorded']
     assert len(usage) == 1 and usage[0]['payload']['interrupted']
     assert usage[0]['payload']['cost_usd'] is None
+
+
+def test_adapter_view_reports_failed_run_and_saved_progress(app_env, monkeypatch):
+    client, store, service, _ = app_env
+    headers, agent, _ = setup(client, service, monkeypatch, fail=True)
+    response = client.post(f"/api/v4/agents/{agent['id']}/abilities",headers=headers,files={'file':('external.zip',package())})
+    record=response.json()['ingestion']
+    run=wait_state(store,record['run_id'],{'needs_human'})
+    view=client.get('/api/v4/skill-ingestions/'+record['id']).json()
+    assert view['status']=='pending'
+    assert view['runtime']['status']=='needs_human'
+    assert 'simulated unavailable' in view['runtime']['error']
+    assert view['progress']=={'mapped':0,'verified':0,'total':1}
+    assert run['plan']['tasks'][0]['depends_on']==[]
+    assert service.agent_manifests.get(agent['id'])['skills']==[]

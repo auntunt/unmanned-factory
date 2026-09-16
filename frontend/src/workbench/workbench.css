@@ -218,3 +218,11 @@ a { color: inherit; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   .wb-shell *, .wb-shell *::before, .wb-shell *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Shared controls also cover configuration and equipment panels. */
+.wb-form select { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid var(--wb-border-strong); border-radius: 6px; background: var(--color-surface); color: var(--wb-ink); font: inherit; }
+.wb-form input[type="checkbox"] { width: 16px; height: 16px; padding: 0; flex: 0 0 16px; }
+.wb-analysis-settings { display: grid; gap: 12px; margin-top: 20px; padding: 16px; border: 1px solid var(--wb-border-strong); border-radius: 8px; }
+.wb-form .wb-checkbox { margin-block: 12px; }
+.wb-server-form { padding: 0; }
+.wb-form select:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }

@@ -116,3 +116,10 @@ it('shows the latest verification failure instead of a retained budget flag', ()
   expect(runGuidance(current).rawEvidence).toContain('验收证据不完整')
   expect(runGuidance({ ...current, status: 'running' }).kind).toBe('progress')
 })
+
+it('links a historical budget pause to its successor instead of asking for another retry', () => {
+  const guidance = runGuidance(run({id:'old', status:'needs_human', retry_run_id:'new', artifacts:{budget_exhausted:true}}))
+  expect(guidance.label).toBe('已由后续运行接手')
+  expect(guidance.primaryHref).toBe('/runs/new')
+  expect(guidance.kind).toBe('progress')
+})

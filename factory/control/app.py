@@ -42,7 +42,7 @@ class Project(Body):
 
 class ProjectUpdate(Body):
     auto_spec_confirm: bool = Field(default=False, strict=True)
-    requirement_analysis_budget_usd: float | None = Field(default=5.0, gt=0, le=1000000, allow_inf_nan=False)
+    requirement_analysis_budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
     revision: int = Field(ge=1, strict=True)
     name: str = Field(min_length=1, max_length=120)
     base_branch: str = Field(min_length=1, max_length=200)

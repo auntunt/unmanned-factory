@@ -5,13 +5,8 @@ import { request } from '../workspace/api'
 import { ErrorNotice, errorText, type PageProps } from './ui'
 import './agent-manifest.css'
 export type SkillRef = { id: string; version: number }
-type Skill = SkillRef & { name: string; source?: {type?: string; agent_name?: string; agent_id?: string}; actor?: string; instructions?: string; description?: string }
-export function skillLabel(skill: Skill) {
-  if (!skill.id.startsWith('legacy-')) return skill.name
-  const summary = (skill.instructions || skill.description || '').replace(/^---[\s\S]*?---\s*/, '').replace(/^#+\s*/gm, '').trim().split(/[。！？\n]/)[0].slice(0, 60)
-  const detail = skill.source?.agent_name || summary || skill.source?.agent_id || skill.id
-  return `${skill.name} · ${detail}（${skill.id.startsWith('legacy-') && skill.id.length > 16 ? skill.id.slice(-8) : skill.id}）`
-}
+import { skillLabel, type Skill } from './skill-label'
+export { skillLabel } from './skill-label'
 export type Manifest = { revision: number; identity: string; skills: SkillRef[]; assertions: string[]; compiler?: string; created_at?: string; resolved_skills?: Skill[]; history?: Manifest[] }
 export default function AgentManifest({agentId,...props}:PageProps & {agentId:string}) {
   const [value,setValue]=useState<Manifest|null>(null),[skills,setSkills]=useState<Skill[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false)
@@ -31,7 +26,7 @@ export default function AgentManifest({agentId,...props}:PageProps & {agentId:st
     {error && <ErrorNotice message={error}/>}
     {value && <><form onSubmit={e=>{e.preventDefault();void mutate(base,{revision:value.revision,identity,skills:refs,assertions:assertions.split('\n').filter(s=>s.trim())},'PUT')}}>
       <label>身份段<textarea maxLength={1200} rows={5} value={identity} disabled={!admin||busy} onChange={e=>setIdentity(e.target.value)} placeholder="我是谁、管什么、不管什么、交付口吻"/></label>
-      <h3>引用的 skill</h3><ul>{refs.map(ref=>{const skill=value.resolved_skills?.find(s=>s.id===ref.id&&s.version===ref.version)||skills.find(s=>s.id===ref.id);return <li key={ref.id}><Link to={`/ability-center?tab=modules&selected=${encodeURIComponent(ref.id)}&agent_id=${encodeURIComponent(agentId)}`}>{skill ? skillLabel({...skills.find(s=>s.id===ref.id),...skill}) : ref.id}</Link> · v{ref.version} · 来源：{skill?.source?.type||skill?.actor||'能力模块'} {admin && <><button type="button" disabled={busy} onClick={()=>setRefs(refs.filter(s=>s.id!==ref.id))}>移除 {skill ? skillLabel({...skills.find(s=>s.id===ref.id),...skill}) : ref.id}</button>{skills.some(s=>s.id===ref.id&&s.version>ref.version)&&<button type="button" disabled={busy} onClick={()=>setRefs(refs.map(s=>s.id===ref.id?{id:s.id,version:skills.find(m=>m.id===s.id)!.version}:s))}>采用最新版本</button>}</>}</li>})}</ul>
+      <h3>已装备能力 · {refs.length} 项</h3>{!refs.length && <p role="status">岗位清单尚未引用 skill。目前只使用身份说明；已上传资料需完成整理或适配、人签后加入清单，才会用于新任务。</p>}<h3>引用的 skill</h3><ul>{refs.map(ref=>{const skill=value.resolved_skills?.find(s=>s.id===ref.id&&s.version===ref.version)||skills.find(s=>s.id===ref.id);return <li key={ref.id}><Link to={`/ability-center?tab=modules&selected=${encodeURIComponent(ref.id)}&agent_id=${encodeURIComponent(agentId)}`}>{skill ? skillLabel({...skills.find(s=>s.id===ref.id),...skill}) : ref.id}</Link> · v{ref.version} · 来源：{skill?.source?.type||skill?.actor||'能力模块'} {admin && <><button type="button" disabled={busy} onClick={()=>setRefs(refs.filter(s=>s.id!==ref.id))}>移除 {skill ? skillLabel({...skills.find(s=>s.id===ref.id),...skill}) : ref.id}</button>{skills.some(s=>s.id===ref.id&&s.version>ref.version)&&<button type="button" disabled={busy} onClick={()=>setRefs(refs.map(s=>s.id===ref.id?{id:s.id,version:skills.find(m=>m.id===s.id)!.version}:s))}>采用最新版本</button>}</>}</li>})}</ul>
       {admin && <label>加入 skill<select value="" disabled={busy} onChange={e=>{const m=skills.find(s=>s.id===e.target.value);if(m)setRefs([...refs,{id:m.id,version:m.version}])}}><option value="">选择能力模块及版本</option>{skills.filter(s=>!refs.some(r=>r.id===s.id)).map(s=><option key={s.id} value={s.id}>{skillLabel(s)} · v{s.version}</option>)}</select></label>}
       <label>验收断言（每行一项）<textarea rows={4} value={assertions} disabled={!admin||busy} onChange={e=>setAssertions(e.target.value)}/></label>
       {value.compiler==='legacy-exact-v1' && <p>当前使用逐字保真的遗留编译；保存清单后启用身份段与能力单元编排。</p>}

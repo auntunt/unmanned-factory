@@ -111,3 +111,28 @@ it('joins provenance through source run ids, deduplicates modules, and keeps sel
   expect(screen.getAllByRole('link',{name:/来源运行 run-one/})[0].getAttribute('href')).toBe('/runs/run-one')
   await waitFor(() => expect(screen.getByText('/ability-center?selected=c1&tab=capabilities')).toBeTruthy())
 })
+
+it('attention hides replaced runs and includes spec confirmation; active includes analysis', async () => {
+  const fixtures = [
+    {...run,id:'old',request:'历史暂停',retry_run_id:'next'},
+    {...run,id:'next',request:'规格确认',status:'awaiting_spec_confirmation'},
+    {...run,id:'analysis',request:'需求分析中',status:'requirement_analysis'},
+  ]
+  const original = api.getMockImplementation()!
+  api.mockImplementation(async (url,options) => url === '/api/v2/runs' ? {runs:fixtures} as never : original(url,options))
+  show(<RunsPage {...props}/>, '/runs?filter=attention')
+  await screen.findByText('规格确认')
+  expect(screen.queryByText('历史暂停')).toBeNull()
+  fireEvent.click(screen.getByRole('tab',{name:/进行中/}))
+  await screen.findByRole('link',{name:'查看需求分析：需求分析中'})
+})
+it('legacy module cards expose distinguishing source summaries', async () => {
+  const original = api.getMockImplementation()!
+  api.mockImplementation(async (url,options) => url === '/api/v4/modules' ? {modules:[
+    {...module,id:'legacy-one',name:'遗留能力',instructions:'维护旧系统。保留行为'},
+    {...module,id:'legacy-two',name:'遗留能力',instructions:'生成命令行工具。验证输入'},
+  ]} as never : original(url,options))
+  show(<CapabilityCenter {...props}/>, '/ability-center')
+  await screen.findByRole('heading',{name:/遗留能力 · 维护旧系统/})
+  expect(screen.getByRole('heading',{name:/遗留能力 · 生成命令行工具/})).toBeTruthy()
+})

@@ -108,6 +108,8 @@ def _recent_events(store, run_ids):
 
 
 def _attention(run, events, latest_inspections=None):
+    if run.get('retry_run_id'):
+        return None
     if run.get('source', {}).get('type') == 'inspection':
         if run.get('inspection_superseded_by') or (latest_inspections is not None and latest_inspections.get(run.get('project_id')) != run['id']):
             return None

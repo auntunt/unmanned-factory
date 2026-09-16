@@ -224,10 +224,10 @@ def plan(service, rid):
         if profile['provider'] != 'claude':
             raise Conflict('摄取需要支持零工具策略的 Claude 执行与验收配置；不会回退到可执行脚本的模式')
     task = {'id': 'adapt', 'title': '职能包适配', 'prompt': '只读分类、映射、产生草稿',
-            'acceptance': CRITERIA, 'paths': [], 'checks': [], 'status': 'pending'}
+            'acceptance': CRITERIA, 'paths': [], 'depends_on': [], 'complexity': 'medium', 'risk': 'low', 'checks': [], 'status': 'pending'}
     service.store.update(rid, {'revision': run['revision'] + 1, 'status': 'queued',
         'runtime_configuration': configuration,
-        'plan': {'summary': '职能包适配', 'tasks': [task], 'questions': []}, 'tasks': [task]},
+        'plan': {'title': '职能包适配', 'summary': '职能包适配', 'tasks': [task], 'questions': []}, 'tasks': [task]},
         expected=('planning',), event=('plan.created', {'summary': '适配后独立验收，人签前不可用'}))
     service._submit(service._run, rid)
 
@@ -284,6 +284,8 @@ def execute(service, rid):
     previous_verdict = (run.get('artifacts') or {}).get('verification') or {}
     if not record.get('mapping') or previous_verdict.get('verdict') == 'fail':
         parts = batches(package)
+        if record.get('batch_count') != len(parts):
+            record = store.update(iid, {'batch_count': len(parts)}, record['revision'], 'adapter')
         completed = [] if previous_verdict.get('verdict') == 'fail' else record.get('mapping_batches', [])
         for index in range(len(completed), len(parts)):
             prompt = adaptation_prompt(parts[index])

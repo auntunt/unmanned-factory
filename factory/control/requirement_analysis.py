@@ -189,7 +189,7 @@ def analyze(self, rid):
         # Independent bounded-output profile; never inherit the planner's expensive model.
         profile = {'provider': os.getenv('FACTORY_REQUIREMENT_ANALYSIS_PROVIDER', 'claude'),
                    'model': os.getenv('FACTORY_REQUIREMENT_ANALYSIS_MODEL', 'sonnet')}
-        budget = project.get('requirement_analysis_budget_usd', 5.0)
+        budget = project.get('requirement_analysis_budget_usd')
         if budget is not None:
             budget += run.get('requirement_analysis_credit_usd', 0)
         previous = self._usage(rid, profile='requirement_analysis')

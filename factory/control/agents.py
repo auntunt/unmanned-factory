@@ -573,7 +573,7 @@ class AgentStore:
             data = dict(id=rid, project_id=prior['project_id'], request=prior['request'],
                 status='received', revision=0, plan=None, triage=None, tasks=[], artifacts={},
                 history=history, created_at=at, updated_at=at, previous_run_id=prior['id'],
-                source={'type': 'retry', 'actor': actor, 'actor_id': actor_id if actor_id is not None else prior.get('source', {}).get('actor_id'), 'retry_of': prior['id']})
+                source={**prior.get('source', {}), 'type': 'retry', 'actor': actor, 'actor_id': actor_id if actor_id is not None else prior.get('source', {}).get('actor_id'), 'retry_of': prior['id']})
             for field in ('capability', 'agent_id', 'agent_version', 'agent_snapshot',
                           'runtime_configuration', 'conversation_id', 'feedback_predecessor_id', 'feedback_applied_ids',
                           'root_request', 'authorization_requests', 'module_snapshot', 'module_selection_revision', 'mount_snapshot'):

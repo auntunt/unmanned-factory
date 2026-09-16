@@ -105,3 +105,34 @@ def test_zip_default_monitoring_and_mode_changes_conflict_on_reused_key(app_env)
     assert result.json()['project']['budget_usd'] is None
     assert post(client, headers, payload).json()['project']['id'] == result.json()['project']['id']
     assert post(client, headers, payload, budget_usd='100').status_code == 409
+
+
+def test_noop_settings_save_during_execution_keeps_revision_and_audit(app_env):
+    client, store, service, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    run, _ = store.create_run(p['id'], 'Active work')
+    store.update(run['id'], {'status': 'running'})
+    before = store.project_audit(p['id'])
+    result = client.put(f"/api/v2/projects/{p['id']}", headers=headers, json={
+        **{k:p[k] for k in ('name','base_branch','checks','revision')},
+        'auto_spec_confirm': False, 'requirement_analysis_budget_usd': None})
+    assert result.status_code == 200, result.text
+    assert result.json()['revision'] == p['revision']
+    assert store.project_audit(p['id']) == before
+    with pytest.raises(Conflict, match='进行中的运行'):
+        store.update_project(p['id'], {'name':'Changed'}, p['revision'], 'owner')
+
+
+def test_analysis_budget_can_be_relaxed_with_completed_delivery_pending(app_env):
+    client, store, service, repo = app_env
+    p = project(client, repo, login(client))
+    p = store.update_project(p['id'], {'requirement_analysis_budget_usd':5}, p['revision'], 'owner')
+    run, _ = store.create_run(p['id'], 'Delivered work')
+    store.update(run['id'], {'status':'ready_for_review'})
+    updated = store.update_project(p['id'], {'requirement_analysis_budget_usd':None, 'budget_usd':None}, p['revision'], 'owner')
+    assert updated['requirement_analysis_budget_usd'] is None
+    assert updated['budget_usd'] is None
+    assert updated['revision'] == p['revision'] + 1
+    with pytest.raises(Conflict):
+        store.update_project(p['id'], {'requirement_analysis_budget_usd':1}, updated['revision'], 'owner')

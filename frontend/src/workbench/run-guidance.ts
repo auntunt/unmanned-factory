@@ -109,6 +109,7 @@ export function runEvidence(run: Run): RunEvidence {
 
 /** Converts persisted run state into an explicit, non-speculative next step. */
 export function runGuidance(run: Run): RunGuidance {
+  if (run.retry_run_id) return { kind: 'progress', label: '已由后续运行接手', summary: '此页保留历史暂停原因与证据；请查看后续运行的进展和成果，无需重复续跑。', view: 'execution', stage: 'build', primaryLabel: '查看后续运行', primaryHref: `/runs/${encodeURIComponent(run.retry_run_id)}` }
   if (run.status === 'awaiting_spec_confirmation') return result(run, { kind: 'requirements', label: '待确认规格', summary: '一次核对规格、推荐 skill 和保真标尺后开工。', view: 'requirements', stage: 'intake', primaryLabel: '确认规格并开工' })
   if (run.status === 'requirement_analysis') return result(run, { kind: 'progress', label: '需求分析中', summary: '正在整理规格、方法建议与保真标尺。', view: 'requirements', stage: 'intake', primaryLabel: '查看需求分析' })
 

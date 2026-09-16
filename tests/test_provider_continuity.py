@@ -74,10 +74,12 @@ def test_timeout_retains_latest_session_and_identity_repeats_are_not_progress(tm
             print(json.dumps({'type':'provider.session','payload':{'session_id':'current-session'}}), flush=True)
         time.sleep(10)
     ''')
+    # Allow interpreter startup under full-suite load; the 10s worker still
+    # must time out after emitting its session, rather than before startup.
     events = []
     with pytest.raises(ProviderTimeout) as error:
         SDKRunner(worker_command=[python, str(script)]).run(
-            ProviderRequest('claude', 'm', 'p', str(tmp_path), session_id='old-session', timeout_s=.2),
+            ProviderRequest('claude', 'm', 'p', str(tmp_path), session_id='old-session', timeout_s=3),
             lambda *x: events.append(x))
     assert error.value.session_id == 'current-session' and error.value.transient
     assert len(events) == 1
