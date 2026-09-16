@@ -464,7 +464,11 @@ class AgentStore:
     @staticmethod
     def _public_conversation(c):
         # The frozen capability snapshot is internal freeze data, never for the client.
-        return {k: v for k, v in c.items() if k != 'agent_snapshot'}
+        out = {k: v for k, v in c.items() if k != 'agent_snapshot'}
+        # Attachment bodies stay server-side; the client sees only the catalog.
+        if out.get('attachments'):
+            out['attachments'] = [{k: v for k, v in a.items() if k != 'text'} for a in out['attachments']]
+        return out
 
     def conversation(self, cid):
         c = self._row("agent_conversations", "id", cid)
@@ -474,6 +478,35 @@ class AgentStore:
     def conversation_snapshot(self, cid):
         """The capability version frozen to this conversation, or None if not yet frozen."""
         return self._row("agent_conversations", "id", cid).get('agent_snapshot')
+
+    def conversation_attachments(self, cid):
+        return self._row("agent_conversations", "id", cid).get('attachments', [])
+
+    def add_attachment(self, cid, actor_id, name, text):
+        """Read-only text material scoped to this one conversation, bounded and owner-checked."""
+        import hashlib
+        text = scrub(text)
+        if not text.strip():
+            raise ValueError('附件内容为空')
+        if len(text.encode()) > 40_000:
+            raise ValueError('单个附件超过 40 KB，请精简或拆分')
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            c = self._decode(row)
+            if c.get('actor_id') != actor_id:
+                raise PermissionError('无权访问该会话')
+            atts = c.setdefault('attachments', [])
+            if len(atts) >= 8:
+                raise ValueError('会话附件已达上限（8 个）')
+            att = {'id': uuid.uuid4().hex, 'name': (name or '附件')[:120], 'text': text,
+                   'sha256': hashlib.sha256(text.encode()).hexdigest(), 'size': len(text.encode()), 'at': now()}
+            atts.append(att)
+            c['updated_at'] = now()
+            db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+        return {k: v for k, v in att.items() if k != 'text'}
 
     def freeze_conversation_snapshot(self, cid, snapshot, version):
         """Pin the role/instructions/skill versions to this conversation once.

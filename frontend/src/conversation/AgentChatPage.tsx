@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { errorText, formatDate, type PageProps } from '../workbench/ui'
@@ -8,7 +8,7 @@ import { useWorkTitle } from './title-context'
 import './conversation.css'
 
 type Msg = { id?: string; role: string; content: string; at?: string; created_at?: string; status?: string; job_id?: string }
-type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string }
+type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string; attachments?: Array<{ id: string; name: string; size?: number }> }
 type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number }
 const base = '/api/v4'
 
@@ -24,6 +24,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
   const [history, setHistory] = useState<Conv[]>([])
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [attaching, setAttaching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -91,6 +92,19 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
     } catch (cause) { setError(errorText(cause)) } finally { setSending(false) }
   }
 
+  const attach = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]; event.target.value = ''
+    if (!file || !aid) return
+    setAttaching(true); setError(null)
+    try {
+      let current = conv
+      if (!current) { current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null } }); setHistory(h => [current as Conv, ...h]) }
+      const body = new FormData(); body.append('file', file)
+      const res = await request<{ conversation: Conv }>(`${base}/conversations/${encodeURIComponent(current.id)}/attachments`, { method: 'POST', csrfToken, onUnauthorized, body })
+      if (res.conversation) setConv(res.conversation)
+    } catch (cause) { setError(errorText(cause)) } finally { setAttaching(false) }
+  }
+
   const startNew = () => { setConv(null); setText(''); setError(null); submitKey.current = null }
   const openConv = async (id: string) => {
     setError(null)
@@ -127,7 +141,11 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
             <div className="cv-composer">
               <textarea rows={2} value={text} disabled={sending} onChange={e => setText(e.target.value)} placeholder={`和 ${agent?.name || '职能体'} 聊…`} aria-label="消息"
                 onKeyDown={e => { if (!e.shiftKey && e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }} />
-              <div className="cv-composer-foot"><span /><button className="cv-send" type="submit" disabled={sending || !text.trim()} aria-label="发送">{sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}</button></div>
+              {(conv?.attachments?.length ?? 0) > 0 && <div className="cv-filechips">{conv!.attachments!.map(a => <span className="cv-filechip" key={a.id}><Icon name="delivery" width={13} height={13} /><span title={a.name}>{a.name}</span></span>)}</div>}
+              <div className="cv-composer-foot">
+                <label className="cv-attach"><Icon name="delivery" width={16} height={16} /> {attaching ? '上传中…' : '添加材料'}<input type="file" accept=".txt,.md,.csv,text/plain" disabled={attaching || sending} onChange={attach} /></label>
+                <button className="cv-send" type="submit" disabled={sending || !text.trim()} aria-label="发送">{sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}</button>
+              </div>
             </div>
           </form>
           {error && <div className="cv-error" role="alert"><span>{error}</span></div>}

@@ -223,3 +223,41 @@ def test_chat_answer_can_be_cancelled_then_retried(app_env, monkeypatch):
     assert _wait_job(service, store, again.json()['job_id']) == 'completed'
     msgs = AgentStore(store).conversation(cid)['messages']
     assert any(m['role'] == 'assistant' and m.get('content') == '重试后的回答' for m in msgs)
+
+
+def test_session_attachment_is_read_by_this_conversation_only(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    reqs = _capture(monkeypatch, service)
+    cid = _do_convo(client, headers, agent['id'])
+    up = client.post(f'/api/v4/conversations/{cid}/attachments',
+                     files={'file': ('quote.csv', '客户,单价,数量\n张三,100,3'.encode(), 'text/csv')}, headers=headers)
+    assert up.status_code == 201
+    # attachment metadata comes back, but the body is not exposed to the client
+    assert up.json()['attachment']['name'] == 'quote.csv' and 'text' not in up.json()['attachment']
+    assert all('text' not in a for a in up.json()['conversation'].get('attachments', []))
+
+    _wait_job(service, store, _send(client, headers, cid, '按附件算总价').json()['job_id'])
+    texts = ' '.join(d.get('text', '') for d in (reqs[-1].reference_mount or {'documents': []})['documents'])
+    assert '张三,100,3' in texts
+
+    # A different conversation of the same role does not see this attachment.
+    cid2 = _do_convo(client, headers, agent['id'])
+    _wait_job(service, store, _send(client, headers, cid2, '你好').json()['job_id'])
+    other = reqs[-1].reference_mount
+    assert other is None or all('张三,100,3' not in d.get('text', '') for d in other['documents'])
+
+
+def test_attachment_upload_rejects_non_owner_and_non_utf8(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    # Non-UTF8 upload rejected (owner session, before any other login swaps the cookie).
+    assert client.post(f'/api/v4/conversations/{cid}/attachments', files={'file': ('x.bin', b'\xff\xfe\x00', 'application/octet-stream')}, headers=headers).status_code == 422
+    # A different member cannot attach to someone else's conversation.
+    client.app.state.auth.create_user('mallory2', 'another-long-password', role='member')
+    other = client.post('/api/auth/login', json={'username': 'mallory2', 'password': 'another-long-password'}, headers={'Origin': 'http://testserver'})
+    mh = {'Origin': 'http://testserver', 'X-CSRF-Token': other.json()['csrf_token']}
+    assert client.post(f'/api/v4/conversations/{cid}/attachments', files={'file': ('x.txt', b'hi', 'text/plain')}, headers=mh).status_code == 403

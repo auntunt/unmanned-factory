@@ -188,6 +188,16 @@ def router(store, service):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
         return c
+    @api.post('/conversations/{cid}/attachments',status_code=201)
+    def add_attachment(cid:str,request:Request,file:UploadFile=File(...)):
+        c=guarded(agents.conversation,cid)
+        if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
+        raw=file.file.read(60_001)
+        if len(raw)>60_000: raise HTTPException(413,'附件过大，请上传 40 KB 以内的文本')
+        try: text=raw.decode('utf-8')
+        except UnicodeDecodeError: raise HTTPException(422,'只支持 UTF-8 文本附件（.txt/.md/.csv）') from None
+        att=guarded(agents.add_attachment,cid,actor(request)['id'],file.filename,text)
+        return {'attachment':att,'conversation':agents.conversation(cid)}
     @api.post('/conversations/{cid}/messages',status_code=201)
     def message(cid:str,body:Message,request:Request):
         with service.lock:
@@ -268,7 +278,7 @@ def router(store, service):
                 # materials; ownership is enforced inside compile_mounts (no cross-role/user).
                 from factory.control.mounts import compile_mounts
                 try:
-                    mount=compile_mounts(store,{'agent_snapshot':snapshot,'agent_id':c['agent_id'],'project_id':None,'module_snapshot':[],'context':{}})
+                    mount=compile_mounts(store,{'agent_snapshot':snapshot,'agent_id':c['agent_id'],'project_id':None,'module_snapshot':[],'context':{},'conversation_attachments':agents.conversation_attachments(cid)})
                 except (ValueError, PermissionError) as exc:
                     job_id=uuid.uuid4().hex
                     agents.append_message(cid,'assistant','能力资料装载失败，未作答：'+str(exc),status='failed',job_id=job_id)

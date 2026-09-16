@@ -151,6 +151,13 @@ def compile_mounts(store, run):
                     mounted_ids.add(document['id'])
             skills.append({'id': skill['id'], 'version': skill['version'],
                            'sha256': skill['external_source']['package_sha256']})
+    # Session attachments: read-only material scoped to this one conversation. They
+    # travel with the run dict, so no other conversation, role or user can see them.
+    for att in run.get('conversation_attachments', []):
+        text = att['text']
+        append_document({'id': 'attachment/' + att['id'], 'title': att.get('name', att['id']),
+                         'text': text, 'uri': 'attachment:' + att['id'], 'trust': 'session_attachment',
+                         'source_revision': 1, 'sha256': att.get('sha256') or hashlib.sha256(text.encode()).hexdigest()})
     manifest = {'schema_version': 1, 'project_id': run['project_id'], 'collections': collections,
                 'modules': [{'id': m['id'], 'version': m['version']} for m in run.get('module_snapshot', [])],
                 'agent': {'id': run.get('agent_id'), 'version': run.get('agent_version')},
