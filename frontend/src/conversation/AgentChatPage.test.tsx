@@ -66,3 +66,19 @@ it('opens the exact conversation named in ?cid=, not the latest, for refresh and
   expect(gets).toContain('/api/v4/conversations/c-target')
   expect(gets).not.toContain('/api/v4/conversations/c-latest') // did not fall back to the latest
 })
+
+it('rejects a ?cid that belongs to another role or is not a do chat, without falling back', async () => {
+  const rows = [{ id: 'c-mine', agent_id: 'a1', mode: 'do', messages: [] }]
+  api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    if (url === '/api/v4/agents/a1' && !opts?.method) return agent as never
+    if (url === '/api/v4/agents/a1/conversations' && !opts?.method) return { conversations: rows } as never
+    // The pinned cid resolves to a conversation owned by a DIFFERENT agent.
+    if (url === '/api/v4/conversations/c-foreign' && !opts?.method) return { id: 'c-foreign', agent_id: 'other', mode: 'do', project_id: null, messages: [{ id: 'x', role: 'user', content: '别的角色的会话' }] } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/agents/a1/chat?cid=c-foreign']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/agents/:agentId/chat" element={<AgentChatPage csrfToken="x" onUnauthorized={noop} user={{ id: 1, username: 'owner', role: 'admin' }} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  expect(await screen.findByText(/不属于当前助手/)).toBeTruthy()
+  expect(screen.queryByText('别的角色的会话')).toBeNull() // did not render the foreign conversation
+})

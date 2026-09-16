@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { errorText, formatDate, type PageProps } from '../workbench/ui'
 import Icon, { CategoryBadge, packMark } from '../workbench/Icon'
@@ -17,6 +17,7 @@ const base = '/api/v4'
  *  维护职能体在单独入口。 */
 export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) {
   const { agentId } = useParams()
+  const navigate = useNavigate()
   const [params] = useSearchParams()
   const targetCid = params.get('cid')
   const setWorkTitle = useWorkTitle()
@@ -35,21 +36,33 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
   useEffect(() => {
     if (!aid) return
     const c = new AbortController()
+    setConv(null); setError(null)  // clear stale content before loading the new target
     request<Agent>(`${base}/agents/${aid}`, { signal: c.signal, onUnauthorized }).then(setAgent).catch(() => undefined)
     request<{ conversations?: Conv[] } | Conv[]>(`${base}/agents/${aid}/conversations`, { signal: c.signal, onUnauthorized })
       .then(r => {
         const rows = (Array.isArray(r) ? r : r.conversations || []).filter(x => x.mode === 'do')
         setHistory(rows)
+        if (targetCid === 'new') return  // an unsent new conversation: nothing to open
         // Open the conversation named in the URL (?cid=…) so a refresh or a second
         // tab restores that exact target, not just the role's latest chat. The GET
-        // itself enforces ownership (403 for another user's conversation). Fall back
-        // to the most recent only when no cid is pinned.
+        // enforces ownership (403 for another user's conversation). Fall back to the
+        // most recent only when no cid is pinned.
         const open = targetCid || rows[0]?.id
-        if (open) return request<Conv>(`${base}/conversations/${encodeURIComponent(open)}`, { signal: c.signal, onUnauthorized }).then(setConv)
+        if (!open) return
+        return request<Conv>(`${base}/conversations/${encodeURIComponent(open)}`, { signal: c.signal, onUnauthorized }).then(loaded => {
+          if (c.signal.aborted) return  // a newer selection superseded this request
+          // The pinned conversation must belong to THIS role and be a chat, not a
+          // maintenance session or another role's conversation shown under this title.
+          if (loaded.agent_id !== agentId || loaded.mode !== 'do') {
+            setConv(null); setError('这个会话不属于当前助手，或不是日常对话。')
+            return
+          }
+          setConv(loaded)
+        })
       })
       .catch(cause => { if (!c.signal.aborted) setError(errorText(cause)) })
     return () => c.abort()
-  }, [aid, targetCid, onUnauthorized])
+  }, [aid, agentId, targetCid, onUnauthorized])
 
   useEffect(() => { setWorkTitle(agent?.name || null); return () => setWorkTitle(null) }, [agent?.name, setWorkTitle])
 
@@ -87,7 +100,9 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
     try {
       let current = conv
       if (!current) {
-        current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null } })
+        // Idempotent create: a lost response on retry returns the same conversation
+        // (server keys on this op), never a duplicate.
+        current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null, client_key: submitKey.current } })
         setHistory(h => [current as Conv, ...h])
       }
       const raw = await request<{ conversation?: Conv; run?: unknown; needs_project?: boolean; busy?: boolean; message?: string }>(`${base}/conversations/${encodeURIComponent(current.id)}/messages`, { method: 'POST', csrfToken, onUnauthorized, body: { content: text.trim(), idempotency_key: submitKey.current } })
@@ -96,6 +111,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
       const res = unwrapAgentMessageResponse(raw as never)
       if (res.needsProject) setError('这个职能体还没有配置可用模型，暂时无法回答。请在维护里配置模型后再聊。')
       submitKey.current = null; setText('')
+      if (current.id !== targetCid) navigate(`/agents/${aid}/chat?cid=${encodeURIComponent(current.id)}`, { replace: true }) // pin the new conversation
     } catch (cause) { setError(errorText(cause)) } finally { setSending(false) }
   }
 
@@ -109,14 +125,14 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
       const body = new FormData(); body.append('file', file)
       const res = await request<{ conversation: Conv }>(`${base}/conversations/${encodeURIComponent(current.id)}/attachments`, { method: 'POST', csrfToken, onUnauthorized, body })
       if (res.conversation) setConv(res.conversation)
+      if (current.id !== targetCid) navigate(`/agents/${aid}/chat?cid=${encodeURIComponent(current.id)}`, { replace: true })
     } catch (cause) { setError(errorText(cause)) } finally { setAttaching(false) }
   }
 
-  const startNew = () => { setConv(null); setText(''); setError(null); submitKey.current = null }
-  const openConv = async (id: string) => {
-    setError(null)
-    try { setConv(await request<Conv>(`${base}/conversations/${encodeURIComponent(id)}`, { onUnauthorized })) } catch (cause) { setError(errorText(cause)) }
-  }
+  // History and new-chat switches go through the URL so refresh and Back stay on the
+  // chosen conversation; the loader effect (keyed on ?cid=) does the fetch + checks.
+  const startNew = () => { setText(''); setError(null); submitKey.current = null; navigate(`/agents/${aid}/chat?cid=new`) }
+  const openConv = (id: string) => { setText(''); submitKey.current = null; navigate(`/agents/${aid}/chat?cid=${encodeURIComponent(id)}`) }
 
   const mark = useMemo(() => (agent ? packMark(agent) : null), [agent])
   const visible = messages.filter(m => !(m.status === 'pending' && m.job_id))

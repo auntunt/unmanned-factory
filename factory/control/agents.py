@@ -556,10 +556,14 @@ class AgentStore:
             if c.get('actor_id') != actor_id:
                 raise PermissionError('无权访问该会话')
             atts = c.setdefault('attachments', [])
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            existing = next((a for a in atts if a.get('sha256') == digest), None)
+            if existing is not None:
+                return {k: v for k, v in existing.items() if k != 'text'}  # idempotent by content
             if len(atts) >= 8:
                 raise ValueError('会话附件已达上限（8 个）')
             att = {'id': uuid.uuid4().hex, 'name': (name or '附件')[:120], 'text': text,
-                   'sha256': hashlib.sha256(text.encode()).hexdigest(), 'size': len(text.encode()), 'at': now()}
+                   'sha256': digest, 'size': len(text.encode()), 'at': now()}
             atts.append(att)
             c['updated_at'] = now()
             db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
@@ -729,14 +733,24 @@ class AgentStore:
     def conversations(self, aid):
         self.get(aid)
         with self.store.connect() as db: return [self._public_conversation(self._decode(r)) for r in db.execute("SELECT data FROM agent_conversations WHERE agent_id=? ORDER BY rowid DESC", (aid,))]
-    def create_conversation(self, aid, mode, project_id=None, actor_id=None):
+    def create_conversation(self, aid, mode, project_id=None, actor_id=None, client_key=None):
         if mode not in {"do", "maintain"}: raise ValueError("会话模式无效")
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE"); arow = db.execute("SELECT 1 FROM agents WHERE id=?", (aid,)).fetchone()
             if not arow: raise KeyError(aid)
+            if client_key:
+                # Atomic idempotent create: one (actor, key) yields one conversation.
+                # Replaying the same key returns that same conversation; the same key
+                # with different parameters is a conflict, never a second conversation.
+                prior = db.execute("SELECT data FROM agent_conversations WHERE json_extract(data,'$.actor_id')=? AND json_extract(data,'$.client_key')=?", (actor_id, client_key)).fetchone()
+                if prior:
+                    c = self._decode(prior)
+                    if c.get("agent_id") != aid or c.get("mode") != mode or (c.get("project_id") or None) != (project_id or None):
+                        raise Conflict("这个提交标识已用于不同的会话参数")
+                    return c
             vrow = db.execute("SELECT data FROM agent_versions WHERE agent_id=? AND version=json_extract((SELECT data FROM agents WHERE id=?),'$.active_version')", (aid, aid)).fetchone(); drow = db.execute("SELECT data FROM agent_drafts WHERE agent_id=?", (aid,)).fetchone(); cid = uuid.uuid4().hex; at = now()
             draft_revision = json.loads(drow[0]).get("revision", 0) if drow else 0
-            c = {"id": cid, "agent_id": aid, "mode": mode, "project_id": project_id, "actor_id": actor_id, "messages": [], "run_id": None, "draft_revision": draft_revision, "created_at": at, "updated_at": at}
+            c = {"id": cid, "agent_id": aid, "mode": mode, "project_id": project_id, "actor_id": actor_id, "client_key": client_key, "messages": [], "run_id": None, "draft_revision": draft_revision, "created_at": at, "updated_at": at}
             db.execute("INSERT INTO agent_conversations VALUES (?,?,?)", (cid, aid, _json(c)))
         return c
     def append_message(self, cid, role, content, expected_updated_at=None, **extra):

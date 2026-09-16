@@ -14,7 +14,7 @@ class AgentCreate(Body):
     identity:str|None=Field(default=None,max_length=1200)
     instructions:str=Field(default='',max_length=30000); model_settings:dict|None=None
     tool_scope:list[str]=Field(default_factory=list); acceptance:list[str]=Field(default_factory=list); delivery:dict|None=None
-class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); project_id:str|None=None
+class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); project_id:str|None=None; client_key:str|None=Field(default=None,min_length=8,max_length=100,pattern=r'^[A-Za-z0-9_-]+$')
 class RouteAttachment(Body):
     name:str=Field(default='',max_length=300); size:int|None=None; type:str|None=None
 class RouteRequest(Body):
@@ -217,7 +217,7 @@ def router(store, service):
     def versions(aid:str): return {'versions':guarded(agents.versions,aid)}
     @api.post('/agents/{aid}/conversations',status_code=201)
     def conversation(aid:str,body:ConversationCreate,request:Request):
-        return guarded(agents.create_conversation,aid,body.mode,body.project_id,actor(request)['id'])
+        return guarded(agents.create_conversation,aid,body.mode,body.project_id,actor(request)['id'],body.client_key)
     @api.get('/agents/{aid}/conversations')
     def conversations(aid:str,request:Request):
         rows=guarded(agents.conversations,aid); uid=actor(request)['id']

@@ -5,23 +5,25 @@ import type { Run } from '../workspace/types'
 import { errorText, type PageProps } from '../workbench/ui'
 import Icon from '../workbench/Icon'
 import { validateProjectFiles, validateProjectZip, type ProjectRecord } from '../workbench/ProjectsPage'
+import { readOp, writeOp, clearOp, hashFile, type OpAttachment } from './entry-recovery'
 
 /** The single daily entry: one Chatbox. Describe a goal, optionally attach
  *  material, send. The server decides the path (development / a standalone role's
  *  chat / ask-one-question / not-available); the client never asserts the route.
  *  Development creates a project + run; role chat opens a no-project conversation
- *  (no run); ambiguity asks instead of assuming code. */
+ *  (no run); ambiguity asks instead of assuming code. One operation key (per tab,
+ *  per actor) makes every step idempotent, so a lost response on retry resumes the
+ *  same conversation/project instead of duplicating it. */
 type Decision = {
   kind: 'development' | 'agent_chat' | 'clarify' | 'unavailable'
   agent_id?: string; agent_name?: string; reason?: string; mode_label?: string
   question?: string; roles?: Array<{ agent_id: string; name: string }>
   offer_development?: boolean; missing?: string[]; detail?: string; attach?: boolean
 }
-type RouteState = { goal: string; agentId: string; cid: string; key: string; attached: string[] }
-const ROUTE_KEY = 'webuddy:start:route'
 
 export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps) {
   const navigate = useNavigate()
+  const uid = user?.id
   const [goal, setGoal] = useState(() => { try { return localStorage.getItem('webuddy:start:goal') || '' } catch { return '' } })
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
@@ -29,12 +31,26 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
   const [error, setError] = useState<string | null>(null)
   const [decision, setDecision] = useState<Decision | null>(null)
   const [focused, setFocused] = useState(false)
-  const attempt = useRef<{ key: string; project?: ProjectRecord; runKey: string }>({ key: crypto.randomUUID(), runKey: crypto.randomUUID() })
+  const attempt = useRef<{ project?: ProjectRecord }>({})
   const lock = useRef(false)
+  // Stable per-submission id, resumed from this tab's saved state when the goal is
+  // unchanged, so a refresh continues the same operation rather than starting over.
+  const opRef = useRef<string>('')
+  if (!opRef.current) {
+    const saved = readOp(uid)
+    opRef.current = saved && saved.goal === goal ? saved.op : crypto.randomUUID()
+    if (saved?.kind === 'dev' && saved.goal === goal && saved.projectId) attempt.current.project = { id: saved.projectId } as ProjectRecord
+  }
 
   const options = () => ({ method: 'POST' as const, csrfToken, onUnauthorized })
+  const rotateOp = () => { opRef.current = crypto.randomUUID(); attempt.current = {}; clearOp(uid) }
 
   const runDevelopment = async () => {
+    const op = opRef.current
+    const saved = readOp(uid)
+    if (!attempt.current.project && saved?.kind === 'dev' && saved.op === op && saved.projectId) {
+      attempt.current.project = { id: saved.projectId } as ProjectRecord // resume, do not recreate
+    }
     if (!attempt.current.project) {
       setStage(files.length ? '正在准备资料…' : '正在准备工作区…')
       const name = goal.trim().replace(/\s+/g, ' ').slice(0, 60)
@@ -42,45 +58,51 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
       if (files.length) {
         const body = new FormData()
         if (archive) body.append('file', files[0]); else files.forEach(file => body.append('files', file))
-        body.append('name', name); body.append('idempotency_key', attempt.current.key)
+        body.append('name', name); body.append('idempotency_key', op)
         const result = await request<{ project: ProjectRecord }>(archive ? '/api/v2/projects/import-zip' : '/api/v2/projects/import-files', { ...options(), body })
         attempt.current.project = result.project
       } else {
-        attempt.current.project = await request<ProjectRecord>('/api/v2/projects/create-workspace', { ...options(), body: { name, idempotency_key: attempt.current.key } })
+        attempt.current.project = await request<ProjectRecord>('/api/v2/projects/create-workspace', { ...options(), body: { name, idempotency_key: op } })
       }
+      writeOp(uid, { op, kind: 'dev', goal: goal.trim(), projectId: String(attempt.current.project.id) })
     }
     setStage('正在开始制作…')
-    const run = await request<Run>('/api/v2/runs', { ...options(), body: { project_id: attempt.current.project.id, request: goal.trim(), operation: 'general', interaction_mode: 'automatic', idempotency_key: attempt.current.runKey } })
-    try { localStorage.removeItem('webuddy:start:goal') } catch { /* Storage is optional. */ }
+    const run = await request<Run>('/api/v2/runs', { ...options(), body: { project_id: attempt.current.project.id, request: goal.trim(), operation: 'general', interaction_mode: 'automatic', idempotency_key: op } })
+    clearOp(uid); try { localStorage.removeItem('webuddy:start:goal') } catch { /* optional */ }
     navigate(`/runs/${encodeURIComponent(String(run.id))}`)
   }
 
   const openAgentChat = async (agentId: string, attach?: boolean) => {
+    const op = opRef.current
+    let saved = readOp(uid)
+    if (saved && (saved.op !== op || saved.kind !== 'chat' || saved.goal !== goal.trim() || saved.agentId !== agentId)) saved = null
+    // Identify current material by content hash, so a same-named edited file counts
+    // as different material and a partial upload lost to a refresh is detectable.
+    const current = attach ? await Promise.all(files.map(async f => ({ file: f, name: f.name, hash: await hashFile(f), size: f.size }))) : []
+    const manifest: OpAttachment[] = saved?.manifest ?? current.map(({ name, hash, size }) => ({ name, hash, size }))
+    const uploaded: string[] = saved?.uploaded ? [...saved.uploaded] : []
+    // A required material that is neither already uploaded nor present now (e.g. the
+    // File was lost on refresh) blocks the submit — never send the text without it.
+    const missing = manifest.filter(m => !uploaded.includes(m.hash) && !current.some(c => c.hash === m.hash))
+    if (missing.length) { setError(`材料未恢复，请重新选择后再发送：${missing.map(m => m.name).join('、')}`); return }
+
     setStage('正在打开对话…')
-    // Resume this exact submission across retries: reuse the same conversation,
-    // idempotency key and already-uploaded attachments so a lost response never
-    // spawns a duplicate conversation or model task. The record is cleared only on
-    // success, or replaced when the request text is edited (a new key).
-    let saved: RouteState | null = null
-    try { const raw = localStorage.getItem(ROUTE_KEY); if (raw) { const p = JSON.parse(raw) as RouteState; if (p.goal === goal.trim() && p.agentId === agentId && p.cid) saved = p } } catch { /* optional */ }
-    const key = saved?.key || attempt.current.runKey
-    let cid = saved?.cid || ''
-    let attached = saved?.attached || []
-    const persist = () => { try { localStorage.setItem(ROUTE_KEY, JSON.stringify({ goal: goal.trim(), agentId, cid, key, attached })) } catch { /* optional */ } }
+    let cid = saved?.cid
     if (!cid) {
-      const conv = await request<{ id: string }>(`/api/v4/agents/${encodeURIComponent(agentId)}/conversations`, { ...options(), body: { mode: 'do', project_id: null } })
-      cid = conv.id; persist()
+      const conv = await request<{ id: string }>(`/api/v4/agents/${encodeURIComponent(agentId)}/conversations`, { ...options(), body: { mode: 'do', project_id: null, client_key: op } })
+      cid = conv.id
     }
-    if (attach && files.length) {
-      for (const file of files) {
-        if (attached.includes(file.name)) continue
-        const body = new FormData(); body.append('file', file)
-        await request(`/api/v4/conversations/${encodeURIComponent(cid)}/attachments`, { ...options(), body })
-        attached = [...attached, file.name]; persist()
-      }
+    const persist = () => writeOp(uid, { op, kind: 'chat', goal: goal.trim(), agentId, cid, manifest, uploaded })
+    persist()
+    for (const entry of manifest) {
+      if (uploaded.includes(entry.hash)) continue
+      const found = current.find(c => c.hash === entry.hash)!
+      const body = new FormData(); body.append('file', found.file)
+      await request(`/api/v4/conversations/${encodeURIComponent(cid)}/attachments`, { ...options(), body }) // idempotent by content
+      uploaded.push(entry.hash); persist()
     }
-    await request(`/api/v4/conversations/${encodeURIComponent(cid)}/messages`, { ...options(), body: { content: goal.trim(), idempotency_key: key } })
-    try { localStorage.removeItem('webuddy:start:goal'); localStorage.removeItem(ROUTE_KEY) } catch { /* optional */ }
+    await request(`/api/v4/conversations/${encodeURIComponent(cid)}/messages`, { ...options(), body: { content: goal.trim(), idempotency_key: op } })
+    clearOp(uid); try { localStorage.removeItem('webuddy:start:goal') } catch { /* optional */ }
     navigate(`/agents/${encodeURIComponent(agentId)}/chat?cid=${encodeURIComponent(cid)}`)
   }
 
@@ -118,19 +140,19 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
         <div className={`cv-composer${focused ? ' is-focused' : ''}`}>
           <textarea required maxLength={50000} rows={3} disabled={locked}
             value={goal} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-            onChange={event => { setGoal(event.target.value); setDecision(null); attempt.current.runKey = crypto.randomUUID(); try { localStorage.setItem('webuddy:start:goal', event.target.value); localStorage.removeItem(ROUTE_KEY) } catch { /* optional */ } }}
+            onChange={event => { setGoal(event.target.value); setDecision(null); rotateOp(); try { localStorage.setItem('webuddy:start:goal', event.target.value) } catch { /* optional */ } }}
             placeholder="描述你想做的产品，或让某个助手处理日常事务…" aria-label="需求" />
           {files.length > 0 && (
             <div className="cv-filechips">
               {files.map((file, index) => (
                 <span className="cv-filechip" key={`${file.name}-${index}`}><span title={file.name}>{file.name}</span>
-                  <button type="button" aria-label={`移除 ${file.name}`} disabled={locked} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}><Icon name="plus" style={{ transform: 'rotate(45deg)' }} width={14} height={14} /></button></span>
+                  <button type="button" aria-label={`移除 ${file.name}`} disabled={locked} onClick={() => { setFiles(current => current.filter((_, i) => i !== index)); rotateOp() }}><Icon name="plus" style={{ transform: 'rotate(45deg)' }} width={14} height={14} /></button></span>
               ))}
             </div>
           )}
           <div className="cv-composer-foot">
             <label className="cv-attach"><Icon name="delivery" width={17} height={17} /> 添加材料
-              <input type="file" multiple disabled={locked} onChange={event => { setFiles(Array.from(event.target.files || [])); setError(null) }} /></label>
+              <input type="file" multiple disabled={locked} onChange={event => { setFiles(Array.from(event.target.files || [])); setError(null); rotateOp() }} /></label>
             <button className="cv-send" type="submit" disabled={busy || !goal.trim()} aria-label="开始制作">
               {busy ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}
             </button>
