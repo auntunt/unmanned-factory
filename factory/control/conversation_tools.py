@@ -10,11 +10,39 @@ import json
 TOOL_NAMES = frozenset(('mcp__session__calc', 'mcp__session__export'))
 
 
+def binding_for(store, cid, actor_id) -> dict:
+    """Server-generated, serializable binding config for crossing the process
+    boundary to the SDK worker. It carries ONLY the on-disk store path plus the
+    conversation and actor the server already authorized; the model never supplies
+    or sees these, and cannot point the tools at another database, user or
+    conversation. Reconstructed with ConversationTools.from_binding in the worker."""
+    # Preserve cid/actor_id types (actor_id is often an int user id); the owner
+    # check compares by equality, so coercing to str would break it. All three
+    # values are JSON-serializable and survive the JSONL round-trip unchanged.
+    return {'db_path': str(store.path), 'conversation_id': cid, 'actor_id': actor_id}
+
+
 class ConversationTools:
     def __init__(self, store, cid, actor_id):
         self.store = store
         self.cid = cid
         self.actor_id = actor_id
+
+    @classmethod
+    def from_binding(cls, binding: dict) -> 'ConversationTools':
+        """Rebuild the bound tools inside the trusted worker from binding_for's
+        config. Opening the store by its server-provided path keeps the binding
+        fixed: the model cannot influence which db/user/conversation is used."""
+        if not isinstance(binding, dict):
+            raise TypeError('conversation binding must be an object')
+        try:
+            db_path = binding['db_path']
+            cid = binding['conversation_id']
+            actor_id = binding['actor_id']
+        except KeyError as exc:
+            raise ValueError(f'conversation binding missing field: {exc}') from None
+        from factory.control.store import Store
+        return cls(Store(db_path), cid, actor_id)
 
     def calc(self, items, discount_rate='1'):
         """Deterministic quote arithmetic; the inputs are the source of truth."""

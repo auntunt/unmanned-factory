@@ -336,9 +336,12 @@ def test_chat_loop_model_invokes_bound_calc_and_export_tools(app_env, monkeypatc
 
     captured = {}
     def model(req, emit, cancel):
-        # The tools are registered on the request, bound to this conversation + user.
-        tools = req.conversation_tools
-        assert tools is not None and tools.cid == cid
+        # The request carries only a serializable binding; the trusted side rebuilds
+        # the tools from it, bound to this conversation + user.
+        from factory.control.conversation_tools import ConversationTools
+        assert req.conversation_binding is not None
+        tools = ConversationTools.from_binding(req.conversation_binding)
+        assert tools.cid == cid
         result = tools.calc([{'name': '演示', 'unit_price': '100', 'quantity': '3'}], '0.9')
         captured['total'] = result['total']
         item = tools.export('报价单', 'md', f"# 报价单\n总价：{result['total']}")
@@ -364,7 +367,8 @@ def test_bound_tool_validates_input_and_cannot_target_another_user(app_env, monk
     cid = _do_convo(client, headers, agent['id'])
     seen = {}
     def model(req, emit, cancel):
-        tools = req.conversation_tools
+        from factory.control.conversation_tools import ConversationTools
+        tools = ConversationTools.from_binding(req.conversation_binding)
         import pytest as _p
         with _p.raises(ValueError):
             tools.calc([], '1')  # invalid params rejected by the tool
@@ -426,7 +430,10 @@ def test_executor_registers_and_gates_bound_session_tools(app_env, monkeypatch):
     agent = _agent(client, headers, service, '报价助手')
     cid = _do_convo(client, headers, agent['id'])
     req = _capture_req(client, headers, service, monkeypatch, cid)
-    assert req.conversation_tools is not None
+    assert req.conversation_binding is not None
+    import json as _json
+    from dataclasses import asdict as _asdict
+    _json.dumps(_asdict(req))  # the request must cross the JSONL process boundary
 
     seen = {}
     async def query(*, prompt, options):
@@ -462,7 +469,7 @@ def test_executor_denies_session_tools_when_request_is_unbound(app_env, monkeypa
     agent = _agent(client, headers, service, '报价助手')
     cid = _do_convo(client, headers, agent['id'])
     bound = _capture_req(client, headers, service, monkeypatch, cid)
-    unbound = dataclasses.replace(bound, conversation_tools=None)
+    unbound = dataclasses.replace(bound, conversation_binding=None)
 
     seen = {}
     async def query(*, prompt, options):
@@ -491,7 +498,7 @@ def test_real_session_mcp_server_calc_and_export_handlers(app_env, monkeypatch):
     agent = _agent(client, headers, service, '报价助手')
     cid = _do_convo(client, headers, agent['id'])
     req = _capture_req(client, headers, service, monkeypatch, cid)
-    tools = req.conversation_tools
+    tools = ct.ConversationTools.from_binding(req.conversation_binding)
     events = []
     server = ct.create_server(tools, lambda *e: events.append(e))
     assert server['name'] == 'session'
@@ -533,7 +540,8 @@ def test_tools_disabled_with_conversation_tools_is_rejected(app_env):
     from factory.control.providers import _run_claude, ProviderRequest, ProviderError
     with pytest.raises(ProviderError):
         _run_claude(ProviderRequest('claude', 'test', 'goal', '/tmp', read_only=True,
-                                     tools_disabled=True, conversation_tools=object()), lambda *e: None)
+                                     tools_disabled=True,
+                                     conversation_binding={'db_path': '/tmp/x.db', 'conversation_id': 'c', 'actor_id': 'u'}), lambda *e: None)
 
 
 def test_codex_executor_rejects_unconsumed_session_tools(app_env):
@@ -543,4 +551,44 @@ def test_codex_executor_rejects_unconsumed_session_tools(app_env):
     from factory.control.providers import _run_codex, ProviderRequest, ProviderError
     with pytest.raises(ProviderError):
         _run_codex(ProviderRequest('codex', 'test', 'goal', '/tmp', read_only=True,
-                                   conversation_tools=object()), lambda *e: None)
+                                   conversation_binding={'db_path': '/tmp/x.db', 'conversation_id': 'c', 'actor_id': 'u'}), lambda *e: None)
+
+
+def test_process_level_chat_tool_chain_exports_through_real_worker(app_env, monkeypatch):
+    """End-to-end across the process boundary: chat endpoint -> real SDKRunner ->
+    JSONL -> sdk_worker subprocess -> ConversationTools rebuilt from the serializable
+    binding -> session calc/export tool calls -> export written to the SQLite file ->
+    downloadable from this conversation. Only the external model response is replaced
+    (in tests/proc_chat_worker.py); the runner and process comms are the real ones.
+    Guards the reported 'ConversationTools is not JSON serializable' failure."""
+    import pytest
+    pytest.importorskip('claude_agent_sdk')
+    from factory.control.providers import SDKRunner
+    client, store, service, repo = app_env
+    # A real SDKRunner, only pointed at a worker module that stubs the model.
+    service.runner = SDKRunner(worker_module='tests.proc_chat_worker')
+    service.governance = None  # exercise the runner directly, no budget broker in this test
+    # Chat uses the planner profile; the session tool chain runs on the claude executor.
+    cfg = service.runtime_settings.get()
+    profs = dict(cfg['profiles'])
+    profs['planner'] = {'provider': 'claude', 'model': 'test'}
+    service.runtime_settings.update({'profiles': profs, 'limits': cfg['limits']}, cfg['revision'], 'tester')
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+
+    r = _send(client, headers, cid, '按 3 台演示、VIP 9 折报价，并生成报价单文件')
+    assert r.status_code in (200, 201), r.text
+    status = _wait_job(service, store, r.json()['job_id'], deadline=30)
+    assert status == 'completed', f'job ended {status}'
+
+    conv = client.get(f'/api/v4/conversations/{cid}', headers=headers).json()
+    exports = conv.get('exports', [])
+    assert exports, 'the worker export did not land in the conversation'
+    eid = exports[0]['id']
+    dl = client.get(f'/api/v4/conversations/{cid}/exports/{eid}/download', headers=headers)
+    assert dl.status_code == 200 and '270.00' in dl.text  # verifiable total, written cross-process
+    # The assistant reply (produced in the worker) reflects the tool result.
+    msgs = conv['messages']
+    assert any(m['role'] == 'assistant' and '270.00' in (m.get('content') or '') for m in msgs)
+    assert store.runs() == []  # daily chat: no dev run created

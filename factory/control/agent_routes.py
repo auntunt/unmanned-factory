@@ -335,15 +335,15 @@ def router(store, service):
                 prompt='Answer the user briefly. If the request requires changing files or running checks, clearly ask them to associate a project.'+catalog_note+'\nAGENT:\n'+snapshot.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
                 # Chat tools (calc/export) bound to THIS conversation and user; the model
                 # cannot target another conversation. Exposed as mcp__session__*.
-                from factory.control.conversation_tools import ConversationTools
-                tools=ConversationTools(store,cid,actor(request)['id'])
+                from factory.control import conversation_tools as _ct
+                conversation_binding=_ct.binding_for(store,cid,actor(request)['id'])
                 prompt+='\nYou may use mcp__session__calc for any money arithmetic (decimal strings) and mcp__session__export to save a downloadable md/txt/csv document for the user; both act only on this conversation.'
                 from factory.control.providers import ProviderRequest
                 from factory.control.governance import GovernedRunner
                 def answer(cancel):
                     with tempfile.TemporaryDirectory(prefix='factory-agent-chat-') as workspace:
                         runner=GovernedRunner(service.runner,service.governance,run_id=None,actor_id=actor(request)['id']) if service.governance else service.runner
-                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference,conversation_tools=tools),lambda *_:None,cancel)
+                        result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference,conversation_binding=conversation_binding),lambda *_:None,cancel)
                     agents.append_message(cid,'assistant',result.text,status='completed',job_id=job_id,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
                     return {'status':'completed'}
                 answer.on_error=lambda exc: agents.append_message(cid,'assistant','回答失败：'+str(exc),status='failed',job_id=job_id)
