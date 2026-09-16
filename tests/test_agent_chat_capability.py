@@ -261,3 +261,31 @@ def test_attachment_upload_rejects_non_owner_and_non_utf8(app_env, monkeypatch):
     other = client.post('/api/auth/login', json={'username': 'mallory2', 'password': 'another-long-password'}, headers={'Origin': 'http://testserver'})
     mh = {'Origin': 'http://testserver', 'X-CSRF-Token': other.json()['csrf_token']}
     assert client.post(f'/api/v4/conversations/{cid}/attachments', files={'file': ('x.txt', b'hi', 'text/plain')}, headers=mh).status_code == 403
+
+
+def test_conversation_calc_is_deterministic_and_verifiable(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '报价助手')
+    cid = _do_convo(client, headers, agent['id'])
+    r = client.post(f'/api/v4/conversations/{cid}/calc',
+                    json={'items': [{'name': '演示', 'unit_price': 100, 'quantity': 3}], 'discount_rate': 0.9}, headers=headers)
+    assert r.status_code == 200 and r.json()['total'] == '270.00' and r.json()['subtotal'] == '300.00'
+    # bad input is a clear 422, not a fabricated number
+    assert client.post(f'/api/v4/conversations/{cid}/calc', json={'items': []}, headers=headers).status_code == 422
+
+
+def test_document_export_is_a_controlled_scoped_write_no_run(app_env, monkeypatch):
+    client, store, service, repo = app_env
+    headers = login(client)
+    agent = _agent(client, headers, service, '会议总结助手')
+    cid = _do_convo(client, headers, agent['id'])
+    exp = client.post(f'/api/v4/conversations/{cid}/export',
+                      json={'title': '会议纪要', 'format': 'md', 'content': '# 纪要\n- 决定：上线延后'}, headers=headers)
+    assert exp.status_code == 201
+    eid = exp.json()['export']['id']
+    assert 'content' not in exp.json()['export']  # body not echoed
+    dl = client.get(f'/api/v4/conversations/{cid}/exports/{eid}/download', headers=headers)
+    assert dl.status_code == 200 and '决定：上线延后' in dl.text and 'attachment' in dl.headers['content-disposition']
+    # No project or coding run was created by exporting.
+    assert store.runs() == []

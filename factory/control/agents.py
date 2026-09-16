@@ -465,9 +465,11 @@ class AgentStore:
     def _public_conversation(c):
         # The frozen capability snapshot is internal freeze data, never for the client.
         out = {k: v for k, v in c.items() if k != 'agent_snapshot'}
-        # Attachment bodies stay server-side; the client sees only the catalog.
+        # Attachment / export bodies stay server-side; the client sees only the catalog.
         if out.get('attachments'):
             out['attachments'] = [{k: v for k, v in a.items() if k != 'text'} for a in out['attachments']]
+        if out.get('exports'):
+            out['exports'] = [{k: v for k, v in e.items() if k != 'content'} for e in out['exports']]
         return out
 
     def conversation(self, cid):
@@ -481,6 +483,45 @@ class AgentStore:
 
     def conversation_attachments(self, cid):
         return self._row("agent_conversations", "id", cid).get('attachments', [])
+
+    def add_export(self, cid, actor_id, title, fmt, content):
+        """A controlled, conversation-scoped write: store a document the chat produced
+        as a downloadable artifact. Not a project, repo or coding run."""
+        import hashlib
+        if fmt not in ('md', 'txt', 'csv'):
+            raise ValueError('仅支持 md / txt / csv 导出')
+        content = scrub(content)
+        if not content.strip():
+            raise ValueError('导出内容为空')
+        if len(content.encode()) > 200_000:
+            raise ValueError('导出内容超过 200 KB')
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            c = self._decode(row)
+            if c.get('actor_id') != actor_id:
+                raise PermissionError('无权访问该会话')
+            exports = c.setdefault('exports', [])
+            if len(exports) >= 20:
+                raise ValueError('导出数量已达上限（20 个）')
+            item = {'id': uuid.uuid4().hex, 'title': (title or '导出文档')[:200], 'format': fmt,
+                    'content': content, 'size': len(content.encode()),
+                    'sha256': hashlib.sha256(content.encode()).hexdigest(), 'at': now()}
+            exports.append(item)
+            c['updated_at'] = now()
+            db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+        return {k: v for k, v in item.items() if k != 'content'}
+
+    def export_document(self, cid, eid, actor_id):
+        c = self._row("agent_conversations", "id", cid)
+        if c.get('actor_id') != actor_id:
+            raise PermissionError('无权访问该会话')
+        item = next((e for e in c.get('exports', []) if e['id'] == eid), None)
+        if not item:
+            raise KeyError(eid)
+        return item
 
     def add_attachment(self, cid, actor_id, name, text):
         """Read-only text material scoped to this one conversation, bounded and owner-checked."""

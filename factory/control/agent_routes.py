@@ -18,6 +18,17 @@ class ConversationCreate(Body): mode:str=Field(pattern='^(do|maintain)$'); proje
 class Message(Body):
     content:str=Field(min_length=1,max_length=50000)
     idempotency_key:str|None=Field(default=None,min_length=8,max_length=100,pattern=r'^[A-Za-z0-9_-]+$')
+class QuoteItem(Body):
+    name:str=Field(default='',max_length=200)
+    unit_price:float=Field(ge=0)
+    quantity:float=Field(ge=0)
+class QuoteCalc(Body):
+    items:list[QuoteItem]=Field(min_length=1,max_length=500)
+    discount_rate:float=Field(default=1.0,gt=0,le=1)
+class ExportDoc(Body):
+    title:str=Field(default='',max_length=200)
+    format:str=Field(pattern='^(md|txt|csv)$')
+    content:str=Field(min_length=1,max_length=200000)
 class DraftPatch(Body): expected_revision:int=Field(ge=0); patch:dict
 class Apply(Body): expected_revision:int=Field(ge=0); idempotency_key:str|None=None
 class Rollback(Body): version:int=Field(ge=1)
@@ -198,6 +209,33 @@ def router(store, service):
         except UnicodeDecodeError: raise HTTPException(422,'只支持 UTF-8 文本附件（.txt/.md/.csv）') from None
         att=guarded(agents.add_attachment,cid,actor(request)['id'],file.filename,text)
         return {'attachment':att,'conversation':agents.conversation(cid)}
+    @api.post('/conversations/{cid}/calc')
+    def conversation_calc(cid:str,body:QuoteCalc,request:Request):
+        # Deterministic arithmetic: a verifiable total from explicit inputs; no model,
+        # no project, no coding run. The inputs are the source of truth.
+        c=guarded(agents.conversation,cid)
+        if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
+        from factory.control.quote_calc import quote
+        try: return quote([i.model_dump() for i in body.items], body.discount_rate)
+        except ValueError as exc: raise HTTPException(422,str(exc)) from None
+
+    @api.post('/conversations/{cid}/export',status_code=201)
+    def export_document(cid:str,body:ExportDoc,request:Request):
+        c=guarded(agents.conversation,cid)
+        if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
+        item=guarded(agents.add_export,cid,actor(request)['id'],body.title,body.format,body.content)
+        return {'export':item,'conversation':agents.conversation(cid)}
+
+    @api.get('/conversations/{cid}/exports/{eid}/download')
+    def download_export(cid:str,eid:str,request:Request):
+        from fastapi.responses import Response
+        c=guarded(agents.conversation,cid)
+        if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
+        item=guarded(agents.export_document,cid,eid,actor(request)['id'])
+        media={'md':'text/markdown','txt':'text/plain','csv':'text/csv'}[item['format']]
+        return Response(item['content'].encode('utf-8'),media_type=media+'; charset=utf-8',headers={
+            'Content-Disposition':f'attachment; filename="export-{eid}.{item["format"]}"','X-Content-Type-Options':'nosniff'})
+
     @api.post('/conversations/{cid}/messages',status_code=201)
     def message(cid:str,body:Message,request:Request):
         with service.lock:
