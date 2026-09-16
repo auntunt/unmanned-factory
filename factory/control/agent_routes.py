@@ -332,7 +332,7 @@ def router(store, service):
                 reference=mount if mount.get("documents") else None
                 job_id=uuid.uuid4().hex
                 catalog_note='' if reference is None else '\nYou have read-only reference tools exposing this role\'s granted skills and materials. Read them before answering and cite the source id. Do not invent facts not present in the materials or the user\'s message.'
-                prompt='Answer the user briefly. If the request requires changing files or running checks, clearly ask them to associate a project.'+catalog_note+'\nAGENT:\n'+snapshot.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
+                prompt='Answer the user briefly as a standalone role assistant. Ordinary questions, quotations, meeting summaries, and downloadable conversation documents do not require a project. Do not append project-association advice to those answers. Only if the user explicitly requests repository edits or execution of development checks, explain that these require an associated project. If tax treatment, currency, or other terms are absent, mark them as unspecified; do not infer that a quote is tax-inclusive or tax-exclusive.'+catalog_note+'\nAGENT:\n'+snapshot.get('instructions','')+'\nHISTORY:\n'+json.dumps([{'role':m.get('role'),'content':m.get('content')} for m in c['messages']],ensure_ascii=False)
                 # Chat tools (calc/export) bound to THIS conversation and user; the model
                 # cannot target another conversation. Exposed as mcp__session__*.
                 from factory.control import conversation_tools as _ct
@@ -349,7 +349,7 @@ def router(store, service):
                 answer.on_error=lambda exc: agents.append_message(cid,'assistant','回答失败：'+str(exc),status='failed',job_id=job_id)
                 job=service.start_maintenance(answer,job_id=job_id,conversation_id=cid,actor_id=actor(request)['id'])
                 agents.link_answer_job(cid,job_id,key)  # bind this job to the message it answers
-                _append_pending(cid,'正在回答；如需修改文件，请随后关联项目',job_id)
+                _append_pending(cid,'正在回答',job_id)
                 return {'conversation':agents.conversation(cid),'run':None,'job_id':job['id'],'status':'pending'}
             # A conversation has at most one active run.
             with service.lock:

@@ -67,7 +67,7 @@ def create_server(tools: ConversationTools, emit):
                   'name': {'type': 'string', 'maxLength': 200},
                   'unit_price': {'type': 'string'}, 'quantity': {'type': 'string'}},
                   'required': ['unit_price', 'quantity'], 'additionalProperties': False}},
-              'discount_rate': {'type': 'string'}},
+              'discount_rate': {'type': 'string', 'description': 'Multiplier applied to subtotal, greater than 0 and at most 1. Default 1 means no discount; VIP 九折 / 10% off means 0.90, not 0.10. Use decimal strings.'}},
            'required': ['items'], 'additionalProperties': False})
     async def calc(args):
         try:
