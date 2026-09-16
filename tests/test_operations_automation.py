@@ -211,6 +211,9 @@ def test_outbox_and_dedup_survive_restart(app_env, monkeypatch):
 
 def test_inspection_request_includes_facts_and_history_is_limited(app_env):
     client, store, automation, p, headers = setup(app_env)
+    # This test drives ticks and history itself. Stop the fixture's live worker
+    # so its enqueued probe cannot become an extra failure during assertions.
+    client.app.state.service.close()
     automation.configure(0, True)
     run = new_run(store, p['id'])
     complete(store, run, 'published', artifacts=verified_artifacts())
