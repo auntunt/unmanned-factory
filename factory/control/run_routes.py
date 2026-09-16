@@ -50,6 +50,10 @@ class Approval(Body):
     revision: int = Field(ge=1)
 
 
+class FollowUp(Body):
+    content: str = Field(min_length=1, max_length=50_000)
+
+
 def router(store, svc, operations):
     api = APIRouter()
 
@@ -138,6 +142,24 @@ def router(store, svc, operations):
     @api.post('/api/v2/runs/{rid}/approve')
     def approve(rid: str, body: Approval, request: Request):
         return svc.approve(rid, body.revision, request.state.user['username'])
+
+
+    @api.post('/api/v2/runs/{rid}/follow-up')
+    def follow_up(rid: str, body: FollowUp, request: Request):
+        # One composer, one endpoint: at a human gate the note drives the run
+        # forward; while the run is actively executing it is recorded in the
+        # conversation and surfaced (not silently dropped, never faked as done).
+        from factory.control.store import ACTIVE
+        run = store.get(rid)
+        status, actor = run['status'], request.state.user['username']
+        if status in ('needs_clarification', 'awaiting_approval'):
+            return svc.clarify(rid, body.content, actor)
+        if status == 'needs_human':
+            return svc.continue_run(rid, body.content, run['revision'], run.get('resume_count', 0), actor)
+        if status in ACTIVE:
+            store.append(rid, 'user.message', {'text': body.content, 'followup': True, 'queued': True, 'actor': actor})
+            return {'queued': True, 'message': '补充已记录并保留在对话中；当前步骤完成、需要你确认时可以继续。'}
+        raise HTTPException(409, '任务已结束，请在下方开始新一轮修改。')
 
 
     @api.post('/api/v2/runs/{rid}/cancel')
