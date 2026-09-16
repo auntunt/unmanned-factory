@@ -139,3 +139,85 @@ it('history, new-chat and Back keep the URL and shown conversation in sync', asy
   await screen.findByText('B的回答')
   expect(screen.getByTestId('url').textContent).toBe('?cid=B')
 })
+
+it('a stale send result does not navigate back to the previous conversation', async () => {
+  let resolveMsg: (v: unknown) => void = () => {}
+  const msgPending = new Promise(r => { resolveMsg = r })
+  api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations' && !opts?.method) return { conversations: twoConvs } as never
+    if (url === '/api/v4/conversations/A' && !opts?.method) return { id: 'A', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'ua', role: 'user', content: '会话A' }] } as never
+    if (url === '/api/v4/conversations/B' && !opts?.method) return { id: 'B', agent_id: 'a1', mode: 'do', project_id: null, messages: [{ id: 'ub', role: 'user', content: '会话B' }] } as never
+    if (url === '/api/v4/conversations/A/messages') return msgPending as never
+    return {} as never
+  })
+  mountAt('/agents/a1/chat?cid=A')
+  await screen.findByText('会话A')
+  fireEvent.change(screen.getByLabelText('消息'), { target: { value: '发给A' } })
+  fireEvent.click(screen.getByLabelText('发送'))
+  fireEvent.click(await screen.findByRole('button', { name: '会话B' }))
+  await screen.findByText('会话B')
+  expect(screen.getByTestId('url').textContent).toBe('?cid=B')
+  resolveMsg({ conversation: { id: 'A', agent_id: 'a1', mode: 'do', messages: [{ id: 'ua', role: 'user', content: '会话A' }] } })
+  await new Promise(r => setTimeout(r, 30))
+  expect(screen.getByTestId('url').textContent).toBe('?cid=B') // stale send did not jump back to A
+  expect(screen.getAllByText('会话B').length).toBeGreaterThan(0)
+})
+
+it('while an attachment is uploading on a new conversation, send is blocked (no forked conversation)', async () => {
+  let convCreates = 0
+  let resolveAttach: (v: unknown) => void = () => {}
+  const attachPending = new Promise(r => { resolveAttach = r })
+  api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations' && !opts?.method) return { conversations: [] } as never
+    if (url === '/api/v4/agents/a1/conversations' && opts?.method === 'POST') { convCreates++; return { id: 'c1', agent_id: 'a1', mode: 'do', messages: [] } as never }
+    if (String(url).endsWith('/attachments')) return attachPending as never
+    if (String(url).endsWith('/messages')) return { conversation: { id: 'c1', agent_id: 'a1', mode: 'do', messages: [] } } as never
+    return {} as never
+  })
+  mountAt('/agents/a1/chat?cid=new')
+  await screen.findByText(/聊点什么/)
+  fireEvent.change(screen.getByLabelText(/添加材料/), { target: { files: [new File(['x'], 'a.txt')] } })
+  await new Promise(r => setTimeout(r, 10)) // attach creates c1, then blocks on upload
+  fireEvent.change(screen.getByLabelText('消息'), { target: { value: '并行发送' } })
+  const sendBtn = screen.getByLabelText('发送') as HTMLButtonElement
+  expect(sendBtn.disabled).toBe(true) // send disabled while an upload is in progress
+  fireEvent.click(sendBtn)
+  resolveAttach({ conversation: { id: 'c1', agent_id: 'a1', mode: 'do', messages: [], attachments: [{ id: 'at1', name: 'a.txt' }] } })
+  await new Promise(r => setTimeout(r, 20))
+  expect(convCreates).toBe(1) // only the upload created a conversation; send did not fork a second
+})
+
+it('a delayed poll for the previous conversation keeps the new one, and the next message goes to it', async () => {
+  vi.useFakeTimers()
+  let aGets = 0
+  let resolvePoll: (v: unknown) => void = () => {}
+  api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations' && !opts?.method) return { conversations: twoConvs } as never
+    if (url === '/api/v4/conversations/A' && !opts?.method) {
+      aGets++
+      if (aGets === 1) return { id: 'A', agent_id: 'a1', mode: 'do', messages: [{ id: 'ua', role: 'user', content: '会话A' }, { id: 'aa', role: 'assistant', content: 'A回答中', status: 'running' }] } as never
+      return new Promise(r => { resolvePoll = r }) as never // the poll hangs, then arrives late
+    }
+    if (url === '/api/v4/conversations/B' && !opts?.method) return { id: 'B', agent_id: 'a1', mode: 'do', messages: [{ id: 'ub', role: 'user', content: '会话B' }] } as never
+    if (url === '/api/v4/conversations/B/messages' && opts?.method === 'POST') return { conversation: { id: 'B', agent_id: 'a1', mode: 'do', messages: [{ id: 'ub', role: 'user', content: '会话B' }] } } as never
+    return {} as never
+  })
+  mountAt('/agents/a1/chat?cid=A')
+  await vi.advanceTimersByTimeAsync(0)
+  await vi.advanceTimersByTimeAsync(2000) // poll fires -> A GET #2 hangs
+  fireEvent.click(screen.getByRole('button', { name: '会话B' }))
+  await vi.advanceTimersByTimeAsync(0)
+  resolvePoll({ id: 'A', agent_id: 'a1', mode: 'do', messages: [{ id: 'ua', role: 'user', content: '会话A' }, { id: 'aa', role: 'assistant', content: 'A迟到回答', status: 'completed' }] })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(screen.queryByText('A迟到回答')).toBeNull() // stale poll dropped
+  expect(screen.getAllByText('会话B').length).toBeGreaterThan(0)
+  fireEvent.change(screen.getByLabelText('消息'), { target: { value: '发给B' } })
+  fireEvent.click(screen.getByLabelText('发送'))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(api.mock.calls.some(([u, o]) => u === '/api/v4/conversations/B/messages' && (o as { method?: string })?.method === 'POST')).toBe(true)
+  expect(api.mock.calls.some(([u, o]) => u === '/api/v4/conversations/A/messages' && (o as { method?: string })?.method === 'POST')).toBe(false)
+  vi.useRealTimers()
+})

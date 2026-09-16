@@ -32,14 +32,21 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
   const scrollRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const submitKey = useRef<string | null>(null)
+  // One generation per selected route/conversation. Every async result (loader,
+  // poll, send, attach) captures the generation it started in and drops itself if
+  // the selection has since changed — a late result never mutates the new page.
+  const gen = useRef(0)
 
   useEffect(() => {
     if (!aid) return
+    const myGen = (gen.current += 1)
     const c = new AbortController()
+    const live = () => gen.current === myGen
     setConv(null); setError(null)  // clear stale content before loading the new target
-    request<Agent>(`${base}/agents/${aid}`, { signal: c.signal, onUnauthorized }).then(setAgent).catch(() => undefined)
+    request<Agent>(`${base}/agents/${aid}`, { signal: c.signal, onUnauthorized }).then(a => { if (live()) setAgent(a) }).catch(() => undefined)
     request<{ conversations?: Conv[] } | Conv[]>(`${base}/agents/${aid}/conversations`, { signal: c.signal, onUnauthorized })
       .then(r => {
+        if (!live()) return
         const rows = (Array.isArray(r) ? r : r.conversations || []).filter(x => x.mode === 'do')
         setHistory(rows)
         if (targetCid === 'new') return  // an unsent new conversation: nothing to open
@@ -50,7 +57,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
         const open = targetCid || rows[0]?.id
         if (!open) return
         return request<Conv>(`${base}/conversations/${encodeURIComponent(open)}`, { signal: c.signal, onUnauthorized }).then(loaded => {
-          if (c.signal.aborted) return  // a newer selection superseded this request
+          if (!live()) return  // a newer selection superseded this request
           // The pinned conversation must belong to THIS role and be a chat, not a
           // maintenance session or another role's conversation shown under this title.
           if (loaded.agent_id !== agentId || loaded.mode !== 'do') {
@@ -60,7 +67,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
           setConv(loaded)
         })
       })
-      .catch(cause => { if (!c.signal.aborted) setError(errorText(cause)) })
+      .catch(cause => { if (live() && !c.signal.aborted) setError(errorText(cause)) })
     return () => c.abort()
   }, [aid, agentId, targetCid, onUnauthorized])
 
@@ -71,7 +78,8 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
 
   const reload = useCallback(async () => {
     if (!conv?.id) return
-    try { setConv(await request<Conv>(`${base}/conversations/${encodeURIComponent(conv.id)}`, { onUnauthorized })) } catch { /* keep last */ }
+    const myGen = gen.current
+    try { const fresh = await request<Conv>(`${base}/conversations/${encodeURIComponent(conv.id)}`, { onUnauthorized }); if (gen.current === myGen) setConv(fresh) } catch { /* keep last */ }
   }, [conv?.id, onUnauthorized])
 
   // Poll only while the model is still answering (async job); stop when settled.
@@ -92,7 +100,10 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
 
   const send = async (event: FormEvent) => {
     event.preventDefault()
-    if (!text.trim() || sending || !aid) return
+    // Mutually exclusive with attach: both can create a conversation, so running them
+    // together could fork two conversations.
+    if (!text.trim() || sending || attaching || !aid) return
+    const myGen = gen.current
     setSending(true); setError(null)
     // A stable key per composed message: reused on retry so a duplicate submit is
     // recognised server-side and never re-answered; reset only after it lands.
@@ -103,30 +114,36 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
         // Idempotent create: a lost response on retry returns the same conversation
         // (server keys on this op), never a duplicate.
         current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null, client_key: submitKey.current } })
-        setHistory(h => [current as Conv, ...h])
+        if (gen.current === myGen) setHistory(h => [current as Conv, ...h])
       }
       const raw = await request<{ conversation?: Conv; run?: unknown; needs_project?: boolean; busy?: boolean; message?: string }>(`${base}/conversations/${encodeURIComponent(current.id)}/messages`, { method: 'POST', csrfToken, onUnauthorized, body: { content: text.trim(), idempotency_key: submitKey.current } })
+      // The user has since switched conversation/role: the server action stands, but a
+      // stale result must not overwrite the new page, its draft or its navigation.
+      if (gen.current !== myGen) return
       if (raw.conversation) { setConv(raw.conversation); setHistory(h => [raw.conversation as Conv, ...h.filter(x => x.id !== (raw.conversation as Conv).id)]) }
       if (raw.busy) { setError(raw.message || '上一条还在回答，请稍候再发送。'); return }  // keep draft + key
       const res = unwrapAgentMessageResponse(raw as never)
       if (res.needsProject) setError('这个职能体还没有配置可用模型，暂时无法回答。请在维护里配置模型后再聊。')
       submitKey.current = null; setText('')
       if (current.id !== targetCid) navigate(`/agents/${aid}/chat?cid=${encodeURIComponent(current.id)}`, { replace: true }) // pin the new conversation
-    } catch (cause) { setError(errorText(cause)) } finally { setSending(false) }
+    } catch (cause) { if (gen.current === myGen) setError(errorText(cause)) } finally { setSending(false) }
   }
 
   const attach = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = ''
-    if (!file || !aid) return
+    if (!file || !aid || attaching || sending) return  // exclusive with send
+    const myGen = gen.current
     setAttaching(true); setError(null)
+    if (!submitKey.current) submitKey.current = crypto.randomUUID()
     try {
       let current = conv
-      if (!current) { current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null } }); setHistory(h => [current as Conv, ...h]) }
+      if (!current) { current = await request<Conv>(`${base}/agents/${aid}/conversations`, { method: 'POST', csrfToken, onUnauthorized, body: { mode: 'do', project_id: null, client_key: submitKey.current } }); if (gen.current === myGen) setHistory(h => [current as Conv, ...h]) }
       const body = new FormData(); body.append('file', file)
       const res = await request<{ conversation: Conv }>(`${base}/conversations/${encodeURIComponent(current.id)}/attachments`, { method: 'POST', csrfToken, onUnauthorized, body })
+      if (gen.current !== myGen) return  // switched away: keep the new page intact
       if (res.conversation) setConv(res.conversation)
       if (current.id !== targetCid) navigate(`/agents/${aid}/chat?cid=${encodeURIComponent(current.id)}`, { replace: true })
-    } catch (cause) { setError(errorText(cause)) } finally { setAttaching(false) }
+    } catch (cause) { if (gen.current === myGen) setError(errorText(cause)) } finally { setAttaching(false) }
   }
 
   // History and new-chat switches go through the URL so refresh and Back stay on the
@@ -171,7 +188,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
               {(conv?.attachments?.length ?? 0) > 0 && <div className="cv-filechips">{conv!.attachments!.map(a => <span className="cv-filechip" key={a.id}><Icon name="delivery" width={13} height={13} /><span title={a.name}>{a.name}</span></span>)}</div>}
               <div className="cv-composer-foot">
                 <label className="cv-attach" title="仅支持 UTF-8 文本：.txt / .md / .csv，单个 ≤40KB（暂不支持 PDF / Word / Excel）"><Icon name="delivery" width={16} height={16} /> {attaching ? '上传中…' : '添加材料'}<input type="file" accept=".txt,.md,.csv,text/plain" disabled={attaching || sending} onChange={attach} /></label>
-                <button className="cv-send" type="submit" disabled={sending || !text.trim()} aria-label="发送">{sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}</button>
+                <button className="cv-send" type="submit" disabled={sending || attaching || !text.trim()} aria-label="发送">{sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}</button>
               </div>
             </div>
           </form>
