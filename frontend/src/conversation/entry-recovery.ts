@@ -19,6 +19,7 @@ export type OpState = {
 }
 
 const keyFor = (uid?: string | number | null) => `webuddy:start:op:${uid ?? 'anon'}`
+const draftKeyFor = (uid?: string | number | null) => `webuddy:start:draft:${uid ?? 'anon'}`
 
 export function readOp(uid?: string | number | null): OpState | null {
   try { const raw = sessionStorage.getItem(keyFor(uid)); return raw ? (JSON.parse(raw) as OpState) : null } catch { return null }
@@ -28,6 +29,18 @@ export function writeOp(uid: string | number | null | undefined, state: OpState)
 }
 export function clearOp(uid?: string | number | null): void {
   try { sessionStorage.removeItem(keyFor(uid)) } catch { /* storage is optional */ }
+}
+
+// The entry draft (what the user typed) is per actor and per tab, like the op — so
+// one account never backfills or overwrites another's text, and two tabs are isolated.
+export function readDraft(uid?: string | number | null): string {
+  try { return sessionStorage.getItem(draftKeyFor(uid)) || '' } catch { return '' }
+}
+export function writeDraft(uid: string | number | null | undefined, goal: string): void {
+  try { sessionStorage.setItem(draftKeyFor(uid), goal) } catch { /* storage is optional */ }
+}
+export function clearDraft(uid?: string | number | null): void {
+  try { sessionStorage.removeItem(draftKeyFor(uid)) } catch { /* storage is optional */ }
 }
 
 /** SHA-256 hex of a file's bytes, for content-addressed, retry-safe attachments.

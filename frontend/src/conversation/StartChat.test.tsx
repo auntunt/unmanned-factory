@@ -66,7 +66,7 @@ it('shows an honest message for MFD without a converter and creates nothing', as
   await screen.findByText(/MFD→XML 转换器尚未接入/)
   expect(screen.getByText('可运行的转换器源码')).toBeTruthy()
   expect(api.mock.calls.map(([url]) => url)).toEqual(['/api/v4/route'])
-  expect(localStorage.getItem('webuddy:start:goal')).toBe('把这个 mfd 转成 xml')
+  expect(sessionStorage.getItem('webuddy:start:draft:anon')).toBe('把这个 mfd 转成 xml')
 })
 
 it('on clarify, shows the question and lets the user pick a role', async () => {
@@ -114,7 +114,7 @@ it('blocks submit when a partly-uploaded material was lost on refresh, instead o
   // Simulate: an earlier attempt created c1 and recorded a material, then a refresh
   // dropped the File. sessionStorage keeps the op; localStorage keeps the goal.
   sessionStorage.setItem('webuddy:start:op:anon', JSON.stringify({ op: 'OP1', kind: 'chat', goal: '按材料报价', agentId: 'a9', cid: 'c1', manifest: [{ name: 'prices.csv', hash: 'deadbeef', size: 10 }], uploaded: [] }))
-  localStorage.setItem('webuddy:start:goal', '按材料报价')
+  sessionStorage.setItem('webuddy:start:draft:anon', '按材料报价')
   api.mockResolvedValueOnce({ kind: 'agent_chat', agent_id: 'a9', attach: true } as never)
   show(); go()
   await screen.findByText(/材料未恢复，请重新选择/)
@@ -124,7 +124,7 @@ it('blocks submit when a partly-uploaded material was lost on refresh, instead o
 
 it('does not inherit another account\'s in-flight project (per-actor state)', async () => {
   sessionStorage.setItem('webuddy:start:op:1', JSON.stringify({ op: 'OP-A', kind: 'dev', goal: '做一个管理系统', projectId: 'p-other' }))
-  localStorage.setItem('webuddy:start:goal', '做一个管理系统')
+  sessionStorage.setItem('webuddy:start:draft:2', '做一个管理系统')
   api.mockResolvedValueOnce({ kind: 'development' } as never)
     .mockResolvedValueOnce({ id: 'p-new' } as never).mockResolvedValueOnce({ id: 'r1' } as never)
   show({ id: 2, username: 'other', role: 'admin' }); go()
@@ -155,4 +155,73 @@ it('uploads two same-named files with different content as distinct materials (b
   await screen.findByText('对话已打开')
   const uploads = api.mock.calls.filter(([u]) => u === '/api/v4/conversations/c1/attachments')
   expect(uploads).toHaveLength(2) // same name, different content -> both sent, none skipped
+})
+
+const remount = () => { cleanup(); return show() } // simulate a browser refresh (sessionStorage survives)
+
+it('after a lost conversation-create response, a refresh reuses the same client_key', async () => {
+  // Merged from the Codex review counter-example: persist BEFORE the first request.
+  api.mockResolvedValueOnce({ kind: 'agent_chat', agent_id: 'a9' } as never)
+    .mockRejectedValueOnce(new Error('创建响应丢失'))
+  show(); type('帮客户算一批设备的报价'); go()
+  await screen.findByText('创建响应丢失')
+  const first = (api.mock.calls.find(([u]) => u === '/api/v4/agents/a9/conversations')![1]!.body as { client_key: string }).client_key
+  api.mockReset()
+  api.mockResolvedValueOnce({ kind: 'agent_chat', agent_id: 'a9' } as never)
+    .mockResolvedValueOnce({ id: 'c1' } as never).mockResolvedValueOnce({ job_id: 'j1' } as never)
+  remount(); go() // goal restored from the per-actor draft; no re-type
+  await screen.findByText('对话已打开')
+  const create = api.mock.calls.find(([u]) => u === '/api/v4/agents/a9/conversations')!
+  expect((create[1]!.body as { client_key: string }).client_key).toBe(first)
+})
+
+it('after a lost project-create response, a refresh reuses the same idempotency key', async () => {
+  api.mockResolvedValueOnce({ kind: 'development' } as never).mockRejectedValueOnce(new Error('创建响应丢失'))
+  show(); type('做一个预约管理工具'); go()
+  await screen.findByText('创建响应丢失')
+  const first = (api.mock.calls.find(([u]) => u === '/api/v2/projects/create-workspace')![1]!.body as { idempotency_key: string }).idempotency_key
+  api.mockReset()
+  api.mockResolvedValueOnce({ kind: 'development' } as never)
+    .mockResolvedValueOnce({ id: 'p1' } as never).mockResolvedValueOnce({ id: 'r1' } as never)
+  remount(); go()
+  await screen.findByText('工作区已打开')
+  const create = api.mock.calls.find(([u]) => u === '/api/v2/projects/create-workspace')!
+  expect((create[1]!.body as { idempotency_key: string }).idempotency_key).toBe(first)
+})
+
+it('a blank/whitespace goal restored on refresh neither submits nor crashes', async () => {
+  sessionStorage.setItem('webuddy:start:draft:anon', '   ')
+  show()
+  expect((screen.getByRole('button', { name: '开始制作' }) as HTMLButtonElement).disabled).toBe(true)
+  go()
+  expect(api.mock.calls).toHaveLength(0)
+})
+
+it('re-selecting the same material after a refresh reuses the conversation, no new op', async () => {
+  let convCreates = 0, attachCalls = 0
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/route') return { kind: 'agent_chat', agent_id: 'a9', attach: true } as never
+    if (url === '/api/v4/agents/a9/conversations') { convCreates++; return { id: 'c1' } as never }
+    if (url === '/api/v4/conversations/c1/attachments') { attachCalls++; if (attachCalls === 1) throw new Error('上传响应丢失'); return {} as never }
+    if (url === '/api/v4/conversations/c1/messages') return { job_id: 'j1' } as never
+    return {} as never
+  })
+  const file = () => new File(['a,b,c'], 'prices.csv')
+  show(); type('按这个价格表报价')
+  fireEvent.change(screen.getByLabelText(/添加材料/), { target: { files: [file()] } })
+  go()
+  await screen.findByText('上传响应丢失')
+  remount(); go() // File lost on refresh -> blocked, asks to re-select
+  await screen.findByText(/材料未恢复/)
+  fireEvent.change(screen.getByLabelText(/添加材料/), { target: { files: [file()] } }) // same content
+  go()
+  await screen.findByText('对话已打开')
+  expect(convCreates).toBe(1) // conversation reused across refresh, not recreated
+  expect(attachCalls).toBe(2) // upload retried once, not a fresh op
+})
+
+it('one account does not see or reuse another account\'s draft text', async () => {
+  sessionStorage.setItem('webuddy:start:draft:1', '账号1的机密草稿')
+  show({ id: 2, username: 'other', role: 'admin' })
+  expect((screen.getByLabelText('需求') as HTMLTextAreaElement).value).toBe('') // uid 2 sees empty, not uid 1's draft
 })
