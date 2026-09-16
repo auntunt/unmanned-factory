@@ -58,8 +58,12 @@ def pack_zip(slug):
     for m in modules:
         files[f"modules/{m['id']}.json"] = json.dumps(m, ensure_ascii=False, indent=2)
     for path in sorted((ROOT / 'packs' / slug / 'fixtures').rglob('*')):
-        if path.is_file():
-            files['fixtures/' + path.relative_to(ROOT / 'packs' / slug / 'fixtures').as_posix()] = path.read_text()
+        # Fixtures are text bundled into the skill zip. Skip Python bytecode caches
+        # (a .py fixture imported anywhere leaves __pycache__/*.pyc, which is binary
+        # and not part of the pack) so a stray import can never poison the zip.
+        if not path.is_file() or '__pycache__' in path.parts or path.suffix == '.pyc':
+            continue
+        files['fixtures/' + path.relative_to(ROOT / 'packs' / slug / 'fixtures').as_posix()] = path.read_text()
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as z:
         for name, content in sorted(files.items()):

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic converter output: partial. 清单 fills only 编号/名称 (single-price
+     attrs missing), never emits 定额, and carries one fabricated attribute (乱码)
+     the XSD does not declare — so the harness must flag all three problems. -->
+<数据转换交换标准>
+  <清单 编号="010101001001" 名称="平整场地" 乱码="x"/>
+  <清单 编号="010101002001" 名称="挖一般土方"/>
+</数据转换交换标准>
