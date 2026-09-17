@@ -178,6 +178,27 @@ class TargetStore:
                        (pid, revision + 1, str(actor), 'target.bind', json.dumps(tids), now()))
         return self.bindings(pid)
 
+    def last_checks(self):
+        """Most recent connection test result per target, from the audit trail."""
+        with self.store.connect() as db:
+            rows = db.execute(
+                "SELECT target_id, data, at FROM deploy_target_audit "
+                "WHERE action='target.test' AND id IN "
+                "(SELECT MAX(id) FROM deploy_target_audit WHERE action='target.test' GROUP BY target_id)"
+            ).fetchall()
+        results = {}
+        for row in rows:
+            try:
+                data = json.loads(row['data'])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            results[row['target_id']] = {
+                'status': data.get('status', 'unverified'),
+                'reason': data.get('reason', ''),
+                'checked_at': row['at'],
+            }
+        return results
+
     def snapshot(self, pid):
         return [{'id': tid, 'name': self.get(tid)['name'], 'revision': self.get(tid)['revision']}
                 for tid in self.bindings(pid)['targets']]
