@@ -285,17 +285,35 @@
 /* 日常调用交付：已挂靠职能包的文件处理入口与成果卡 */
 .cv-capability { display:grid; gap:8px; margin-bottom:8px; }
 .cv-capability-row { display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;
-  border:1px solid var(--cv-line,var(--color-border)); border-radius:10px; padding:8px 10px; }
-.cv-capability-version { color:var(--cv-faint,var(--color-muted)); font-size:12px; margin-left:6px; }
-.cv-capability-link { color:var(--color-accent); font-size:12px; margin-left:8px; }
-.cv-capability-warn { color:var(--color-warning); font-size:12px; }
-.cv-result { border:1px solid var(--cv-line,var(--color-border)); border-radius:10px; padding:10px; display:grid; gap:6px; }
-.cv-result.is-ok { border-color:var(--color-success); }
-.cv-result.is-bad { border-color:var(--color-danger); }
+  border:1px solid var(--cv-border,var(--color-border)); border-radius:10px; padding:10px 12px; }
+.cv-capability-info { display:flex; flex-direction:column; gap:4px; flex:1; min-width:0; }
+.cv-capability-version { color:var(--cv-faint); font-size:12px; margin-left:6px; }
+.cv-capability-link { color:var(--cv-accent); font-size:12px; margin-left:8px; }
+.cv-capability-warn { color:var(--cv-warning); font-size:12px; }
+.cv-capability-purpose { margin:2px 0 0; color:var(--cv-muted); font-size:13px; line-height:1.5; }
+.cv-capability-meta { display:flex; align-items:center; gap:4px; flex-wrap:wrap; font-size:12px; color:var(--cv-faint); }
+.cv-capability-constraints { font-size:12px; color:var(--cv-faint); }
+.cv-capability-undeclared { font-size:12px; color:var(--cv-warning); }
+.cv-capability-sep { color:var(--cv-faint); }
+.cv-capability-toggle { background:transparent; border:0; color:var(--cv-accent); font-size:12px; cursor:pointer; padding:0; }
+.cv-capability-toggle:hover { text-decoration:underline; }
+.cv-support-matrix { display:flex; flex-direction:column; gap:4px; margin-top:6px; padding:8px; background:var(--cv-raised); border-radius:8px; }
+.cv-support-row { display:flex; align-items:center; gap:8px; font-size:12px; }
+.cv-support-status { font-weight:600; min-width:56px; }
+.cv-support-supported { color:var(--cv-accent); }
+.cv-support-partial { color:var(--cv-warning); }
+.cv-support-unsupported { color:var(--cv-faint); }
+.cv-support-format { color:var(--cv-muted); }
+.cv-result { border:1px solid var(--cv-border); border-radius:10px; padding:10px; display:grid; gap:6px; }
+.cv-result.is-ok { border-color:var(--cv-accent); }
+.cv-result.is-bad { border-color:var(--cv-danger); }
+.cv-result.is-cancelled { border-color:var(--cv-warning); }
+.cv-result.is-timeout { border-color:var(--cv-warning); }
+.cv-result.is-unknown { border-color:var(--cv-faint); }
 .cv-result-head { display:flex; gap:8px; align-items:center; justify-content:space-between; }
-.cv-result-reason { margin:0; color:var(--cv-faint,var(--color-muted)); font-size:13px; overflow-wrap:anywhere; }
+.cv-result-reason { margin:0; color:var(--cv-muted); font-size:13px; overflow-wrap:anywhere; }
 
 /* Follow-up badges on user messages submitted during active execution. */
 .cv-followup-badge { display:inline-block; margin-top:4px; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; line-height:1.6; }
-.cv-followup-badge.is-pending { color:var(--cv-warning, #b08000); background:color-mix(in srgb, var(--cv-warning, #b08000) 12%, transparent); }
-.cv-followup-badge.is-applied { color:var(--cv-accent, #377a6a); background:color-mix(in srgb, var(--cv-accent, #377a6a) 12%, transparent); }
+.cv-followup-badge.is-pending { color:var(--cv-warning); background:var(--cv-warning-bg, color-mix(in srgb, var(--cv-warning) 12%, transparent)); }
+.cv-followup-badge.is-applied { color:var(--cv-accent); background:color-mix(in srgb, var(--cv-accent) 12%, transparent); }
