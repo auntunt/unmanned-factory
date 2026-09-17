@@ -16,6 +16,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import shlex
 import shutil
 import tomllib
 import threading
@@ -338,6 +339,27 @@ def _overlaps(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     return any(_within(a, right) or _within(b, left) for a in left for b in right)
 
 
+def _normalize_check_argv(name: str, argv: list[str] | tuple[str, ...]) -> list[str]:
+    """Normalize a check command to a proper argv list.
+
+    A single-element list whose sole entry contains whitespace is treated as a
+    shell command string and split with ``shlex.split``.  Multi-element lists
+    are validated as-is (each element must be a non-empty string).  Returns the
+    canonical argv or raises ``ExecutionError`` with a structured message.
+    """
+    if len(argv) == 1 and " " in argv[0]:
+        try:
+            split = shlex.split(argv[0])
+        except ValueError as exc:
+            raise ExecutionError(
+                f"check {name!r}: cannot parse shell string {argv[0]!r}: {exc}"
+            )
+        if not split:
+            raise ExecutionError(f"check {name!r}: shell string expands to empty argv")
+        return split
+    return list(argv)
+
+
 def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[str, list[str]]]:
     trusted = project.get("checks") or {}
     if not isinstance(trusted, Mapping):
@@ -346,11 +368,17 @@ def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[
     for raw in names:
         name = str(raw)
         argv = trusted.get(name)
-        if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(x, str) and x for x in argv):
+        if not isinstance(argv, (list, tuple)) or not argv:
             raise ExecutionError(f"check {name!r} is not a trusted argv array")
+        if not all(isinstance(x, str) and x for x in argv):
+            bad = [repr(x) for x in argv if not isinstance(x, str) or not x]
+            raise ExecutionError(
+                f"check {name!r} contains invalid elements: {', '.join(bad[:5])}"
+            )
         if any("\x00" in x for x in argv):
             raise ExecutionError(f"check {name!r} contains NUL")
-        out.append((name, list(argv)))
+        argv = _normalize_check_argv(name, argv)
+        out.append((name, argv))
     return out
 
 

@@ -147,6 +147,17 @@ class Store:
                 raise ValueError('需求分析预算必须为正数或 null')
         if 'spec_tree_enabled' in changes and type(changes['spec_tree_enabled']) is not bool:
             raise ValueError('规格树配置须为开关')
+        if 'checks' in changes:
+            checks = changes['checks']
+            if not isinstance(checks, dict):
+                raise ValueError('checks must be a name-to-command mapping')
+            for ck_name, ck_argv in checks.items():
+                if not isinstance(ck_name, str) or not ck_name.strip():
+                    raise ValueError(f'check name must be a non-empty string, got {ck_name!r}')
+                if not isinstance(ck_argv, list) or not ck_argv:
+                    raise ValueError(f'check {ck_name!r} must be a non-empty list of strings')
+                if not all(isinstance(x, str) and x for x in ck_argv):
+                    raise ValueError(f'check {ck_name!r} contains non-string or empty elements')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT data FROM projects WHERE id=?', (pid,)).fetchone()
