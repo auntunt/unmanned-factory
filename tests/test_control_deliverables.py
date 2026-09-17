@@ -88,6 +88,24 @@ def test_infer_delivery_type_conflicting_signals_returns_none():
     assert infer_delivery_type_from_text('做一个网站同时提供命令行工具') is None
 
 
+def test_infer_non_goal_excludes_rather_than_matches():
+    """'做个网站，不要做成桌面应用' must infer service, not None."""
+    spec = {'goal': '做个网站', 'flows': [], 'non_goals': ['不要做成桌面应用'], 'data_model': []}
+    assert infer_delivery_type_from_text('做个网站，不要做成桌面应用', spec) == 'service'
+
+
+def test_infer_non_goal_cli_excluded_service_survives():
+    """'不做 CLI' in non_goals + '做网站' in goal → service."""
+    spec = {'goal': '做网站', 'flows': [], 'non_goals': ['不做 CLI'], 'data_model': []}
+    assert infer_delivery_type_from_text('做网站', spec) == 'service'
+
+
+def test_infer_non_goal_alone_does_not_produce_type():
+    """non_goals mentioning installer alone should NOT infer installer."""
+    spec = {'goal': '做个工具', 'flows': [], 'non_goals': ['不需要安装包'], 'data_model': []}
+    assert infer_delivery_type_from_text('做个工具', spec) is None
+
+
 def test_listing_returns_delivery_type_and_installer_targets(app_env):
     client, store, svc, repo = app_env
     from tests.test_control_app import login, project

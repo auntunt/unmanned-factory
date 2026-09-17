@@ -143,24 +143,37 @@ def infer_delivery_type_from_text(text, spec_draft=None):
     """Infer delivery type from user request text and optional spec draft.
 
     Returns 'service', 'cli', 'installer', or None when ambiguous.
-    Only returns a type when exactly one category matches; conflicting
-    signals yield None to avoid mis-labeling.
+    Only returns a type when exactly one positive category matches;
+    conflicting signals yield None to avoid mis-labeling.
+
+    non_goals act as negative signals: a keyword found only in non_goals
+    is subtracted from matches rather than added.  This prevents
+    "做个网站，不要做成桌面应用" from returning None due to a false
+    installer match from the non_goal text.
     """
-    sources = [text or '']
+    positive_sources = [text or '']
+    negative_sources = []
     if spec_draft:
-        sources.append(spec_draft.get('goal') or '')
+        positive_sources.append(spec_draft.get('goal') or '')
         for flow in (spec_draft.get('flows') or []):
-            sources.append(flow)
+            positive_sources.append(flow)
         for ng in (spec_draft.get('non_goals') or []):
-            sources.append(ng)
-    combined = '\n'.join(sources).lower()
+            negative_sources.append(ng)
+    positive = '\n'.join(positive_sources).lower()
+    negative = '\n'.join(negative_sources).lower()
     matches = set()
-    if any(kw in combined for kw in _SERVICE_KEYWORDS):
-        matches.add('service')
-    if any(kw in combined for kw in _CLI_KEYWORDS):
-        matches.add('cli')
-    if any(kw in combined for kw in _INSTALLER_KEYWORDS):
-        matches.add('installer')
+    excluded = set()
+    for keywords, label in ((_SERVICE_KEYWORDS, 'service'), (_CLI_KEYWORDS, 'cli'), (_INSTALLER_KEYWORDS, 'installer')):
+        in_positive = any(kw in positive for kw in keywords)
+        in_negative = any(kw in negative for kw in keywords)
+        if in_negative:
+            # Negative signal (non_goals) always wins: if a keyword appears
+            # in non_goals it is an exclusion even when the same word shows
+            # up in the request text as part of "不要做成桌面应用".
+            excluded.add(label)
+        elif in_positive:
+            matches.add(label)
+    matches -= excluded
     if len(matches) == 1:
         return matches.pop()
     return None
