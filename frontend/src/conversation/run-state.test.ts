@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { composerMode, headState, stageIndex, isTerminal, STAGES } from './run-state'
+import { composerMode, headState, stageIndex, isTerminal, STAGES, followUpBadge, FOLLOWUP_BADGE_LABEL, type FollowUpStatus } from './run-state'
 
 it('maps each run status to the correct progress head', () => {
   expect(headState('running')).toBe('active')
@@ -37,6 +37,42 @@ it('treats only terminal statuses as terminal for polling', () => {
   expect(isTerminal('published')).toBe(true)
   expect(isTerminal('failed')).toBe(true)
   expect(isTerminal('cancelled')).toBe(true)
+})
+
+it('followUpBadge returns pending when followups have unapplied items', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '加搜索', created_at: '2026-01-01', applied: false },
+  ]
+  expect(followUpBadge({ followup: true, applied: false }, followups)).toBe('pending')
+  expect(FOLLOWUP_BADGE_LABEL.pending).toBe('待应用')
+})
+
+it('followUpBadge returns applied when all followups are consumed', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '加搜索', created_at: '2026-01-01', applied: true },
+    { id: 'b', content: '改颜色', created_at: '2026-01-01', applied: true },
+  ]
+  expect(followUpBadge({ followup: true, applied: false }, followups)).toBe('applied')
+  expect(FOLLOWUP_BADGE_LABEL.applied).toBe('已应用')
+})
+
+it('followUpBadge returns none for non-followup messages', () => {
+  expect(followUpBadge({ followup: false }, [])).toBe('none')
+  expect(followUpBadge({}, [])).toBe('none')
+})
+
+it('followUpBadge returns applied when message itself says applied', () => {
+  expect(followUpBadge({ followup: true, applied: true }, [])).toBe('applied')
+})
+
+it('followUpBadge returns pending when followups list is empty but message is a followup', () => {
+  expect(followUpBadge({ followup: true, applied: false }, [])).toBe('pending')
+})
+
+it('followup composer hint mentions automatic merging at safe node', () => {
+  const mode = composerMode('running')
+  expect(mode.kind).toBe('followup')
+  expect(mode.hint).toContain('安全节点')
 })
 
 it('distinguishes completed inspections, interruptions and unknown statuses from active work', () => {
