@@ -59,6 +59,11 @@ def router(service):
         admin(request)
         return {'targets': targets.list()}
 
+    @routes.get('/api/v2/deploy-targets/checks')
+    def last_checks(request: Request):
+        admin(request)
+        return {'checks': targets.last_checks()}
+
     @routes.post('/api/v2/deploy-targets', status_code=201)
     def create(body: Target, request: Request):
         admin(request)
