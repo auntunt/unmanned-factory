@@ -53,7 +53,7 @@ it('followUpBadge returns applied when all followups are consumed', () => {
     { id: 'b', content: '改颜色', created_at: '2026-01-01', applied: true },
   ]
   expect(followUpBadge({ followup: true, applied: false }, followups)).toBe('applied')
-  expect(FOLLOWUP_BADGE_LABEL.applied).toBe('已应用')
+  expect(FOLLOWUP_BADGE_LABEL.applied).toBe('已并入后续执行')
 })
 
 it('followUpBadge returns none for non-followup messages', () => {
@@ -67,6 +67,44 @@ it('followUpBadge returns applied when message itself says applied', () => {
 
 it('followUpBadge returns pending when followups list is empty but message is a followup', () => {
   expect(followUpBadge({ followup: true, applied: false }, [])).toBe('pending')
+})
+
+it('followUpBadge uses per-item pending_id to determine badge', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '已并入', created_at: '2026-01-01', applied: true },
+    { id: 'b', content: '仍待', created_at: '2026-01-01', applied: false },
+  ]
+  // Message A has pending_id 'a' -> its item is applied -> badge = applied
+  expect(followUpBadge({ followup: true, applied: false, pending_id: 'a' }, followups)).toBe('applied')
+  // Message B has pending_id 'b' -> its item is pending -> badge = pending
+  expect(followUpBadge({ followup: true, applied: false, pending_id: 'b' }, followups)).toBe('pending')
+})
+
+it('followUpBadge shows expired for a specific item that expired', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '已并入', created_at: '2026-01-01', applied: true },
+    { id: 'b', content: '未并入', created_at: '2026-01-01', applied: false, expired: true },
+  ]
+  expect(followUpBadge({ followup: true, applied: false, pending_id: 'b' }, followups)).toBe('expired')
+  expect(FOLLOWUP_BADGE_LABEL.expired).toBe('任务已结束未并入')
+})
+
+it('followUpBadge falls back to global list when pending_id is missing', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '已并入', created_at: '2026-01-01', applied: true },
+    { id: 'b', content: '仍待', created_at: '2026-01-01', applied: false },
+  ]
+  // No pending_id, not all applied -> pending
+  expect(followUpBadge({ followup: true, applied: false }, followups)).toBe('pending')
+})
+
+it('followUpBadge expired fallback when all are expired or applied', () => {
+  const followups: FollowUpStatus[] = [
+    { id: 'a', content: '已并入', created_at: '2026-01-01', applied: true },
+    { id: 'b', content: '未并入', created_at: '2026-01-01', applied: false, expired: true },
+  ]
+  // No pending_id, all either applied or expired -> expired
+  expect(followUpBadge({ followup: true, applied: false }, followups)).toBe('expired')
 })
 
 it('followup composer hint mentions automatic merging at safe node', () => {

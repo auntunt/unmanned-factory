@@ -361,10 +361,14 @@ class Store:
                 elif e['type'] in ('run.failed', 'run.recovered', 'run.cancelled', 'github.published'):
                     content = p.get('message') or p.get('pr_url')
                 if content:
+                    followup_extra = {}
+                    if p.get('followup'):
+                        followup_extra = {'followup': True, 'applied': p.get('applied', False)}
+                        if p.get('pending_id'):
+                            followup_extra['pending_id'] = p['pending_id']
                     messages.append(dict(id=e['id'], role=role, content=content,
                                          event_ids=[e['id']], at=e['at'], task_id=e['task_id'],
-                                         **({'followup': True, 'applied': p.get('applied', False)}
-                                            if p.get('followup') else {})))
+                                         **followup_extra))
             after = events[-1]['id']
         return messages
 

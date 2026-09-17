@@ -35,31 +35,44 @@ export function stageIndex(status: string): number {
   return headState(status) === 'fail' ? 1 : 0
 }
 
-export type FollowUpBadge = 'pending' | 'applied' | 'none'
+export type FollowUpBadge = 'pending' | 'applied' | 'expired' | 'none'
 
 export interface FollowUpStatus {
   id: string
   content: string
   created_at: string
   applied: boolean
+  expired?: boolean
 }
 
 /** Determine the badge for a follow-up message.
- *  Since store.conversation() does not pass pending_id through to the frontend,
- *  we resolve the badge from the global followups list: if ALL pending items
- *  are applied, every follow-up message shows "已应用"; otherwise "待应用". */
-export function followUpBadge(msg: { followup?: boolean; applied?: boolean }, followups: FollowUpStatus[]): FollowUpBadge {
+ *  Uses the message's own pending_id to look up its specific followup item
+ *  status.  Falls back to global list only when pending_id is unavailable. */
+export function followUpBadge(msg: { followup?: boolean; applied?: boolean; pending_id?: string }, followups: FollowUpStatus[]): FollowUpBadge {
   if (!msg.followup) return 'none'
   if (msg.applied) return 'applied'
-  // If there are no tracked pending items, fall back to the message's own flag.
+  // Per-item lookup: find the specific followup by pending_id
+  if (msg.pending_id && followups.length > 0) {
+    const item = followups.find(f => f.id === msg.pending_id)
+    if (item) {
+      if (item.applied) return 'applied'
+      if (item.expired) return 'expired'
+      return 'pending'
+    }
+  }
+  // Fallback when pending_id is not available: use global list
   if (followups.length === 0) return 'pending'
   const allApplied = followups.every(f => f.applied)
-  return allApplied ? 'applied' : 'pending'
+  if (allApplied) return 'applied'
+  const allExpired = followups.every(f => f.expired || f.applied)
+  if (allExpired) return 'expired'
+  return 'pending'
 }
 
 export const FOLLOWUP_BADGE_LABEL: Record<FollowUpBadge, string> = {
   pending: '待应用',
-  applied: '已应用',
+  applied: '已并入后续执行',
+  expired: '任务已结束未并入',
   none: '',
 }
 

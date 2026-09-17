@@ -144,7 +144,7 @@ it('shows applied badge on follow-up messages when all followups are consumed', 
   render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
     <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
   </WorkTitleContext.Provider></MemoryRouter>)
-  await screen.findByText('已应用')
+  await screen.findByText('已并入后续执行')
 })
 
 it('follow-up badges survive refresh by re-reading from run response', async () => {

@@ -57,16 +57,20 @@ class FollowUp(Body):
 
 
 def _followup_status(store, rid):
-    """Build the pending/applied follow-up list from durable events."""
+    """Build the pending/applied/expired follow-up list from durable events."""
     pending = {}
     for event in store.export_events(rid, kind='followup.pending'):
         p = event['payload']
         pending[p['id']] = {'id': p['id'], 'content': p.get('content', '')[:200],
-                            'created_at': p.get('created_at', ''), 'applied': False}
+                            'created_at': p.get('created_at', ''), 'applied': False, 'expired': False}
     for event in store.export_events(rid, kind='followup.applied'):
         pid = event['payload'].get('pending_id')
         if pid in pending:
             pending[pid]['applied'] = True
+    for event in store.export_events(rid, kind='followup.expired'):
+        pid = event['payload'].get('pending_id')
+        if pid in pending and not pending[pid]['applied']:
+            pending[pid]['expired'] = True
     return list(pending.values())
 
 

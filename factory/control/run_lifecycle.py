@@ -66,6 +66,99 @@ def _mark_followups_applied(svc, rid, pending):
                 'pending_id': p['id'], 'run_revision': run['revision']})
 
 
+def _expire_unconsumed_followups(svc, rid):
+    """Mark unconsumed pending followups as expired when run reaches a terminal
+    success state (ready_for_review, published).  Expired means the content was
+    never merged into any execution round; the user sees '任务已结束未并入'.
+
+    Must be called under svc.lock (or after the terminal store.update has
+    committed).  Writing followup.expired is safe to repeat -- the routes
+    deduplicate by pending_id.
+    """
+    collected = _collect_pending_followups(svc, rid)
+    if not collected:
+        return
+    with svc.store.connect() as db:
+        for p in collected:
+            svc.store._event(db, rid, 'followup.expired', {
+                'pending_id': p['id'], 'reason': 'run_completed'})
+
+
+def _auto_resume_with_followups(svc, rid):
+    """Auto-resume a needs_human run when unconsumed pending followups exist.
+
+    Called after _fail sets the run to needs_human.  Performs the equivalent of
+    continue_run with actor='system/auto', but silently returns False if the run
+    is not resumable (no plan, no artifacts, cancelled, etc.).
+
+    Returns True if auto-resume was submitted, False otherwise.
+    """
+    log = logging.getLogger(__name__)
+    with svc.lock:
+        run = svc.store.get(rid)
+        if run['status'] != 'needs_human':
+            return False
+        if run['status'] == 'cancelled':
+            return False
+        collected = _collect_pending_followups(svc, rid)
+        if not collected:
+            return False
+        pending_ids = [p['id'] for p in collected]
+        answer, _ = _merge_followup_content('', collected)
+        # Require resumable artifacts (same as continue_run)
+        artifacts = run.get('artifacts') or {}
+        if not artifacts.get('base_sha') or not artifacts.get('tasks'):
+            log.info('auto_resume(%s): no resumable artifacts, skipping', rid)
+            return False
+        if not run.get('plan'):
+            log.info('auto_resume(%s): no plan, skipping', rid)
+            return False
+        if rid in svc.active_jobs:
+            log.info('auto_resume(%s): active job still running, skipping', rid)
+            return False
+        # Validate baseline
+        try:
+            from factory.control.codegraph import baseline_sha
+            project = svc._project_for_run(run)
+            if baseline_sha(project) != artifacts['base_sha']:
+                log.info('auto_resume(%s): baseline changed, skipping', rid)
+                return False
+        except Exception:
+            log.info('auto_resume(%s): baseline check failed, skipping', rid)
+            return False
+        # Check execution_checks consistency
+        if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
+            log.info('auto_resume(%s): checks changed, skipping', rid)
+            return False
+        configuration = run.get('runtime_configuration') or svc.runtime_settings.get()
+        current_timeout = svc.runtime_settings.get()['limits']['timeout_s']
+        configuration = {**configuration, 'limits': {**configuration['limits'],
+            'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
+        resume_count = run.get('resume_count', 0)
+        revision = run['revision']
+        try:
+            updated = svc.store.update(rid, {'status': 'queued',
+                'runtime_configuration': configuration,
+                'resume_count': resume_count + 1,
+                'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
+                'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
+                event=('run.auto_resumed', {'actor': 'system/auto', 'answer': answer,
+                    'revision': revision, 'resume_count': resume_count + 1,
+                    'pending_ids': pending_ids}))
+        except Exception as exc:
+            log.info('auto_resume(%s): store.update failed: %s', rid, exc)
+            return False
+        _mark_followups_applied(svc, rid, collected)
+    try:
+        svc._submit(svc._run, rid)
+    except Exception as exc:
+        log.warning('auto_resume(%s): _submit failed: %s', rid, exc)
+        svc._fail(rid, exc)
+        return False
+    log.info('auto_resume(%s): submitted with %d pending followups', rid, len(collected))
+    return True
+
+
 class _RunCancellation:
     """Event-compatible cancellation with an atomic Git-finalization gate."""
 
