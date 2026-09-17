@@ -35,7 +35,9 @@ MAX_STDERR = 16 * 1024
 MEMORY_LIMIT = 1024 * 1024 * 1024
 MAX_TOTAL_OUTPUT = 64 * 1024 * 1024
 MAX_OUTPUT_FILES = 64
-POLL_INTERVAL_S = 0.2
+POLL_INTERVAL_S = 0.05
+# 主进程退出后给 stdout 的排空窗口。够短，孙进程持有 stdout 时也不会拖住截止时间。
+STDOUT_DRAIN_GRACE_S = 0.5
 
 _MEMORY_PROBE = (
     'import resource,sys\n'
@@ -175,8 +177,11 @@ def _validator(schema, *, where):
     """
     from jsonschema import Draft202012Validator
     from jsonschema.exceptions import SchemaError
-    if _has_remote_ref(schema):
-        raise ValueError(f'{where} 含远端 $ref，出于安全不允许')
+    if not isinstance(schema, dict):
+        raise ValueError(f'{where} schema 必须是对象')
+    remote = _remote_reference(schema)
+    if remote:
+        raise ValueError(f'{where} 含会触发远端解析的引用（{remote}），出于安全不允许')
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
@@ -184,15 +189,34 @@ def _validator(schema, *, where):
     return Draft202012Validator(schema)
 
 
-def _has_remote_ref(node):
+# 任何可能触发远端解析的引用关键字都不许出现。只挡 `$ref` 不够：`$dynamicRef` /
+# `$recursiveRef` 同样会去解析，`$id` / `$schema` 指向 http 会把基准 URI 变成远端。
+_REF_KEYS = ('$ref', '$dynamicRef', '$recursiveRef')
+_BASE_KEYS = ('$id', '$schema')
+
+
+def _remote_reference(node, path='(根)'):
+    """返回第一处会触发远端解析的引用位置；没有则返回 None。"""
     if isinstance(node, dict):
-        ref = node.get('$ref')
-        if isinstance(ref, str) and not ref.startswith('#'):
-            return True
-        return any(_has_remote_ref(value) for value in node.values())
+        for key in _REF_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and not value.startswith('#'):
+                return f'{path} 的 {key}'
+        for key in _BASE_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and '://' in value:
+                return f'{path} 的 {key}'
+        for key, value in node.items():
+            found = _remote_reference(value, f'{path}/{key}')
+            if found:
+                return found
+        return None
     if isinstance(node, list):
-        return any(_has_remote_ref(value) for value in node)
-    return False
+        for index, value in enumerate(node):
+            found = _remote_reference(value, f'{path}[{index}]')
+            if found:
+                return found
+    return None
 
 
 def _schema_check(instance, schema):
@@ -204,78 +228,93 @@ def _schema_check(instance, schema):
 
 
 def validate_instance(instance, schema, *, where):
-    """返回结构化的问题列表（路径 + 说明），不抛异常给调用方。"""
+    """返回结构化的问题列表（路径 + 说明），**任何情况下都不抛异常给调用方**。
+
+    指向不存在锚点的本地 `$ref`（`#/$defs/missing`）能通过 check_schema，却在校验时抛
+    `PointerToNowhere`——那会让一次调用变成没有终态的异常，而不是一条「契约写错了」。
+    引用解析失败在这里同样变成结构化问题。
+    """
     try:
         validator = _validator(schema, where=where)
     except ValueError as exc:
         return [str(exc)]
+    try:
+        errors = sorted(validator.iter_errors(instance), key=lambda error: list(error.absolute_path))
+    except Exception as exc:  # 引用解析失败等：转成结构化问题，不让它冒泡卡住任务
+        return [f'{where} schema 引用无法解析：{type(exc).__name__}: {str(exc)[:200]}']
     problems = []
-    for error in sorted(validator.iter_errors(instance), key=lambda e: list(e.absolute_path)):
+    for error in errors:
         location = '/'.join(str(part) for part in error.absolute_path) or '(根)'
         problems.append(f'{where} {location}：{error.message}')
     return problems[:20]
 
 
 # ---- 执行 ------------------------------------------------------------------
-def _terminate(proc):
-    """整进程组回收。只 kill 直接子进程会留下孤儿继续烧 CPU——实测过。"""
-    for sig in (signal.SIGKILL,):
+def _reclaim(proc, pgid):
+    """回收整个进程组，**即使组首领已经退出**。
+
+    只 kill 直接子进程会留下孤儿继续跑（实测过）。pgid 在 spawn 之后立刻记下来：
+    等 proc 被 wait 掉之后再去 os.getpgid(pid) 会抛 ProcessLookupError，于是「清理」
+    静默变成没清理。start_new_session=True 保证 pgid == 子进程 pid。
+    """
+    if pgid:
         try:
-            os.killpg(os.getpgid(proc.pid), sig)
-        except (OSError, ProcessLookupError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
     try:
         proc.wait(timeout=5)
     except subprocess.SubprocessError:
         pass
 
 
-def _stream(proc, *, deadline, cancel, stderr_path):
-    """有界地读 stdout：先收进内存再判大小的话，一个狂写 stdout 的工具能把服务打爆。
+def _stream(proc, *, deadline, cancel, pgid):
+    """**全程非阻塞、全程有截止时间**地读 stdout。
+
+    先收进内存再判大小，一个狂写 stdout 的工具就能把服务打爆；而主进程退出后直接
+    `stdout.read()` 会阻塞——孙进程继承了同一个 stdout，它不退出这里就一直等
+    （实测 deadline 0.2s、孙进程 sleep(3)，实际 3.04s 才返回，还误报 exited）。
+    所以：主进程退出后只给一个很短的排空窗口，窗口内仍然只走 select；窗口过了就收工，
+    截止时间任何一轮都优先于排空。
 
     返回 (stdout, 结束原因)。原因 ∈ {'exited','timeout','cancelled','stdout_too_large'}。
     """
-    chunks, total = [], 0
-    stdout = proc.stdout
+    handle = proc.stdout
+    fileno = handle.fileno()
+    os.set_blocking(fileno, False)
+    chunks, total, drain_until = [], 0, None
     while True:
         if cancel is not None and cancel.is_set():
-            _terminate(proc)
             return b''.join(chunks), 'cancelled'
+        if drain_until is not None and time.monotonic() > drain_until:
+            # 主进程已退出，stdout 仍被别人持有：不等了，交给调用方回收进程组。
+            return b''.join(chunks), 'exited'
         if time.monotonic() > deadline:
-            _terminate(proc)
             return b''.join(chunks), 'timeout'
-        ready, _, _ = select.select([stdout], [], [], POLL_INTERVAL_S)
+        ready, _, _ = select.select([fileno], [], [], POLL_INTERVAL_S)
         if ready:
             try:
-                data = os.read(stdout.fileno(), 65536)
+                data = os.read(fileno, 65536)
+            except BlockingIOError:
+                data = None
             except OSError as exc:
-                if exc.errno != errno.EINTR:
-                    break
+                if exc.errno == errno.EINTR:
+                    continue
+                return b''.join(chunks), 'exited'
+            if data == b'':
+                return b''.join(chunks), 'exited'  # 真正的 EOF：所有写端都关了
+            if data:
+                total += len(data)
+                if total > MAX_STDOUT:
+                    return b''.join(chunks), 'stdout_too_large'
+                chunks.append(data)
                 continue
-            if not data:
-                break
-            total += len(data)
-            if total > MAX_STDOUT:
-                _terminate(proc)
-                return b''.join(chunks), 'stdout_too_large'
-            chunks.append(data)
-        elif proc.poll() is not None:
-            # 进程已退出：把管道里剩下的读干净再收工。
-            try:
-                rest = stdout.read() or b''
-            except OSError:
-                rest = b''
-            chunks.append(rest[:max(0, MAX_STDOUT - total)])
-            break
-    try:
-        proc.wait(timeout=5)
-    except subprocess.SubprocessError:
-        _terminate(proc)
-    del stderr_path  # stderr 由调用方按需读取（有界）
-    return b''.join(chunks), 'exited'
+        if proc.poll() is not None and drain_until is None:
+            drain_until = min(time.monotonic() + STDOUT_DRAIN_GRACE_S, deadline + STDOUT_DRAIN_GRACE_S)
 
 
 def _failure(code, message, *, evidence, started, outputs=()):
@@ -333,6 +372,7 @@ def run_tool(version, files: dict[str, bytes], inputs, *, options=None, workdir=
         except IsolationUnavailable as exc:
             return _failure('isolation_unavailable', str(exc), evidence=evidence, started=started)
         stderr_path = base / 'stderr.log'
+        proc = pgid = None
         try:
             with stderr_path.open('wb') as stderr_file:
                 proc = subprocess.Popen(
@@ -340,6 +380,9 @@ def run_tool(version, files: dict[str, bytes], inputs, *, options=None, workdir=
                     stdout=subprocess.PIPE, stderr=stderr_file, start_new_session=True,
                     preexec_fn=_limits(timeout, int(tool['permissions']['max_output_bytes']),
                                        memory_limit_supported()))
+                # start_new_session=True → pgid == pid。**现在**记下来：等进程被 wait 掉
+                # 之后再查 pgid 会失败，清理就变成静默没清理。
+                pgid = proc.pid
                 try:
                     proc.stdin.write(json.dumps(request).encode())
                 except OSError:
@@ -347,9 +390,13 @@ def run_tool(version, files: dict[str, bytes], inputs, *, options=None, workdir=
                 finally:
                     proc.stdin.close()
                 stdout, reason = _stream(proc, deadline=time.monotonic() + timeout,
-                                         cancel=cancel, stderr_path=stderr_path)
+                                         cancel=cancel, pgid=pgid)
         except OSError as exc:
             return _failure('spawn_failed', f'无法启动工具进程：{exc}', evidence=evidence, started=started)
+        finally:
+            # 无论哪种结局都回收整个进程组：正常结束的工具也可能留下后台孙进程。
+            if proc is not None:
+                _reclaim(proc, pgid)
         stderr = stderr_path.read_bytes()[:MAX_STDERR].decode('utf-8', 'replace') if stderr_path.exists() else ''
 
         if reason == 'timeout':

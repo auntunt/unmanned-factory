@@ -15,6 +15,10 @@ dependencies = [
     # 控制面直接用它们就必须显式声明——否则最小安装下 import 失败。
     "jsonschema>=4.20.0",
     "packaging>=23.2",
+    # multipart 上传（会话附件、职能包调用的文件输入）。FastAPI 只有在装了它之后才能
+    # 构造带 Form/File 的路由——缺它时 create_app 直接抛 RuntimeError，服务起不来。
+    # 此前只作为 claude extra 的传递依赖（mcp → python-multipart）存在，最小安装必挂。
+    "python-multipart>=0.0.9",
 ]
 
 # 文档里从第一天就写着 `factory run ...`，但这个入口点一直不存在 ——

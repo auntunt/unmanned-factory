@@ -81,6 +81,12 @@
 `kernel.apparmor_restrict_unprivileged_userns=1` 会拦掉）。金丝雀跑不通就没有工具执行能力，
 这是有意的阻断。
 
+**放开哪些运行时路径**由 `runtime_roots()` 按 `sysconfig` 声明逐条算出（base_prefix /
+prefix / stdlib / purelib / scripts / 解释器所在目录，符号链接前后都收），再去掉被祖先覆盖的
+条目；符号链接形式的祖先目录单独放开一个 literal。不是整树放开 `/opt`，也不是「取排序后的
+首末两条」——Conda base 上建的 venv 正好会被后者漏掉标准库根，探针报
+"Could not find platform independent/dependent libraries"。
+
 资源上限只作用于工具子进程：CPU 秒、单文件与总输出上限、文件句柄数，能设内存上限就设。
 **能力探测一律在短命子进程里做**，服务进程的 rlimit 一个字节都不动（早先版本在模块导入时
 先降后升，Linux 上恢复会抛 `ValueError: not allowed to raise maximum limit`，等于把服务
@@ -91,8 +97,16 @@
 版本比对（`3` → `>=3`，`3.12` → `==3.12.*`，也接受完整 specifier）。
 
 工具契约的 `input_schema` / `output_schema` 由 `jsonschema`（Draft 2020-12）先自检再校验
-实例，远端 `$ref` 一律拒绝；`outputs` 里的畸形元素变成结构化问题，不会抛异常把任务卡死。
-stdout 边读边限流，超过 256 KB 立即回收整个进程组，不会先无界缓冲再判大小。
+实例。**任何可能触发远端解析的引用都拒绝**——不只是 `$ref`，还包括 `$dynamicRef`、
+`$recursiveRef`，以及指向 http(s) 的 `$id` / `$schema`。指向不存在锚点的**本地** `$ref`
+能通过 `check_schema` 却在校验时抛 `PointerToNowhere`，这里一并转成结构化问题，
+让任务落到明确终态而不是卡在异常上。`outputs` 里的畸形元素同样只变成一条问题。
+
+stdout **全程非阻塞、全程有截止时间**地读，超过 256 KB 立即中止。主进程退出后只给一个很短
+的排空窗口（0.5s），窗口内仍然只走 `select`：孙进程继承了同一个 stdout 时，直接
+`stdout.read()` 会一直等它退出（实测 0.2s 的期限被拖到 3.04s，还误报 `exited`）。
+进程组 id 在 spawn 之后立刻记下，**每次执行结束都回收整个进程组**（成功也回收），
+组首领已经退出也照样回收——等 `wait` 之后再查 pgid 会失败，清理就静默变成没清理。
 
 **任务与作业原子关联**：`pack_tasks` 在建表的同一个事务里写入 `job_id`。派发前崩溃留下的
 任务，重启时由 `recover_interrupted()` 对账到明确终态（`failed` / `error_code=interrupted`），
@@ -101,7 +115,8 @@ stdout 边读边限流，超过 256 KB 立即回收整个进程组，不会先�
 超时与取消都按进程组回收（只杀直接子进程会留下孤儿）。
 
 **验证提交即幂等**：操作键在提交时登记，重复提交回放同一个作业，不会把测试集再真跑一遍；
-同键不同候选内容 → 409。
+同键不同候选内容 → 409。若登记之后、派发之前崩溃（作业根本不存在），重放会**用登记的
+job id 补派发**，而不是回一个查不到的作业加 `completed`。
 
 **环境检查会过期**：解释器/平台指纹变化或超过 24 小时，状态退回 `unchecked` 并给出原因，
 不让一次 `ready` 永久代表「现在能跑」；发布状态不受影响。
@@ -137,6 +152,12 @@ python3 -c "from factory.control.pack_sandbox import probe; print(probe().as_dic
 |---|---|
 | `jsonschema>=4.20.0` | 工具契约 schema 自检与输入/输出实例校验 |
 | `packaging>=23.2` | 依赖声明（PEP 508）解析与版本约束比对 |
+| `python-multipart>=0.0.9` | multipart 上传（会话附件、职能包调用的文件输入） |
+
+`python-multipart` 是**既有缺口**：`agent_routes` 的附件上传在 4c56632 上就用了
+`File(...)`，而 FastAPI 没有它就构造不出带 Form/File 的路由——最小安装下 `create_app`
+直接抛 RuntimeError，服务起不来。此前它只作为 `claude` extra 的传递依赖
+（`mcp` → `python-multipart`）存在。职能包的 `/invocations` 也走 multipart，所以一并显式声明。
 
 ## 6. 未完成项
 

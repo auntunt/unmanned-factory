@@ -187,7 +187,7 @@ def test_output_schema_enforces_enum_and_nested_constraints():
 def test_remote_refs_are_refused():
     remote = {'type': 'object', 'properties': {'a': {'$ref': 'https://example.com/s.json'}}}
     problems = validate_instance({'a': 1}, remote, where='输出')
-    assert problems and '远端 $ref' in problems[0]
+    assert len(problems) == 1 and '远端解析' in problems[0] and '$ref' in problems[0]
 
 
 def test_input_schema_is_actually_executed():
@@ -383,3 +383,191 @@ def test_the_working_directory_is_removed_after_a_run(monkeypatch):
     outcome = run_tool(v, files, [])
     assert outcome['status'] == 'succeeded'
     assert created and not Path(created[0]).exists(), '工作目录没有清理'
+
+# ---- 复核轮次 2：运行时根目录、非阻塞读、进程组 ------------------------------
+def test_runtime_roots_keep_the_standard_library_for_a_venv_on_a_conda_base(monkeypatch):
+    """Conda base 上建的 venv：sys.prefix 是 .venv，标准库却在 base_prefix 下。
+
+    早先只取「排序后的首末两条」，正好把标准库根丢掉，探针报
+    Could not find platform independent/dependent libraries。
+    """
+    monkeypatch.setattr(pack_sandbox.sys, 'prefix', '/tmp/demo-venv')
+    monkeypatch.setattr(pack_sandbox.sys, 'exec_prefix', '/tmp/demo-venv')
+    monkeypatch.setattr(pack_sandbox.sys, 'base_prefix', '/opt/base-python')
+    monkeypatch.setattr(pack_sandbox.sys, 'base_exec_prefix', '/opt/base-python')
+    monkeypatch.setattr(pack_sandbox.sys, 'executable', '/tmp/demo-venv/bin/python')
+    monkeypatch.setattr(pack_sandbox.sysconfig, 'get_paths', lambda: {
+        'stdlib': '/opt/base-python/lib/python3.12',
+        'platstdlib': '/opt/base-python/lib/python3.12',
+        'purelib': '/tmp/demo-venv/lib/python3.12/site-packages',
+        'platlib': '/tmp/demo-venv/lib/python3.12/site-packages',
+        'scripts': '/tmp/demo-venv/bin', 'data': '/tmp/demo-venv'})
+    roots = [str(item) for item in pack_sandbox.runtime_roots()]
+    assert '/opt/base-python' in roots, f'标准库根丢了：{roots}'
+    assert any(item.rstrip('/').endswith('demo-venv') for item in roots), roots
+    # 收敛到祖先，不会把每个子目录都写成一条规则，更不会放开整个 /opt。
+    assert '/opt/base-python/lib/python3.12' not in roots
+    assert '/opt' not in roots and '/' not in roots
+
+
+def test_every_runtime_root_reaches_the_seatbelt_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(pack_sandbox, 'backend_name', lambda: 'seatbelt')
+    monkeypatch.setattr(pack_sandbox, 'runtime_roots',
+                        lambda: [Path('/opt/base-python'), Path('/opt/venv-one'), Path('/opt/venv-two')])
+    base = tmp_path / 'base'
+    out, tmp = base / 'output', base / 'tmp'
+    for folder in (base, out, tmp):
+        folder.mkdir(parents=True, exist_ok=True)
+    argv = pack_sandbox.build_argv(['/opt/venv-one/bin/python'], base=base, output_dir=out, tmp_dir=tmp)
+    params = dict(zip(argv, argv[1:]))
+    handed = {value.split('=', 1)[1] for key, value in zip(argv, argv[1:])
+              if key == '-D' and value.startswith('PY')}
+    assert handed == {'/opt/base-python', '/opt/venv-one', '/opt/venv-two'}
+    profile = Path(params['-f']).read_text(encoding='utf-8')
+    for index in range(3):
+        assert f'(param "PY{index}")' in profile
+    assert '(deny default)' in profile and '(deny network*)' in profile
+    del params
+
+
+def test_symlinked_ancestors_of_the_interpreter_are_allowed_but_nothing_else(tmp_path):
+    link = tmp_path / 'linked'
+    link.symlink_to(tmp_path / 'real', target_is_directory=True)
+    (tmp_path / 'real').mkdir()
+    found = [str(item) for item in pack_sandbox.symlink_ancestors([link / 'bin' / 'python'])]
+    assert str(link) in found
+    assert str(tmp_path / 'real') not in found
+
+
+def test_a_grandchild_holding_stdout_cannot_outlast_the_deadline():
+    """主进程先退出、孙进程继承 stdout 并 sleep(3)。
+
+    早先 select 未就绪时走的是阻塞 `stdout.read()`，实测 0.2 秒的期限被拖到 3.04 秒，
+    还把结果报成 exited。现在全程非阻塞 + 排空窗口有界。
+    """
+    if not pack_sandbox.probe().available:
+        pytest.skip('本机没有可验证的隔离')
+    v, files = version("""
+        import json, subprocess, sys
+        json.load(sys.stdin)
+        subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(3)'])
+        print(json.dumps({'status': 'ok', 'result': {'a': 1}}))
+        sys.stdout.flush()
+    """, timeout=1)
+    started = time.time()
+    outcome = run_tool(v, files, [])
+    elapsed = time.time() - started
+    assert elapsed < 2.5, f'孙进程把读操作拖住了：{elapsed:.2f}s'
+    # 主进程确实完成了，结果照常解析出来；孙进程由进程组回收兜底。
+    assert outcome['status'] == 'succeeded' and outcome['result'] == {'a': 1}
+
+
+def test_a_grandchild_holding_stdout_does_not_survive_the_run(tmp_path):
+    if not pack_sandbox.probe().available:
+        pytest.skip('本机没有可验证的隔离')
+    workdir = tmp_path / 'work'
+    v, files = version("""
+        import json, subprocess, sys
+        json.load(sys.stdin)
+        subprocess.Popen([sys.executable, '-I', '-c',
+            "import time; time.sleep(4); open('output/orphan.txt','w').write('survived')"])
+        print(json.dumps({'status': 'ok', 'result': {'a': 1}}))
+        sys.stdout.flush()
+    """, timeout=10)
+    outcome = run_tool(v, files, [], workdir=workdir)
+    assert outcome['status'] == 'succeeded'
+    time.sleep(6)
+    assert not (workdir / 'output' / 'orphan.txt').exists(), '正常结束也必须回收进程组'
+
+
+def test_a_silent_grandchild_does_not_stop_the_timeout_from_firing():
+    if not pack_sandbox.probe().available:
+        pytest.skip('本机没有可验证的隔离')
+    v, files = version("""
+        import json, subprocess, sys, time
+        json.load(sys.stdin)
+        subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'])
+        time.sleep(30)
+    """, timeout=2)
+    started = time.time()
+    outcome = run_tool(v, files, [])
+    assert outcome['error_code'] == 'timeout'
+    assert time.time() - started < 15
+
+
+# ---- 复核轮次 2：schema 引用 -------------------------------------------------
+def test_a_broken_local_ref_is_a_structured_problem_not_an_exception():
+    problems = validate_instance({}, {'$ref': '#/$defs/missing'}, where='输入')
+    assert len(problems) == 1 and '引用无法解析' in problems[0]
+
+
+def test_a_valid_local_ref_still_works():
+    schema = {'type': 'object', '$defs': {'name': {'type': 'string'}},
+              'properties': {'a': {'$ref': '#/$defs/name'}}}
+    assert validate_instance({'a': 'ok'}, schema, where='输入') == []
+    assert validate_instance({'a': 1}, schema, where='输入')
+
+
+@pytest.mark.parametrize('schema', [
+    {'$ref': 'https://example.com/s.json'},
+    {'$dynamicRef': 'https://example.com/s.json#a'},
+    {'$recursiveRef': 'https://example.com/s.json#'},
+    {'$id': 'https://example.com/base', 'type': 'object'},
+    {'type': 'object', 'properties': {'a': {'$dynamicRef': 'http://example.com/x#y'}}},
+])
+def test_any_reference_that_could_hit_the_network_is_refused(schema):
+    problems = validate_instance({'a': 1}, schema, where='输入')
+    assert len(problems) == 1 and '远端解析' in problems[0]
+
+
+def test_a_tool_whose_contract_has_a_broken_ref_fails_the_task_with_a_reason():
+    """契约写错不能让任务卡在没有终态的异常上。"""
+    if not pack_sandbox.probe().available:
+        pytest.skip('本机没有可验证的隔离')
+    v, files = version("""
+        import json, sys
+        json.load(sys.stdin)
+        print(json.dumps({'status': 'ok', 'result': {'a': 1}}))
+    """, input_schema={'$ref': '#/$defs/nope'})
+    outcome = run_tool(v, files, [])
+    assert outcome['status'] == 'failed' and outcome['error_code'] == 'bad_input'
+    assert '引用无法解析' in outcome['error']
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_VENV_PROBE = ('import json, sys\n'
+               'sys.path.insert(0, {root!r})\n'
+               'from factory.control.pack_sandbox import probe, runtime_roots\n'
+               'print(json.dumps({{"probe": probe(refresh=True).as_dict(),\n'
+               '                  "roots": [str(item) for item in runtime_roots()]}}))\n')
+
+
+@pytest.mark.parametrize('through_symlink', [False, True])
+def test_the_canary_passes_for_an_interpreter_inside_a_venv(tmp_path, through_symlink):
+    """真的建一个 venv，用它的解释器跑金丝雀。
+
+    venv 的 `sys.prefix` 与标准库所在的 `base_prefix` 不是同一棵树，而通过符号链接
+    访问时 exec 走的还是未解析的路径——这两点各让隔离探针挂过一次。
+    """
+    if not pack_sandbox.probe().available:
+        pytest.skip('本机没有可验证的隔离')
+    real = tmp_path / 'real'
+    real.mkdir()
+    home = tmp_path / 'linked'
+    if through_symlink:
+        home.symlink_to(real, target_is_directory=True)
+    else:
+        home = real
+    venv_dir = home / 'venv'
+    try:
+        subprocess.run([sys.executable, '-m', 'venv', str(venv_dir)],
+                       check=True, capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f'本机建不了 venv：{exc}')
+    probe_source = _VENV_PROBE.format(root=str(REPO_ROOT))
+    result = subprocess.run([str(venv_dir / 'bin' / 'python'), '-c', probe_source],
+                            capture_output=True, timeout=300)
+    assert result.returncode == 0, result.stderr.decode('utf-8', 'replace')[-800:]
+    report = json.loads(result.stdout.decode())
+    assert report['probe']['available'] is True, report
+    # 标准库根来自 base_prefix，必须在放开的根目录里。
+    assert any(str(Path(sys.base_prefix)) == root for root in report['roots']), report['roots']

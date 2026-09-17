@@ -530,12 +530,13 @@ def test_tool_cannot_write_outside_its_output_directory(app_env):
     assert result['passed'] is False
     evaluation = client.get(f"/api/v4/capability-packs/{pack['id']}",
                             headers=headers).json()['evaluations'][0]
+    # 隔离是硬要求：后端只可能是本机实际验证过的那个（macOS seatbelt / Linux bwrap），
+    # 不再有「本机没沙箱所以照跑」这条分支——那条分支在 Linux 上把 bwrap 误断言成 none。
     isolation = evaluation['cases'][0]['isolation']
-    if isolation == 'seatbelt':
-        assert not escape_target.exists(), '沙箱可用时必须真的挡住越界写'
-    else:
-        # No sandbox on this host: we say so rather than claiming confinement.
-        assert evaluation['environment']['sandbox'] == 'none'
+    assert isolation in ('seatbelt', 'bwrap'), isolation
+    assert evaluation['environment']['sandbox'] == isolation
+    assert evaluation['environment']['isolation_verified'] is True
+    assert not escape_target.exists(), '越界写没有被真的挡住'
 
 
 def test_maintainer_only_operations_are_enforced_server_side(app_env):

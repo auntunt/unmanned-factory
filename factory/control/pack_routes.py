@@ -170,10 +170,16 @@ def router(store, service):
         # 同键不同候选内容 → Conflict（由 _replay 抛出）。
         registered = guarded(packs.begin_evaluation, pack_id, content_digest_value=digest,
                              actor=who, operation_key=body.operation_key, job_id=job_id)
-        if registered.get('idempotent_replay'):
+        replay = bool(registered.get('idempotent_replay'))
+        if replay:
             replayed = registered.get('job_id')
-            return {'job_id': replayed, 'status': job_state(replayed) or 'completed',
-                    'content_digest': registered.get('content_digest', digest), 'idempotent_replay': True}
+            state = job_state(replayed)
+            if state is not None:
+                return {'job_id': replayed, 'status': state, 'content_digest': digest,
+                        'idempotent_replay': True}
+            # 登记成功但崩在派发之前：作业**根本不存在**。以前这里 `or 'completed'`，
+            # 于是重放会报一个查不到的作业已完成。改成用登记的 job_id 真正补派发。
+            job_id = replayed or job_id
 
         def job(cancel):
             report = evaluate(draft, files, cancel=cancel)
@@ -187,7 +193,8 @@ def router(store, service):
 
         started = service.start_maintenance(job, job_id=job_id, conversation_id=f'pack-eval:{pack_id}',
                                             actor_id=who['id'])
-        return {'job_id': started['id'], 'status': started['status'], 'content_digest': digest}
+        return {'job_id': started['id'], 'status': started['status'], 'content_digest': digest,
+                'idempotent_replay': replay}
 
     @api.get('/jobs/{job_id}')
     def evaluation_job(job_id: str, request: Request):

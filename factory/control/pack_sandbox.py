@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,12 @@ PROBE_TIMEOUT_S = 30.0
 # Seatbelt：默认拒绝。`(literal "/")` 不可少——根目录本身读不到的话，连 /bin/echo 都
 # 起不来（实测 SIGABRT，且没有任何提示指向沙箱）。路径一律走 -D 参数，不拼字符串：
 # 目录名里一个引号就能提前闭合表达式，把某条 deny 挤出策略。
-_SEATBELT = '''(version 1)
+# Seatbelt：默认拒绝。`(literal "/")` 不可少——根目录本身读不到的话，连 /bin/echo 都
+# 起不来（实测 SIGABRT，且没有任何提示指向沙箱）。路径一律走 -D 参数，不拼字符串：
+# 目录名里一个引号就能提前闭合表达式，把某条 deny 挤出策略。运行时根目录有几条就写几条
+# `(param "PYn")`——早先只取排序后的首末两条，Conda base + venv 的布局下正好丢掉标准库根，
+# 探针报 "Could not find platform independent libraries"。
+_SEATBELT_HEAD = """(version 1)
 (deny default)
 (allow process-fork process-exec)
 (allow sysctl-read)
@@ -39,13 +45,44 @@ _SEATBELT = '''(version 1)
   (literal "/")
   (subpath "/usr") (subpath "/System") (subpath "/bin") (subpath "/sbin")
   (subpath "/Library") (subpath "/private/etc") (subpath "/private/var/db")
-  (subpath (param "PY")) (subpath (param "PYBASE")) (subpath (param "BASE")))
+  (subpath (param "BASE"))"""
+_SEATBELT_TAIL = """)
 (allow file-read* file-write*
   (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom")
   (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/dtracehelper") (literal "/dev/tty"))
 (allow file-write* (subpath (param "OUT")) (subpath (param "TMP")))
 (deny network*)
-'''
+"""
+
+
+def _seatbelt_profile(runtime_count: int, link_count: int) -> str:
+    """按运行时根目录与符号链接祖先的条数展开策略。
+
+    只展开我们自己生成的参数名，路径仍然只走 -D。`LNn` 是**符号链接形式的祖先目录**：
+    sbpl 的 subpath 按真实路径匹配，而 exec 走的是未解析的那条路径，中间少一个链接节点
+    就会以 `execvp(...) Operation not permitted` 失败（venv 建在 /tmp 下时实测到）。
+    只放开这几个链接节点本身，不是 `file-read-metadata` 全放开。
+    """
+    roots = ''.join(f'\n  (subpath (param "PY{index}"))' for index in range(runtime_count))
+    links = ''.join(f'\n  (literal (param "LN{index}"))' for index in range(link_count))
+    return _SEATBELT_HEAD + roots + links + _SEATBELT_TAIL
+
+
+def symlink_ancestors(paths) -> list[Path]:
+    """paths 里每条路径自身及其祖先中，属于符号链接的那些节点。"""
+    found: set[Path] = set()
+    for path in paths:
+        current = Path(path)
+        for node in (current, *current.parents):
+            if node == Path(node.root):
+                continue
+            try:
+                if node.is_symlink():
+                    found.add(node)
+            except OSError:
+                continue
+    return sorted(found, key=str)
+
 
 # 金丝雀：在沙箱里报告三件事的真实结果，由外面判定。它只报告，不下结论——
 # 「策略加载成功」和「策略真的挡住了」是两回事。
@@ -104,11 +141,44 @@ def backend_name() -> str | None:
     return None
 
 
-def _python_roots() -> list[Path]:
-    roots = {Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve()}
-    executable = Path(sys.executable).resolve()
-    roots.add(executable.parent)
-    return sorted(roots)
+def runtime_roots() -> list[Path]:
+    """运行这个解释器所需的**最小**路径集合。
+
+    不是 `/opt` 这种整树放开，也不是「取前缀的首末两条」——Conda base 上建的 venv 里，
+    `sys.prefix` 是 .venv、标准库却在 `sys.base_prefix/lib/pythonX.Y`，只取首末会把标准库
+    整个漏掉（实测探针 "Could not find platform independent/dependent libraries"）。
+    这里按 sysconfig 声明的位置逐条收集，符号链接前后都收（venv 里的 python 是个链接，
+    exec 走的是**未解析**的那条路径），最后去掉被祖先覆盖的条目。
+    """
+    candidates: set[Path] = set()
+    for value in (sys.base_prefix, sys.prefix, sys.base_exec_prefix, sys.exec_prefix):
+        if value:
+            candidates.add(Path(value))
+    paths = sysconfig.get_paths()
+    for key in ('stdlib', 'platstdlib', 'purelib', 'platlib', 'scripts', 'data'):
+        value = paths.get(key)
+        if value:
+            candidates.add(Path(value))
+    executable = Path(sys.executable)
+    candidates.add(executable.parent)
+    expanded: set[Path] = set()
+    for path in candidates:
+        expanded.add(path)
+        try:
+            expanded.add(path.resolve())
+        except OSError:
+            continue
+    try:
+        expanded.add(executable.resolve().parent)
+    except OSError:
+        pass
+    minimal: list[Path] = []
+    for path in sorted(expanded, key=lambda item: (len(item.parts), str(item))):
+        if path == Path(path.root):
+            continue  # 绝不把 "/" 当运行时根放开
+        if not any(path.is_relative_to(kept) for kept in minimal):
+            minimal.append(path)
+    return minimal
 
 
 def build_argv(argv, *, base: Path, output_dir: Path, tmp_dir: Path):
@@ -118,11 +188,16 @@ def build_argv(argv, *, base: Path, output_dir: Path, tmp_dir: Path):
     backend = backend_name()
     base, output_dir, tmp_dir = base.resolve(), output_dir.resolve(), tmp_dir.resolve()
     if backend == 'seatbelt':
+        roots = runtime_roots()
+        links = symlink_ancestors([*roots, Path(argv[0]) if argv else base])
         profile = base / '.policy.sb'
-        profile.write_text(_SEATBELT, encoding='utf-8')
-        roots = _python_roots()
-        return ['/usr/bin/sandbox-exec', '-f', str(profile),
-                '-D', f'PY={roots[0]}', '-D', f'PYBASE={roots[-1]}', '-D', f'BASE={base}',
+        profile.write_text(_seatbelt_profile(len(roots), len(links)), encoding='utf-8')
+        params = []
+        for index, root in enumerate(roots):
+            params += ['-D', f'PY{index}={root}']
+        for index, link in enumerate(links):
+            params += ['-D', f'LN{index}={link}']
+        return ['/usr/bin/sandbox-exec', '-f', str(profile), *params, '-D', f'BASE={base}',
                 '-D', f'OUT={output_dir}', '-D', f'TMP={tmp_dir}', *argv]
     if backend == 'bwrap':
         # --unshare-all 含 --unshare-net：网络不是靠策略语句禁掉的，而是根本没有接口。
@@ -133,7 +208,7 @@ def build_argv(argv, *, base: Path, output_dir: Path, tmp_dir: Path):
         for path in ('/usr', '/lib', '/lib64', '/bin', '/sbin', '/etc/ld.so.cache',
                      '/etc/ld.so.conf', '/etc/ld.so.conf.d'):
             wrapped += ['--ro-bind-try', path, path]
-        for root in _python_roots():
+        for root in runtime_roots():
             wrapped += ['--ro-bind-try', str(root), str(root)]
         wrapped += ['--ro-bind', str(base), str(base)]          # program/ 与 input/ 只读
         wrapped += ['--bind', str(output_dir), str(output_dir)]  # 唯一可写出口

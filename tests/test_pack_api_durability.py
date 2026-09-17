@@ -319,3 +319,43 @@ def test_starting_the_service_never_changes_the_process_limits(app_env):
     router(store, service)  # 再建一次路由：恢复逻辑会跑，仍然不许动限制
     after = {name: resource.getrlimit(getattr(resource, name)) for name in watched}
     assert after == before, f'服务进程的 rlimit 被改动了：{before} -> {after}'
+
+def test_an_evaluation_registered_but_never_dispatched_is_redispatched_not_reported_done(app_env):
+    """登记了幂等键、崩在派发之前：作业根本不存在。
+
+    以前重放会返回一个查不到的作业 + status=completed。现在必须补派发，并且最终真的
+    留下一条证据。
+    """
+    client, store, service, repo = app_env
+    headers = login(client)
+    rid = development_run(client, store, repo, headers)
+    pack = client.post(f'{BASE}/drafts', headers=headers,
+                       json={'source_run_id': rid, 'selections': selections(),
+                             'operation_key': key()}).json()
+    packs = PackStore(store)
+    actor = client.get('/api/auth/me', headers=headers).json()['user']
+    op, ghost = key(), uuid.uuid4().hex
+    packs.begin_evaluation(pack['id'], content_digest_value=pack['draft']['content_digest'],
+                           actor=actor, operation_key=op, job_id=ghost)
+    with store.connect() as db:  # 确认这个作业真的不存在
+        assert db.execute('SELECT COUNT(*) FROM maintenance_jobs WHERE id=?', (ghost,)).fetchone()[0] == 0
+
+    replay = client.post(f"{BASE}/{pack['id']}/evaluations", headers=headers,
+                         json={'expected_revision': pack['draft']['revision'], 'operation_key': op})
+    assert replay.status_code == 202, replay.text
+    body = replay.json()
+    assert body['status'] != 'completed', body          # 不臆造完成
+    assert body['job_id'] == ghost                      # 用登记的那个 id 补派发
+    assert client.get(f"{BASE}/jobs/{ghost}", headers=headers).status_code == 200
+    finished = await_job(client, headers, ghost)
+    assert finished['status'] == 'completed' and finished['result']['passed'] is True
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM pack_evaluations WHERE pack_id=?',
+                          (pack['id'],)).fetchone()[0] == 1
+    # 再重放一次：这次作业存在了，回放真实状态，不会再跑第二遍。
+    again = client.post(f"{BASE}/{pack['id']}/evaluations", headers=headers,
+                        json={'expected_revision': pack['draft']['revision'], 'operation_key': op})
+    assert again.json()['status'] == 'completed' and again.json()['idempotent_replay'] is True
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM pack_evaluations WHERE pack_id=?',
+                          (pack['id'],)).fetchone()[0] == 1
