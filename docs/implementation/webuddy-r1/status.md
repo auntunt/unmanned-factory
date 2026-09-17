@@ -1,7 +1,7 @@
 # webuddy-r1 状态
 
 - 基线核对：2026-09-17，HEAD f81622a，工作区干净，与远端同步。
-- T01：ready（已派发前状态；派发后更新为 running）
+- T01：running（2026-09-17 已派发给 Sonnet 子任务）
 - T02：planned（依赖 T01 回执）
 - T03：planned（缺口已确认，可独立于 T01/T02）
 - T04：planned
