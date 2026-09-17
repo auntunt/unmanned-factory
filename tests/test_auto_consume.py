@@ -15,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-
 import pytest
 
 from factory.control.run_lifecycle import (
@@ -28,6 +27,8 @@ from factory.control.run_lifecycle import (
 from factory.control.service import Service
 from factory.control.store import Conflict, Store
 from tests.test_control_app import app_env, login, project, FakeSDK, wait_state  # noqa: F401
+
+
 
 
 def _setup_resumable_run(client, store, svc, repo, headers, *, followup_contents=('加搜索功能',)):
@@ -617,3 +618,98 @@ def test_baseline_exception_logged_and_event_emitted(app_env):
     payload = skip_events[0]['payload']
     assert payload['reason'] == 'baseline_check_exception'
     assert 'Error' in payload['error'] or 'error' in payload['error'].lower() or '不存在' in payload['error'] or 'No such' in payload['error']
+
+
+# ---------- Scenario 15: full _job path with real thread pool ----------
+
+def test_full_job_path_auto_resumes_after_execution_failure(app_env):
+    """Exercises the real _submit -> _job path through the thread pool.
+    Monkeypatches _run to call _fail (simulating an execution failure),
+    proving that _job's finally hook fires auto-resume AFTER active_jobs.pop.
+
+    Root cause reproduced: before the fix, the hook was inside _run's except
+    blocks where rid was still in active_jobs, so the active_jobs guard
+    always returned False.
+
+    Uses: app_env with monkeypatched _run (fake failure path).
+    """
+    import uuid as _uuid
+    from factory.control.store import now as _now
+
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+
+    # Create a run and drive it to 'queued' with a plan and resumable
+    # artifacts, plus a pending followup — all the preconditions for
+    # auto-resume.  We do this by hand because the real execution pipeline
+    # is not the subject under test; the _job timing is.
+    rid = client.post('/api/v2/runs', json={
+        'operation': 'general', 'project_id': p['id'], 'request': '做工具',
+    }, headers=headers).json()['id']
+    # Let planning settle
+    wait_state(store, rid, ('awaiting_approval', 'needs_clarification',
+                            'needs_human', 'queued', 'running'))
+    time.sleep(0.5)
+    with svc.lock:
+        svc.active_jobs.pop(rid, None)
+
+    base_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(repo),
+                              capture_output=True, text=True).stdout.strip()
+    store.update(rid, {
+        'status': 'queued',
+        'plan': {'title': 't', 'summary': '', 'questions': [], 'tasks': [
+            {'id': 't1', 'title': 'a', 'prompt': 'a', 'acceptance': ['ok'],
+             'paths': ['x'], 'checks': ['greeting'], 'depends_on': [],
+             'complexity': 'small', 'risk': 'low'}]},
+        'revision': 1,
+        'artifacts': {'base_sha': base_sha, 'tasks': [{'id': 't1'}]},
+        'execution_checks': store.project(p['id'])['checks'],
+    })
+
+    # Inject a pending followup
+    pending_id = _uuid.uuid4().hex
+    with store.connect() as db:
+        store._event(db, rid, 'user.message', {
+            'text': '加搜索', 'followup': True, 'queued': True,
+            'applied': False, 'actor': 'owner', 'actor_id': 1,
+            'pending_id': pending_id,
+        })
+        store._event(db, rid, 'followup.pending', {
+            'id': pending_id, 'content': '加搜索',
+            'actor_id': 1, 'actor': 'owner',
+            'fingerprint': 'test', 'created_at': _now(),
+        })
+
+    # Monkeypatch _run: call _fail to set needs_human (the real failure path)
+    original_run = type(svc)._run
+
+    def failing_run(self_svc, run_id):
+        """Simulates execution failure: sets needs_human via _fail."""
+        self_svc._fail(run_id, RuntimeError('simulated execution failure'))
+
+    type(svc)._run = failing_run
+    try:
+        # Submit through the real _submit -> _job path (thread pool)
+        svc._submit(svc._run, rid)
+
+        # Wait for the auto_resumed event
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            auto_events = list(store.export_events(rid, kind='run.auto_resumed'))
+            if auto_events:
+                break
+            time.sleep(0.05)
+    finally:
+        type(svc)._run = original_run
+
+    auto_events = list(store.export_events(rid, kind='run.auto_resumed'))
+    assert len(auto_events) >= 1, (
+        f'auto-resume must fire via _job path; '
+        f'status={store.get(rid)["status"]}, '
+        f'active_jobs={list(svc.active_jobs.keys())}, '
+        f'auto_resumed={len(auto_events)}'
+    )
+    payload = auto_events[0]['payload']
+    assert payload['actor'] == 'system/auto'
+    assert pending_id in payload['pending_ids']

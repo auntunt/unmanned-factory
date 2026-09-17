@@ -258,6 +258,14 @@ class Service:
                 self.queue.finish(rid, phase)
                 self.active_jobs.pop(rid, None)
                 self.wake.set()
+            # Auto-consume pending followups at this safe node.  Called AFTER
+            # active_jobs.pop so the rid-in-active_jobs guard does not block it,
+            # and outside the lock block so _auto_resume_with_followups can
+            # acquire svc.lock cleanly (even though RLock would allow re-entry,
+            # keeping the critical section minimal is safer).
+            from factory.control.run_lifecycle import _auto_resume_with_followups, _collect_pending_followups
+            if self.store.get(rid)['status'] == 'needs_human' and _collect_pending_followups(self, rid):
+                _auto_resume_with_followups(self, rid)
 
     def _submit(self, fn, rid):
         with self.lock:

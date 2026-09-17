@@ -15,7 +15,7 @@ from factory.control.mounts import agent_guidance, compile_mounts, manifest_summ
 from factory.control.planning import build_prompt, continuous_plan, parse_plan, triage
 from factory.control.providers import ProviderRequest
 from factory.control.run_billing import _verification_reserve_usd
-from factory.control.run_lifecycle import _auto_resume_with_followups, _expire_unconsumed_followups
+from factory.control.run_lifecycle import _expire_unconsumed_followups
 from factory.control.store import Conflict, now
 from factory.control.verification import verify_spec_only
 from factory.control.spec_tree import enrich_tasks
@@ -380,7 +380,6 @@ def _run(self, rid):
         status = self.store.get(rid)['status']
         if status in ('running', 'verifying'):
             self._fail(rid, exc)
-            _auto_resume_with_followups(self, rid)
         elif status == 'ready_for_review':
             self._emit(rid, 'delivery.blocked', {'message': str(exc)})
     except Exception as exc:
@@ -389,7 +388,6 @@ def _run(self, rid):
         # a failed engineering run.
         if self.store.get(rid)['status'] != 'ready_for_review':
             self._fail(rid, exc)
-            _auto_resume_with_followups(self, rid)
 
 
 def _emit(self, rid, kind, payload, task_id=None):
