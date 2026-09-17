@@ -6,8 +6,8 @@
 - T03：local_reviewed（followup pending/applied 安全节点消费；首轮「校验前标 applied」缺陷已修正为 collect→校验→update→mark；已合并）
 - T04：local_reviewed（契约驱动工具面板 + 四类失败态；csv-quote-xml 真实全链实测 seatbelt 隔离通过，V1-07 非 MFD 实证；已合并）
 - T06：local_reviewed（公司测试环境配置区；后端接线回归补齐；已合并）
-- T05：running（S4 交付类型与结果卡；基线 b697494，独立 worktree webuddy-r1-t05）
-- 集成检查：前端 tsc/build 通过；全量 vitest 348/348（连续 3 次；曾出现 1 次未复现的单测失败，已记录）；后端全量 -m "not smoke" 进行中。
+- T05：local_reviewed（已合并 88cadc5）
+- 集成检查：前端 tsc/build 通过；全量 vitest 348/348（连续 3 次；曾出现 1 次未复现的单测失败，已记录）；后端全量（uv run，88cadc5）2375+1 断言对齐后通过；前端 354/354。全部任务 ready_for_codex，交接见 codex-handoff.md。
 
 ## 模型核实（宿主转写元数据）
 请求 model=sonnet 的所有子任务实际均为 claude-opus-4-6；宿主未生效模型指定。执行者不称为 Sonnet；按用户授权以可用模型推进，并行规模压在 4。
