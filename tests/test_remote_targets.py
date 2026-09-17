@@ -385,3 +385,35 @@ def test_missing_target_returns_404(remote_env, method, standalone):
     response = client.request(method, '/api/v2/deploy-targets/' + '0' * 32, headers=headers, **kwargs)
     assert response.status_code == 404
     assert response.json() == {'detail': '记录不存在'}
+
+
+def test_checks_endpoint_returns_latest_test_result_per_target(remote_env):
+    client, _, service, _, headers, target, _, _ = remote_env
+    # Before any test: target should not appear in checks
+    response = client.get('/api/v2/deploy-targets/checks')
+    assert response.status_code == 200
+    assert target['id'] not in response.json()['checks']
+    # Run a connection test
+    result = service.remote.test(target['id'])
+    assert result['status'] == 'pass'
+    # Now the checks endpoint should return the result
+    response = client.get('/api/v2/deploy-targets/checks')
+    assert response.status_code == 200
+    checks = response.json()['checks']
+    assert target['id'] in checks
+    entry = checks[target['id']]
+    assert entry['status'] == 'pass'
+    assert entry['reason'] == ''
+    assert entry['checked_at']  # non-empty timestamp
+
+
+def test_checks_endpoint_requires_admin(remote_env):
+    client, _, service, _, _, target, _, _ = remote_env
+    # Create a member user
+    client.app.state.auth.create_user('checks-member', 'very-long-password', role='member')
+    response = client.post('/api/auth/login', headers={'Origin': 'http://testserver'},
+                           json={'username': 'checks-member', 'password': 'very-long-password'})
+    member_headers = {'Origin': 'http://testserver', 'X-CSRF-Token': response.json()['csrf_token']}
+    # Member should get 403
+    response = client.get('/api/v2/deploy-targets/checks', headers=member_headers)
+    assert response.status_code == 403
