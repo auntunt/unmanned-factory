@@ -18,6 +18,54 @@ from factory.control.recovery import _check_failure_context, _continuous_resume_
 from factory.control.store import Conflict, now, scrub
 
 
+def _collect_pending_followups(svc, rid):
+    """Read-only: return unconsumed followup.pending payloads, or empty list.
+
+    Must be called under svc.lock.  Does NOT write followup.applied events --
+    the caller must call _mark_followups_applied after all Conflict checks pass
+    so that a failed check never leaves a pending item marked applied without
+    its content being merged into an actual execution.
+    """
+    applied_ids = set()
+    for event in svc.store.export_events(rid, kind='followup.applied'):
+        applied_ids.add(event['payload'].get('pending_id'))
+    pending = []
+    for event in svc.store.export_events(rid, kind='followup.pending'):
+        p = event['payload']
+        if p['id'] not in applied_ids:
+            pending.append(p)
+    return pending
+
+
+def _merge_followup_content(answer, pending):
+    """Merge collected pending follow-ups into an answer string.
+
+    Returns (merged_answer, had_followups).
+    """
+    if not pending:
+        return answer, False
+    followup_text = '\n\n'.join(p['content'] for p in pending)
+    merged = (answer + '\n\n' if answer.strip() else '') + '[用户在执行中补充的要求]\n' + followup_text
+    return merged, True
+
+
+def _mark_followups_applied(svc, rid, pending):
+    """Write followup.applied events for previously collected pending items.
+
+    Call only after the lifecycle store.update has succeeded, still under
+    svc.lock.  Crash between update and this write is safe: the pending
+    content is already merged into the run's history, so the worst case is
+    a duplicate merge on the next safe node -- never a silent loss.
+    """
+    if not pending:
+        return
+    run = svc.store.get(rid)
+    with svc.store.connect() as db:
+        for p in pending:
+            svc.store._event(db, rid, 'followup.applied', {
+                'pending_id': p['id'], 'run_revision': run['revision']})
+
+
 class _RunCancellation:
     """Event-compatible cancellation with an atomic Git-finalization gate."""
 
@@ -70,6 +118,8 @@ def clarify(self, rid, answer, actor, *, feedback_message_ids=None):
     if self.store.get(rid).get('source', {}).get('type') == 'inspection':
         raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
     with self.lock:
+        collected = _collect_pending_followups(self, rid)
+        answer, _ = _merge_followup_content(answer, collected)
         run = self.store.get(rid)
         history = [*run['history'], run['request']]
         if run.get('artifacts'):
@@ -95,6 +145,7 @@ def clarify(self, rid, answer, actor, *, feedback_message_ids=None):
             'runtime_configuration': run.get('runtime_configuration') if run.get('agent_snapshot') else None},
             expected=('needs_clarification', 'awaiting_approval', 'needs_human'),
             event=('user.message', {'text': answer, 'actor': actor, 'revision': run['revision']}))
+        _mark_followups_applied(self, rid, collected)
         try:
             self.start_plan(rid)
         except Exception as exc:
@@ -128,6 +179,10 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
     continuation_only = not answer.strip()
     answer = answer.strip()
     with self.lock:
+        collected = _collect_pending_followups(self, rid)
+        answer, had_followups = _merge_followup_content(answer, collected)
+        if had_followups:
+            continuation_only = False
         run = self.store.get(rid)
         if run['status'] != 'needs_human' or not run.get('plan'):
             raise Conflict('当前任务不在可继续的执行暂停状态')
@@ -180,6 +235,7 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
             'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
             event=('human.continued', {'actor': actor, 'answer': answer,
                 'revision': revision, 'resume_count': resume_count + 1}))
+        _mark_followups_applied(self, rid, collected)
         try:
             self._submit(self._run, rid)
         except Exception as exc:

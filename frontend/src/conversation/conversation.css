@@ -294,3 +294,8 @@
 .cv-result.is-bad { border-color:var(--color-danger); }
 .cv-result-head { display:flex; gap:8px; align-items:center; justify-content:space-between; }
 .cv-result-reason { margin:0; color:var(--cv-faint,var(--color-muted)); font-size:13px; overflow-wrap:anywhere; }
+
+/* Follow-up badges on user messages submitted during active execution. */
+.cv-followup-badge { display:inline-block; margin-top:4px; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; line-height:1.6; }
+.cv-followup-badge.is-pending { color:var(--cv-warning, #b08000); background:color-mix(in srgb, var(--cv-warning, #b08000) 12%, transparent); }
+.cv-followup-badge.is-applied { color:var(--cv-accent, #377a6a); background:color-mix(in srgb, var(--cv-accent, #377a6a) 12%, transparent); }

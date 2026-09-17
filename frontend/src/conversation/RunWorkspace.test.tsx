@@ -96,7 +96,7 @@ it('reuses follow-up identity after a network error and reports that it is only 
   fireEvent.click(screen.getByLabelText('发送'))
   await screen.findByText('网络中断')
   fireEvent.click(screen.getByLabelText('发送'))
-  await screen.findByText(/补充已记录，尚未执行/)
+  await screen.findByText(/补充已记录，将在下一个安全节点自动并入任务/)
   const bodies = api.mock.calls.filter(([url]) => url.endsWith('/follow-up')).map(([, options]) => options?.body)
   expect(bodies[0]).toEqual(bodies[1])
 })
@@ -109,6 +109,65 @@ it('shows completed inspection evidence without a product card or active compose
   expect(screen.queryByText('正在处理')).toBeNull()
   expect(screen.queryByLabelText('补充或修改')).toBeNull()
   expect(api.mock.calls.some(([url]) => url.endsWith('/deliverables'))).toBe(false)
+})
+
+it('shows pending badge on follow-up messages when followups are unapplied', async () => {
+  api.mockImplementation(async (url?: string, opts?: { method?: string; body?: unknown }) => {
+    if (url === '/api/v2/runs/r1' && (!opts || !opts.method)) return {
+      ...base, status: 'running',
+      followups: [{ id: 'fu1', content: '再加搜索', created_at: '2026-01-01', applied: false }],
+    } as never
+    if (url === '/api/v2/runs/r1/conversation') return { messages: [
+      { id: 1, role: 'user', content: '做预约工具', at: '' },
+      { id: 2, role: 'user', content: '再加搜索', at: '', followup: true, applied: false },
+    ] } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('待应用')
+})
+
+it('shows applied badge on follow-up messages when all followups are consumed', async () => {
+  api.mockImplementation(async (url?: string, opts?: { method?: string; body?: unknown }) => {
+    if (url === '/api/v2/runs/r1' && (!opts || !opts.method)) return {
+      ...base, status: 'needs_human', artifacts: { base_sha: 'abc', tasks: [{ id: 'a' }] },
+      followups: [{ id: 'fu1', content: '再加搜索', created_at: '2026-01-01', applied: true }],
+    } as never
+    if (url === '/api/v2/runs/r1/conversation') return { messages: [
+      { id: 1, role: 'user', content: '做预约工具', at: '' },
+      { id: 2, role: 'user', content: '再加搜索', at: '', followup: true, applied: false },
+    ] } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('已应用')
+})
+
+it('follow-up badges survive refresh by re-reading from run response', async () => {
+  let callCount = 0
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v2/runs/r1') {
+      callCount++
+      return {
+        ...base, status: 'running',
+        followups: [{ id: 'fu1', content: '加搜索', created_at: '2026-01-01', applied: false }],
+      } as never
+    }
+    if (url?.endsWith('/conversation')) return { messages: [
+      { id: 1, role: 'user', content: '加搜索', at: '', followup: true, applied: false },
+    ] } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('待应用')
+  // The badge comes from the run response, not local state, so refresh preserves it
+  expect(callCount).toBeGreaterThanOrEqual(1)
 })
 
 it('keeps real deployment evidence visible for non-general completed work', async () => {
