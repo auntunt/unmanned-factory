@@ -1,0 +1,43 @@
+{
+  "schema": "webuddy.capability-pack/v1",
+  "name": "MFD → 江苏标准 XML（清单局部提取）",
+  "purpose": "从江苏未来计价 Mars 的 .mfd 文件中提取分部分项/技术措施清单记录（编号、名称、单位、工程量、单价、合价），生成江苏未来数据标准 XML 的清单子集，并输出逐条提取报告。这是局部记录提取，不是整文件无损转换：缺少 XSD 必填字段的记录一律判为不完整，不补零、不猜测、不从参考 XML 回填任何业务值。",
+  "tool": {
+    "name": "mfd_to_xml",
+    "entrypoint": "tool/main.py",
+    "runtime": "python3",
+    "timeout_seconds": 120,
+    "input_schema": {
+      "type": "object",
+      "required": ["input_dir", "output_dir", "inputs"],
+      "properties": {
+        "input_dir": {"type": "string"},
+        "output_dir": {"type": "string"},
+        "inputs": {"type": "array"},
+        "options": {"type": "object"}
+      }
+    },
+    "output_schema": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string"},
+        "outputs": {"type": "array"},
+        "result": {"type": "object"},
+        "diagnostics": {"type": "array"},
+        "error_code": {"type": "string"}
+      }
+    },
+    "permissions": {"network": false, "max_input_bytes": 16777216, "max_output_bytes": 8388608}
+  },
+  "dependency_lock": {"python": "3", "packages": []},
+  "support_matrix": [
+    {"format": "MFD 清单记录（编号 + 名称）", "status": "supported", "evidence": "真实样本 2.mfd（sha256 见 docs/mfd/mfd-xml-extraction-report.md）14/14 条清单的编号与名称与甲方参考 XML 完全一致"},
+    {"format": "MFD 清单记录（单位 + 工程量/单价/合价）", "status": "partial", "evidence": "同一真实样本 2/14 条可完整提取并与参考 XML 逐值一致；其余 12 条的单位与数值不在已确认局部文法内，按不完整返回并保留偏移"},
+    {"format": "合成样本（本包 fixtures，按已确认词素编码）", "status": "supported", "evidence": "fixtures/synthetic_complete.mfd 逐字节比对 fixtures/expected_complete.xml"},
+    {"format": "工程信息、费用汇总表、工料机汇总、定额层级", "status": "unsupported", "evidence": "本版本不提取；这些区段的字段标签尚未取得跨样本证据"},
+    {"format": "MFD 整体分帧与无损往返", "status": "unsupported", "evidence": "容器只带子节点个数不带字节长度，整体分帧在上游逆向工作中仍处于个位数百分比；本包不做也不声称"},
+    {"format": "加密或截断的 MFD、其他版本的 MFD 变体", "status": "unsupported", "evidence": "缺少签名时返回 not_mfd；识别不到清单记录时返回 no_records，不猜测"}
+  ],
+  "evaluation_policy": {"test_set": "fixtures/tests.json", "required": true}
+}

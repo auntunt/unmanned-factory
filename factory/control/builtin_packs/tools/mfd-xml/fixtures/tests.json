@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "id": "合成完整样本逐字节比对期望 XML",
+      "inputs": ["fixtures/synthetic_complete.mfd"],
+      "expect": {
+        "equals": {"project.xml": "fixtures/expected_complete.xml"},
+        "result": {"records_total": 2, "records_emitted": 2, "records_unresolved": 0, "complete": true}
+      }
+    },
+    {
+      "id": "必填字段缺失必须判不完整而不是补零",
+      "inputs": ["fixtures/synthetic_partial.mfd"],
+      "expect": {"error_code": "incomplete_extraction"}
+    },
+    {
+      "id": "非 MFD 文件必须明确拒绝",
+      "inputs": ["fixtures/not_mfd.bin"],
+      "expect": {"error_code": "not_mfd"}
+    }
+  ]
+}
