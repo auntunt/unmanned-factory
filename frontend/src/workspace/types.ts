@@ -99,7 +99,7 @@ export interface Artifacts {
 }
 
 export interface Run {
-  followups?: { id: string; content: string; created_at: string; applied: boolean }[]
+  followups?: { id: string; content: string; created_at: string; applied: boolean; expired?: boolean }[]
   root_request?: string
   error?: string | null
   retry_run_id?: string
@@ -129,6 +129,7 @@ export interface Run {
 export interface ConversationMessage {
   followup?: boolean
   applied?: boolean
+  pending_id?: string
   id: string | number
   role: string
   content: string

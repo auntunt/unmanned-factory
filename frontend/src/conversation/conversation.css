@@ -326,3 +326,4 @@
 .cv-followup-badge { display:inline-block; margin-top:4px; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; line-height:1.6; }
 .cv-followup-badge.is-pending { color:var(--cv-warning); background:var(--cv-warning-bg, color-mix(in srgb, var(--cv-warning) 12%, transparent)); }
 .cv-followup-badge.is-applied { color:var(--cv-accent); background:color-mix(in srgb, var(--cv-accent) 12%, transparent); }
+.cv-followup-badge.is-expired { color:var(--cv-muted); background:color-mix(in srgb, var(--cv-muted) 12%, transparent); }
