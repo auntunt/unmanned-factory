@@ -213,10 +213,10 @@ def test_consumed_followup_not_double_consumed(app_env):
     pending_id = pending[0]['payload']['id']
     # Simulate first consumption
     store.append(rid, 'followup.applied', {'pending_id': pending_id, 'run_revision': 1})
-    # Import and call consume directly to verify idempotence
-    from factory.control.run_lifecycle import _consume_pending_followups
-    result = _consume_pending_followups(svc, rid)
-    assert result is None  # Nothing left to consume
+    # Import and call collect directly to verify idempotence
+    from factory.control.run_lifecycle import _collect_pending_followups
+    result = _collect_pending_followups(svc, rid)
+    assert result == []  # Nothing left to consume
     # Only one applied event should exist
     applied_events = list(store.export_events(rid, kind='followup.applied'))
     assert len(applied_events) == 1
@@ -300,3 +300,84 @@ def test_followup_during_cancel_is_preserved(app_env):
     messages = client.get(f'/api/v2/runs/{rid}/conversation', headers=headers).json()['messages']
     followup_msgs = [m for m in messages if m.get('followup')]
     assert len(followup_msgs) == 1
+
+
+def test_stale_revision_conflict_does_not_mark_pending_as_applied(app_env):
+    """Regression: if continue_run raises Conflict (e.g. stale revision),
+    the pending follow-up must remain unapplied -- never 'applied but lost'."""
+    import subprocess
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做工具'},
+                      headers=headers).json()['id']
+    store.update(rid, {
+        'status': 'running',
+        'plan': {'title': 'test', 'summary': '', 'questions': [], 'tasks': [
+            {'id': 't1', 'title': 'a', 'prompt': 'a', 'acceptance': ['ok'],
+             'paths': ['x'], 'checks': ['greeting'], 'depends_on': [],
+             'complexity': 'small', 'risk': 'low'}]},
+        'revision': 2,
+    })
+    # Submit a follow-up during active execution
+    client.post(f'/api/v2/runs/{rid}/follow-up', json={'content': '换颜色'}, headers=headers)
+    pending = list(store.export_events(rid, kind='followup.pending'))
+    assert len(pending) == 1
+    base = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(repo),
+                          capture_output=True, text=True).stdout.strip()
+    store.update(rid, {
+        'status': 'needs_human',
+        'artifacts': {'base_sha': base, 'tasks': [{'id': 't1'}]},
+        'execution_checks': store.project(p['id'])['checks'],
+    })
+    # Try continue with STALE revision (1 instead of 2) -> must Conflict
+    res = client.post(f'/api/v2/runs/{rid}/continue',
+                      json={'answer': '', 'revision': 1, 'resume_count': 0},
+                      headers=headers)
+    assert res.status_code == 409
+    # The pending follow-up must still be unapplied
+    applied = list(store.export_events(rid, kind='followup.applied'))
+    assert len(applied) == 0
+    run_data = client.get(f'/api/v2/runs/{rid}', headers=headers).json()
+    assert len(run_data['followups']) == 1
+    assert run_data['followups'][0]['applied'] is False
+
+
+def test_pending_applied_exactly_once_after_conflict_then_correct_retry(app_env):
+    """After a Conflict from stale revision, retrying with the correct revision
+    consumes the pending follow-up exactly once."""
+    import subprocess
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做工具'},
+                      headers=headers).json()['id']
+    store.update(rid, {
+        'status': 'running',
+        'plan': {'title': 'test', 'summary': '', 'questions': [], 'tasks': [
+            {'id': 't1', 'title': 'a', 'prompt': 'a', 'acceptance': ['ok'],
+             'paths': ['x'], 'checks': ['greeting'], 'depends_on': [],
+             'complexity': 'small', 'risk': 'low'}]},
+        'revision': 2,
+    })
+    client.post(f'/api/v2/runs/{rid}/follow-up', json={'content': '加导出功能'}, headers=headers)
+    base = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(repo),
+                          capture_output=True, text=True).stdout.strip()
+    store.update(rid, {
+        'status': 'needs_human',
+        'artifacts': {'base_sha': base, 'tasks': [{'id': 't1'}]},
+        'execution_checks': store.project(p['id'])['checks'],
+    })
+    # First attempt: stale revision -> Conflict, pending stays unapplied
+    res1 = client.post(f'/api/v2/runs/{rid}/continue',
+                       json={'answer': '', 'revision': 1, 'resume_count': 0},
+                       headers=headers)
+    assert res1.status_code == 409
+    assert len(list(store.export_events(rid, kind='followup.applied'))) == 0
+    # Second attempt: correct revision -> success, pending applied exactly once
+    res2 = client.post(f'/api/v2/runs/{rid}/continue',
+                       json={'answer': '', 'revision': 2, 'resume_count': 0},
+                       headers=headers)
+    assert res2.status_code == 200, res2.text
+    applied = list(store.export_events(rid, kind='followup.applied'))
+    assert len(applied) == 1
