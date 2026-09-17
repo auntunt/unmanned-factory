@@ -129,16 +129,57 @@ def snapshot(store, run):
     return json.loads((target / 'manifest.json').read_text())
 
 
+_SERVICE_KEYWORDS = ('网站', '站点', 'saas', 'web app', 'webapp', 'web 应用', '在线服务',
+                     '线上服务', 'api 服务', 'api服务', '后端服务', '服务端')
+_CLI_KEYWORDS = ('命令行', 'cli', '终端工具', 'shell 脚本', 'shell脚本', '命令行工具',
+                 'cli 工具', 'cli工具', '脚本工具')
+_INSTALLER_KEYWORDS = ('安装包', 'installer', '桌面应用', '桌面客户端', '客户端应用',
+                       '.exe', '.dmg', '.msi', '.pkg', '.deb', '.rpm', '.appimage',
+                       'electron 应用', 'electron应用', '桌面程序')
+DELIVERY_TYPES = ('service', 'cli', 'installer')
+
+
+def infer_delivery_type_from_text(text, spec_draft=None):
+    """Infer delivery type from user request text and optional spec draft.
+
+    Returns 'service', 'cli', 'installer', or None when ambiguous.
+    Only returns a type when exactly one category matches; conflicting
+    signals yield None to avoid mis-labeling.
+    """
+    sources = [text or '']
+    if spec_draft:
+        sources.append(spec_draft.get('goal') or '')
+        for flow in (spec_draft.get('flows') or []):
+            sources.append(flow)
+        for ng in (spec_draft.get('non_goals') or []):
+            sources.append(ng)
+    combined = '\n'.join(sources).lower()
+    matches = set()
+    if any(kw in combined for kw in _SERVICE_KEYWORDS):
+        matches.add('service')
+    if any(kw in combined for kw in _CLI_KEYWORDS):
+        matches.add('cli')
+    if any(kw in combined for kw in _INSTALLER_KEYWORDS):
+        matches.add('installer')
+    if len(matches) == 1:
+        return matches.pop()
+    return None
+
+
 def derive_delivery_type(run, items):
     """Derive the delivery type from run artifacts or deliverable items.
 
     Returns one of 'service', 'cli', 'installer', or None (undeclared).
-    Priority: explicit artifacts field > item-based inference > None.
+    Priority: explicit artifacts field > run-level inference > item-based inference > None.
     """
     artifacts = run.get('artifacts') or {}
     explicit = artifacts.get('delivery_type')
-    if isinstance(explicit, str) and explicit in ('service', 'cli', 'installer'):
+    if isinstance(explicit, str) and explicit in DELIVERY_TYPES:
         return explicit
+    # Check run-level inference written during requirement analysis.
+    inferred = run.get('delivery_type_inferred')
+    if isinstance(inferred, str) and inferred in DELIVERY_TYPES:
+        return inferred
     # Infer from deliverable items when not explicitly declared.
     has_installer = any(item.get('kind') == 'installer' for item in items)
     if has_installer:

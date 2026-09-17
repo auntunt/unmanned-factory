@@ -9,7 +9,7 @@ import zipfile
 import httpx
 import pytest
 
-from factory.control.deliverables import derive_delivery_type, snapshot
+from factory.control.deliverables import derive_delivery_type, infer_delivery_type_from_text, snapshot
 from factory.control.github import publish_failure_message
 from factory.control.store import Conflict, Store
 from tests.test_control_app import app_env, login, project, wait_state
@@ -48,6 +48,44 @@ def delivery(tmp_path):
 def test_derive_delivery_type(artifacts, items, expected):
     run = {'artifacts': artifacts}
     assert derive_delivery_type(run, items) == expected
+
+
+def test_derive_delivery_type_uses_run_level_inference():
+    """derive_delivery_type reads delivery_type_inferred when artifacts has no explicit type."""
+    run = {'artifacts': {}, 'delivery_type_inferred': 'cli'}
+    assert derive_delivery_type(run, []) == 'cli'
+
+
+def test_derive_explicit_artifacts_beats_run_level_inference():
+    """Explicit artifacts.delivery_type takes priority over run-level inference."""
+    run = {'artifacts': {'delivery_type': 'service'}, 'delivery_type_inferred': 'cli'}
+    assert derive_delivery_type(run, []) == 'service'
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('做一个网站', 'service'),
+    ('帮我做个 SaaS', 'service'),
+    ('做一个在线服务', 'service'),
+    ('写一个命令行工具', 'cli'),
+    ('写个 CLI 工具', 'cli'),
+    ('做个桌面应用的安装包', 'installer'),
+    ('做一个 .dmg 安装包', 'installer'),
+    ('做个桌面客户端', 'installer'),
+    ('帮我写个代码', None),  # ambiguous
+    ('', None),
+])
+def test_infer_delivery_type_from_text(text, expected):
+    assert infer_delivery_type_from_text(text) == expected
+
+
+def test_infer_delivery_type_from_text_with_spec_draft():
+    spec = {'goal': '做一个终端工具', 'flows': ['输入参数后执行'], 'non_goals': [], 'data_model': []}
+    assert infer_delivery_type_from_text('帮我做个工具', spec) == 'cli'
+
+
+def test_infer_delivery_type_conflicting_signals_returns_none():
+    """When text mentions both service and CLI, return None (ambiguous)."""
+    assert infer_delivery_type_from_text('做一个网站同时提供命令行工具') is None
 
 
 def test_listing_returns_delivery_type_and_installer_targets(app_env):

@@ -6,21 +6,15 @@ import { errorText, formatDate, type PageProps } from '../workbench/ui'
 import Icon from '../workbench/Icon'
 import { useWorkTitle } from './title-context'
 import { STAGES, HEAD_LABEL, TERMINAL_DONE, isTerminal, headState, stageIndex, composerMode, followUpBadge, FOLLOWUP_BADGE_LABEL, type FollowUpStatus } from './run-state'
+import { DELIVERY_TYPE_LABEL, type DeliveryType } from './delivery-constants'
 import OperationResults from '../workbench/OperationResults'
 import RequirementConfirmation from '../workbench/RequirementConfirmation'
 import './conversation.css'
 
-type DeliveryType = 'service' | 'cli' | 'installer' | null
 type Deliverable = { id: string | number; name: string; kind?: string; size?: number; preview?: boolean }
 type DeliverList = { items?: Deliverable[]; saved?: boolean; collection_error?: string; recommended_preview_id?: string | number | null; can_collect?: boolean; repository_url?: string | null; delivery_type?: DeliveryType; installer_targets?: string[] | null }
 type LedgerItem = { id: string; text: string; status: string; evidence?: string }
 type Ledger = { total?: number; counts?: { pass?: number; fail?: number; unverified?: number }; items?: LedgerItem[] }
-
-const DELIVERY_TYPE_LABEL: Record<string, string> = {
-  service: '线上服务',
-  cli: '命令行工具',
-  installer: '安装包',
-}
 
 function sizeLabel(bytes?: number): string {
   if (!bytes && bytes !== 0) return ''
