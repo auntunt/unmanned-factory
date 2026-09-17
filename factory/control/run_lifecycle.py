@@ -118,11 +118,17 @@ def _auto_resume_with_followups(svc, rid):
         try:
             from factory.control.codegraph import baseline_sha
             project = svc._project_for_run(run)
-            if baseline_sha(project) != artifacts['base_sha']:
-                log.info('auto_resume(%s): baseline changed, skipping', rid)
+            current = baseline_sha(project)
+            if current != artifacts['base_sha']:
+                log.info('auto_resume(%s): baseline changed (%s != %s), skipping',
+                         rid, current[:12], artifacts['base_sha'][:12])
                 return False
-        except Exception:
-            log.info('auto_resume(%s): baseline check failed, skipping', rid)
+        except Exception as exc:
+            log.warning('auto_resume(%s): baseline check raised %s: %s',
+                        rid, type(exc).__name__, exc)
+            svc.store.append(rid, 'followup.auto_resume_skipped', {
+                'reason': 'baseline_check_exception',
+                'error': f'{type(exc).__name__}: {str(exc)[:500]}'})
             return False
         # Check execution_checks consistency
         if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
