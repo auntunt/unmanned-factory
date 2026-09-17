@@ -894,3 +894,76 @@ def test_budget_partial_result_survives_worker_transport(tmp_path):
     assert json.loads(stopped.value.partial_result.text) == {'text': '界' * 40000}
     assert stopped.value.partial_result.cost_usd == 5.1
     assert stopped.value.partial_result.tokens_out == 9000
+
+
+def test_setting_sources_user_loads_only_user_settings_and_strict_mcp_blocks_only_mcp(monkeypatch, tmp_path):
+    """T10 regression: document what setting_sources=["user"] loads and what strict_mcp_config covers.
+
+    setting_sources=["user"] tells the CLI to load ~/.claude/settings.json, which
+    includes hooks, permissions, env, and plugins — not just credentials.
+    strict_mcp_config=True only blocks ambient MCP servers; it does not block
+    hooks, permissions, env, or plugins from user settings.
+
+    The worker's SDK-level PreToolUse hook is the actual tool gate regardless of
+    what permissions the user settings file declares.  User settings hooks
+    (shell commands) remain a deployment surface: the server's deploying user
+    must have a clean ~/.claude/settings.json.
+    """
+    from factory.control.providers import _run_claude
+    from factory.control import claude_terminal
+    monkeypatch.setattr(claude_terminal, 'available', lambda: False)
+
+    mod = types.ModuleType("claude_agent_sdk")
+    captured = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.__dict__.update(kwargs)
+
+    class HookMatcher:
+        def __init__(self, *, matcher=None, hooks=None, **kwargs):
+            self.matcher, self.hooks = matcher, hooks or []
+
+    class PermissionResult:
+        def __init__(self, **kwargs): pass
+
+    class ResultMessage:
+        is_error = False
+        result = "ok"
+        session_id = "s"
+        total_cost_usd = None
+        usage = None
+
+    async def query(*, prompt, options):
+        yield ResultMessage()
+
+    mod.ClaudeAgentOptions = ClaudeAgentOptions
+    mod.HookMatcher = HookMatcher
+    mod.PermissionResultAllow = PermissionResult
+    mod.PermissionResultDeny = PermissionResult
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+
+    _run_claude(ProviderRequest("claude", "model", "prompt", str(tmp_path)),
+                lambda *_: None)
+
+    # setting_sources must be ["user"] — not [] (breaks auth) and not None (loads project/local too)
+    assert captured['setting_sources'] == ['user'], (
+        'setting_sources must be ["user"] for credential resolution; '
+        '[] strips credentials, None loads project/local ambient config')
+
+    # strict_mcp_config must be True — blocks ambient MCP from user settings
+    assert captured['strict_mcp_config'] is True, (
+        'strict_mcp_config blocks ambient MCP servers from user settings')
+
+    # The worker's PreToolUse hook must be present as the actual tool gate.
+    # User settings permissions cannot bypass this SDK-level hook.
+    assert 'PreToolUse' in captured['hooks']
+    hook_fns = captured['hooks']['PreToolUse'][0].hooks
+    assert len(hook_fns) == 1, 'exactly one PreToolUse hook expected (the worker gate)'
+
+    # setting_sources=["user"] does NOT load project settings or CLAUDE.md
+    # (SDK docs: "Must include 'project' to load CLAUDE.md files")
+    assert 'project' not in captured['setting_sources']
+    assert 'local' not in captured['setting_sources']
