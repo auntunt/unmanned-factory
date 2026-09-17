@@ -5,7 +5,7 @@ import type { ConversationMessage, Run } from '../workspace/types'
 import { errorText, formatDate, type PageProps } from '../workbench/ui'
 import Icon from '../workbench/Icon'
 import { useWorkTitle } from './title-context'
-import { STAGES, HEAD_LABEL, TERMINAL_DONE, isTerminal, headState, stageIndex, composerMode } from './run-state'
+import { STAGES, HEAD_LABEL, TERMINAL_DONE, isTerminal, headState, stageIndex, composerMode, followUpBadge, FOLLOWUP_BADGE_LABEL, type FollowUpStatus } from './run-state'
 import OperationResults from '../workbench/OperationResults'
 import RequirementConfirmation from '../workbench/RequirementConfirmation'
 import './conversation.css'
@@ -120,7 +120,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
         throw new Error('规格草案暂不可用，请刷新后通过规格表单确认。')
       } else if (mode.kind === 'followup') {
         const res = await request<{ recorded?: boolean; queued?: boolean; message?: string }>(`/api/v2/runs/${rid}/follow-up`, { ...options, body: { content: text, idempotency_key: submission.current.key } })
-        setQueuedNote(res.message || '补充已记录，尚未执行；请在任务暂停或完成后重新提交需要落实的修改。')
+        setQueuedNote(res.message || '补充已记录，将在下一个安全节点自动并入任务。')
       } else if (mode.kind === 'revise') {
         const project = run.project_id
         const created = await request<Run>('/api/v2/runs', { ...options, body: { project_id: project, request: `原始目标：${run.source?.original_request || run.root_request || run.request}\n\n本次修改要求：${text}`, operation: 'general', interaction_mode: 'automatic', idempotency_key: submission.current.key } })
@@ -176,7 +176,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
 
           <div className="cv-thread">
             {messages.length === 0 && <ThreadMessage message={{ id: 'request', role: 'user', content: String(run.source?.original_request || run.request), at: run.created_at }} />}
-            {messages.map(message => <ThreadMessage key={String(message.id)} message={message} />)}
+            {messages.map(message => <ThreadMessage key={String(message.id)} message={message} followups={(run as Record<string, unknown>).followups as FollowUpStatus[] ?? []} />)}
 
             {head === 'active' && <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">w</span>webuddy</div>
               <div className="cv-msg-body"><span className="cv-typing"><i /><i /><i /></span></div></div>}
@@ -228,9 +228,13 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
   )
 }
 
-function ThreadMessage({ message }: { message: ConversationMessage }) {
+function ThreadMessage({ message, followups = [] }: { message: ConversationMessage; followups?: FollowUpStatus[] }) {
   const isUser = message.role === 'user'
-  if (isUser) return <div className="cv-msg is-user"><div className="cv-msg-bubble">{message.content}{message.followup && message.applied === false && <small style={{ display: 'block' }}>仅已记录，尚未加入任务</small>}</div></div>
+  if (isUser) {
+    const badge = followUpBadge(message, followups)
+    const badgeLabel = FOLLOWUP_BADGE_LABEL[badge]
+    return <div className="cv-msg is-user"><div className="cv-msg-bubble">{message.content}{badgeLabel && <small className={`cv-followup-badge is-${badge}`} style={{ display: 'block' }}>{badgeLabel}</small>}</div></div>
+  }
   return <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">w</span>webuddy<span style={{ marginLeft: 'auto', color: 'var(--cv-faint)', fontWeight: 400 }}>{formatDate(message.at)}</span></div>
     <div className="cv-msg-body">{message.content}</div></div>
 }

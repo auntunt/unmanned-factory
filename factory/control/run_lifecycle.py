@@ -18,6 +18,31 @@ from factory.control.recovery import _check_failure_context, _continuous_resume_
 from factory.control.store import Conflict, now, scrub
 
 
+def _consume_pending_followups(svc, rid):
+    """Consume unconsumed followup.pending events at a safe node.
+
+    Returns merged content string, or None if no pending follow-ups exist.
+    Must be called under svc.lock to prevent double-consumption on concurrent
+    retries or restarts.
+    """
+    applied_ids = set()
+    for event in svc.store.export_events(rid, kind='followup.applied'):
+        applied_ids.add(event['payload'].get('pending_id'))
+    pending = []
+    for event in svc.store.export_events(rid, kind='followup.pending'):
+        p = event['payload']
+        if p['id'] not in applied_ids:
+            pending.append(p)
+    if not pending:
+        return None
+    run = svc.store.get(rid)
+    with svc.store.connect() as db:
+        for p in pending:
+            svc.store._event(db, rid, 'followup.applied', {
+                'pending_id': p['id'], 'run_revision': run['revision']})
+    return '\n\n'.join(p['content'] for p in pending)
+
+
 class _RunCancellation:
     """Event-compatible cancellation with an atomic Git-finalization gate."""
 
@@ -70,6 +95,9 @@ def clarify(self, rid, answer, actor, *, feedback_message_ids=None):
     if self.store.get(rid).get('source', {}).get('type') == 'inspection':
         raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
     with self.lock:
+        followup_content = _consume_pending_followups(self, rid)
+        if followup_content:
+            answer = (answer + '\n\n' if answer.strip() else '') + '[用户在执行中补充的要求]\n' + followup_content
         run = self.store.get(rid)
         history = [*run['history'], run['request']]
         if run.get('artifacts'):
@@ -128,6 +156,10 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
     continuation_only = not answer.strip()
     answer = answer.strip()
     with self.lock:
+        followup_content = _consume_pending_followups(self, rid)
+        if followup_content:
+            answer = (answer + '\n\n' if answer else '') + '[用户在执行中补充的要求]\n' + followup_content
+            continuation_only = False
         run = self.store.get(rid)
         if run['status'] != 'needs_human' or not run.get('plan'):
             raise Conflict('当前任务不在可继续的执行暂停状态')

@@ -35,6 +35,34 @@ export function stageIndex(status: string): number {
   return headState(status) === 'fail' ? 1 : 0
 }
 
+export type FollowUpBadge = 'pending' | 'applied' | 'none'
+
+export interface FollowUpStatus {
+  id: string
+  content: string
+  created_at: string
+  applied: boolean
+}
+
+/** Determine the badge for a follow-up message.
+ *  Since store.conversation() does not pass pending_id through to the frontend,
+ *  we resolve the badge from the global followups list: if ALL pending items
+ *  are applied, every follow-up message shows "已应用"; otherwise "待应用". */
+export function followUpBadge(msg: { followup?: boolean; applied?: boolean }, followups: FollowUpStatus[]): FollowUpBadge {
+  if (!msg.followup) return 'none'
+  if (msg.applied) return 'applied'
+  // If there are no tracked pending items, fall back to the message's own flag.
+  if (followups.length === 0) return 'pending'
+  const allApplied = followups.every(f => f.applied)
+  return allApplied ? 'applied' : 'pending'
+}
+
+export const FOLLOWUP_BADGE_LABEL: Record<FollowUpBadge, string> = {
+  pending: '待应用',
+  applied: '已应用',
+  none: '',
+}
+
 export type ComposerKind = 'clarify' | 'continue' | 'approve' | 'confirm' | 'followup' | 'revise' | 'readonly'
 export type Mode = { kind: ComposerKind; placeholder: string; hint: string; needsText: boolean; send?: string; approve?: string }
 
@@ -55,7 +83,7 @@ export function composerMode(status: string): Mode {
     case 'failed': case 'cancelled': case 'discarded': case 'inspection_failed':
       return { kind: 'revise', placeholder: '说明要怎么改，我重新制作…', hint: '会在同一项目上重新制作。', needsText: true }
     case 'requirement_analysis': case 'received': case 'planning': case 'queued': case 'running': case 'verifying': case 'publishing':
-      return { kind: 'followup', placeholder: '任务进行中，可以继续补充要求…', hint: '运行中补充仅记录；暂停或完成后重新提交需要落实的修改。', needsText: true }
+      return { kind: 'followup', placeholder: '任务进行中，可以继续补充要求…', hint: '补充将在下一个安全节点自动并入任务。', needsText: true }
     default:
       return { kind: 'readonly', placeholder: '此状态仅供查看', hint: status === 'inspection_completed' ? '巡检已完成，仅记录诊断结果。' : status === 'interrupted' ? '任务已中断，请查看记录；恢复由后台状态决定。' : '当前状态暂不支持操作，请刷新或查看运行记录。', needsText: false }
   }

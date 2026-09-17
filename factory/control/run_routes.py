@@ -1,13 +1,14 @@
 """Run submission, lifecycle and delivery HTTP endpoints; policy remains in Service."""
 import hashlib
 import json
+import uuid
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field
 from factory.control.auth_routes import Body
 from pydantic import BaseModel
-from factory.control.store import Conflict
+from factory.control.store import Conflict, now
 from factory.control import requirement_analysis, budget_resume
 from factory.control.spec_refs import resolve as resolve_refs, fingerprint as refs_fingerprint
 
@@ -53,6 +54,20 @@ class Approval(Body):
 class FollowUp(Body):
     content: str = Field(min_length=1, max_length=50_000)
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+def _followup_status(store, rid):
+    """Build the pending/applied follow-up list from durable events."""
+    pending = {}
+    for event in store.export_events(rid, kind='followup.pending'):
+        p = event['payload']
+        pending[p['id']] = {'id': p['id'], 'content': p.get('content', '')[:200],
+                            'created_at': p.get('created_at', ''), 'applied': False}
+    for event in store.export_events(rid, kind='followup.applied'):
+        pid = event['payload'].get('pending_id')
+        if pid in pending:
+            pending[pid]['applied'] = True
+    return list(pending.values())
 
 
 def router(store, svc, operations):
@@ -114,7 +129,8 @@ def router(store, svc, operations):
     def get_run(rid: str):
         from factory.control.engineering_overview import current_evidence
         run = svc.remote.evidence(store.get(rid))
-        return {**run, 'progress': current_evidence(run)}
+        followups = _followup_status(store, rid)
+        return {**run, 'progress': current_evidence(run), 'followups': followups}
 
 
     @api.post('/api/v2/runs/{rid}/resume-budget')
@@ -173,16 +189,23 @@ def router(store, svc, operations):
                 result = svc.continue_run(rid, content, run['revision'], run.get('resume_count', 0), actor)
                 response = {'recorded': True, 'applied': True, 'queued': False, 'run_id': rid, 'status': result['status']}
             elif status in ACTIVE:
-                message = {'text': content, 'followup': True, 'queued': False,
-                    'applied': False, 'actor': actor, 'actor_id': actor_id}
-                response = {'recorded': True, 'applied': False, 'queued': False,
-                    'message': '补充已保存在对话中，尚未加入当前任务；任务暂停或完成后，请再次提交这些要求。'}
+                pending_id = uuid.uuid4().hex
+                message = {'text': content, 'followup': True, 'queued': True,
+                    'applied': False, 'actor': actor, 'actor_id': actor_id,
+                    'pending_id': pending_id}
+                pending_event = {'id': pending_id, 'content': content,
+                    'actor_id': actor_id, 'actor': actor,
+                    'fingerprint': fingerprint, 'created_at': now()}
+                response = {'recorded': True, 'applied': False, 'queued': True,
+                    'message': '补充已记录，将在下一个安全节点自动并入任务。'}
             else:
                 raise HTTPException(409, '任务已结束，请在下方开始新一轮修改。')
             # An active note and its retry receipt are one durable transaction.
             with store.connect() as db:
                 if message is not None:
                     store._event(db, rid, 'user.message', message)
+                    if pending_event is not None:
+                        store._event(db, rid, 'followup.pending', pending_event)
                 if body.idempotency_key:
                     store._event(db, rid, 'followup.received', {'actor_id': actor_id, 'key': body.idempotency_key,
                         'fingerprint': fingerprint, 'response': response})
