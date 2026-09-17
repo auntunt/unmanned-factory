@@ -564,10 +564,28 @@ class PackStore:
                 body = json.loads(row['data'])
                 latest = db.execute('SELECT MAX(version) AS v FROM pack_versions WHERE pack_id=?',
                                     (row['pack_id'],)).fetchone()
+                # Expose the tool contract so the UI can render input constraints
+                # and support scope from the manifest, not from hardcoded assumptions.
+                ver_row = db.execute('SELECT data FROM pack_versions WHERE id=?',
+                                     (body['version_id'],)).fetchone()
+                tool_contract = None
+                if ver_row:
+                    ver_data = json.loads(ver_row['data'])
+                    manifest = ver_data.get('manifest') or {}
+                    tool = manifest.get('tool') or {}
+                    tool_contract = {
+                        'permissions': tool.get('permissions'),
+                        'input_schema': tool.get('input_schema'),
+                        'output_schema': tool.get('output_schema'),
+                        'timeout_seconds': tool.get('timeout_seconds'),
+                        'support_matrix': manifest.get('support_matrix'),
+                        'purpose': manifest.get('purpose'),
+                    }
                 out.append({**body, 'id': row['id'], 'agent_id': agent_id,
                             'latest_version': int(latest['v'] or 0),
                             'upgrade_available': int(latest['v'] or 0) > int(body['version']),
-                            'environment': self._env(db, body['version_id'])})
+                            'environment': self._env(db, body['version_id']),
+                            'tool_contract': tool_contract})
         return out
 
     def binding_for(self, agent_id, pack_id):

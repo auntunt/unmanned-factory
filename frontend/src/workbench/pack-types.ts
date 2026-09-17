@@ -33,10 +33,19 @@ export interface PackVersion {
   lifecycle: PackLifecycle; source_task_id?: string
 }
 export interface PackSummary { id: string; name: string; purpose: string; owner_id: string; updated_at: string; published_version?: number | null }
+export interface ToolContract {
+  permissions?: { network?: boolean; max_input_bytes?: number; max_output_bytes?: number } | null
+  input_schema?: Record<string, unknown> | null
+  output_schema?: Record<string, unknown> | null
+  timeout_seconds?: number | null
+  support_matrix?: SupportRow[] | null
+  purpose?: string | null
+}
 export interface PackBinding {
   id: string; agent_id: string; pack_id: string; pack_name: string; version_id: string; version: number
   revision: number; latest_version: number; upgrade_available: boolean; content_digest: string
   environment?: { status: EnvStatus; missing?: string[] }
+  tool_contract?: ToolContract | null
 }
 export interface EnvCheck {
   status: EnvStatus; missing?: string[]; problems?: string[]; checked_at?: string
@@ -68,4 +77,15 @@ export const ENV_LABEL: Record<EnvStatus, string> = {
 export const SUPPORT_LABEL: Record<SupportRow['status'], string> = {
   supported: '已验证', partial: '部分支持', unsupported: '暂不支持',
 }
+export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  queued: '排队中', running: '处理中', waiting_input: '等待输入',
+  succeeded: '处理完成', failed: '执行失败', cancelled: '已取消',
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 export const packsBase = '/api/v4/capability-packs'
