@@ -451,3 +451,169 @@ def test_service_restart_does_not_resume_requirement_analysis_interrupted(app_en
     result = _auto_resume_with_followups(svc, rid)
     assert result is False
     assert store.get(rid)['status'] == 'needs_human'
+
+
+# ---------- Scenario 12: spec_confirmation run with requirement workspace ----------
+
+def _setup_requirement_workspace_run(client, store, svc, repo, headers, *, followup_content='补充要求'):
+    """Create a spec_confirmation run whose artifacts.base_sha comes from
+    a requirement branch (different from project main), simulating the
+    live scenario where requirement analysis creates a separate worktree.
+
+    Returns (rid, project_id, pending_ids, requirement_workspace, requirement_branch).
+    Uses FakeSDK runner (fake).
+    """
+    import uuid as _uuid
+    p = project(client, repo, headers)
+    rid = client.post('/api/v2/runs', json={
+        'operation': 'general', 'project_id': p['id'], 'request': '做工具'
+    }, headers=headers).json()['id']
+    time.sleep(0.3)
+    with svc.lock:
+        svc.active_jobs.pop(rid, None)
+
+    # Create a requirement branch that diverges from main
+    req_branch = f'factory/spec-{rid}'
+    subprocess.run(['git', 'checkout', '-b', req_branch], cwd=str(repo),
+                   check=True, capture_output=True)
+    (repo / 'spec.md').write_text('requirement spec')
+    subprocess.run(['git', 'add', 'spec.md'], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-qm', 'add spec'], cwd=str(repo),
+                   check=True, capture_output=True)
+    req_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(repo),
+                             capture_output=True, text=True).stdout.strip()
+    # Go back to main — main HEAD is now different from req_branch HEAD
+    subprocess.run(['git', 'checkout', 'main'], cwd=str(repo),
+                   check=True, capture_output=True)
+    main_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=str(repo),
+                              capture_output=True, text=True).stdout.strip()
+    assert req_sha != main_sha, 'requirement branch must differ from main'
+
+    # Set up run with spec_confirmation and requirement workspace
+    store.update(rid, {
+        'status': 'running',
+        'spec_confirmation': {'actor': 'project-policy', 'at': '2026-01-01', 'automatic': True},
+        'requirement_workspace': str(repo),
+        'requirement_branch': req_branch,
+        'execution_mode': 'continuous',
+        'plan': {
+            'title': 'test', 'summary': '', 'questions': [],
+            'tasks': [{
+                'id': 't1', 'title': 'a', 'prompt': 'a',
+                'acceptance': ['ok'], 'paths': ['x'],
+                'checks': ['greeting'], 'depends_on': [],
+                'complexity': 'small', 'risk': 'low',
+            }],
+        },
+        'revision': 2,
+    })
+
+    # Submit followup during execution
+    res = client.post(f'/api/v2/runs/{rid}/follow-up',
+                      json={'content': followup_content}, headers=headers)
+    assert res.status_code == 200
+
+    pending_ids = [e['payload']['id']
+                   for e in store.export_events(rid, kind='followup.pending')]
+
+    # Transition to needs_human with artifacts whose base_sha = req_sha
+    store.update(rid, {
+        'status': 'needs_human',
+        'artifacts': {
+            'base_sha': req_sha,
+            'tasks': [{'id': 't1'}],
+            'execution_mode': 'continuous',
+            'branch': f'factory/{rid}-r2',
+            'worktree': str(repo),
+        },
+        'execution_checks': store.project(p['id'])['checks'],
+    })
+    return rid, p['id'], pending_ids, str(repo), req_branch, req_sha, main_sha
+
+
+def test_spec_confirmation_run_auto_resumes_despite_different_main(app_env):
+    """A spec_confirmation run with requirement workspace has artifacts.base_sha
+    from the requirement branch, which differs from the project's main branch.
+    Auto-resume must use _project_for_run (which adjusts to the requirement
+    workspace), so the baseline check passes.
+
+    This reproduces the live scenario where baseline_sha(raw_project) would
+    return the main branch SHA but the correct comparison root is the
+    requirement branch.
+
+    Uses: FakeSDK runner (fake).
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    rid, pid, pending_ids, ws, req_branch, req_sha, main_sha = \
+        _setup_requirement_workspace_run(client, store, svc, repo, headers)
+
+    result = _auto_resume_with_followups(svc, rid)
+    assert result is True, (
+        f'auto-resume should succeed: req_sha={req_sha[:12]}, main_sha={main_sha[:12]}')
+
+    # Verify events
+    auto_events = list(store.export_events(rid, kind='run.auto_resumed'))
+    assert len(auto_events) == 1
+    assert auto_events[0]['payload']['actor'] == 'system/auto'
+    assert set(auto_events[0]['payload']['pending_ids']) == set(pending_ids)
+
+    applied = list(store.export_events(rid, kind='followup.applied'))
+    assert len(applied) == len(pending_ids)
+
+
+def test_external_baseline_change_still_blocks_auto_resume(app_env):
+    """If someone pushes to the requirement branch between execution and
+    auto-resume, the baseline has truly changed and auto-resume must be
+    blocked — the guard is not removed.
+
+    Uses: FakeSDK runner (fake).
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    rid, pid, pending_ids, ws, req_branch, req_sha, main_sha = \
+        _setup_requirement_workspace_run(client, store, svc, repo, headers)
+
+    # Simulate external push to the requirement branch
+    subprocess.run(['git', 'checkout', req_branch], cwd=ws,
+                   check=True, capture_output=True)
+    (repo / 'external_change.txt').write_text('pushed by another')
+    subprocess.run(['git', 'add', 'external_change.txt'], cwd=ws,
+                   check=True, capture_output=True)
+    subprocess.run(['git', 'commit', '-qm', 'external push'], cwd=ws,
+                   check=True, capture_output=True)
+    new_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ws,
+                             capture_output=True, text=True).stdout.strip()
+    subprocess.run(['git', 'checkout', 'main'], cwd=ws,
+                   check=True, capture_output=True)
+    assert new_sha != req_sha, 'external push must move the branch'
+
+    result = _auto_resume_with_followups(svc, rid)
+    assert result is False, 'external baseline change must block auto-resume'
+    assert store.get(rid)['status'] == 'needs_human'
+
+    # No auto_resume events
+    auto_events = list(store.export_events(rid, kind='run.auto_resumed'))
+    assert len(auto_events) == 0
+
+
+def test_baseline_exception_logged_and_event_emitted(app_env):
+    """When the baseline check throws (e.g. workspace deleted), the exception
+    is logged at WARNING and a durable event is emitted, not silently swallowed."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    rid, pid, pending_ids, ws, req_branch, req_sha, main_sha = \
+        _setup_requirement_workspace_run(client, store, svc, repo, headers)
+
+    # Point requirement_workspace to a non-existent path
+    store.update(rid, {'requirement_workspace': '/nonexistent/path'})
+
+    result = _auto_resume_with_followups(svc, rid)
+    assert result is False
+
+    # A durable event should record the failure reason
+    skip_events = list(store.export_events(rid, kind='followup.auto_resume_skipped'))
+    assert len(skip_events) == 1
+    payload = skip_events[0]['payload']
+    assert payload['reason'] == 'baseline_check_exception'
+    assert 'Error' in payload['error'] or 'error' in payload['error'].lower() or '不存在' in payload['error'] or 'No such' in payload['error']
