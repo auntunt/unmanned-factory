@@ -3,9 +3,10 @@ import { useEffect, useState } from 'react'
 import { request } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import GithubDelivery, { githubPublicationLabel } from './GithubDelivery'
+import { DELIVERY_TYPE_LABEL, type DeliveryType } from '../conversation/delivery-constants'
 
 type Item = { id: number; name: string; kind: string; size: number; sha256: string; origin: string; preview: boolean }
-type Catalog = { recommended_preview_id?: number | null; saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string }
+type Catalog = { recommended_preview_id?: number | null; saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string; delivery_type?: DeliveryType; installer_targets?: string[] | null }
 const labels: Record<string, string> = { installer: '安装包', package: '压缩包 / 软件包', web: '网页', image: '图片', document: '文档', source: '源码 / 文件' }
 function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` }
 
@@ -52,7 +53,8 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
     {error && <div role="alert" className="wb-billing-warning">{error}</div>}
     {!catalog && !error && <p role="status">正在读取成果…</p>}
     {catalog && <>
-      <div className="wb-notice">成果：{catalog.saved ? `已保存 · ${catalog.items.length} 个文件` : '尚未保存'} · GitHub：{githubPublicationLabel(run, catalog.github_configured, catalog.github_repository_bound)}</div>
+      <div className="wb-notice">成果：{catalog.saved ? `已保存 · ${catalog.items.length} 个文件` : '尚未保存'} · GitHub：{githubPublicationLabel(run, catalog.github_configured, catalog.github_repository_bound)}{catalog.delivery_type ? ` · 交付类型：${DELIVERY_TYPE_LABEL[catalog.delivery_type] || catalog.delivery_type}` : ' · 交付类型：未声明'}</div>
+      <DeliverableDeliverySection deliveryType={catalog.delivery_type ?? null} installerTargets={catalog.installer_targets ?? null} run={run} />
       {catalog.publish_error && <p role="alert">{catalog.publish_error}</p>}
       {!catalog.github_configured && <p>如需推送仓库，请联系管理员配置 GitHub 发布凭据；查看和下载成果不依赖 GitHub。</p>}
       {!catalog.saved && <><p>{catalog.collection_error || (catalog.can_collect ? '这次运行尚未归档实际文件，保存后即可预览和下载。' : '执行与验证完成后，系统会自动保存成果。')}</p>{catalog.can_collect && (isAdmin ? <button className="wb-button wb-button-primary" disabled={busy} onClick={() => void collect()}>{busy ? '正在保存…' : '保存本次成果'}</button> : <p>请管理员保存本次成果后即可下载。</p>)}</>}
@@ -69,4 +71,31 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
       </>}
     </>}
   </section>
+}
+
+/** Delivery-type-specific status, consistent with RunWorkspace's DeliverySection.
+ *  Uses the same shared DELIVERY_TYPE_LABEL constant to guarantee label parity. */
+function DeliverableDeliverySection({ deliveryType, installerTargets, run }: { deliveryType: DeliveryType; installerTargets: string[] | null; run: Run }) {
+  const deployed = run.status === 'published'
+  if (deliveryType === 'cli') {
+    return <div className="wb-delivery-type-section" data-delivery-type="cli">
+      <p><strong>部署：</strong><span>不适用</span> — 命令行工具通过下载使用，无需在线部署。</p>
+    </div>
+  }
+  if (deliveryType === 'installer') {
+    return <div className="wb-delivery-type-section" data-delivery-type="installer">
+      <p><strong>安装目标：</strong>{installerTargets && installerTargets.length > 0
+        ? <span>{installerTargets.join('、')}</span>
+        : <span>待确认</span>}</p>
+      {!installerTargets && <p>尚未选定目标系统，安装包构建暂不可用。</p>}
+    </div>
+  }
+  if (deliveryType === 'service') {
+    return <div className="wb-delivery-type-section" data-delivery-type="service">
+      <p><strong>部署：</strong>{deployed ? <span>已部署</span> : <span>待部署</span>}</p>
+    </div>
+  }
+  return <div className="wb-delivery-type-section" data-delivery-type="undeclared">
+    <p><strong>交付类型：</strong><span>未声明</span></p>
+  </div>
 }

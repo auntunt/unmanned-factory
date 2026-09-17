@@ -295,9 +295,14 @@ def confirm(self, rid, body, actor, *, automatic=False):
         candidate['context'] = assemble_context(self.store, {**project, 'workspace': run['requirement_workspace'], 'base_branch': run['requirement_branch']}, run['request'], run['history'])
         mounts = compile_mounts(self.store, candidate)  # validates source scope before signing
         spec = save_spec(self, candidate, confirmed=True)
+        from factory.control.deliverables import infer_delivery_type_from_text
+        delivery_type_inferred = infer_delivery_type_from_text(
+            run.get('source', {}).get('original_request', run['request']),
+            value['spec_draft'])
         updated = self.store.update(rid, {**frozen_agent, **spec, 'spec_draft': value['spec_draft'], 'fidelity_target': value['fidelity_target'],
             'module_snapshot': modules, 'mount_snapshot': mounts, 'spec_tree_enabled': True,
-            'spec_confirmation': confirmation, 'status': 'received', 'error': None}, expected=('awaiting_spec_confirmation',),
+            'spec_confirmation': confirmation, 'delivery_type_inferred': delivery_type_inferred,
+            'status': 'received', 'error': None}, expected=('awaiting_spec_confirmation',),
             revision=body.revision, event=('spec.auto_confirmed' if automatic else 'spec.confirmed', confirmation))
         self._emit(rid, 'mounts.frozen', manifest_summary(mounts))
         self.start_plan(rid)

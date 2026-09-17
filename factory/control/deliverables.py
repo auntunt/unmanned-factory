@@ -129,16 +129,70 @@ def snapshot(store, run):
     return json.loads((target / 'manifest.json').read_text())
 
 
+_SERVICE_KEYWORDS = ('网站', '站点', 'saas', 'web app', 'webapp', 'web 应用', '在线服务',
+                     '线上服务', 'api 服务', 'api服务', '后端服务', '服务端')
+_CLI_KEYWORDS = ('命令行', 'cli', '终端工具', 'shell 脚本', 'shell脚本', '命令行工具',
+                 'cli 工具', 'cli工具', '脚本工具')
+_INSTALLER_KEYWORDS = ('安装包', 'installer', '桌面应用', '桌面客户端', '客户端应用',
+                       '.exe', '.dmg', '.msi', '.pkg', '.deb', '.rpm', '.appimage',
+                       'electron 应用', 'electron应用', '桌面程序')
+DELIVERY_TYPES = ('service', 'cli', 'installer')
+
+
+def infer_delivery_type_from_text(text, spec_draft=None):
+    """Infer delivery type from user request text and optional spec draft.
+
+    Returns 'service', 'cli', 'installer', or None when ambiguous.
+    Only returns a type when exactly one positive category matches;
+    conflicting signals yield None to avoid mis-labeling.
+
+    non_goals act as negative signals: a keyword found only in non_goals
+    is subtracted from matches rather than added.  This prevents
+    "做个网站，不要做成桌面应用" from returning None due to a false
+    installer match from the non_goal text.
+    """
+    positive_sources = [text or '']
+    negative_sources = []
+    if spec_draft:
+        positive_sources.append(spec_draft.get('goal') or '')
+        for flow in (spec_draft.get('flows') or []):
+            positive_sources.append(flow)
+        for ng in (spec_draft.get('non_goals') or []):
+            negative_sources.append(ng)
+    positive = '\n'.join(positive_sources).lower()
+    negative = '\n'.join(negative_sources).lower()
+    matches = set()
+    excluded = set()
+    for keywords, label in ((_SERVICE_KEYWORDS, 'service'), (_CLI_KEYWORDS, 'cli'), (_INSTALLER_KEYWORDS, 'installer')):
+        in_positive = any(kw in positive for kw in keywords)
+        in_negative = any(kw in negative for kw in keywords)
+        if in_negative:
+            # Negative signal (non_goals) always wins: if a keyword appears
+            # in non_goals it is an exclusion even when the same word shows
+            # up in the request text as part of "不要做成桌面应用".
+            excluded.add(label)
+        elif in_positive:
+            matches.add(label)
+    matches -= excluded
+    if len(matches) == 1:
+        return matches.pop()
+    return None
+
+
 def derive_delivery_type(run, items):
     """Derive the delivery type from run artifacts or deliverable items.
 
     Returns one of 'service', 'cli', 'installer', or None (undeclared).
-    Priority: explicit artifacts field > item-based inference > None.
+    Priority: explicit artifacts field > run-level inference > item-based inference > None.
     """
     artifacts = run.get('artifacts') or {}
     explicit = artifacts.get('delivery_type')
-    if isinstance(explicit, str) and explicit in ('service', 'cli', 'installer'):
+    if isinstance(explicit, str) and explicit in DELIVERY_TYPES:
         return explicit
+    # Check run-level inference written during requirement analysis.
+    inferred = run.get('delivery_type_inferred')
+    if isinstance(inferred, str) and inferred in DELIVERY_TYPES:
+        return inferred
     # Infer from deliverable items when not explicitly declared.
     has_installer = any(item.get('kind') == 'installer' for item in items)
     if has_installer:

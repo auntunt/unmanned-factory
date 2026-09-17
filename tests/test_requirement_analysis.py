@@ -46,6 +46,49 @@ def env(tmp_path):
     svc.close()
 
 
+def test_confirm_stores_delivery_type_inferred_from_request_text(env):
+    """The real confirm() path must write delivery_type_inferred from the request text."""
+    env.result.update(proposal())
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    assert run['status'] == 'awaiting_spec_confirmation'
+    body = ra.Confirmation(revision=run['revision'], spec_draft=run['spec_draft'], selected_skills=[])
+    ra.confirm(env.svc, run['id'], body, 'owner')
+    confirmed = env.store.get(run['id'])
+    # The fixture request is '像美团的团购工具' which is ambiguous; delivery_type_inferred should be None.
+    assert confirmed.get('delivery_type_inferred') is None
+
+
+def test_confirm_stores_cli_delivery_type_from_request(env):
+    """When request text clearly says CLI, confirm() infers delivery_type_inferred='cli'."""
+    env.store.update(env.run['id'], {'status': 'cancelled'})
+    run2, _ = env.store.create_run(env.project['id'], '做一个命令行工具',
+        source={'type': 'web', 'operation': 'general', 'original_request': '做一个命令行工具'})
+    import threading
+    env.svc.cancels[run2['id']] = threading.Event()
+    env.svc._analyze(run2['id'])
+    run = env.store.get(run2['id'])
+    assert run['status'] == 'awaiting_spec_confirmation'
+    body = ra.Confirmation(revision=run['revision'], spec_draft=run['spec_draft'], selected_skills=[])
+    ra.confirm(env.svc, run2['id'], body, 'owner')
+    confirmed = env.store.get(run2['id'])
+    assert confirmed['delivery_type_inferred'] == 'cli'
+
+
+def test_confirm_stores_service_from_spec_draft_goal(env):
+    """When spec_draft goal says '网站', the inference picks service even if request text is ambiguous."""
+    env.result.update(proposal())
+    env.result['spec_draft']['goal'] = '构建一个团购网站'
+    env.svc._analyze(env.run['id'])
+    run = env.store.get(env.run['id'])
+    body = ra.Confirmation(revision=run['revision'],
+        spec_draft=ra.SpecDraft(**{**run['spec_draft'], 'goal': '构建一个团购网站'}),
+        selected_skills=[])
+    ra.confirm(env.svc, run['id'], body, 'owner')
+    confirmed = env.store.get(run['id'])
+    assert confirmed['delivery_type_inferred'] == 'service'
+
+
 def test_general_waits_for_single_confirmation_and_freezes_skills(env):
     skill = ModuleStore(env.store).list()[0]
     env.result.update(proposal(skill, True))
