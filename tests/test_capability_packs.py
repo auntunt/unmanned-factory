@@ -129,6 +129,9 @@ def test_development_output_to_published_capability_and_real_download(app_env):
     assert task['validation_status'] == 'passed'
     assert task['result']['total'] == '18920.70' and task['result']['item_count'] == 3
     assert task['snapshot']['version'] == 1 and task['snapshot']['content_digest'] == version['content_digest']
+    # The role's version is frozen alongside the capability's, so a later change to either
+    # cannot silently redefine what this task ran.
+    assert task['snapshot']['agent_version'] == 1
 
     output = task['outputs'][0]
     download = client.get(f"/api/v4/capability-packs/artifacts/{output['id']}/download", headers=headers)

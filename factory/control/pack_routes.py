@@ -92,6 +92,13 @@ def router(store, service):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
 
+    def _agent_version(agent_id):
+        try:
+            from factory.control.agents import AgentStore
+            return AgentStore(store).get(agent_id).get('active_version')
+        except (KeyError, ValueError):
+            return None
+
     def run_items(rid, request):
         """Development output for a run: its saved, immutable deliverables. Access is
         checked against the run's project, so a pack can never be cut from someone
@@ -238,7 +245,8 @@ def router(store, service):
         artifact = guarded(packs.put_artifact, actor_id=who['id'], name=file.filename or 'input.bin',
                            content=raw, role='input', validation_status='not_applicable', dedupe=True)
         task = guarded(packs.create_task, actor=who, agent_id=agent_id, pack_id=pack_id,
-                       input_artifact_ids=[artifact['id']], operation_key=operation_key)
+                       input_artifact_ids=[artifact['id']], operation_key=operation_key,
+                       agent_version=_agent_version(agent_id))
         if task.get('idempotent_replay'):
             return packs.task(task['id'], actor=who)
         version = guarded(packs.version, task['snapshot']['version_id'])

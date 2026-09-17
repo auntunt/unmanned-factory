@@ -587,7 +587,8 @@ class PackStore:
             return (body, row['content']) if with_content else body
 
     # ---- tasks -------------------------------------------------------------
-    def create_task(self, *, actor, agent_id, pack_id, input_artifact_ids, options=None, operation_key=None):
+    def create_task(self, *, actor, agent_id, pack_id, input_artifact_ids, options=None,
+                    operation_key=None, agent_version=None):
         """Freeze the capability snapshot inside the same transaction that registers the
         task, so an upgrade landing a millisecond later cannot change what this task runs."""
         fingerprint = self._fingerprint({'agent': agent_id, 'pack': pack_id, 'inputs': sorted(input_artifact_ids)})
@@ -620,6 +621,9 @@ class PackStore:
                     'snapshot': {'version_id': binding['version_id'], 'version': version_row['version'],
                                  'content_digest': version_row['content_digest'],
                                  'binding_revision': binding['revision'],
+                                 # The role's own version is frozen with the capability's:
+                                 # both are what this task ran against, whatever changes later.
+                                 'agent_version': agent_version,
                                  'tool': json.loads(version_row['data'])['manifest']['tool']['name'],
                                  'environment': env},
                     'created_at': now(), 'updated_at': now()}
