@@ -17,3 +17,13 @@
 2. 真实 GitHub bind→publish 与服务器部署/固定测试地址验证（V1-03 线上段）。
 3. checks 命令被 exec 为路径的 Errno 2（既有验证段行为，另立任务，不在本轮）。
 4. 真实 SDK runner 下 needs_human 安全节点自动消费 followup 的现场联测。
+
+## r2 验收前修复批次（2026-09-17，基线 5018e7d）
+Codex 初审：/Users/auntlee/Desktop/自动化harness构建/docs/webuddy-r1-handoff-intake-2026-09-17.md（ready_for_codex，未验收）。
+- T07(A)：running——checks 命令契约（Errno 2）；执行端 argv 契约已定位 execution.py，查生成/存储层后最小修复 + 真实模型平台复验 counter。
+- T08(B)：running——安全节点自动消费（runner 状态转换触发，禁手工 continue_run 冒充）+ 逐条 pending_id 徽标 + 完成/取消/崩溃方向。契约④。
+- T09(C)：running——delivery_type 正常流程写入（需求分析层）+ 两页展示一致 + 走真实推导路径验证。契约⑤。
+- T10(D)：running——setting_sources ["user"] 边界矩阵（隔离 HOME 实验，不动真实配置，不出凭据）；结论决定改或固定。
+工作区：webuddy-r2-t07/t08/t09/t10，各自独占；RunWorkspace.tsx 由 T08（消息区）/T09（结果卡区）分区。
+模型核实：四个执行者请求 sonnet，宿主转写元数据实际均 claude-opus-4-6（与 r1 一致的宿主限制，不冒称 Sonnet）。
+测试口径更正（采纳 Codex）：r1 后端应表述为「88cadc5 全量一项失败，00a833e 修正后该文件定向复跑 9 项通过」，非最终 HEAD 一次完整全绿。
