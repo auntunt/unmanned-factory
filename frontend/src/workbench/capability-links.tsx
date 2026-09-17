@@ -4,7 +4,7 @@ import type { Capability } from './v3-types'
 export interface Provenance { byRun: Map<string, Array<{ id: string; name: string }>>; counts: Map<string, number>; loaded: boolean; error: boolean }
 export const ProvenanceContext = createContext<Provenance>({ byRun: new Map(), counts: new Map(), loaded: false, error: false })
 export const useProvenance = () => useContext(ProvenanceContext)
-export function capabilityHref(tab: 'modules' | 'capabilities', selected?: string) {
+export function capabilityHref(tab: 'modules' | 'capabilities' | 'packs', selected?: string) {
   return `/ability-center?${new URLSearchParams({ tab, ...(selected ? { selected } : {}) })}`
 }
 export function LegacyCapabilityRedirect({ tab }: { tab: 'modules' | 'capabilities' }) {

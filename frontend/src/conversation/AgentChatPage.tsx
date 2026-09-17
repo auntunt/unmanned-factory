@@ -4,6 +4,7 @@ import { request } from '../workspace/api'
 import { errorText, formatDate, type PageProps } from '../workbench/ui'
 import Icon, { CategoryBadge, packMark } from '../workbench/Icon'
 import { unwrapAgentMessageResponse } from '../workbench/AgentsPage'
+import CapabilityPanel from './CapabilityPanel'
 import { useWorkTitle } from './title-context'
 import './conversation.css'
 
@@ -181,6 +182,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
       </div>}
       <div className="cv-dock">
         <div className="cv-dock-inner">
+          {agentId && <CapabilityPanel agentId={agentId} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
           <form onSubmit={send}>
             <div className="cv-composer">
               <textarea rows={2} value={text} disabled={sending} onChange={e => { setText(e.target.value); submitKey.current = null }} placeholder={`和 ${agent?.name || '职能体'} 聊…`} aria-label="消息"

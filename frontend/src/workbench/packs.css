@@ -1,0 +1,42 @@
+/* Capability packs reuse the workbench palette, radii and borders; no new theme. */
+.pk-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); list-style:none; margin:0; padding:0; }
+.pk-card { background:var(--color-surface); border:1px solid var(--color-border); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:8px; }
+.pk-card-head { display:flex; align-items:flex-start; gap:8px; justify-content:space-between; }
+.pk-card-title { color:var(--color-text); font-weight:600; text-decoration:none; }
+.pk-card-title:hover, .pk-link:hover { text-decoration:underline; }
+.pk-card-purpose { color:var(--color-muted); margin:0; font-size:13px; line-height:1.55; }
+.pk-card-foot { display:flex; justify-content:space-between; align-items:center; color:var(--color-muted); font-size:12px; margin-top:auto; }
+.pk-link { color:var(--color-accent); text-decoration:none; font-size:12px; }
+.pk-pill { border-radius:8px; padding:2px 8px; font-size:12px; border:1px solid var(--color-border); white-space:nowrap; }
+.pk-pill.is-published { background:var(--color-success-bg); color:var(--color-success); border-color:transparent; }
+.pk-pill.is-draft { background:var(--color-raised); color:var(--color-muted); }
+.pk-pill.is-warn { background:var(--color-warning-bg); color:var(--color-warning); border-color:transparent; }
+.pk-pill.is-error { background:var(--color-danger-bg); color:var(--color-danger); border-color:transparent; }
+.pk-muted { color:var(--color-muted); }
+.pk-empty { border:1px dashed var(--color-border); border-radius:12px; padding:28px; text-align:center; color:var(--color-muted); display:grid; gap:8px; justify-items:center; }
+.pk-notice { border:1px solid var(--color-border); border-radius:10px; padding:12px 14px; display:grid; gap:4px; }
+.pk-notice p { margin:0; font-size:13px; }
+.pk-notice-error { background:var(--color-danger-bg); border-color:transparent; color:var(--color-danger); }
+.pk-notice-warn { background:var(--color-warning-bg); border-color:transparent; color:var(--color-warning); }
+.pk-notice-info { background:var(--color-info-bg); border-color:transparent; color:var(--color-info); }
+.pk-detail { display:grid; gap:16px; }
+.pk-detail-head { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.pk-detail-head h1 { margin:0; font-size:22px; }
+.pk-tabs { display:flex; gap:4px; overflow-x:auto; border-bottom:1px solid var(--color-border); }
+.pk-tabs button { background:none; border:0; border-bottom:2px solid transparent; padding:8px 12px; color:var(--color-muted); cursor:pointer; border-radius:8px 8px 0 0; font:inherit; }
+.pk-tabs button[aria-selected="true"] { color:var(--color-text); border-bottom-color:var(--color-accent); }
+.pk-tabs button:focus-visible, .pk-button:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
+.pk-panel { display:grid; gap:12px; }
+.pk-section { background:var(--color-surface); border:1px solid var(--color-border); border-radius:12px; padding:14px; display:grid; gap:8px; }
+.pk-section h2 { margin:0; font-size:15px; }
+.pk-list { margin:0; padding:0; list-style:none; display:grid; gap:6px; font-size:13px; }
+.pk-row { display:flex; gap:8px; justify-content:space-between; align-items:center; border:1px solid var(--color-border); border-radius:8px; padding:8px 10px; }
+.pk-row code { font-size:12px; color:var(--color-muted); overflow-wrap:anywhere; }
+.pk-button { background:var(--color-accent); color:var(--color-on-accent); border:0; border-radius:10px; padding:9px 14px; cursor:pointer; font:inherit; text-decoration:none; display:inline-block; }
+.pk-button[disabled] { opacity:.55; cursor:not-allowed; }
+.pk-button-secondary { background:var(--color-raised); color:var(--color-text); border:1px solid var(--color-border); }
+.pk-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.pk-kv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:13px; }
+.pk-kv dt { color:var(--color-muted); }
+.pk-kv dd { margin:0; overflow-wrap:anywhere; }
+@media (max-width:640px) { .pk-grid { grid-template-columns:1fr; } }

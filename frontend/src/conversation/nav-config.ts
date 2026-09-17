@@ -50,6 +50,7 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体' }] }
   if (is('/agents/:agentId/chat')) return { activeKey: 'agents', title: '对话', usesWorkTitle: true, group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '对话' }] }
   if (is('/agents/:agentId')) return { activeKey: 'agents', title: '职能体详情', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '详情' }] }
+  if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库', to: '/ability-center?tab=packs' }, { label: '职能包' }] }
   if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力库', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库' }] }
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
   if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }

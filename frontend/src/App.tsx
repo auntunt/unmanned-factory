@@ -26,6 +26,7 @@ import './workbench/studio.css'
 
 const RunWorkspace = lazy(() => import('./conversation/RunWorkspace'))
 const RuntimePage = lazy(() => import('./workbench/RuntimePage'))
+const PackDetail = lazy(() => import('./workbench/PackDetail'))
 
 interface AuthResponse {
   user: User
@@ -97,6 +98,7 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="agents/:agentId/chat" element={<AgentChatPage {...pageProps} />} />
       <Route path="agents/:agentId" element={<AgentsPage {...pageProps} />} />
       <Route path="ability-center" element={<CapabilityCenter {...pageProps} />} />
+      <Route path="ability-center/packs/:packId" element={<PackDetail {...pageProps} />} />
       <Route path="modules" element={<LegacyCapabilityRedirect tab="modules" />} />
       <Route path="capabilities" element={<LegacyCapabilityRedirect tab="capabilities" />} />
       <Route path="overview" element={<OverviewPage {...pageProps} />} />
