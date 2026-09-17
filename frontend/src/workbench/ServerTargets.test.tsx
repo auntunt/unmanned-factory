@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ServerTargets, { ProjectTargets } from './ServerTargets'
 import OperationResults from './OperationResults'
 import { request } from '../workspace/api'

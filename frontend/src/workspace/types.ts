@@ -99,6 +99,7 @@ export interface Artifacts {
 }
 
 export interface Run {
+  followups?: { id: string; content: string; created_at: string; applied: boolean }[]
   root_request?: string
   error?: string | null
   retry_run_id?: string

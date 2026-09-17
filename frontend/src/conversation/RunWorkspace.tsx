@@ -176,7 +176,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
 
           <div className="cv-thread">
             {messages.length === 0 && <ThreadMessage message={{ id: 'request', role: 'user', content: String(run.source?.original_request || run.request), at: run.created_at }} />}
-            {messages.map(message => <ThreadMessage key={String(message.id)} message={message} followups={(run as Record<string, unknown>).followups as FollowUpStatus[] ?? []} />)}
+            {messages.map(message => <ThreadMessage key={String(message.id)} message={message} followups={run.followups ?? []} />)}
 
             {head === 'active' && <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">w</span>webuddy</div>
               <div className="cv-msg-body"><span className="cv-typing"><i /><i /><i /></span></div></div>}
