@@ -77,6 +77,18 @@ def router(store, service):
     api = APIRouter(prefix='/api/v4/capability-packs')
     packs = PackStore(store)
 
+    def job_state(job_id):
+        if not job_id:
+            return None
+        try:
+            return service.maintenance_status(job_id)['status']
+        except KeyError:
+            return None
+
+    # 服务重启后把在途调用对齐到明确终态：Service 会把 maintenance_jobs 标成 interrupted，
+    # pack_tasks 不跟着对账的话，界面会永远停在「处理中」。
+    packs.recover_interrupted(job_status=job_state)
+
     def actor(request: Request):
         return request.state.user
 
@@ -91,13 +103,6 @@ def router(store, service):
             raise HTTPException(404, '记录不存在') from None
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-
-    def _agent_version(agent_id):
-        try:
-            from factory.control.agents import AgentStore
-            return AgentStore(store).get(agent_id).get('active_version')
-        except (KeyError, ValueError):
-            return None
 
     def run_items(rid, request):
         """Development output for a run: its saved, immutable deliverables. Access is
@@ -132,28 +137,6 @@ def router(store, service):
         # visible to the workspace (publishing is an internal registration, not a deploy).
         return {'packs': [p for p in rows if p.get('published_version') or p['owner_id'] == uid or admin]}
 
-    @api.get('/{pack_id}')
-    def read_pack(pack_id: str, request: Request):
-        detail = guarded(packs.get, pack_id)
-        uid, admin = str(actor(request)['id']), actor(request).get('role') == 'admin'
-        maintainer = detail['owner_id'] == uid or admin
-        if not maintainer and not detail.get('versions'):
-            raise HTTPException(403, '无权查看该职能包')
-        if not maintainer:
-            detail = {**detail, 'draft': None}
-        return {**detail, 'can_maintain': maintainer}
-
-    @api.get('/{pack_id}/files/{path:path}')
-    def read_file(pack_id: str, path: str, request: Request, version_id: str | None = None):
-        detail = guarded(packs.get, pack_id)
-        if detail['owner_id'] != str(actor(request)['id']) and actor(request).get('role') != 'admin':
-            raise HTTPException(403, '无权查看该职能包内容')
-        files = guarded(packs.files, pack_id=pack_id, version_id=version_id)
-        if path not in files:
-            raise HTTPException(404, '文件不存在')
-        return Response(files[path], media_type='text/plain; charset=utf-8',
-                        headers={'X-Content-Type-Options': 'nosniff'})
-
     # ---- candidate ---------------------------------------------------------
     @api.post('/drafts', status_code=201)
     def create_draft(body: DraftFromTask, request: Request):
@@ -182,16 +165,27 @@ def router(store, service):
             raise HTTPException(409, draft.get('blocked_reason') or '工具契约不完整，无法验证')
         files = guarded(packs.files, pack_id=pack_id)
         digest, who = draft['content_digest'], actor(request)
+        job_id = uuid.uuid4().hex
+        # 提交即登记幂等键：同键重复提交回放同一个作业，而不是把测试集再真跑一遍。
+        # 同键不同候选内容 → Conflict（由 _replay 抛出）。
+        registered = guarded(packs.begin_evaluation, pack_id, content_digest_value=digest,
+                             actor=who, operation_key=body.operation_key, job_id=job_id)
+        if registered.get('idempotent_replay'):
+            replayed = registered.get('job_id')
+            return {'job_id': replayed, 'status': job_state(replayed) or 'completed',
+                    'content_digest': registered.get('content_digest', digest), 'idempotent_replay': True}
 
         def job(cancel):
-            report = evaluate(draft, files)
+            report = evaluate(draft, files, cancel=cancel)
             if cancel.is_set():
                 return {'status': 'cancelled'}
+            # 幂等键已在提交时登记（begin_evaluation），这里不再覆盖那条登记——
+            # 覆盖会让后续重放拿到的记录少掉 job_id，重试反而 404。
             record = packs.save_evaluation(pack_id, content_digest_value=digest, report=report,
-                                           actor=who, operation_key=body.operation_key)
+                                           actor=who)
             return {'evaluation_id': record['id'], 'passed': record['passed'], 'summary': record['summary']}
 
-        started = service.start_maintenance(job, conversation_id=f'pack-eval:{pack_id}',
+        started = service.start_maintenance(job, job_id=job_id, conversation_id=f'pack-eval:{pack_id}',
                                             actor_id=who['id'])
         return {'job_id': started['id'], 'status': started['status'], 'content_digest': digest}
 
@@ -244,22 +238,28 @@ def router(store, service):
         who = actor(request)
         artifact = guarded(packs.put_artifact, actor_id=who['id'], name=file.filename or 'input.bin',
                            content=raw, role='input', validation_status='not_applicable', dedupe=True)
+        job_id = uuid.uuid4().hex
         task = guarded(packs.create_task, actor=who, agent_id=agent_id, pack_id=pack_id,
-                       input_artifact_ids=[artifact['id']], operation_key=operation_key,
-                       agent_version=_agent_version(agent_id))
+                       input_artifact_ids=[artifact['id']], operation_key=operation_key, job_id=job_id)
+        current = packs.task(task['id'], actor=who)
         if task.get('idempotent_replay'):
-            return packs.task(task['id'], actor=who)
+            # 重放：只有当这次调用**从未真正派发**（作业不存在且任务仍排队）时才补派发，
+            # 否则重试会把同一个文件再转一遍。
+            if not (current['status'] == 'queued' and job_state(current.get('job_id')) is None):
+                return current
+            job_id = current.get('job_id') or job_id
         version = guarded(packs.version, task['snapshot']['version_id'])
         files = guarded(packs.files, version_id=version['id'])
         inputs = [{'name': artifact['name'], 'content': raw, 'sha256': artifact['sha256']}]
 
         def job(cancel):
-            packs.update_task(task['id'], {'status': 'running'}, event=('task.running', {}), expected=('queued',))
+            packs.update_task(task['id'], {'status': 'running'}, event=('task.running', {}),
+                              expected=('queued', 'cancel_requested'))
             if cancel.is_set():
-                packs.update_task(task['id'], {'status': 'cancelled', 'error_code': 'cancelled'},
-                                  event=('task.cancelled', {}))
+                packs.update_task(task['id'], {'status': 'cancelled', 'error_code': 'cancelled',
+                                               'error': '调用已取消'}, event=('task.cancelled', {}))
                 return {'status': 'cancelled'}
-            outcome = run_tool(version, files, inputs)
+            outcome = run_tool(version, files, inputs, cancel=cancel)
             saved = [packs.put_artifact(actor_id=who['id'], name=out['name'], content=out['content'],
                                         role='output', task_id=task['id'], kind=out['kind'],
                                         validation_status=outcome['validation_status'])
@@ -273,8 +273,20 @@ def router(store, service):
                                                      'outputs': [a['id'] for a in saved]}))
             return {'task_id': task['id'], 'status': outcome['status']}
 
-        service.start_maintenance(job, conversation_id=f'pack-task:{task["id"]}', actor_id=who['id'])
+        service.start_maintenance(job, job_id=job_id, conversation_id=f'pack-task:{task["id"]}',
+                                  actor_id=who['id'])
         return packs.task(task['id'], actor=who)
+
+    @api.post('/invocations/{task_id}/cancel')
+    def cancel_invocation(task_id: str, request: Request):
+        """取消是持久化的：先落库，再让作业层置取消位——工具进程组由运行时回收。"""
+        task = guarded(packs.request_cancel, task_id, actor=actor(request))
+        if task.get('job_id'):
+            try:
+                service.cancel_maintenance(task['job_id'], str(actor(request)['id']))
+            except KeyError:
+                pass
+        return guarded(packs.task, task_id, actor=actor(request))
 
     @api.get('/invocations')
     def list_invocations(request: Request):
@@ -302,5 +314,32 @@ def router(store, service):
             # The label travels with the file: a candidate output that failed validation is
             # downloadable, but never presented as verified.
             'X-Validation-Status': body['validation_status']})
+
+
+    # ---- 动态段放最后 ----------------------------------------------------
+    # `/{pack_id}` 会吞掉任何在它之后声明的同层静态路径（实测 GET /invocations 返回 404）。
+    # FastAPI 按声明顺序匹配，所以静态路径一律先声明，带路径参数的放最后。
+    @api.get('/{pack_id}')
+    def read_pack(pack_id: str, request: Request):
+        detail = guarded(packs.get, pack_id)
+        uid, admin = str(actor(request)['id']), actor(request).get('role') == 'admin'
+        maintainer = detail['owner_id'] == uid or admin
+        if not maintainer and not detail.get('versions'):
+            raise HTTPException(403, '无权查看该职能包')
+        if not maintainer:
+            detail = {**detail, 'draft': None}
+        return {**detail, 'can_maintain': maintainer}
+
+    @api.get('/{pack_id}/files/{path:path}')
+    def read_file(pack_id: str, path: str, request: Request, version_id: str | None = None):
+        detail = guarded(packs.get, pack_id)
+        if detail['owner_id'] != str(actor(request)['id']) and actor(request).get('role') != 'admin':
+            raise HTTPException(403, '无权查看该职能包内容')
+        files = guarded(packs.files, pack_id=pack_id, version_id=version_id)
+        if path not in files:
+            raise HTTPException(404, '文件不存在')
+        return Response(files[path], media_type='text/plain; charset=utf-8',
+                        headers={'X-Content-Type-Options': 'nosniff'})
+
 
     return api

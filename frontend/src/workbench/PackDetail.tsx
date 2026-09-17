@@ -145,8 +145,13 @@ export default function PackDetail({ csrfToken, onUnauthorized }: PageProps) {
           <Support rows={(draft?.manifest ?? published!.manifest).support_matrix} />
         </div>}
         {published && environment?.status === 'unavailable' && <div className="pk-notice pk-notice-warn">
-          <strong>本机环境缺少依赖：{environment.missing?.join('、') || '未知'}</strong>
+          <strong>本机环境不可用{environment.missing?.length ? `：缺少 ${environment.missing.join('、')}` : ''}</strong>
+          {environment.problems?.map(problem => <p key={problem}>{problem}</p>)}
           <p>版本仍然是已发布状态；先到 <Link className="pk-link" to="/settings/runtime">模型与执行</Link> 定位运行环境，再重试调用。</p>
+        </div>}
+        {published && environment?.stale && <div className="pk-notice pk-notice-info">
+          <strong>环境检查已过期</strong>
+          <p>{environment.stale_reason}；发布状态不变，重新检查后再调用更稳妥。</p>
         </div>}
         {detail.bindings.length > 0 && <div className="pk-section"><h2>已挂靠的职能体</h2>
           <ul className="pk-list">{detail.bindings.map(binding => <li key={binding.id} className="pk-row">

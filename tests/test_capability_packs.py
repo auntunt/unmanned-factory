@@ -318,7 +318,8 @@ def test_lost_response_retry_never_duplicates_draft_or_version_or_task(app_env):
                'operation_key': publish_key}
     v1 = client.post(f"/api/v4/capability-packs/{pack['id']}/versions", headers=headers, json=payload)
     v2 = client.post(f"/api/v4/capability-packs/{pack['id']}/versions", headers=headers, json=payload)
-    assert v1.status_code == 201 and v2.status_code == 201 and v1.json()['id'] == v2.json()['id']
+    assert v1.status_code == 201 and v2.status_code == 201, (v1.text, v2.text)
+    assert v1.json()['id'] == v2.json()['id']
     with store.connect() as db:
         assert db.execute('SELECT COUNT(*) FROM pack_versions').fetchone()[0] == 1
 

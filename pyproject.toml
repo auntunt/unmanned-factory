@@ -10,6 +10,11 @@ dependencies = [
     "uvicorn>=0.52.4",
     "httpx>=0.28.1",
     "cryptography>=50.0.0",
+    # 职能包：工具契约的 schema 自检与输入/输出校验（jsonschema），以及依赖声明的
+    # 解析与版本约束比对（packaging）。两者此前只作为可选 extra 的传递依赖出现，
+    # 控制面直接用它们就必须显式声明——否则最小安装下 import 失败。
+    "jsonschema>=4.20.0",
+    "packaging>=23.2",
 ]
 
 # 文档里从第一天就写着 `factory run ...`，但这个入口点一直不存在 ——

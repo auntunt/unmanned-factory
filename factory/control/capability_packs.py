@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -29,7 +30,7 @@ SCHEMA = 'webuddy.capability-pack/v1'
 MANIFEST_NAME = 'webuddy-pack.json'
 LIFECYCLE = ('draft', 'building', 'validating', 'verified', 'published', 'retired', 'needs_changes')
 ENV_STATUS = ('unchecked', 'checking', 'ready', 'unavailable')
-TASK_STATUS = ('queued', 'running', 'waiting_input', 'succeeded', 'failed', 'cancelled')
+TASK_STATUS = ('queued', 'running', 'waiting_input', 'cancel_requested', 'succeeded', 'failed', 'cancelled')
 MATERIAL_SCOPES = ('synthetic', 'licensed')
 # Directories that hold the customer's own material in a development workspace. Anything
 # under them is client material by default, whatever the caller selected.
@@ -281,9 +282,36 @@ class PackStore:
                 out[entry['path']] = blob['content']
         return out
 
+    ENV_CHECK_TTL_SECONDS = 24 * 3600
+
+    @staticmethod
+    def _runtime_fingerprint():
+        import platform
+        return f'{platform.python_version()}|{platform.platform()}'
+
     def _env(self, db, version_id):
+        """环境检查会过期。
+
+        解释器换了、平台换了、或者检查已经过了 TTL，就退回 unchecked 并说明原因——
+        依赖是会变的，一次 ready 不能永久代表「现在能跑」。
+        """
         row = db.execute('SELECT data FROM pack_env_checks WHERE version_id=?', (version_id,)).fetchone()
-        return json.loads(row['data']) if row else {'status': 'unchecked'}
+        if not row:
+            return {'status': 'unchecked'}
+        body = json.loads(row['data'])
+        reason = None
+        if body.get('runtime_fingerprint') != self._runtime_fingerprint():
+            reason = '运行环境已变化，上次检查结果不再适用'
+        else:
+            try:
+                checked = datetime.fromisoformat(body['checked_at'])
+                if (datetime.now(timezone.utc) - checked).total_seconds() > self.ENV_CHECK_TTL_SECONDS:
+                    reason = '上次检查已超过 24 小时'
+            except (KeyError, ValueError):
+                reason = '上次检查时间无法解析'
+        if reason:
+            return {**body, 'status': 'unchecked', 'stale': True, 'stale_reason': reason}
+        return {**body, 'stale': False}
 
     # ---- candidate ---------------------------------------------------------
     def create_draft(self, *, source, selections, actor, operation_key=None, name=None, purpose=None):
@@ -405,8 +433,9 @@ class PackStore:
     # ---- evidence ----------------------------------------------------------
     def save_evaluation(self, pack_id, *, content_digest_value, report, actor, operation_key=None):
         """Evidence is append-only and bound to the exact candidate digest it ran against."""
-        fingerprint = self._fingerprint({'pack': pack_id, 'digest': content_digest_value,
-                                         'cases': [c.get('id') for c in report.get('cases', [])]})
+        # 与 begin_evaluation 用同一个指纹口径：提交时已登记，这里只是把结果补进去。
+        fingerprint = self._fingerprint({'kind': 'evaluation', 'pack': pack_id,
+                                         'digest': content_digest_value})
         eid = uuid.uuid4().hex
         body = {'passed': bool(report.get('passed')), 'summary': scrub(report.get('summary', ''))[:2000],
                 'cases': scrub(report.get('cases', [])), 'environment': scrub(report.get('environment', {})),
@@ -415,9 +444,6 @@ class PackStore:
             db.execute('BEGIN IMMEDIATE')
             pack = self._pack_row(db, pack_id)
             self._require_maintainer(pack, actor)
-            replay = self._replay(db, actor['id'], operation_key, fingerprint)
-            if replay is not None:
-                return replay
             row = db.execute('SELECT data FROM pack_drafts WHERE pack_id=?', (pack_id,)).fetchone()
             draft = json.loads(row['data']) if row else None
             db.execute('INSERT INTO pack_evaluations VALUES(?,?,?,?,?)',
@@ -439,6 +465,8 @@ class PackStore:
             db.execute('BEGIN IMMEDIATE')
             pack = self._pack_row(db, pack_id)
             self._require_maintainer(pack, actor)
+            # 重放要在候选 revision 检查**之前**：发布本身会把 revision +1，
+            # 丢响应后的重试拿着原来的 expected_revision，否则会被误判成「内容已被更新」。
             replay = self._replay(db, actor['id'], operation_key, fingerprint)
             if replay is not None:
                 return replay
@@ -484,7 +512,8 @@ class PackStore:
         if report.get('status') not in ENV_STATUS:
             raise ValueError('环境状态不合法')
         version = self.version(version_id)
-        body = {**report, 'version_id': version_id, 'content_digest': version['content_digest'], 'checked_at': now()}
+        body = {**report, 'version_id': version_id, 'content_digest': version['content_digest'],
+                'runtime_fingerprint': self._runtime_fingerprint(), 'checked_at': now()}
         with self.store.connect() as db:
             db.execute('INSERT OR REPLACE INTO pack_env_checks VALUES(?,?)', (version_id, _json(body)))
         return body
@@ -587,8 +616,19 @@ class PackStore:
             return (body, row['content']) if with_content else body
 
     # ---- tasks -------------------------------------------------------------
+    @staticmethod
+    def _agent_version(db, agent_id):
+        """角色版本在**同一个事务里**读，冻结才是原子的。
+
+        事务外先读再写的话，两次读之间落地的一次角色升级会让快照记下一个这次调用
+        其实没有用到的版本号。"""
+        row = db.execute('SELECT data FROM agents WHERE id=?', (agent_id,)).fetchone()
+        if row is None:
+            return None
+        return json.loads(row['data']).get('active_version')
+
     def create_task(self, *, actor, agent_id, pack_id, input_artifact_ids, options=None,
-                    operation_key=None, agent_version=None):
+                    operation_key=None, job_id=None):
         """Freeze the capability snapshot inside the same transaction that registers the
         task, so an upgrade landing a millisecond later cannot change what this task runs."""
         fingerprint = self._fingerprint({'agent': agent_id, 'pack': pack_id, 'inputs': sorted(input_artifact_ids)})
@@ -616,6 +656,10 @@ class PackStore:
             env = self._env(db, binding['version_id'])
             tid = uuid.uuid4().hex
             task = {'id': tid, 'actor_id': str(actor['id']), 'agent_id': agent_id, 'pack_id': pack_id,
+                    # The durable job id is written in the SAME transaction as the task, so a
+                    # crash before dispatch leaves a task that recovery can recognise and a
+                    # replay can re-dispatch — never a queued row nobody will ever pick up.
+                    'job_id': job_id,
                     'status': 'queued', 'inputs': inputs, 'outputs': [], 'validation_status': 'pending',
                     'error_code': None, 'error': None, 'options': dict(options or {}),
                     'snapshot': {'version_id': binding['version_id'], 'version': version_row['version'],
@@ -623,7 +667,7 @@ class PackStore:
                                  'binding_revision': binding['revision'],
                                  # The role's own version is frozen with the capability's:
                                  # both are what this task ran against, whatever changes later.
-                                 'agent_version': agent_version,
+                                 'agent_version': self._agent_version(db, agent_id),
                                  'tool': json.loads(version_row['data'])['manifest']['tool']['name'],
                                  'environment': env},
                     'created_at': now(), 'updated_at': now()}
@@ -666,6 +710,61 @@ class PackStore:
             rows = db.execute('SELECT * FROM pack_task_events WHERE task_id=? AND id>? ORDER BY id', (task_id, int(cursor)))
             events = [{'id': r['id'], 'type': r['type'], 'payload': json.loads(r['payload']), 'at': r['at']} for r in rows]
         return {'events': events, 'cursor': events[-1]['id'] if events else int(cursor)}
+
+    def recover_interrupted(self, *, job_status):
+        """服务重启后把任务对齐到明确终态。
+
+        `Service.__init__` 会把在途 maintenance_jobs 标成 interrupted，但 pack_tasks
+        不会自己跟着变——不同步的话，界面上会永远停在「处理中」。这里用真实的 job 状态
+        对账：job 不存在（崩在派发之前）或已是终态而任务还没结束，就落到 failed
+        并写明原因，不假装还在跑。
+        """
+        recovered = []
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT id,data FROM pack_tasks').fetchall()
+            for row in rows:
+                task = json.loads(row['data'])
+                if task['status'] not in ('queued', 'running', 'cancel_requested', 'waiting_input'):
+                    continue
+                state = job_status(task.get('job_id'))
+                if state in ('pending', 'running', 'cancel_requested'):
+                    continue
+                status = 'cancelled' if state == 'cancelled' else 'failed'
+                task = {**task, 'status': status, 'error_code': 'interrupted',
+                        'error': '服务重启时这次调用没有收到回执，已标为终态；请重新提交。',
+                        'validation_status': 'unverified', 'updated_at': now()}
+                db.execute('UPDATE pack_tasks SET data=? WHERE id=?', (_json(task), row['id']))
+                db.execute('INSERT INTO pack_task_events(task_id,type,payload,at) VALUES(?,?,?,?)',
+                           (row['id'], 'task.interrupted', _json({'job': state}), now()))
+                recovered.append(row['id'])
+        return recovered
+
+    def request_cancel(self, task_id, *, actor):
+        """取消是持久化的意图，不是只在内存里置个标志。"""
+        task = self.task(task_id, actor=actor)
+        if task['status'] in ('succeeded', 'failed', 'cancelled'):
+            return task
+        return self.update_task(task_id, {'status': 'cancel_requested'}, event=('task.cancel_requested', {}))
+
+    def begin_evaluation(self, pack_id, *, content_digest_value, actor, operation_key, job_id):
+        """在**提交时**就登记幂等键，而不是等验证跑完才登记。
+
+        先前的写法只在 save_evaluation 里登记，于是同一个键重复提交会重复真实执行一遍
+        测试集；丢响应的重试因此变成「跑两次、留两条证据」。
+        """
+        fingerprint = self._fingerprint({'kind': 'evaluation', 'pack': pack_id,
+                                         'digest': content_digest_value})
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            pack = self._pack_row(db, pack_id)
+            self._require_maintainer(pack, actor)
+            replay = self._replay(db, actor['id'], operation_key, fingerprint)
+            if replay is not None:
+                return {**replay, 'idempotent_replay': True}
+            record = {'job_id': job_id, 'pack_id': pack_id, 'content_digest': content_digest_value}
+            return {**self._record(db, actor['id'], operation_key, fingerprint, record),
+                    'idempotent_replay': False}
 
     def tasks_for(self, actor, *, limit=50):
         with self.store.connect() as db:

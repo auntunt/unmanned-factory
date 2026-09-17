@@ -38,9 +38,15 @@ export interface PackBinding {
   revision: number; latest_version: number; upgrade_available: boolean; content_digest: string
   environment?: { status: EnvStatus; missing?: string[] }
 }
+export interface EnvCheck {
+  status: EnvStatus; missing?: string[]; problems?: string[]; checked_at?: string
+  /** 检查过期（解释器/平台变了，或超过 TTL）；此时 status 退回 unchecked。 */
+  stale?: boolean; stale_reason?: string
+  sandbox?: string; isolation_verified?: boolean
+}
 export interface PackDetail extends PackSummary {
   draft: PackDraft | null; versions: PackVersion[]; evaluations: Evaluation[]
-  bindings: PackBinding[]; environments: Record<string, { status: EnvStatus; missing?: string[]; checked_at?: string }>
+  bindings: PackBinding[]; environments: Record<string, EnvCheck>
   can_maintain: boolean
 }
 export interface PackArtifact { id: string; name: string; size: number; validation_status: string; kind?: string }

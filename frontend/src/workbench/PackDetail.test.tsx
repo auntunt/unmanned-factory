@@ -90,7 +90,7 @@ it('an unavailable environment never turns a published version back into "not pu
   mount()
   await screen.findByText('已发布')
   expect(screen.getByText('环境缺依赖')).toBeTruthy()
-  expect(screen.getByText(/本机环境缺少依赖：lxml/)).toBeTruthy()
+  expect(screen.getByText(/本机环境不可用：缺少 lxml/)).toBeTruthy()
   expect(screen.queryByText('未发布')).toBeNull()
 })
 
@@ -128,4 +128,33 @@ it('shows the validated scope honestly, including formats that are not supported
   await screen.findByText('适用范围')
   expect(screen.getByText('已验证')).toBeTruthy()
   expect(screen.getByText('暂不支持')).toBeTruthy()
+})
+
+it('an expired environment check is shown as expired, not as a fresh green', async () => {
+  const version = { id: 'v1', pack_id: 'p1', version: 1, content_digest: 'c'.repeat(64),
+                    created_at: '2026-09-17T02:00:00Z', manifest, files, evaluation_id: 'e1',
+                    support_matrix: manifest.support_matrix, lifecycle: 'published' }
+  api.mockImplementation(async () => detail({
+    versions: [version], draft: { ...detail().draft, lifecycle: 'published' },
+    environments: { v1: { status: 'unchecked', stale: true, stale_reason: '运行环境已变化，上次检查结果不再适用' } },
+  }) as never)
+  mount()
+  await screen.findByText('环境检查已过期')
+  expect(screen.getByText(/运行环境已变化/)).toBeTruthy()
+  expect(screen.getByText('已发布')).toBeTruthy()   // 发布状态不受影响
+  expect(screen.getAllByText('尚未检查').length).toBeGreaterThan(0)
+})
+
+it('an unavailable environment explains the blocking problem, including missing isolation', async () => {
+  const version = { id: 'v1', pack_id: 'p1', version: 1, content_digest: 'c'.repeat(64),
+                    created_at: '2026-09-17T02:00:00Z', manifest, files, evaluation_id: 'e1',
+                    support_matrix: manifest.support_matrix, lifecycle: 'published' }
+  api.mockImplementation(async () => detail({
+    versions: [version], draft: { ...detail().draft, lifecycle: 'published' },
+    environments: { v1: { status: 'unavailable', missing: [],
+                          problems: ['隔离不可用：没有可用的隔离后端（缺少 sandbox-exec / bwrap）'] } },
+  }) as never)
+  mount()
+  await screen.findByText(/隔离不可用/)
+  expect(screen.getByText('已发布')).toBeTruthy()
 })
