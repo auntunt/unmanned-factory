@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from factory.control.execution import ExecutionError, execute_plan
+from factory.control.execution import ExecutionError, execute_plan, _check_argv, _normalize_check_argv
 from factory.control.providers import ProviderError
 
 
@@ -425,3 +425,113 @@ def test_ignored_delivery_outputs_do_not_break_source_commit(repo):
     subprocess.run(['git', 'commit', '-qm', 'tracked output'], cwd=repo, check=True)
     (repo / 'dist/index.html').write_text('changed')
     assert 'dist/index.html' in _status_paths(repo, timeout_s=10)
+
+
+# ---------------------------------------------------------------------------
+# T07: _check_argv normalization and validation
+# ---------------------------------------------------------------------------
+
+
+class TestCheckArgvNormalization:
+    """Unit tests for _check_argv and _normalize_check_argv."""
+
+    def test_proper_argv_passes_through(self):
+        """Multi-element argv list is passed through unchanged."""
+        project = {"checks": {"test": [sys.executable, "-c", "print('ok')"]}}
+        result = _check_argv(project, ["test"])
+        assert result == [("test", [sys.executable, "-c", "print('ok')"])]
+
+    def test_single_string_with_spaces_is_split(self):
+        """Single-element list with spaces is normalized via shlex.split."""
+        project = {"checks": {"test": ["python3 -m pytest test_counter.py -v"]}}
+        result = _check_argv(project, ["test"])
+        name, argv = result[0]
+        assert name == "test"
+        assert argv == ["python3", "-m", "pytest", "test_counter.py", "-v"]
+
+    def test_single_string_without_spaces_passes_through(self):
+        """Single-element list without spaces is not altered."""
+        project = {"checks": {"lint": ["ruff"]}}
+        result = _check_argv(project, ["lint"])
+        assert result == [("lint", ["ruff"])]
+
+    def test_single_string_with_quotes_is_split(self):
+        """Shell quoting in a single-element string is handled by shlex."""
+        project = {"checks": {"test": ["python3 -c 'print(\"hello world\")'"]}}
+        result = _check_argv(project, ["test"])
+        _, argv = result[0]
+        assert argv == ["python3", "-c", 'print("hello world")']
+
+    def test_missing_check_name_raises(self):
+        project = {"checks": {"test": [sys.executable, "-c", "pass"]}}
+        with pytest.raises(ExecutionError, match="not a trusted argv"):
+            _check_argv(project, ["missing"])
+
+    def test_empty_list_raises(self):
+        project = {"checks": {"bad": []}}
+        with pytest.raises(ExecutionError, match="not a trusted argv"):
+            _check_argv(project, ["bad"])
+
+    def test_non_string_element_raises_structured_error(self):
+        project = {"checks": {"bad": ["python3", 42]}}
+        with pytest.raises(ExecutionError, match="invalid elements"):
+            _check_argv(project, ["bad"])
+
+    def test_empty_string_element_raises_structured_error(self):
+        project = {"checks": {"bad": ["python3", ""]}}
+        with pytest.raises(ExecutionError, match="invalid elements"):
+            _check_argv(project, ["bad"])
+
+    def test_nul_in_argv_raises(self):
+        project = {"checks": {"bad": ["python3", "-c\x00evil"]}}
+        with pytest.raises(ExecutionError, match="NUL"):
+            _check_argv(project, ["bad"])
+
+    def test_checks_not_mapping_raises(self):
+        project = {"checks": "not a dict"}
+        with pytest.raises(ExecutionError, match="must be a mapping"):
+            _check_argv(project, ["x"])
+
+    def test_unparseable_shell_string_raises(self):
+        """Unbalanced quotes in a single-element string produce a structured error."""
+        project = {"checks": {"bad": ["python3 -c 'unterminated"]}}
+        with pytest.raises(ExecutionError, match="cannot parse shell string"):
+            _check_argv(project, ["bad"])
+
+
+class TestCheckArgvRealSubprocess:
+    """Integration: normalized argv actually runs via real subprocess."""
+
+    def test_shell_string_check_runs_successfully(self, repo, provider_module):
+        """A check written as a single shell string runs after normalization."""
+        runner = FakeRunner({"a": [("a.txt", "a\n")]})
+        project = _project(repo)
+        # Override with a single-string check that would have caused Errno 2 before.
+        # Use double-quoted inner string so shlex does not strip quotes needed by Python.
+        project["checks"] = {"ok": [f'{sys.executable} -c "print(42)"']}
+        plan = {"tasks": [
+            {"id": "a", "prompt": "a", "paths": ["a.txt"], "checks": ["ok"]},
+        ]}
+        out = execute_plan(
+            run_id="shell-string-check", plan=plan, project=project,
+            profiles={"standard": {"provider": "fake", "model": "test"}},
+            runner=runner, emit=lambda *_: None, cancel=threading.Event(),
+        )
+        # Check executed successfully (exit 0)
+        task_checks = out["tasks"][0]["checks"]
+        assert any(c["exit"] == 0 for c in task_checks), f"Expected exit 0, got {task_checks}"
+
+    def test_proper_argv_check_still_works(self, repo, provider_module):
+        """Normal multi-element argv still works as before."""
+        runner = FakeRunner({"a": [("a.txt", "a\n")]})
+        project = _project(repo)
+        plan = {"tasks": [
+            {"id": "a", "prompt": "a", "paths": ["a.txt"], "checks": ["ok"]},
+        ]}
+        out = execute_plan(
+            run_id="proper-argv-check", plan=plan, project=project,
+            profiles={"standard": {"provider": "fake", "model": "test"}},
+            runner=runner, emit=lambda *_: None, cancel=threading.Event(),
+        )
+        task_checks = out["tasks"][0]["checks"]
+        assert any(c["exit"] == 0 for c in task_checks)
