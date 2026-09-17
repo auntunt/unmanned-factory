@@ -104,7 +104,9 @@ def test_claude_zero_tools_denies_every_callback(monkeypatch, tmp_path):
     _run_claude(ProviderRequest('claude', 'test', adaptation_prompt(read_package(package())),
                               str(tmp_path), read_only=True, tools_disabled=True), lambda *a: None)
     assert not captured.get('mcp_servers')
-    assert captured['setting_sources'] == []
+    # 79b7035: user settings are loaded for credential resolution; ambient
+    # MCP/plugin config stays blocked via strict_mcp_config (asserted above).
+    assert captured['setting_sources'] == ['user']
     assert 'Ignore previous' not in captured['system_prompt']
 
 
