@@ -129,6 +129,23 @@ def snapshot(store, run):
     return json.loads((target / 'manifest.json').read_text())
 
 
+def derive_delivery_type(run, items):
+    """Derive the delivery type from run artifacts or deliverable items.
+
+    Returns one of 'service', 'cli', 'installer', or None (undeclared).
+    Priority: explicit artifacts field > item-based inference > None.
+    """
+    artifacts = run.get('artifacts') or {}
+    explicit = artifacts.get('delivery_type')
+    if isinstance(explicit, str) and explicit in ('service', 'cli', 'installer'):
+        return explicit
+    # Infer from deliverable items when not explicitly declared.
+    has_installer = any(item.get('kind') == 'installer' for item in items)
+    if has_installer:
+        return 'installer'
+    return None
+
+
 def router(store, service):
     api = APIRouter(prefix='/api/v3/runs/{rid}/deliverables')
     def location(rid):
@@ -169,6 +186,11 @@ def router(store, service):
             candidate = next((item for item in result['items'] if item['name'] == name and item['kind'] == 'image' and item['preview']), None)
             if candidate:
                 recommended = candidate['id']; break
+        delivery_type = derive_delivery_type(run, result.get('items', []))
+        installer_targets = None
+        if delivery_type == 'installer':
+            declared = (run.get('artifacts') or {}).get('installer_targets')
+            installer_targets = declared if isinstance(declared, list) and declared else None
         return {**result, 'recommended_preview_id': recommended, 'saved': saved, 'can_collect': run['status'] in ('ready_for_review', 'published'),
                 'github_configured': bool(service.publisher),
                 'github_repository': project['repository'],
@@ -177,6 +199,8 @@ def router(store, service):
                 'repository_url': (run.get('artifacts') or {}).get('repository_url'),
                 'publication_type': (run.get('artifacts') or {}).get('publication_type'),
                 'baseline_sync': (run.get('artifacts') or {}).get('baseline_sync'),
+                'delivery_type': delivery_type,
+                'installer_targets': installer_targets,
                 'publish_error': error,
                 'collection_error': (run.get('artifacts') or {}).get('collection_error')}
     @api.post('/collect')

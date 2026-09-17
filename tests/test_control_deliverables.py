@@ -9,7 +9,7 @@ import zipfile
 import httpx
 import pytest
 
-from factory.control.deliverables import snapshot
+from factory.control.deliverables import derive_delivery_type, snapshot
 from factory.control.github import publish_failure_message
 from factory.control.store import Conflict, Store
 from tests.test_control_app import app_env, login, project, wait_state
@@ -34,6 +34,48 @@ def delivery(tmp_path):
     store = Store(tmp_path / 'data' / 'control.db')
     run = {'id': 'run1', 'status': 'ready_for_review', 'artifacts': {'worktree': str(root), 'commit': git(root, 'rev-parse', 'HEAD')}}
     return store, run, root
+
+
+@pytest.mark.parametrize('artifacts,items,expected', [
+    ({'delivery_type': 'service'}, [], 'service'),
+    ({'delivery_type': 'cli'}, [], 'cli'),
+    ({'delivery_type': 'installer'}, [], 'installer'),
+    ({}, [{'kind': 'installer', 'name': 'app.dmg'}], 'installer'),
+    ({}, [{'kind': 'source', 'name': 'main.py'}], None),
+    ({}, [], None),
+    ({'delivery_type': 'bogus'}, [], None),
+])
+def test_derive_delivery_type(artifacts, items, expected):
+    run = {'artifacts': artifacts}
+    assert derive_delivery_type(run, items) == expected
+
+
+def test_listing_returns_delivery_type_and_installer_targets(app_env):
+    client, store, svc, repo = app_env
+    from tests.test_control_app import login, project
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    run, _ = store.create_run(pid, 'cli delivery', source={'type': 'test'})
+    store.update(run['id'], {'status': 'needs_human', 'artifacts': {'delivery_type': 'cli'}})
+    response = client.get(f"/api/v3/runs/{run['id']}/deliverables")
+    assert response.status_code == 200
+    data = response.json()
+    assert data['delivery_type'] == 'cli'
+    assert data['installer_targets'] is None
+
+
+def test_listing_returns_installer_targets_when_declared(app_env):
+    client, store, svc, repo = app_env
+    from tests.test_control_app import login, project
+    headers = login(client)
+    pid = project(client, repo, headers)['id']
+    run, _ = store.create_run(pid, 'installer delivery', source={'type': 'test'})
+    store.update(run['id'], {'status': 'needs_human', 'artifacts': {'delivery_type': 'installer', 'installer_targets': ['macOS', 'Windows']}})
+    response = client.get(f"/api/v3/runs/{run['id']}/deliverables")
+    assert response.status_code == 200
+    data = response.json()
+    assert data['delivery_type'] == 'installer'
+    assert data['installer_targets'] == ['macOS', 'Windows']
 
 
 def test_snapshot_source_installer_and_web_excludes_secrets_and_symlinks(delivery):

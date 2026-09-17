@@ -10,10 +10,17 @@ import OperationResults from '../workbench/OperationResults'
 import RequirementConfirmation from '../workbench/RequirementConfirmation'
 import './conversation.css'
 
+type DeliveryType = 'service' | 'cli' | 'installer' | null
 type Deliverable = { id: string | number; name: string; kind?: string; size?: number; preview?: boolean }
-type DeliverList = { items?: Deliverable[]; saved?: boolean; collection_error?: string; recommended_preview_id?: string | number | null; can_collect?: boolean; repository_url?: string | null }
+type DeliverList = { items?: Deliverable[]; saved?: boolean; collection_error?: string; recommended_preview_id?: string | number | null; can_collect?: boolean; repository_url?: string | null; delivery_type?: DeliveryType; installer_targets?: string[] | null }
 type LedgerItem = { id: string; text: string; status: string; evidence?: string }
 type Ledger = { total?: number; counts?: { pass?: number; fail?: number; unverified?: number }; items?: LedgerItem[] }
+
+const DELIVERY_TYPE_LABEL: Record<string, string> = {
+  service: '线上服务',
+  cli: '命令行工具',
+  installer: '安装包',
+}
 
 function sizeLabel(bytes?: number): string {
   if (!bytes && bytes !== 0) return ''
@@ -263,13 +270,16 @@ function ProductCard({ run, title, rid, ledger, csrfToken, onUnauthorized, isAdm
     try { await request(`${base}/collect`, { method: 'POST', csrfToken, onUnauthorized }); setRefresh(value => value + 1) }
     catch (cause) { setError(errorText(cause)) } finally { setBusy(false) }
   }
+  const deliveryType: DeliveryType = deliver?.delivery_type ?? null
+  const typeLabel = deliveryType ? DELIVERY_TYPE_LABEL[deliveryType] || deliveryType : null
   return <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">w</span>webuddy</div><div className="cv-msg-body">
     {run.status === 'published' ? '本次任务已发布。' : '本次任务已完成，可查看成果与验证记录。'}
-    <div className="cv-artifact" style={{ marginTop: 10 }}><div className="cv-artifact-head"><Icon name="delivery" width={17} height={17} />{title}</div><div className="cv-artifact-foot">
+    <div className="cv-artifact" style={{ marginTop: 10 }}><div className="cv-artifact-head"><Icon name="delivery" width={17} height={17} />{title}{typeLabel && <span className="cv-tag">{typeLabel}</span>}</div><div className="cv-artifact-foot">
       {deliver?.saved && previewId != null && <button className="cv-btn cv-btn-primary" disabled={busy} onClick={() => void openPreview()}>预览成果</button>}
       {deliver?.saved && <a className="cv-btn cv-btn-secondary" href={`${base}/download`}><Icon name="download" width={15} height={15} />下载全部成果 ZIP</a>}
       {!deliver?.saved && deliver?.can_collect && isAdmin && <button className="cv-btn cv-btn-secondary" disabled={busy} onClick={() => void collect()}>保存成果后下载</button>}
     </div></div>
+    <DeliverySection deliveryType={deliveryType} installerTargets={deliver?.installer_targets ?? null} run={run} />
     {!deliver && !error && <p role="status">正在读取成果…</p>}
     {error && <div role="alert">{error}<button className="cv-btn" onClick={() => setRefresh(value => value + 1)}>重试读取成果</button></div>}
     {deliver && !deliver.saved && <p>{deliver.collection_error || (isAdmin ? '成果尚未归档。' : '请管理员保存成果后再下载。')}</p>}
@@ -277,6 +287,44 @@ function ProductCard({ run, title, rid, ledger, csrfToken, onUnauthorized, isAdm
     {deliver?.saved && items.length > 0 && <details className="cv-collapse"><summary>全部文件 · {items.length}</summary>{items.map(item => <div className="cv-file" key={item.id}><div className="cv-file-meta"><strong>{item.name}</strong><small>{sizeLabel(item.size)}</small></div><a className="cv-btn cv-btn-secondary" href={`${base}/files/${item.id}`}>下载</a></div>)}</details>}
     <VerificationDrawer run={run} ledger={ledger} />
   </div></div>
+}
+
+/** Shows delivery-type-specific deployment status.
+ *  - service: shows normal deployment status from run artifacts
+ *  - cli: deployment is not applicable, rendered as neutral "不适用"
+ *  - installer: shows target platforms or "待确认" when not yet selected
+ *  - null (undeclared): shown as "未声明" for backward compatibility */
+function DeliverySection({ deliveryType, installerTargets, run }: { deliveryType: DeliveryType; installerTargets: string[] | null; run: Run }) {
+  const deployed = run.status === 'published'
+  if (deliveryType === 'cli') {
+    return <div className="cv-delivery-section" data-delivery-type="cli">
+      <div className="cv-delivery-row"><span>部署</span><span className="cv-delivery-na">不适用</span></div>
+      <p className="cv-delivery-hint">命令行工具通过下载使用，无需在线部署。</p>
+    </div>
+  }
+  if (deliveryType === 'installer') {
+    return <div className="cv-delivery-section" data-delivery-type="installer">
+      <div className="cv-delivery-row"><span>安装目标</span>
+        {installerTargets && installerTargets.length > 0
+          ? <span className="cv-delivery-ok">{installerTargets.join('、')}</span>
+          : <span className="cv-delivery-pending">待确认</span>}
+      </div>
+      {!installerTargets && <p className="cv-delivery-hint">尚未选定目标系统，安装包构建暂不可用。</p>}
+    </div>
+  }
+  if (deliveryType === 'service') {
+    return <div className="cv-delivery-section" data-delivery-type="service">
+      <div className="cv-delivery-row"><span>部署</span>
+        {deployed
+          ? <span className="cv-delivery-ok">已部署</span>
+          : <span className="cv-delivery-pending">待部署</span>}
+      </div>
+    </div>
+  }
+  // Undeclared / legacy: show neutral state, never mark as failed
+  return <div className="cv-delivery-section" data-delivery-type="undeclared">
+    <div className="cv-delivery-row"><span>交付类型</span><span className="cv-delivery-undeclared">未声明</span></div>
+  </div>
 }
 
 function VerificationDrawer({ run, ledger }: { run: Run; ledger: Ledger | null }) {
