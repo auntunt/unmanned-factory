@@ -1,0 +1,41 @@
+{
+  "schema": "webuddy.capability-pack/v1",
+  "name": "CSV 工程量清单 → XML",
+  "purpose": "把 UTF-8 的工程量清单 CSV（编号/名称/单位/数量/单价）转换为结构化 XML，金额用 Decimal 计算并保留两位。缺列、重复编号、非法数值一律拒绝，不猜测列序，不补零。",
+  "tool": {
+    "name": "csv_quote_xml",
+    "entrypoint": "tool/main.py",
+    "runtime": "python3",
+    "timeout_seconds": 30,
+    "input_schema": {
+      "type": "object",
+      "required": ["input_dir", "output_dir", "inputs"],
+      "properties": {
+        "input_dir": {"type": "string"},
+        "output_dir": {"type": "string"},
+        "inputs": {"type": "array"},
+        "options": {"type": "object"}
+      }
+    },
+    "output_schema": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string"},
+        "outputs": {"type": "array"},
+        "result": {"type": "object"},
+        "diagnostics": {"type": "array"},
+        "error_code": {"type": "string"}
+      }
+    },
+    "permissions": {"network": false, "max_input_bytes": 4194304, "max_output_bytes": 8388608}
+  },
+  "dependency_lock": {"python": "3", "packages": []},
+  "support_matrix": [
+    {"format": "UTF-8 CSV，表头含 编号/名称/单位/数量/单价", "status": "supported", "evidence": "fixtures/sample_quote.csv 逐字节比对 fixtures/expected_quote.xml"},
+    {"format": "缺少必需列的 CSV", "status": "supported", "evidence": "返回 bad_header，不产出 XML"},
+    {"format": "GBK 等非 UTF-8 编码", "status": "unsupported", "evidence": "返回 not_utf8；尚无转码样本"},
+    {"format": "Excel（.xlsx）清单", "status": "unsupported", "evidence": "本版本不解析 xlsx"}
+  ],
+  "evaluation_policy": {"test_set": "fixtures/tests.json", "required": true}
+}

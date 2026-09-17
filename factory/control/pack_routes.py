@@ -1,0 +1,298 @@
+"""Authenticated API for the capability-pack lifecycle.
+
+Prefix `/api/v4/capability-packs`, chosen after checking the existing routes: `/api/v3/
+capabilities` is the distilled-method library and stays untouched, and this is a different
+entity — a versioned, executable capability.
+
+Every state change that matters is decided here on the server: who may maintain a pack,
+whether the candidate is still the one that was validated, whether an evaluation passed,
+which version a task freezes, and whether the caller owns the file being read. The client
+never supplies the actor, the provider, or another user's artifact id and gets away with it.
+"""
+from __future__ import annotations
+
+import json
+import re
+import uuid
+import zipfile
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+
+from factory.control.capability_packs import MAX_ARTIFACT_BYTES, PackStore
+from factory.control.pack_runtime import environment_report, evaluate, run_tool
+from factory.control.store import Conflict, now
+
+KEY = r'^[A-Za-z0-9_-]{8,100}$'
+
+
+class Body(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+
+class Selection(Body):
+    name: StrictStr = Field(min_length=1, max_length=255)
+    material_scope: StrictStr | None = Field(default=None, pattern='^(synthetic|licensed)$')
+
+
+class DraftFromTask(Body):
+    source_run_id: StrictStr = Field(min_length=1, max_length=200)
+    selections: list[Selection] = Field(min_length=1, max_length=200)
+    operation_key: StrictStr = Field(pattern=KEY)
+
+
+class DraftFile(Body):
+    path: StrictStr = Field(min_length=1, max_length=255)
+    content: StrictStr = Field(max_length=2_000_000)
+    role: StrictStr = Field(default='program', pattern='^(program|fixture)$')
+    material_scope: StrictStr | None = Field(default=None, pattern='^(synthetic|licensed)$')
+
+
+class DraftUpdate(Body):
+    expected_revision: StrictInt = Field(ge=1)
+    files: list[DraftFile] = Field(min_length=1, max_length=200)
+
+
+class RunEvaluation(Body):
+    expected_revision: StrictInt = Field(ge=1)
+    operation_key: StrictStr = Field(pattern=KEY)
+
+
+class Publish(Body):
+    expected_revision: StrictInt = Field(ge=1)
+    evaluation_id: StrictStr = Field(min_length=8, max_length=64)
+    operation_key: StrictStr = Field(pattern=KEY)
+
+
+class BindVersion(Body):
+    agent_id: StrictStr = Field(min_length=1, max_length=200)
+    version_id: StrictStr = Field(min_length=8, max_length=64)
+    expected_revision: StrictInt = Field(ge=0)
+
+
+def router(store, service):
+    api = APIRouter(prefix='/api/v4/capability-packs')
+    packs = PackStore(store)
+
+    def actor(request: Request):
+        return request.state.user
+
+    def guarded(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Conflict:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from None
+        except KeyError:
+            raise HTTPException(404, '记录不存在') from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    def run_items(rid, request):
+        """Development output for a run: its saved, immutable deliverables. Access is
+        checked against the run's project, so a pack can never be cut from someone
+        else's task."""
+        run = guarded(store.get, rid)
+        if service.governance:
+            guarded(service.governance.require_project, actor(request)['id'], run['project_id'])
+        sha = (run.get('artifacts') or {}).get('commit', '')
+        if not (isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha)):
+            raise HTTPException(409, '该任务还没有保存成果，无法沉淀为职能包。')
+        base = Path(store.path).parent / 'deliverables' / rid / sha
+        if not (base / 'manifest.json').is_file():
+            raise HTTPException(409, '该任务还没有保存成果，请先保存成果再沉淀能力。')
+        manifest = json.loads((base / 'manifest.json').read_text())
+        items = []
+        with zipfile.ZipFile(base / 'files.zip') as archive:
+            for item in manifest['items']:
+                if item['size'] > 2 * 1024 * 1024:
+                    items.append({**item, 'content': b''})
+                    continue
+                items.append({**item, 'content': archive.read(item['name'])})
+        return items
+
+    # ---- catalogue ---------------------------------------------------------
+    @api.get('')
+    def list_packs(request: Request):
+        rows = packs.list()
+        uid = str(actor(request)['id'])
+        admin = actor(request).get('role') == 'admin'
+        # Unpublished candidates are only visible to their maintainer; a published pack is
+        # visible to the workspace (publishing is an internal registration, not a deploy).
+        return {'packs': [p for p in rows if p.get('published_version') or p['owner_id'] == uid or admin]}
+
+    @api.get('/{pack_id}')
+    def read_pack(pack_id: str, request: Request):
+        detail = guarded(packs.get, pack_id)
+        uid, admin = str(actor(request)['id']), actor(request).get('role') == 'admin'
+        maintainer = detail['owner_id'] == uid or admin
+        if not maintainer and not detail.get('versions'):
+            raise HTTPException(403, '无权查看该职能包')
+        if not maintainer:
+            detail = {**detail, 'draft': None}
+        return {**detail, 'can_maintain': maintainer}
+
+    @api.get('/{pack_id}/files/{path:path}')
+    def read_file(pack_id: str, path: str, request: Request, version_id: str | None = None):
+        detail = guarded(packs.get, pack_id)
+        if detail['owner_id'] != str(actor(request)['id']) and actor(request).get('role') != 'admin':
+            raise HTTPException(403, '无权查看该职能包内容')
+        files = guarded(packs.files, pack_id=pack_id, version_id=version_id)
+        if path not in files:
+            raise HTTPException(404, '文件不存在')
+        return Response(files[path], media_type='text/plain; charset=utf-8',
+                        headers={'X-Content-Type-Options': 'nosniff'})
+
+    # ---- candidate ---------------------------------------------------------
+    @api.post('/drafts', status_code=201)
+    def create_draft(body: DraftFromTask, request: Request):
+        items = run_items(body.source_run_id, request)
+        return guarded(packs.create_draft,
+                       source={'kind': 'run', 'id': body.source_run_id, 'items': items},
+                       selections=[s.model_dump() for s in body.selections],
+                       actor=actor(request), operation_key=body.operation_key)
+
+    @api.put('/{pack_id}/draft')
+    def update_draft(pack_id: str, body: DraftUpdate, request: Request):
+        return guarded(packs.update_draft, pack_id, expected_revision=body.expected_revision,
+                       files=[{**f.model_dump(), 'content': f.content.encode()} for f in body.files],
+                       actor=actor(request))
+
+    # ---- evaluation --------------------------------------------------------
+    @api.post('/{pack_id}/evaluations', status_code=202)
+    def start_evaluation(pack_id: str, body: RunEvaluation, request: Request):
+        detail = guarded(packs.get, pack_id)
+        if detail['owner_id'] != str(actor(request)['id']) and actor(request).get('role') != 'admin':
+            raise HTTPException(403, '只有能力维护者可以运行验证')
+        draft = guarded(packs.draft, pack_id)
+        if int(draft['revision']) != int(body.expected_revision):
+            raise Conflict('候选内容已被更新，请刷新后重新运行验证')
+        if not draft.get('manifest'):
+            raise HTTPException(409, draft.get('blocked_reason') or '工具契约不完整，无法验证')
+        files = guarded(packs.files, pack_id=pack_id)
+        digest, who = draft['content_digest'], actor(request)
+
+        def job(cancel):
+            report = evaluate(draft, files)
+            if cancel.is_set():
+                return {'status': 'cancelled'}
+            record = packs.save_evaluation(pack_id, content_digest_value=digest, report=report,
+                                           actor=who, operation_key=body.operation_key)
+            return {'evaluation_id': record['id'], 'passed': record['passed'], 'summary': record['summary']}
+
+        started = service.start_maintenance(job, conversation_id=f'pack-eval:{pack_id}',
+                                            actor_id=who['id'])
+        return {'job_id': started['id'], 'status': started['status'], 'content_digest': digest}
+
+    @api.get('/jobs/{job_id}')
+    def evaluation_job(job_id: str, request: Request):
+        job = guarded(service.maintenance_status, job_id)
+        if str(job.get('actor_id')) != str(actor(request)['id']) and actor(request).get('role') != 'admin':
+            raise HTTPException(403, '无权查看该作业')
+        return job
+
+    # ---- publish -----------------------------------------------------------
+    @api.post('/{pack_id}/versions', status_code=201)
+    def publish(pack_id: str, body: Publish, request: Request):
+        version = guarded(packs.publish, pack_id, expected_revision=body.expected_revision,
+                          evaluation_id=body.evaluation_id, actor=actor(request),
+                          operation_key=body.operation_key)
+        # An availability check is recorded immediately, but it is a separate state:
+        # `published` never implies the dependencies exist on this host.
+        guarded(packs.record_env_check, version['id'], environment_report(version['manifest']))
+        return version
+
+    @api.post('/versions/{version_id}/environment-check')
+    def check_environment(version_id: str, request: Request):
+        version = guarded(packs.version, version_id)
+        return guarded(packs.record_env_check, version_id, environment_report(version['manifest']))
+
+    # ---- binding -----------------------------------------------------------
+    @api.get('/bindings/{agent_id}')
+    def agent_bindings(agent_id: str):
+        return {'bindings': packs.bindings(agent_id)}
+
+    @api.post('/bindings', status_code=201)
+    def bind(body: BindVersion, request: Request):
+        return guarded(packs.bind, body.agent_id, body.version_id,
+                       expected_revision=body.expected_revision, actor=actor(request))
+
+    @api.delete('/bindings/{agent_id}/{pack_id}')
+    def unbind(agent_id: str, pack_id: str, request: Request):
+        return guarded(packs.unbind, agent_id, pack_id, actor=actor(request))
+
+    # ---- invocation --------------------------------------------------------
+    @api.post('/invocations', status_code=202)
+    def invoke(request: Request, agent_id: str = Form(...), pack_id: str = Form(...),
+               operation_key: str = Form(...), file: UploadFile = File(...)):
+        if not re.fullmatch(KEY, operation_key or ''):
+            raise HTTPException(422, '操作键格式不合法')
+        raw = file.file.read(MAX_ARTIFACT_BYTES + 1)
+        if len(raw) > MAX_ARTIFACT_BYTES:
+            raise HTTPException(413, '文件超过 16 MB 上限')
+        who = actor(request)
+        artifact = guarded(packs.put_artifact, actor_id=who['id'], name=file.filename or 'input.bin',
+                           content=raw, role='input', validation_status='not_applicable', dedupe=True)
+        task = guarded(packs.create_task, actor=who, agent_id=agent_id, pack_id=pack_id,
+                       input_artifact_ids=[artifact['id']], operation_key=operation_key)
+        if task.get('idempotent_replay'):
+            return packs.task(task['id'], actor=who)
+        version = guarded(packs.version, task['snapshot']['version_id'])
+        files = guarded(packs.files, version_id=version['id'])
+        inputs = [{'name': artifact['name'], 'content': raw, 'sha256': artifact['sha256']}]
+
+        def job(cancel):
+            packs.update_task(task['id'], {'status': 'running'}, event=('task.running', {}), expected=('queued',))
+            if cancel.is_set():
+                packs.update_task(task['id'], {'status': 'cancelled', 'error_code': 'cancelled'},
+                                  event=('task.cancelled', {}))
+                return {'status': 'cancelled'}
+            outcome = run_tool(version, files, inputs)
+            saved = [packs.put_artifact(actor_id=who['id'], name=out['name'], content=out['content'],
+                                        role='output', task_id=task['id'], kind=out['kind'],
+                                        validation_status=outcome['validation_status'])
+                     for out in outcome['outputs']]
+            packs.update_task(task['id'], {
+                'status': outcome['status'], 'outputs': saved, 'error_code': outcome.get('error_code'),
+                'error': outcome.get('error'), 'result': outcome.get('result'),
+                'diagnostics': outcome.get('diagnostics', []), 'evidence': outcome['evidence'],
+                'validation_status': outcome['validation_status'], 'duration_ms': outcome.get('duration_ms')},
+                event=('task.' + outcome['status'], {'error_code': outcome.get('error_code'),
+                                                     'outputs': [a['id'] for a in saved]}))
+            return {'task_id': task['id'], 'status': outcome['status']}
+
+        service.start_maintenance(job, conversation_id=f'pack-task:{task["id"]}', actor_id=who['id'])
+        return packs.task(task['id'], actor=who)
+
+    @api.get('/invocations')
+    def list_invocations(request: Request):
+        return {'tasks': packs.tasks_for(actor(request))}
+
+    @api.get('/invocations/{task_id}')
+    def read_invocation(task_id: str, request: Request):
+        return guarded(packs.task, task_id, actor=actor(request))
+
+    @api.get('/invocations/{task_id}/events')
+    def invocation_events(task_id: str, request: Request, cursor: int = 0):
+        return guarded(packs.task_events, task_id, cursor=cursor, actor=actor(request))
+
+    @api.get('/artifacts/{artifact_id}/download')
+    def download_artifact(artifact_id: str, request: Request):
+        body, content = guarded(packs.artifact, artifact_id, actor=actor(request), with_content=True)
+        # A Chinese filename must survive the header: latin-1 only in `filename`, the real
+        # name in RFC 5987 `filename*`. Encoding the raw name would raise and lose the file.
+        name = body['name'].replace('"', '')
+        ascii_name = name.encode('ascii', 'replace').decode('ascii')
+        quoted = quote(name, safe='')
+        return Response(content, media_type='application/octet-stream', headers={
+            'Content-Disposition': f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}',
+            'X-Content-Type-Options': 'nosniff',
+            # The label travels with the file: a candidate output that failed validation is
+            # downloadable, but never presented as verified.
+            'X-Validation-Status': body['validation_status']})
+
+    return api

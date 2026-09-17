@@ -144,6 +144,8 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(deliverables_router(store, svc))
     from factory.control.agent_routes import router as agent_router
     app.include_router(agent_router(store, svc))
+    from factory.control.pack_routes import router as pack_router
+    app.include_router(pack_router(store, svc))
 
     @app.exception_handler(AuthError)
     async def auth_error(req, exc):

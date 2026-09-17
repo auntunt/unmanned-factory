@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "id": "标准清单转换",
+      "inputs": ["fixtures/sample_quote.csv"],
+      "options": {"project_name": "示范工程"},
+      "expect": {
+        "equals": {"quote.xml": "fixtures/expected_quote.xml"},
+        "result": {"item_count": 3, "total": "18920.70"}
+      }
+    },
+    {
+      "id": "缺列必须拒绝而不是猜测",
+      "inputs": ["fixtures/missing_column.csv"],
+      "expect": {"error_code": "bad_header"}
+    }
+  ]
+}

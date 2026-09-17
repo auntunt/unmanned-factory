@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Quote project="示范工程" total="18920.70" itemCount="3">
+  <Item code="A-001" unit="m3" quantity="12.5" unitPrice="486.20" amount="6077.50">现浇混凝土 C30</Item>
+  <Item code="A-002" unit="t" quantity="0.86" unitPrice="4120.00" amount="3543.20">钢筋 HRB400</Item>
+  <Item code="B-010" unit="m2" quantity="240" unitPrice="38.75" amount="9300.00">模板安装</Item>
+</Quote>
