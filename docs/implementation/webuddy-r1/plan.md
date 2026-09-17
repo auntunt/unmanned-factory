@@ -1,0 +1,24 @@
+# webuddy-r1 批次计划（2026-09-17）
+
+规划/监工：Fable 5（宿主报告 model=claude-fable-5）。执行：经宿主 Agent 工具派发 model=sonnet 的子任务（宿主支持模型指定，非角色扮演）。独立验收：Codex（外部，本批次不代写其结论）。
+
+基线：工作区 `/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`，本地分支 `v3-conversation-workspace`，HEAD `f81622a`，与 `origin/codex/autonomous-factory-v3` 同步，无未提交改动。生产 `4c56632`。S0（职能包复核轮次 2）已收尾并推送，待 Codex Linux 复验。
+
+## 已实现 / 需修复 / 缺证据 / 未实现（首查快照）
+
+- 已实现（需按单补证据）：统一 AppShell 五区页面；run 生命周期 clarify/continue/approve/retry/cancel/discard（run_lifecycle.py）；GitHub 发布含回执（github_publication.py）；部署目标+SSH 远端执行与证据采集（deploy_targets.py / remote_targets.py）；职能包生命周期与 CapabilityPanel（f81622a）；StartChat 服务端分流（/api/v4/route）。
+- 需修复（已确认）：S2 缺口——run 处于 ACTIVE 时 follow-up 只存 user.message（applied=false），响应要求用户"再次提交"（run_routes.py 约 176-180 行）；违反 V1-05。
+- 缺证据：V1-01～04 真实链路（一句需求→开发→测试→GitHub→固定测试地址→同任务修改→同地址更新）本地段的端到端证据；线上段归 Codex。
+- 未实现/未查实：S3 通用 CLI 挂靠的去 MFD 专属化程度；S4 交付类型区分（V1-06）与页面收口细节。F01～F06 明确不做。
+
+## 任务队列（每单一条用户路径）
+
+| ID | 阶段 | 内容 | 状态 |
+|---|---|---|---|
+| T01 | S1 | 真实链路探针：核验交付主线现状并列首个断点（不改产品代码） | ready |
+| T02 | S1 | 修 T01 发现的首个断点（内容待 T01 回执后定义） | planned |
+| T03 | S2 | 运行中补充→耐久待应用→安全点消费→已应用回执（V1-05/09） | planned |
+| T04 | S3 | 通用 CLI 工具复用与去 MFD 专属文案（V1-07/08） | planned |
+| T05 | S4 | 交付类型区分与界面收口（V1-06/10） | planned |
+
+范围锁定沿用 UIUX-1.0；页面编号见 page-contracts.md；不新增一级入口。
