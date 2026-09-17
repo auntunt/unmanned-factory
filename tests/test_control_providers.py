@@ -73,6 +73,41 @@ def test_worker_env_removes_desktop_control_channels_but_keeps_codex_home_and_pr
     assert env["OPENAI_API_KEY"] == "provider-auth"
 
 
+def test_worker_env_strips_claude_code_host_session_vars_but_keeps_provider_auth(monkeypatch):
+    """Inherited CLAUDE_CODE_* session vars cause the bundled CLI to attempt
+    host-auth-refresh through the parent session's messaging socket instead
+    of falling back to ANTHROPIC_AUTH_TOKEN, resulting in 'Not logged in'
+    even when valid credentials exist."""
+    from factory.control.providers import _worker_env
+
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/parent.sock")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "host-msg-token")
+    monkeypatch.setenv("CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH", "true")
+    monkeypatch.setenv("CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH", "true")
+    monkeypatch.setenv("CLAUDE_CODE_HOST_SESSION_ID", "host-session-123")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "child-session-456")
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "true")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "sdk")
+    # Provider credentials must survive.
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "valid-provider-auth")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-api-key")
+
+    env = _worker_env()
+
+    # Host-session channels must be removed.
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" not in env
+    assert "CLAUDE_CODE_MESSAGING_TOKEN" not in env
+    assert "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH" not in env
+    assert "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH" not in env
+    assert "CLAUDE_CODE_HOST_SESSION_ID" not in env
+    assert "CLAUDE_CODE_SESSION_ID" not in env
+    assert "CLAUDE_CODE_CHILD_SESSION" not in env
+    assert "CLAUDE_CODE_ENTRYPOINT" not in env
+    # Provider credentials must be preserved.
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "valid-provider-auth"
+    assert env["ANTHROPIC_API_KEY"] == "valid-api-key"
+
+
 def test_parent_reads_jsonl_and_keeps_request_out_of_shell(tmp_path):
     python, script = _worker(
         tmp_path,
@@ -543,6 +578,11 @@ def test_claude_pretool_hook_gates_auto_approved_paths(monkeypatch, tmp_path):
     assert 'mcp__project__run_command' in captured['allowed_tools']
     assert 'mcp__project__browser_open' in captured['allowed_tools']
     assert captured['permission_mode'] == 'acceptEdits'
+    # An empty setting_sources list produces --setting-sources= which strips
+    # credential sources from the CLI, causing "Not logged in" even when
+    # ANTHROPIC_AUTH_TOKEN is in the environment.  The user source must be
+    # present so the CLI can resolve credentials.
+    assert captured['setting_sources'] == ['user']
     assert captured['system_prompt']['preset'] == 'claude_code'
     assert 'current working directory supplied by the runtime' in captured['system_prompt']['append']
     assert str(tmp_path) not in captured['system_prompt']['append']

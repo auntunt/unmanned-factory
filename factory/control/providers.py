@@ -199,6 +199,33 @@ _DESKTOP_CODEX_ENV_KEYS = {
     "CODEX_THREAD_ID",
     "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
 }
+# Claude Code host-session channels: messaging socket, session tokens, and
+# feature flags bound to the parent Claude Code process.  When inherited by
+# the SDK worker, the bundled CLI attempts host-auth-refresh through the
+# parent session's socket instead of falling back to ANTHROPIC_AUTH_TOKEN or
+# credential files, causing "Not logged in" even when valid credentials
+# exist in the environment.
+_HOST_CLAUDE_CODE_ENV_KEYS = {
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_DESKTOP_APP_VERSION",
+    "CLAUDE_CODE_DISABLE_CRON",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    "CLAUDE_CODE_EAGER_FLUSH",
+    "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES",
+    "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    "CLAUDE_CODE_REPORT_FINDINGS",
+    "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+    "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+}
 
 Emit = Callable[[str, dict[str, Any]], None]
 _MAX_JSONL_LINE = 1_048_576
@@ -569,8 +596,11 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         "permission_mode": "default" if req.read_only else "acceptEdits",
         "can_use_tool": can_use_tool,
         "hooks": {"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use])]},
-        # Ignore ambient user/project settings and MCP/plugin configuration.
-        "setting_sources": [],
+        # Load user settings for credential resolution while blocking ambient
+        # project MCP/plugin configuration.  An empty list (`[]`) produces
+        # `--setting-sources=` which strips credential sources and causes
+        # "Not logged in" even when ANTHROPIC_AUTH_TOKEN is in the environment.
+        "setting_sources": ["user"],
         "strict_mcp_config": True,
         # The default Claude Code prompt contains machine-specific sections,
         # and using an append otherwise disables its snapshot.  Keep the
@@ -658,7 +688,7 @@ def _run_claude(req: ProviderRequest, emit: Emit) -> ProviderResult:
         'project_tools': options_kwargs.get('allowed_tools', []),
         'permission_mode': options_kwargs['permission_mode'],
         'read_only': req.read_only,
-        'research_agent': researcher_available, 'setting_sources': [],
+        'research_agent': researcher_available, 'setting_sources': ['user'],
         'terminal_lifetime': 'sdk_execution' if terminal_enabled else None,
         'max_buffer_size': _CLAUDE_MAX_BUFFER_SIZE,
         'prompt_cache': {
@@ -1366,7 +1396,7 @@ def _worker_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in list(env):
         upper = key.upper()
-        if key in _STRIPPED_ENV_KEYS or key in _DESKTOP_CODEX_ENV_KEYS or (
+        if key in _STRIPPED_ENV_KEYS or key in _DESKTOP_CODEX_ENV_KEYS or key in _HOST_CLAUDE_CODE_ENV_KEYS or (
             upper.startswith("FACTORY_")
             and any(word in upper for word in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"))
         ):
