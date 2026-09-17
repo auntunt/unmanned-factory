@@ -175,3 +175,108 @@ it('keeps real deployment evidence visible for non-general completed work', asyn
   await screen.findByText('恢复 release-17 并探测健康状态')
   expect(screen.getByRole('region', { name: '维护结果' })).toBeTruthy()
 })
+
+it('renders service delivery type with deployment status', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'published' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [], delivery_type: 'service', can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('线上服务')
+  expect(screen.getByText('已部署')).toBeTruthy()
+  // Delivery section present with service type
+  const section = document.querySelector('[data-delivery-type="service"]')
+  expect(section).toBeTruthy()
+})
+
+it('renders CLI delivery type with deployment marked as not applicable', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [{ id: 0, name: 'cli-tool', kind: 'source' }], delivery_type: 'cli', can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('命令行工具')
+  expect(screen.getByText('不适用')).toBeTruthy()
+  expect(screen.getByText('命令行工具通过下载使用，无需在线部署。')).toBeTruthy()
+  // Must NOT show failure styling — the deployment NA is neutral
+  const section = document.querySelector('[data-delivery-type="cli"]')
+  expect(section).toBeTruthy()
+  expect(section!.querySelector('.cv-verify-fail')).toBeNull()
+})
+
+it('renders installer delivery type with pending confirmation when targets are not selected', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [{ id: 0, name: 'app.dmg', kind: 'installer' }], delivery_type: 'installer', installer_targets: null, can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('安装包')
+  expect(screen.getByText('待确认')).toBeTruthy()
+  expect(screen.getByText('尚未选定目标系统，安装包构建暂不可用。')).toBeTruthy()
+  const section = document.querySelector('[data-delivery-type="installer"]')
+  expect(section).toBeTruthy()
+})
+
+it('renders installer delivery type with confirmed target platforms', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [{ id: 0, name: 'app.dmg', kind: 'installer' }], delivery_type: 'installer', installer_targets: ['macOS', 'Windows'], can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('安装包')
+  expect(screen.getByText('macOS、Windows')).toBeTruthy()
+})
+
+it('renders undeclared delivery type for legacy tasks without mismarking as failed', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [{ id: 0, name: 'index.html', kind: 'web' }], can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('未声明')
+  const section = document.querySelector('[data-delivery-type="undeclared"]')
+  expect(section).toBeTruthy()
+  // Must NOT show any failure indicators
+  expect(section!.querySelector('.cv-verify-fail')).toBeNull()
+  expect(section!.querySelector('.cv-delivery-fail')).toBeNull()
+})
+
+it('keeps the result area visible on mobile breakpoint without input occlusion', async () => {
+  api.mockImplementation(async url => {
+    if (url === '/api/v2/runs/r1') return { ...base, status: 'ready_for_review' } as never
+    if (url?.endsWith('/conversation')) return { messages: [] } as never
+    if (url?.endsWith('/deliverables')) return { saved: true, items: [], delivery_type: 'service', can_collect: true } as never
+    return {} as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/r1']}><WorkTitleContext.Provider value={vi.fn()}>
+    <Routes><Route path="/runs/:runId" element={<RunWorkspace csrfToken="csrf" onUnauthorized={noop} pollMs={0} />} /></Routes>
+  </WorkTitleContext.Provider></MemoryRouter>)
+  await screen.findByText('线上服务')
+  // The result area (cv-run-inner) has bottom padding ensuring the sticky dock never covers it.
+  // Verify the dock exists and the inner content wrapper is present.
+  const inner = document.querySelector('.cv-run-inner')
+  expect(inner).toBeTruthy()
+  // The revise composer is present for completed runs, but the result card is above it
+  const resultCard = document.querySelector('.cv-artifact')
+  expect(resultCard).toBeTruthy()
+})

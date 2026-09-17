@@ -313,6 +313,15 @@
 .cv-result-head { display:flex; gap:8px; align-items:center; justify-content:space-between; }
 .cv-result-reason { margin:0; color:var(--cv-muted); font-size:13px; overflow-wrap:anywhere; }
 
+/* Delivery type section in product card */
+.cv-delivery-section { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--cv-border); border-radius: 10px; background: var(--cv-surface); }
+.cv-delivery-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.cv-delivery-na { color: var(--cv-faint); font-weight: 500; }
+.cv-delivery-ok { color: var(--cv-accent); font-weight: 600; }
+.cv-delivery-pending { color: var(--cv-warning); font-weight: 600; }
+.cv-delivery-undeclared { color: var(--cv-faint); font-weight: 500; }
+.cv-delivery-hint { margin: 6px 0 0; color: var(--cv-muted); font-size: 12px; }
+
 /* Follow-up badges on user messages submitted during active execution. */
 .cv-followup-badge { display:inline-block; margin-top:4px; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:600; line-height:1.6; }
 .cv-followup-badge.is-pending { color:var(--cv-warning); background:var(--cv-warning-bg, color-mix(in srgb, var(--cv-warning) 12%, transparent)); }
