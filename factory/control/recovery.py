@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from factory.control.autonomy import all_events
 from factory.control.execution import ExecutionError
@@ -155,3 +156,15 @@ def recover(self):
                     {'message': '执行已中断，保留工作区与检查点；核对已发生的写入后可从记录重试，避免重复发布。'}))
         self._ensure_scheduler()
         self.wake.set()
+    # Auto-resume needs_human runs that have unconsumed pending followups.
+    # Runs after _ensure_scheduler so the durable queue and thread pool are
+    # ready to accept _submit.  The requirement_analysis interrupted path
+    # (line 89) sets needs_human but uses budget_resume semantics, not
+    # continue_run; those runs have no plan or resumable artifacts, so
+    # _auto_resume_with_followups correctly skips them.
+    from factory.control.run_lifecycle import _auto_resume_with_followups, _collect_pending_followups
+    log = logging.getLogger(__name__)
+    for run in self.store.all_runs():
+        if run['status'] == 'needs_human' and _collect_pending_followups(self, run['id']):
+            log.info('recover: auto-resuming %s with pending followups', run['id'])
+            _auto_resume_with_followups(self, run['id'])

@@ -377,3 +377,77 @@ def test_auto_resume_skipped_without_resumable_artifacts(app_env):
     assert result is False
     # Run stays at needs_human
     assert store.get(rid)['status'] == 'needs_human'
+
+
+# ---------- Scenario 10: service restart triggers auto-resume via recover() ----------
+
+def test_service_restart_auto_resumes_needs_human_with_pending(app_env):
+    """A run that was interrupted by restart (set to needs_human by
+    store.recover) with unconsumed pending followups is auto-resumed by
+    svc.recover() without any user API call.
+
+    Simulated by: (1) setting run to 'running' as if mid-execution,
+    (2) calling store.recover() to move it to needs_human (same as
+    server restart does), (3) calling svc.recover() which should detect
+    the pending followups and auto-resume.
+
+    Uses: FakeSDK runner (fake).
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    rid, p, pending_ids = _setup_resumable_run(client, store, svc, repo, headers)
+
+    # Simulate a mid-execution crash: put the run into 'running' as if it
+    # was executing when the server died.
+    store.update(rid, {'status': 'running'})
+
+    # store.recover() sets ACTIVE runs to needs_human
+    store.recover()
+    assert store.get(rid)['status'] == 'needs_human'
+
+    # svc.recover() should auto-resume it — no user API call
+    svc.recover()
+
+    # After recover, the run should have left needs_human
+    run = store.get(rid)
+    assert run['status'] != 'needs_human', f'Expected auto-resume but status is {run["status"]}'
+
+    # run.auto_resumed event should exist
+    auto_events = list(store.export_events(rid, kind='run.auto_resumed'))
+    assert len(auto_events) >= 1
+    payload = auto_events[-1]['payload']
+    assert payload['actor'] == 'system/auto'
+    assert set(payload['pending_ids']) == set(pending_ids)
+
+    # followup.applied events should be recorded
+    applied = list(store.export_events(rid, kind='followup.applied'))
+    assert len(applied) == len(pending_ids)
+
+
+def test_service_restart_does_not_resume_requirement_analysis_interrupted(app_env):
+    """The requirement_analysis interrupted path (recovery.py:89) sets
+    needs_human but uses budget_resume semantics; auto-resume correctly
+    skips it because there is no plan or resumable artifacts."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = project(client, repo, headers)
+    rid = client.post('/api/v2/runs', json={
+        'operation': 'general', 'project_id': p['id'], 'request': '做工具'
+    }, headers=headers).json()['id']
+    time.sleep(0.3)
+    with svc.lock:
+        svc.active_jobs.pop(rid, None)
+
+    # Simulate: requirement_analysis was interrupted, now at needs_human
+    # with no plan, no artifacts — just an error message and a pending followup
+    store.update(rid, {'status': 'running', 'revision': 1})
+    client.post(f'/api/v2/runs/{rid}/follow-up', json={'content': '补充'}, headers=headers)
+    store.update(rid, {
+        'status': 'needs_human',
+        'error': '需求分析被重启中断',
+        # No plan, no artifacts — budget_resume semantics
+    })
+
+    result = _auto_resume_with_followups(svc, rid)
+    assert result is False
+    assert store.get(rid)['status'] == 'needs_human'

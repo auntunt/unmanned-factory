@@ -98,8 +98,6 @@ def _auto_resume_with_followups(svc, rid):
         run = svc.store.get(rid)
         if run['status'] != 'needs_human':
             return False
-        if run['status'] == 'cancelled':
-            return False
         collected = _collect_pending_followups(svc, rid)
         if not collected:
             return False
