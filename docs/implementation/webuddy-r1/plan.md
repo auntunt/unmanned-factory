@@ -15,10 +15,11 @@
 
 | ID | 阶段 | 内容 | 状态 |
 |---|---|---|---|
-| T01 | S1 | 真实链路探针：核验交付主线现状并列首个断点（不改产品代码） | ready |
-| T02 | S1 | 修 T01 发现的首个断点（内容待 T01 回执后定义） | planned |
-| T03 | S2 | 运行中补充→耐久待应用→安全点消费→已应用回执（V1-05/09） | planned |
-| T04 | S3 | 通用 CLI 工具复用与去 MFD 专属文案（V1-07/08） | planned |
-| T05 | S4 | 交付类型区分与界面收口（V1-06/10） | planned |
+| T01 | S1 | 真实链路探针 | local_reviewed |
+| T02 | S1 | B1 修复（providers 凭据源）+ 两轮真实穿链 | local_reviewed |
+| T03 | S2 | 干预闭环耐久化 | local_reviewed |
+| T04 | S3 | 通用工具复用 + csv-quote-xml 真实全链 | local_reviewed |
+| T05 | S4 | 交付类型与结果卡收口 | running |
+| T06 | S1 | S03 公司测试环境配置区 | local_reviewed |
 
 范围锁定沿用 UIUX-1.0；页面编号见 page-contracts.md；不新增一级入口。
