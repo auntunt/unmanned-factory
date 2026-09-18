@@ -143,7 +143,7 @@ describe('rejected state', () => {
 describe('removal', () => {
   it('no longer shows the skill after removal', async () => {
     let deleted = false
-    api.mockImplementation(async (url?: string, opts?: { method?: string }) => {
+    api.mockImplementation(async (_url?: string, opts?: { method?: string }) => {
       if (opts?.method === 'DELETE') {
         deleted = true
         return { deleted: true } as never
