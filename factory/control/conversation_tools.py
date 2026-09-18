@@ -15,7 +15,7 @@ from factory.control.admin_config_tools import ADMIN_TOOL_NAMES
 TOOL_NAMES = frozenset(('mcp__session__calc', 'mcp__session__export')) | ADMIN_TOOL_NAMES
 
 
-def binding_for(store, cid, actor_id, *, actor_role=None) -> dict:
+def binding_for(store, cid, actor_id, *, actor_role=None, admin_config=False) -> dict:
     """Server-generated, serializable binding config for crossing the process
     boundary to the SDK worker. It carries ONLY the on-disk store path plus the
     conversation and actor the server already authorized; the model never supplies
@@ -28,15 +28,17 @@ def binding_for(store, cid, actor_id, *, actor_role=None) -> dict:
     # check compares by equality, so coercing to str would break it. All three
     # values are JSON-serializable and survive the JSONL round-trip unchanged.
     return {'db_path': str(store.path), 'conversation_id': cid, 'actor_id': actor_id,
-            'actor_role': actor_role or 'member'}
+            'actor_role': actor_role or 'member',
+            'admin_config': bool(admin_config)}
 
 
 class ConversationTools:
-    def __init__(self, store, cid, actor_id, *, actor_role='member'):
+    def __init__(self, store, cid, actor_id, *, actor_role='member', admin_config=False):
         self.store = store
         self.cid = cid
         self.actor_id = actor_id
         self.actor_role = actor_role
+        self.admin_config = admin_config
 
     @classmethod
     def from_binding(cls, binding: dict) -> 'ConversationTools':
@@ -53,7 +55,8 @@ class ConversationTools:
             raise ValueError(f'conversation binding missing field: {exc}') from None
         from factory.control.store import Store
         actor_role = binding.get('actor_role', 'member')
-        return cls(Store(db_path), cid, actor_id, actor_role=actor_role)
+        admin_config = bool(binding.get('admin_config'))
+        return cls(Store(db_path), cid, actor_id, actor_role=actor_role, admin_config=admin_config)
 
     def calc(self, items, discount_rate='1'):
         """Deterministic quote arithmetic; the inputs are the source of truth."""
@@ -108,10 +111,17 @@ def create_server(tools: ConversationTools, emit):
         return {'content': [{'type': 'text', 'text': '已导出：' + json.dumps(item, ensure_ascii=False)}]}
 
     # Admin configuration tools (runtime / operations / deploy-targets).
-    # Registered for all roles: each tool checks admin role internally and
-    # returns a structured rejection for non-admin callers.
-    from factory.control.admin_config_tools import AdminConfigTools, register_admin_tools
-    admin = AdminConfigTools(tools.store, tools.actor_id, tools.actor_role)
-    admin_tools_list = register_admin_tools(admin, emit, tool_decorator=tool)
+    # Two conditions, both required. The role must be admin, AND the binding
+    # must have explicitly asked for the configuration surface: an ordinary
+    # role chat (a quoting assistant, say) must not carry tools that can
+    # rewrite deploy targets, even when the person chatting is an admin.
+    # So an ordinary session's inventory stays {calc, export}. Each tool ALSO
+    # re-checks the role internally, so a stale or forged binding still gets a
+    # structured rejection rather than a write.
+    admin_tools_list = []
+    if tools.actor_role == 'admin' and tools.admin_config:
+        from factory.control.admin_config_tools import AdminConfigTools, register_admin_tools
+        admin = AdminConfigTools(tools.store, tools.actor_id, tools.actor_role)
+        admin_tools_list = register_admin_tools(admin, emit, tool_decorator=tool)
 
     return create_sdk_mcp_server('session', tools=[calc, export, *admin_tools_list])
