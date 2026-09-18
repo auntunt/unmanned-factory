@@ -65,6 +65,9 @@ class LearningChoice(Body):
     agent_id: str | None = None
     draft_revision: int = Field(default=0, ge=0)
 
+class AdminConfigMessage(Body):
+    content: str = Field(min_length=1, max_length=50000)
+
 
 def router(store, service):
     api=APIRouter(prefix='/api/v4'); agents=AgentStore(store)
@@ -546,6 +549,210 @@ def router(store, service):
         agents.get(aid)
         with store.connect() as db:
             return {'skills':[json.loads(r[0]) for r in db.execute('SELECT data FROM skill_assets WHERE agent_id=? ORDER BY rowid DESC',(aid,))]}
+    # ------------------------------------------------------------------
+    # Admin configuration conversation endpoints (N11).
+    #
+    # These provide the "natural-language configuration" entry point
+    # described in consensus section 20: admin opens a chat on the
+    # RuntimePage, asks questions or instructs changes, and the model
+    # uses the same admin_config_tools that the gate exposes only when
+    # the binding has admin_config=True AND actor_role=='admin'.
+    #
+    # The admin_config flag is ALWAYS determined server-side from the
+    # actor's actual role; the client cannot set or influence it.
+    # ------------------------------------------------------------------
+
+    _ADMIN_CONFIG_AGENT = '__admin_config__'
+
+    def _ensure_admin_config_table():
+        with store.connect() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS admin_config_conversations
+                          (id TEXT PRIMARY KEY, data TEXT NOT NULL)""")
+
+    _ensure_admin_config_table()
+
+    def _admin_config_conv(cid):
+        with store.connect() as db:
+            row = db.execute('SELECT data FROM admin_config_conversations WHERE id=?', (cid,)).fetchone()
+        if not row:
+            raise KeyError(cid)
+        return json.loads(row[0])
+
+    def _save_admin_config_conv(conv):
+        with store.connect() as db:
+            db.execute('INSERT OR REPLACE INTO admin_config_conversations VALUES (?,?)',
+                       (conv['id'], json.dumps(conv, ensure_ascii=False)))
+
+    @api.post('/admin-config/conversations', status_code=201)
+    def create_admin_config_conversation(request: Request):
+        if actor(request).get('role') != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        cid = uuid.uuid4().hex
+        from factory.control.store import now
+        conv = {
+            'id': cid,
+            'purpose': 'admin_config',
+            'actor_id': actor(request)['id'],
+            'messages': [],
+            'created_at': now(),
+            'updated_at': now(),
+        }
+        _save_admin_config_conv(conv)
+        return conv
+
+    @api.get('/admin-config/conversations')
+    def list_admin_config_conversations(request: Request):
+        if actor(request).get('role') != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        with store.connect() as db:
+            rows = db.execute('SELECT data FROM admin_config_conversations ORDER BY rowid DESC').fetchall()
+        convs = [json.loads(r[0]) for r in rows]
+        uid = actor(request)['id']
+        return {'conversations': [c for c in convs if c.get('actor_id') == uid]}
+
+    @api.get('/admin-config/conversations/{cid}')
+    def get_admin_config_conversation(cid: str, request: Request):
+        if actor(request).get('role') != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        try:
+            conv = _admin_config_conv(cid)
+        except KeyError:
+            raise HTTPException(404, '会话不存在')
+        if conv.get('actor_id') != actor(request)['id']:
+            raise HTTPException(403, '无权访问该会话')
+        return conv
+
+    @api.post('/admin-config/conversations/{cid}/messages', status_code=201)
+    def admin_config_message(cid: str, body: AdminConfigMessage, request: Request):
+        # Server-side role determination: admin_config is True only if the
+        # actor's actual role is admin. This is the critical security boundary.
+        if actor(request).get('role') != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        try:
+            conv = _admin_config_conv(cid)
+        except KeyError:
+            raise HTTPException(404, '会话不存在')
+        if conv.get('actor_id') != actor(request)['id']:
+            raise HTTPException(403, '无权访问该会话')
+
+        from factory.control.store import now
+        # Append user message
+        msg_id = uuid.uuid4().hex
+        conv['messages'].append({
+            'id': msg_id, 'role': 'user', 'content': body.content,
+            'created_at': now(),
+        })
+        conv['updated_at'] = now()
+        _save_admin_config_conv(conv)
+
+        # Get runtime config for model settings
+        cfg = service.runtime_settings.get()
+        settings = cfg['profiles']['planner']
+        if not settings.get('model'):
+            return {'conversation': conv, 'status': 'failed',
+                    'message': '规划模型未配置，无法回答'}
+
+        # Build conversation binding with server-determined admin_config.
+        # The flag is True because we verified actor_role=='admin' above.
+        from factory.control import conversation_tools as _ct
+        is_admin = actor(request).get('role') == 'admin'
+        conversation_binding = _ct.binding_for(
+            store, cid, actor(request)['id'],
+            actor_role=actor(request).get('role'),
+            admin_config=is_admin,
+        )
+
+        # Build the system prompt for configuration assistance
+        history = json.dumps(
+            [{'role': m.get('role'), 'content': m.get('content')}
+             for m in conv['messages']],
+            ensure_ascii=False,
+        )
+        prompt = (
+            'You are a configuration assistant for this workspace. '
+            'Help the admin read and update runtime profiles, operations '
+            'automation settings, and deploy targets using your configuration '
+            'tools. Always read the current configuration before making changes. '
+            'Use the exact tool names (get_runtime_config, update_runtime_config, '
+            'get_operations_config, configure_operations, list_deploy_targets, '
+            'create_deploy_target, update_deploy_target, delete_deploy_target, '
+            'check_deploy_targets). Never ask for or accept API keys or secrets; '
+            'credentials must be set through the admin form. '
+            'You also have calc and export tools for arithmetic and documents.\n'
+            'HISTORY:\n' + history
+        )
+
+        job_id = uuid.uuid4().hex
+
+        def answer(cancel):
+            with tempfile.TemporaryDirectory(prefix='factory-admin-config-') as workspace:
+                from factory.control.providers import ProviderRequest
+                from factory.control.governance import GovernedRunner
+                runner = (GovernedRunner(service.runner, service.governance,
+                                        run_id=None, actor_id=actor(request)['id'])
+                          if service.governance else service.runner)
+                result = runner.run(
+                    ProviderRequest(
+                        provider=settings['provider'],
+                        model=settings['model'],
+                        prompt=prompt,
+                        workspace=workspace,
+                        timeout_s=cfg['limits']['timeout_s'],
+                        read_only=True,
+                        conversation_binding=conversation_binding,
+                    ),
+                    lambda *_: None,
+                    cancel,
+                )
+            # Append assistant reply
+            try:
+                fresh = _admin_config_conv(cid)
+            except KeyError:
+                fresh = conv
+            fresh['messages'].append({
+                'id': uuid.uuid4().hex,
+                'role': 'assistant',
+                'content': result.text,
+                'status': 'completed',
+                'job_id': job_id,
+                'created_at': now(),
+            })
+            fresh['updated_at'] = now()
+            _save_admin_config_conv(fresh)
+            return {'status': 'completed'}
+
+        answer.on_error = lambda exc: _admin_config_error(cid, job_id, exc)
+        job = service.start_maintenance(answer, job_id=job_id,
+                                        conversation_id=cid,
+                                        actor_id=actor(request)['id'])
+
+        # Append pending message
+        pending_id = uuid.uuid4().hex
+        conv['messages'].append({
+            'id': pending_id, 'role': 'assistant', 'content': '正在回答',
+            'status': 'pending', 'job_id': job_id, 'created_at': now(),
+        })
+        _save_admin_config_conv(conv)
+
+        return {'conversation': conv, 'job_id': job_id, 'status': 'pending'}
+
+    def _admin_config_error(cid, job_id, exc):
+        from factory.control.store import now
+        try:
+            conv = _admin_config_conv(cid)
+        except KeyError:
+            return
+        conv['messages'].append({
+            'id': uuid.uuid4().hex,
+            'role': 'assistant',
+            'content': '回答失败：' + str(exc),
+            'status': 'failed',
+            'job_id': job_id,
+            'created_at': now(),
+        })
+        conv['updated_at'] = now()
+        _save_admin_config_conv(conv)
+
     return api
 
 from factory.control.agents import MAX_ZIP
