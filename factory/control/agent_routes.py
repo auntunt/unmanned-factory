@@ -363,7 +363,7 @@ def router(store, service):
                 # Chat tools (calc/export) bound to THIS conversation and user; the model
                 # cannot target another conversation. Exposed as mcp__session__*.
                 from factory.control import conversation_tools as _ct
-                conversation_binding=_ct.binding_for(store,cid,actor(request)['id'])
+                conversation_binding=_ct.binding_for(store,cid,actor(request)['id'],actor_role=actor(request).get('role'))
                 prompt+='\nYou may use mcp__session__calc for any money arithmetic (decimal strings) and mcp__session__export to save a downloadable md/txt/csv document for the user; both act only on this conversation.'
                 from factory.control.providers import ProviderRequest
                 from factory.control.governance import GovernedRunner
