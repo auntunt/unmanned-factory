@@ -51,10 +51,10 @@ it.each([false, true])('native import belongs only to the list (detail=%s)', asy
   render(<MemoryRouter initialEntries={[detail ? '/agents/a1' : '/agents']}><Routes><Route path="/agents/:agentId?" element={<AgentsPage {...props} />} /></Routes></MemoryRouter>)
   if (detail) {
     await screen.findByRole('button', { name: '维护职能体' })
-    expect(screen.queryByRole('region', { name: '为职能体添加能力' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '为职能体加载方法或安装工具' })).toBeNull()
     expect(screen.queryByText('模型与工具')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '维护职能体' }))
-    await screen.findByRole('region', { name: '为职能体添加能力' })
+    await screen.findByRole('region', { name: '为职能体加载方法或安装工具' })
     expect(screen.queryByRole('button', { name: '导入职能体' })).toBeNull()
     expect(screen.queryByLabelText('选择 webuddy 职能包 ZIP')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '维护职能体' }))
@@ -62,7 +62,7 @@ it.each([false, true])('native import belongs only to the list (detail=%s)', asy
   } else {
     fireEvent.click(screen.getByRole('button', { name: '导入职能体' }))
     expect(screen.getByLabelText('选择 webuddy 职能包 ZIP')).toBeTruthy()
-    expect(screen.queryByRole('region', { name: '为职能体添加能力' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '为职能体加载方法或安装工具' })).toBeNull()
   }
 })
 
