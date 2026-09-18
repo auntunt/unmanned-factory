@@ -121,6 +121,11 @@ def router(store, svc, operations):
             if run['source'].get('request_fingerprint') != fingerprint:
                 raise HTTPException(409, '这次提交已被接收；内容发生变化，请重新提交。')
             return run
+        if body.operation != 'general':
+            from factory.control.deliverables import infer_delivery_type_from_text
+            dt = infer_delivery_type_from_text(body.request)
+            if dt is not None:
+                run = store.update(run['id'], {'delivery_type_inferred': dt})
         try:
             svc.start_plan(run['id'])
         except Exception as exc:
