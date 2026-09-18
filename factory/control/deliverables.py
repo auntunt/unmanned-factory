@@ -281,6 +281,18 @@ def router(store, service):
         if delivery_type == 'installer':
             declared = (run.get('artifacts') or {}).get('installer_targets')
             installer_targets = declared if isinstance(declared, list) and declared else None
+        from factory.control.capability_source import aggregate as capability_aggregate
+        capability_sources = capability_aggregate(store, run)
+        # service_urls from deploy targets (safe to fail if no targets configured)
+        service_urls = []
+        try:
+            from factory.control.deploy_targets import TargetStore
+            ts = TargetStore(store.path)
+            for entry in ts.snapshot(run['project_id']):
+                if entry.get('service_url'):
+                    service_urls.append({'name': entry['name'], 'url': entry['service_url']})
+        except Exception:
+            pass
         return {**result, 'recommended_preview_id': recommended, 'saved': saved, 'can_collect': run['status'] in ('ready_for_review', 'published'),
                 'github_configured': bool(service.publisher),
                 'github_repository': project['repository'],
@@ -292,7 +304,9 @@ def router(store, service):
                 'delivery_type': delivery_type,
                 'installer_targets': installer_targets,
                 'publish_error': error,
-                'collection_error': (run.get('artifacts') or {}).get('collection_error')}
+                'collection_error': (run.get('artifacts') or {}).get('collection_error'),
+                'capability_sources': capability_sources,
+                'service_urls': service_urls}
     @api.post('/collect')
     def collect(rid: str):
         run = store.get(rid)
