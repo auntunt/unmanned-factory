@@ -35,3 +35,9 @@ Codex 初审：/Users/auntlee/Desktop/自动化harness构建/docs/webuddy-r1-han
 - T10：local_reviewed，已合并。矩阵结论：["user"] 认证必需但连带加载 hooks/permissions/env；strict_mcp_config 只挡 MCP servers。不改代码，服务器 6 步检查清单为 79b7035 上线前置。
 - 集成检查（60fb644）：前端 tsc/build 干净、全量 vitest 364/364；后端全量三次——第 1 次 1 failed（continuous restart 参数化用例）、第 2 次 1 failed（pack durability restart 用例）、第 3 次 2427 全绿；两条失败均为一次性、单跑/整文件/组合均过，未复现，列为观察项（重启形态、疑与负载时序相关），建议 Codex Linux 复验留意。
 - 测试口径：以上按「每次运行的真实结果」分别记录，不合并表述为一次全绿。
+
+## r2 复核修复轮（2026-09-18，Codex 定向复核 eff65ec 后）
+- T11（R2-01）：local_reviewed，已合并。含空格的存在可执行路径原样保留（绝对/相对按 root 解析），否则才 shlex.split；无 shell=True。4 条新回归修复前失败在案；T07 既有场景保持。
+- T12（R2-02）：local_reviewed，已合并。ASCII 关键词词边界匹配（client 不再命中 cli）；关键词分 form/deploy 两层，非目标里的部署措辞不否定交付形态；歧义 None 保守策略保持。3 条新回归修复前失败在案。
+- 集成（318e57f）：Codex 六文件定向集 210 passed（其复核时 203 + 7 新回归）；后端全量一次 2434 passed / 0 failed。前端零改动未重跑（沿用 eff65ec 的 364/364）。
+- 证据边界修正（采纳 Codex）：T10 矩阵中 hooks/permissions/env 加载一格的证据为「SDK 参数传入 + CLI 帮助与 SDK 源码」，隔离 canary 因认证段先失败未观测到 hook 实际执行，不以本机现象推断所有环境；T08 现场自动接续仍未验证；两条重启形态偶发失败不因本轮通过而消除。

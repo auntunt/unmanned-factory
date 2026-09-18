@@ -56,3 +56,24 @@
 4. 「独立验收需要可用的隔离终端」（providers.py:538）在本机联测环境成立，服务器环境需确认隔离终端可用性。
 5. 非 general 操作（bugfix/release）无 delivery_type 推导写入（T09 已登记缺口，后续小项）。
 6. 真实 GitHub 发布、固定测试地址业务操作、Linux bwrap 全链复跑：归你。
+
+
+---
+# r2 复核修复交接（2026-09-18，基线 eff65ec → 候选见推送）
+
+## 提交
+- fb59847 merge T11（6ac4f4d）：R2-01——单元素含空格且为存在可执行文件（绝对，或含斜杠相对按检查 cwd root 解析）时原样保留为 argv[0]；否则维持确定性 shlex.split；root 经 _check_argv 透传三处调用点；无 shell=True，结构化错误与 NUL 检查不变。
+- 318e57f merge T12（2aad10a）：R2-02——ASCII 关键词 \b 词边界（中文与 .exe 类扩展保持子串）；关键词分 form（形态）/deploy（部署拓扑）两层，non_goals 的负向减除只用 form 层；唯一正向命中才定型、歧义 None 不变。
+
+## 证据
+- 每单回执（receipts/T11.md、T12.md）含修复前失败输出（红→绿）。
+- 你的六文件定向集在 318e57f：210 passed（203 + 7 新回归）。
+- 后端全量（318e57f）：2434 passed / 0 failed / 20 skipped。前端零改动，沿用 eff65ec 记录。
+
+## 证据边界更正（采纳你的复核）
+- T10 矩阵「["user"] 加载 hooks/permissions/env」一格证据级别：SDK 参数传入断言 + CLI --help 与 SDK 源码；隔离 canary 认证段先失败，未观测 hook 实际执行；不以本机推断所有环境，也不排除更小配置方案——服务器检查仍按实际部署身份与认证方式执行。
+- T08 现场自动接续：未验证，判据与 10 步清单不变。
+- 两条重启形态偶发失败：观察项保留。
+
+## 待你复核与后续
+R2-01/R2-02 修复复核 → 服务器隔离验收（GitHub 发布、固定地址、隔离终端可用性、Linux bwrap 全链）。
