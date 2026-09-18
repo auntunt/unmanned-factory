@@ -15,10 +15,22 @@ def declarations(store, rid):
     return list(store.export_events(rid, kind='scope_declaration'))
 
 
-def exempt(path):
+_PLATFORM_PROGRESS_NOTE = '.webuddy/coding-progress.md'
+
+
+def exempt(path, workspace=None):
     name = PurePosixPath(path).name
-    return path.startswith('.spec/') or bool(re.fullmatch(
-        r'(?:test_.+\.py|.+_test\.py|.+\.(?:test|spec)\.(?:js|jsx|ts|tsx)|.+_test\.go)', name))
+    if path.startswith('.spec/') or bool(re.fullmatch(
+            r'(?:test_.+\.py|.+_test\.py|.+\.(?:test|spec)\.(?:js|jsx|ts|tsx)|.+_test\.go)', name)):
+        return True
+    if path == _PLATFORM_PROGRESS_NOTE:
+        if workspace is not None:
+            from pathlib import Path
+            full = Path(workspace) / path
+            if full.is_symlink():
+                return False
+        return True
+    return False
 
 
 def changed(workspace, base, commit=None):
@@ -121,7 +133,7 @@ def evidence(store, rid, project, workspace, commit, artifacts=None):
         actual = changed(workspace, base, commit)
         records = declarations(store, rid)
         declared = {f['path'] for e in records for f in e['payload'].get('files', []) if f.get('accepted')}
-        excluded = {p for p in actual if exempt(p)}
+        excluded = {p for p in actual if exempt(p, workspace=workspace)}
         undeclared = sorted(actual - excluded - declared)
         item.update(status='fail' if undeclared else 'pass', baseline=base, commit=commit,
                     actual_changes=sorted(actual), declared_files=sorted(declared), exempt_files=sorted(excluded),
