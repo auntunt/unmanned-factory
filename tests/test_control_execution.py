@@ -499,6 +499,64 @@ class TestCheckArgvNormalization:
             _check_argv(project, ["bad"])
 
 
+class TestCheckArgvSpacedPaths:
+    """T11: single-element argv that is a real executable with spaces must not be split."""
+
+    def test_absolute_path_with_space_preserved(self, tmp_path):
+        """An absolute path containing spaces pointing to an existing executable is kept intact."""
+        spaced = tmp_path / "My Tools"
+        spaced.mkdir()
+        checker = spaced / "checker"
+        checker.write_text("#!/bin/sh\nexit 0\n")
+        checker.chmod(0o755)
+        argv_str = str(checker)
+        project = {"checks": {"test": [argv_str]}}
+        result = _check_argv(project, ["test"], root=tmp_path)
+        name, argv = result[0]
+        assert name == "test"
+        assert argv == [argv_str], f"Expected single-element argv preserved, got {argv}"
+
+    def test_absolute_nonexistent_path_with_space_is_split(self, tmp_path):
+        """A single string with spaces that does NOT point to an existing file is still shlex.split'd."""
+        project = {"checks": {"test": ["python3 -m pytest test_counter.py"]}}
+        result = _check_argv(project, ["test"], root=tmp_path)
+        _, argv = result[0]
+        assert argv == ["python3", "-m", "pytest", "test_counter.py"]
+
+    def test_relative_path_with_space_resolved_against_root(self, tmp_path):
+        """A relative path with spaces resolved against root is kept intact when it exists."""
+        spaced = tmp_path / "my scripts"
+        spaced.mkdir()
+        checker = spaced / "run"
+        checker.write_text("#!/bin/sh\nexit 0\n")
+        checker.chmod(0o755)
+        project = {"checks": {"test": ["my scripts/run"]}}
+        result = _check_argv(project, ["test"], root=tmp_path)
+        _, argv = result[0]
+        assert argv == ["my scripts/run"], f"Expected relative spaced path preserved, got {argv}"
+
+    def test_real_subprocess_with_spaced_path(self, repo, provider_module):
+        """Full integration: a check whose argv[0] has spaces runs exit 0."""
+        spaced = repo / "My Tools"
+        spaced.mkdir()
+        checker = spaced / "checker"
+        checker.write_text("#!/bin/sh\nexit 0\n")
+        checker.chmod(0o755)
+        runner = FakeRunner({"a": [("a.txt", "a\n")]})
+        project = _project(repo)
+        project["checks"] = {"ok": [str(checker)]}
+        plan = {"tasks": [
+            {"id": "a", "prompt": "a", "paths": ["a.txt"], "checks": ["ok"]},
+        ]}
+        out = execute_plan(
+            run_id="spaced-path-check", plan=plan, project=project,
+            profiles={"standard": {"provider": "fake", "model": "test"}},
+            runner=runner, emit=lambda *_: None, cancel=threading.Event(),
+        )
+        task_checks = out["tasks"][0]["checks"]
+        assert any(c["exit"] == 0 for c in task_checks), f"Expected exit 0 from spaced path, got {task_checks}"
+
+
 class TestCheckArgvRealSubprocess:
     """Integration: normalized argv actually runs via real subprocess."""
 

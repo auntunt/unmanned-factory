@@ -339,20 +339,38 @@ def _overlaps(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     return any(_within(a, right) or _within(b, left) for a in left for b in right)
 
 
-def _normalize_check_argv(name: str, argv: list[str] | tuple[str, ...]) -> list[str]:
+def _normalize_check_argv(name: str, argv: list[str] | tuple[str, ...], *, root: Path | None = None) -> list[str]:
     """Normalize a check command to a proper argv list.
 
     A single-element list whose sole entry contains whitespace is treated as a
-    shell command string and split with ``shlex.split``.  Multi-element lists
-    are validated as-is (each element must be a non-empty string).  Returns the
-    canonical argv or raises ``ExecutionError`` with a structured message.
+    shell command string and split with ``shlex.split`` -- **unless** the string
+    itself resolves to an existing executable file.  Absolute paths are checked
+    directly; relative paths containing a slash are resolved against *root* (the
+    check's working directory).  This prevents legitimate paths like
+    ``/opt/My Tools/checker`` from being broken by the split.
+
+    Multi-element lists are validated as-is (each element must be a non-empty
+    string).  Returns the canonical argv or raises ``ExecutionError`` with a
+    structured message.
     """
     if len(argv) == 1 and " " in argv[0]:
+        candidate = argv[0]
+        # If the string is itself a path to an existing file, preserve it as a
+        # single argv element.  Absolute paths are checked directly; relative
+        # paths with a directory separator are resolved against root.
+        candidate_path = Path(candidate)
+        if candidate_path.is_absolute():
+            if candidate_path.is_file():
+                return [candidate]
+        elif root is not None and "/" in candidate:
+            resolved = root / candidate
+            if resolved.is_file():
+                return [candidate]
         try:
-            split = shlex.split(argv[0])
+            split = shlex.split(candidate)
         except ValueError as exc:
             raise ExecutionError(
-                f"check {name!r}: cannot parse shell string {argv[0]!r}: {exc}"
+                f"check {name!r}: cannot parse shell string {candidate!r}: {exc}"
             )
         if not split:
             raise ExecutionError(f"check {name!r}: shell string expands to empty argv")
@@ -360,7 +378,7 @@ def _normalize_check_argv(name: str, argv: list[str] | tuple[str, ...]) -> list[
     return list(argv)
 
 
-def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[str, list[str]]]:
+def _check_argv(project: Mapping[str, Any], names: Iterable[Any], *, root: Path | None = None) -> list[tuple[str, list[str]]]:
     trusted = project.get("checks") or {}
     if not isinstance(trusted, Mapping):
         raise ExecutionError("project checks must be a mapping")
@@ -377,7 +395,7 @@ def _check_argv(project: Mapping[str, Any], names: Iterable[Any]) -> list[tuple[
             )
         if any("\x00" in x for x in argv):
             raise ExecutionError(f"check {name!r} contains NUL")
-        argv = _normalize_check_argv(name, argv)
+        argv = _normalize_check_argv(name, argv, root=root)
         out.append((name, argv))
     return out
 
@@ -889,7 +907,7 @@ def execute_plan(
             return {"status": status, "cost_usd": cost, "session_id": session_id, "attempt": payload, **values}
 
         try:
-            for check_name, argv in _check_argv(project, task.get('checks') or ()):
+            for check_name, argv in _check_argv(project, task.get('checks') or (), root=child_root):
                 error = _check_launch_error(child_root, argv)
                 if error:
                     provider_dispatched = False
@@ -991,7 +1009,7 @@ def execute_plan(
             _guard_workspace(child_root, before, changed)
             before_hash = _working_hash(child_root, changed, timeout_s=timeout_s)
             records: list[dict] = []
-            for name, argv in _check_argv(project, task.get("checks") or ()):
+            for name, argv in _check_argv(project, task.get("checks") or (), root=child_root):
                 record = _run_check(child_root, name, argv, remaining(), emit, task_id, cancel)
                 records.append(record)
                 if record.get("cancelled"):
@@ -1242,7 +1260,7 @@ def execute_plan(
             raise ExecutionError("integration worktree is dirty before final verification", artifacts={**artifacts, "tasks": list(by_id.values()), "commit": integrated})
         final_checks = []
         failed_check: tuple[str, dict] | None = None
-        for name, argv in _check_argv(project, (project.get("checks") or {}).keys()):
+        for name, argv in _check_argv(project, (project.get("checks") or {}).keys(), root=integration_path):
             record = _run_check(integration_path, name, argv, remaining(), emit, None, cancel)
             final_checks.append(record)
             if record.get("cancelled"):
