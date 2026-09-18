@@ -417,3 +417,132 @@ def test_checks_endpoint_requires_admin(remote_env):
     # Member should get 403
     response = client.get('/api/v2/deploy-targets/checks', headers=member_headers)
     assert response.status_code == 403
+
+
+# ── service_url 字段 ──────────────────────────────────────────────
+
+
+def test_service_url_accepted_and_persisted(remote_env):
+    """管理员可以在创建或更新目标时填写 service_url，值被持久化并出现在列表和详情中。"""
+    client, _, service, _, headers, target, *_ = remote_env
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    # 更新时带上 service_url
+    updated = client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+                         json={**values, 'service_url': 'https://example.com', 'revision': target['revision']})
+    assert updated.status_code == 200
+    assert updated.json()['service_url'] == 'https://example.com'
+    # 详情接口也能读到
+    detail = client.get(f'/api/v2/deploy-targets/{target["id"]}')
+    assert detail.json()['service_url'] == 'https://example.com'
+    # 列表接口也能读到
+    listing = client.get('/api/v2/deploy-targets')
+    found = [t for t in listing.json()['targets'] if t['id'] == target['id']]
+    assert found and found[0]['service_url'] == 'https://example.com'
+
+
+def test_service_url_optional_defaults_to_empty(remote_env):
+    """不填 service_url 时默认为空字符串，不影响已有创建/更新流程。"""
+    _, _, service, _, _, target, *_ = remote_env
+    # 创建时没有填 service_url 的目标
+    assert target.get('service_url', '') == ''
+
+
+def test_service_url_create_with_url(remote_env):
+    """创建目标时可以直接提供 service_url。"""
+    client, _, service, _, headers, *_ = remote_env
+    values = {'name': '带地址目标', 'host': 'new.test', 'port': 22, 'user': 'deploy',
+              'host_fingerprint': target_fingerprint(remote_env),
+              'commands': {}, 'service_url': 'https://staging.example.com/app'}
+    resp = client.post('/api/v2/deploy-targets', headers=headers, json=values)
+    assert resp.status_code == 201
+    assert resp.json()['service_url'] == 'https://staging.example.com/app'
+
+
+@pytest.mark.parametrize('bad_url', [
+    'javascript:alert(1)',
+    'data:text/html,<h1>hi</h1>',
+    'ftp://files.example.com/deploy',
+    '/relative/path',
+    'relative/path',
+    'file:///etc/passwd',
+    '',  # empty string should be accepted (optional)
+])
+def test_service_url_rejects_non_http(remote_env, bad_url):
+    """service_url 必须是 http 或 https，拒绝 javascript:、相对路径及其它协议。"""
+    client, _, service, _, headers, target, *_ = remote_env
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    if bad_url == '':
+        # Empty string means "no URL", should be accepted
+        resp = client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+                          json={**values, 'service_url': bad_url, 'revision': target['revision']})
+        assert resp.status_code == 200
+        return
+    resp = client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+                      json={**values, 'service_url': bad_url, 'revision': target['revision']})
+    assert resp.status_code == 422, f'应当拒绝 {bad_url!r}'
+
+
+def test_service_url_accepts_http_and_https(remote_env):
+    """http 和 https 都是合法的 service_url 协议。"""
+    client, _, service, _, headers, target, *_ = remote_env
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    for url in ('https://example.com', 'http://10.0.0.1:8080/status', 'https://example.com:443/path?q=1'):
+        resp = client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+                          json={**values, 'service_url': url, 'revision': target['revision']})
+        assert resp.status_code == 200, f'应当接受 {url!r}'
+        target = resp.json()  # update revision for next iteration
+
+
+def test_member_sees_service_url_but_not_sensitive_fields(remote_env):
+    """member 通过项目绑定接口只能看到 service_url，看不到 host/user/port/commands/host_fingerprint。"""
+    client, _, service, p, headers, target, *_ = remote_env
+    # 先给目标设置 service_url
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+               json={**values, 'service_url': 'https://prod.example.com', 'revision': target['revision']})
+    # 创建 member 并登录，分配项目权限
+    member_user = client.app.state.auth.create_user('url-member', 'very-long-password', role='member')
+    service.governance.assign(member_user['id'], [p['id']], 1)
+    resp = client.post('/api/auth/login', headers={'Origin': 'http://testserver'},
+                       json={'username': 'url-member', 'password': 'very-long-password'})
+    member = {'Origin': 'http://testserver', 'X-CSRF-Token': resp.json()['csrf_token']}
+    # member 通过项目绑定接口获取信息
+    bindings = client.get(f'/api/v2/projects/{p["id"]}/deploy-targets', headers=member)
+    assert bindings.status_code == 200
+    available = bindings.json()['available']
+    assert len(available) >= 1
+    entry = [a for a in available if a['id'] == target['id']][0]
+    # 能看到 service_url
+    assert entry['service_url'] == 'https://prod.example.com'
+    # 不能看到敏感字段
+    for forbidden in ('host', 'user', 'port', 'commands', 'host_fingerprint',
+                      'public_key', 'public_fingerprint'):
+        assert forbidden not in entry, f'member 不应看到 {forbidden}'
+
+
+def test_member_visibility_mutation_service_url_must_be_present(remote_env):
+    """变异验证：如果 snapshot 不返回 service_url，member 就看不到地址。"""
+    client, _, service, p, headers, target, *_ = remote_env
+    values = {k: target[k] for k in ('name', 'host', 'port', 'user', 'host_fingerprint', 'commands')}
+    client.put(f'/api/v2/deploy-targets/{target["id"]}', headers=headers,
+               json={**values, 'service_url': 'https://visible.example.com', 'revision': target['revision']})
+    # 正常路径：snapshot 包含 service_url
+    snap = service.targets.snapshot(p['id'])
+    assert any(s.get('service_url') == 'https://visible.example.com' for s in snap)
+
+
+def test_member_visibility_mutation_sensitive_fields_must_be_absent(remote_env):
+    """变异验证：snapshot 返回的条目绝不包含 host/user/port/commands/host_fingerprint。
+    即使变异把这些字段加回去，测试也会捕获。"""
+    _, _, service, p, _, target, *_ = remote_env
+    snap = service.targets.snapshot(p['id'])
+    for entry in snap:
+        for forbidden in ('host', 'user', 'port', 'commands', 'host_fingerprint',
+                          'public_key', 'public_fingerprint'):
+            assert forbidden not in entry, f'snapshot 泄漏了 {forbidden}'
+
+
+def target_fingerprint(remote_env):
+    """从现有目标借用有效的 host_fingerprint。"""
+    *_, target, _, _ = remote_env
+    return target['host_fingerprint']

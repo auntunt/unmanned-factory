@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import stat
 import threading
+from urllib.parse import urlparse
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -80,8 +81,22 @@ class TargetStore:
         return json.loads(row['data'])
 
     @staticmethod
+    def _validate_service_url(url):
+        """校验 service_url：必须是 http 或 https 绝对地址。"""
+        if not url:
+            return ''
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            raise ValueError('可展示地址必须使用 http 或 https 协议')
+        if not parsed.netloc:
+            raise ValueError('可展示地址必须是完整的绝对 URL')
+        return url
+
+    @staticmethod
     def validate(values):
-        if set(values) != {'name', 'host', 'port', 'user', 'host_fingerprint', 'commands'}:
+        required = {'name', 'host', 'port', 'user', 'host_fingerprint', 'commands'}
+        optional = {'service_url'}
+        if not required <= set(values) or set(values) - required - optional:
             raise ValueError('目标字段不完整')
         if not isinstance(values['name'], str) or not 1 <= len(values['name'].strip()) <= 120:
             raise ValueError('请填写目标名称')
@@ -102,6 +117,7 @@ class TargetStore:
             raise ValueError('预注册动作不得包含明文凭据，请在目标服务器脚本内配置')
         if commands.get('fetch_log') and not commands['fetch_log'].startswith('/'):
             raise ValueError('fetch_log 必须是绝对日志路径')
+        values['service_url'] = TargetStore._validate_service_url(values.get('service_url', ''))
         return values
 
     def _audit(self, db, tid, revision, actor, action, data):
@@ -200,5 +216,13 @@ class TargetStore:
         return results
 
     def snapshot(self, pid):
-        return [{'id': tid, 'name': self.get(tid)['name'], 'revision': self.get(tid)['revision']}
-                for tid in self.bindings(pid)['targets']]
+        result = []
+        for tid in self.bindings(pid)['targets']:
+            target = self.get(tid)
+            entry = {'id': tid, 'name': target['name'], 'revision': target['revision']}
+            if target.get('service_url'):
+                entry['service_url'] = target['service_url']
+            else:
+                entry['service_url'] = ''
+            result.append(entry)
+        return result

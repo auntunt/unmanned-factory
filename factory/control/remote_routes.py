@@ -15,6 +15,7 @@ class Target(Body):
     user: str = Field(min_length=1, max_length=64)
     host_fingerprint: str
     commands: dict[str, str]
+    service_url: str = Field(default='', max_length=2000)
 
 
 class Update(Target):
