@@ -20,13 +20,14 @@ const managementNavigation = [
   { to: '/team', label: '团队', icon: 'team' as const, end: false },
 ]
 const secondaryNavigation = [{ to: '/settings/runtime', label: '运行配置', icon: 'settings' as const, end: false }]
+const memberSecondaryNavigation = [{ to: '/settings/runtime', label: '运行状态', icon: 'settings' as const, end: false }]
 
 
 export default function Workbench({ user, onLogout, children }: WorkbenchProps & { children?: ReactNode }) {
   const [navOpen, setNavOpen] = useState(false)
   const [environment, setEnvironment] = useState<{ mode: 'preview' | 'live'; label: string } | null>(null)
   const location = useLocation()
-  const visibleSecondary = user.role === 'member' ? [] : secondaryNavigation
+  const visibleSecondary = user.role === 'member' ? memberSecondaryNavigation : secondaryNavigation
   const currentPage = [...navigation, ...managementNavigation, ...visibleSecondary].find((item) => item.end ? location.pathname === item.to : location.pathname.startsWith(item.to))
 
   useEffect(() => { setNavOpen(false) }, [location.pathname])

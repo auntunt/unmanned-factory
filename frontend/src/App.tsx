@@ -26,6 +26,7 @@ import './workbench/studio.css'
 
 const RunWorkspace = lazy(() => import('./conversation/RunWorkspace'))
 const RuntimePage = lazy(() => import('./workbench/RuntimePage'))
+const RuntimeReadiness = lazy(() => import('./workbench/RuntimeReadiness'))
 const PackDetail = lazy(() => import('./workbench/PackDetail'))
 
 interface AuthResponse {
@@ -108,7 +109,9 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="costs" element={<CostsPage {...pageProps} />} />
       <Route path="team" element={<TeamPage {...pageProps} />} />
       <Route path="settings" element={<SettingsPage {...shell} />} />
-      {isAdmin && <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />}
+      {isAdmin
+        ? <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />
+        : <Route path="settings/runtime" element={<RuntimeReadiness {...pageProps} />} />}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Route>
   </Routes>
