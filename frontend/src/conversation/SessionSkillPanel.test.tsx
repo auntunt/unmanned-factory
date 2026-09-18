@@ -170,3 +170,20 @@ describe('removal', () => {
 // ---- T5: AgentManifest wording (tested via import) ----
 // This test is in AgentManifest.test.tsx below, but also verified here for completeness.
 // The actual assertion on AgentManifest.tsx wording is done separately.
+
+describe('意外响应形状不崩页面', () => {
+  it('响应缺 items 时渲染空态而不是抛错', async () => {
+    api.mockResolvedValue({} as never)
+    mount()
+    await waitFor(() => expect(screen.getByText(/当前会话加载的 Skill/)).toBeTruthy())
+    expect(screen.getByText(/当前会话加载的 Skill · 0 项/)).toBeTruthy()
+  })
+
+  it('记录缺 dependencies 且依赖缺失时仍渲染补齐提示', async () => {
+    api.mockResolvedValue({
+      items: [skill({ dependency_state: 'missing', dependencies: undefined })],
+    } as never)
+    mount()
+    await waitFor(() => expect(screen.getByText(/需要管理员补齐运行条件/)).toBeTruthy())
+  })
+})

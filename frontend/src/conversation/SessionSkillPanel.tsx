@@ -45,7 +45,7 @@ function DependencyBadge({ state, deps }: { state: SessionSkill['dependency_stat
   if (state === 'missing') {
     return (
       <span className="ss-badge ss-badge-missing">
-        需要管理员补齐{deps.length > 0 ? `：${deps.join('、')}` : '运行条件'}
+        需要管理员补齐{deps && deps.length > 0 ? `：${deps.join('、')}` : '运行条件'}
       </span>
     )
   }
@@ -89,7 +89,7 @@ export default function SessionSkillPanel({
     try {
       const data = await request<{ items: SessionSkill[] }>(base, { onUnauthorized })
       if (gen.current === mine) {
-        setSkills(data.items)
+        setSkills(Array.isArray(data?.items) ? data.items : [])
         setError(null)
       }
     } catch (cause) {
