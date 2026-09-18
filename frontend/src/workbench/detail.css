@@ -238,3 +238,19 @@
 @media (max-width: 640px) { .wb-deliverables-heading, .wb-deliverable-item { align-items: flex-start; flex-direction: column; } }
 
 .wb-deliverable-image { display: block; width: 100%; max-height: 560px; object-fit: contain; background: var(--color-surface); }
+
+/* Admin config chat (N11) */
+.wb-config-chat-history { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.wb-config-chat-thread { max-height: 360px; overflow-y: auto; border: 1px solid var(--detail-border); border-radius: 9px; background: var(--color-bg); padding: 12px; margin-bottom: 10px; }
+.wb-config-chat-empty { text-align: center; padding: 24px 12px; color: var(--detail-muted); }
+.wb-config-chat-empty strong { display: block; color: var(--detail-ink); margin-bottom: 6px; }
+.wb-config-chat-empty p { margin: 0; font-size: 13px; line-height: 1.5; }
+.wb-config-msg { margin-bottom: 10px; }
+.wb-config-msg:last-child { margin-bottom: 0; }
+.wb-config-msg.is-user { display: flex; justify-content: flex-end; }
+.wb-config-msg-bubble { display: inline-block; max-width: 85%; border-radius: 10px; padding: 8px 12px; background: var(--detail-teal); color: var(--color-on-accent); font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wb-config-msg-body { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wb-config-msg-label { display: block; font-size: 12px; font-weight: 650; color: var(--detail-muted); margin-bottom: 3px; }
+.wb-config-msg-content { display: block; }
+.wb-config-msg-failed { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--color-danger); }
+.wb-config-chat-form { display: flex; gap: 8px; align-items: center; }
