@@ -299,7 +299,11 @@ def confirm(self, rid, body, actor, *, automatic=False):
         delivery_type_inferred = infer_delivery_type_from_text(
             run.get('source', {}).get('original_request', run['request']),
             value['spec_draft'])
-        updated = self.store.update(rid, {**frozen_agent, **spec, 'spec_draft': value['spec_draft'], 'fidelity_target': value['fidelity_target'],
+        session_skill_fields = {}
+        if run.get('conversation_id') and 'session_skill_snapshot' not in run:
+            from factory.control.session_skills import SessionSkillStore
+            session_skill_fields['session_skill_snapshot'] = SessionSkillStore(self.store).freeze(run['conversation_id'])
+        updated = self.store.update(rid, {**frozen_agent, **spec, **session_skill_fields, 'spec_draft': value['spec_draft'], 'fidelity_target': value['fidelity_target'],
             'module_snapshot': modules, 'mount_snapshot': mounts, 'spec_tree_enabled': True,
             'spec_confirmation': confirmation, 'delivery_type_inferred': delivery_type_inferred,
             'status': 'received', 'error': None}, expected=('awaiting_spec_confirmation',),
