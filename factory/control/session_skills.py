@@ -88,7 +88,7 @@ class SessionSkillStore:
         return data
 
     def create_from_data(self, session_id: str, payload: dict, actor_id: str) -> dict:
-        """直接从结构化数据创建绑定（供 N4 GitHub 来源使用）。"""
+        """直接从结构化数据创建绑定（供内部或兼容调用）。"""
         sid = uuid.uuid4().hex
         at = now()
         origin = payload.get('origin', 'github')
@@ -113,6 +113,29 @@ class SessionSkillStore:
                 'INSERT INTO session_skills(id, session_id, data, created_at) VALUES (?,?,?,?)',
                 (sid, session_id, json.dumps(data, ensure_ascii=False), at))
         return data
+
+    def create_from_github(self, session_id: str, fetch_result, actor_id: str) -> dict:
+        """从 GitHub 拉取结果创建 session skill 绑定。
+
+        fetch_result 是 github_skill_fetch.FetchResult。
+        不触碰 instruction_modules / skill_assets / project_modules / agent manifests。
+        不授予任何工具权限、凭据或部署权限。
+        """
+        dependencies = list(fetch_result.dependencies)
+        dependency_state = 'ready' if not dependencies else 'missing'
+
+        return self.create_from_data(session_id, {
+            'name': fetch_result.name,
+            'origin': 'github',
+            'source_ref': fetch_result.source_ref,
+            'source_version': fetch_result.commit_sha,
+            'source_sha256': fetch_result.content_sha256,
+            'entry': fetch_result.entry,
+            'description': fetch_result.description,
+            'dependencies': dependencies,
+            'import_state': 'imported',
+            'dependency_state': dependency_state,
+        }, actor_id)
 
     def delete(self, skill_id: str, session_id: str) -> None:
         """解绑。已产生的 run 记录与其 session_skill_snapshot 不受影响。"""
