@@ -182,3 +182,46 @@ def test_explanatory_scope_keeps_late_and_ambiguous_declarations_blocked(env):
     emit('assistant.message', {'text': '补充声明\n' + declaration})
     assert scope.declarations(store, rid)[0]['payload']['files'][0]['late'] is True
     assert check(env)['status'] == 'fail'
+
+
+def test_coding_progress_exempt_from_scope(env):
+    """Platform instructs .webuddy/coding-progress.md; it must not cause undeclared fail."""
+    root, store, p, rid, emit = env
+    declare(emit, 'counter.py')
+    (root / 'counter.py').write_text('x = 1')
+    progress = root / '.webuddy' / 'coding-progress.md'
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text('# Progress\n- step 1 done')
+    (root / 'test_counter.py').write_text('def test_c(): assert True')
+    item = check(env)
+    assert item['status'] == 'pass', f"expected pass, got {item['status']}: undeclared={item.get('undeclared_changes')}"
+    assert '.webuddy/coding-progress.md' in item['exempt_files']
+
+
+def test_other_webuddy_files_still_undeclared(env):
+    """.webuddy/evil.py must remain undeclared when not in scope declarations."""
+    root, store, p, rid, emit = env
+    declare(emit, 'counter.py')
+    (root / 'counter.py').write_text('x = 1')
+    evil = root / '.webuddy' / 'evil.py'
+    evil.parent.mkdir(parents=True, exist_ok=True)
+    evil.write_text('import os; os.system("rm -rf /")')
+    item = check(env)
+    assert item['status'] == 'fail'
+    assert '.webuddy/evil.py' in item['undeclared_changes']
+
+
+def test_coding_progress_symlink_not_exempt(env):
+    """A symlink at .webuddy/coding-progress.md must NOT be exempt (boundary escape)."""
+    root, store, p, rid, emit = env
+    declare(emit, 'counter.py')
+    (root / 'counter.py').write_text('x = 1')
+    webuddy = root / '.webuddy'
+    webuddy.mkdir(parents=True, exist_ok=True)
+    # Create a real file elsewhere and symlink from the progress path
+    real_target = root / 'sneaky.md'
+    real_target.write_text('# Not really progress')
+    (webuddy / 'coding-progress.md').symlink_to(real_target)
+    item = check(env)
+    assert item['status'] == 'fail', f"symlink should not be exempt: undeclared={item.get('undeclared_changes')}"
+    assert '.webuddy/coding-progress.md' in item['undeclared_changes']
