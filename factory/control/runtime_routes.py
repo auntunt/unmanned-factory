@@ -57,7 +57,9 @@ def router(store, service, workspace_root=None, static_dir=None):
         return service.operations_automation.config()
 
     @api.put("/runtime/operations")
-    def operations_update(body: OperationsBody):
+    def operations_update(body: OperationsBody, request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
         try:
             return service.operations_automation.configure(**body.model_dump())
         except Conflict as exc:
@@ -66,11 +68,22 @@ def router(store, service, workspace_root=None, static_dir=None):
             raise HTTPException(400, str(exc)) from None
 
     @api.get("/runtime")
-    def runtime():
-        return inspect_runtime(settings, workspace_root, static_dir)
+    def runtime(request: Request):
+        full = inspect_runtime(settings, workspace_root, static_dir)
+        if request.state.user.get('role') == 'member':
+            # Member sees readiness + blockers only, no configuration details.
+            return {
+                "readiness": full.get("readiness"),
+                "local_readiness": full.get("local_readiness"),
+                "blockers": full.get("blockers", []),
+                "configuration_revision": full.get("configuration_revision"),
+            }
+        return full
 
     @api.put("/runtime/profiles")
     def update_runtime(body: RuntimeProfilesBody, request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
         try:
             return settings.update({"profiles": body.profiles, "limits": body.limits},
                                    body.revision, request.state.user["username"])
@@ -81,6 +94,8 @@ def router(store, service, workspace_root=None, static_dir=None):
 
     @api.post("/runtime/probe")
     def probe(body: RuntimeProbeBody, http_request: Request):
+        if http_request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
         if body.profile not in ROLES:
             raise HTTPException(400, "未知运行档位")
         if not _probe_gate.acquire(blocking=False):
