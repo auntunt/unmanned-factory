@@ -129,14 +129,47 @@ def snapshot(store, run):
     return json.loads((target / 'manifest.json').read_text())
 
 
-_SERVICE_KEYWORDS = ('网站', '站点', 'saas', 'web app', 'webapp', 'web 应用', '在线服务',
-                     '线上服务', 'api 服务', 'api服务', '后端服务', '服务端')
-_CLI_KEYWORDS = ('命令行', 'cli', '终端工具', 'shell 脚本', 'shell脚本', '命令行工具',
-                 'cli 工具', 'cli工具', '脚本工具')
-_INSTALLER_KEYWORDS = ('安装包', 'installer', '桌面应用', '桌面客户端', '客户端应用',
-                       '.exe', '.dmg', '.msi', '.pkg', '.deb', '.rpm', '.appimage',
-                       'electron 应用', 'electron应用', '桌面程序')
+# -- keyword tiers ---------------------------------------------------------
+# "Form" keywords describe a delivery *shape* (website, CLI binary, desktop
+# installer).  They act as both positive and negative evidence.
+# "Deploy" keywords describe hosting / deployment topology (online service,
+# API backend).  They contribute to *positive* matching only; when they
+# appear in non_goals they do NOT negate the delivery type, because "no
+# deployment" is a deployment decision, not a delivery-form decision.
+_SERVICE_FORM = ('网站', '站点', 'saas', 'web app', 'webapp', 'web 应用')
+_SERVICE_DEPLOY = ('在线服务', '线上服务', 'api 服务', 'api服务', '后端服务', '服务端')
+_SERVICE_KEYWORDS = _SERVICE_FORM + _SERVICE_DEPLOY
+
+_CLI_FORM = ('命令行', 'cli', '终端工具', 'shell 脚本', 'shell脚本', '命令行工具',
+             'cli 工具', 'cli工具', '脚本工具')
+_CLI_KEYWORDS = _CLI_FORM
+
+_INSTALLER_FORM = ('安装包', 'installer', '桌面应用', '桌面客户端', '客户端应用',
+                   '.exe', '.dmg', '.msi', '.pkg', '.deb', '.rpm', '.appimage',
+                   'electron 应用', 'electron应用', '桌面程序')
+_INSTALLER_KEYWORDS = _INSTALLER_FORM
+
 DELIVERY_TYPES = ('service', 'cli', 'installer')
+
+# Precompiled regex for ASCII-only keywords that need word-boundary matching
+# to prevent substring false positives (e.g. "client" matching "cli").
+_RE_ASCII_WORD = re.compile(r'^[a-zA-Z0-9 ]+$')
+_WORD_BOUNDARY_CACHE: dict[str, re.Pattern] = {}
+
+
+def _kw_in_text(kw: str, text: str) -> bool:
+    """Match a keyword in text.
+
+    Pure-ASCII keywords use word-boundary matching (``\\b``); CJK text and
+    extension patterns (e.g. ``.exe``) use plain substring matching.
+    """
+    if _RE_ASCII_WORD.fullmatch(kw):
+        pattern = _WORD_BOUNDARY_CACHE.get(kw)
+        if pattern is None:
+            pattern = re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+            _WORD_BOUNDARY_CACHE[kw] = pattern
+        return bool(pattern.search(text))
+    return kw in text
 
 
 def infer_delivery_type_from_text(text, spec_draft=None):
@@ -163,13 +196,16 @@ def infer_delivery_type_from_text(text, spec_draft=None):
     negative = '\n'.join(negative_sources).lower()
     matches = set()
     excluded = set()
-    for keywords, label in ((_SERVICE_KEYWORDS, 'service'), (_CLI_KEYWORDS, 'cli'), (_INSTALLER_KEYWORDS, 'installer')):
-        in_positive = any(kw in positive for kw in keywords)
-        in_negative = any(kw in negative for kw in keywords)
+    for form_kws, all_kws, label in (
+        (_SERVICE_FORM, _SERVICE_KEYWORDS, 'service'),
+        (_CLI_FORM,     _CLI_KEYWORDS,     'cli'),
+        (_INSTALLER_FORM, _INSTALLER_KEYWORDS, 'installer'),
+    ):
+        in_positive = any(_kw_in_text(kw, positive) for kw in all_kws)
+        # Negative signals use only delivery-form keywords; deployment /
+        # hosting words in non_goals do not negate the delivery type.
+        in_negative = any(_kw_in_text(kw, negative) for kw in form_kws)
         if in_negative:
-            # Negative signal (non_goals) always wins: if a keyword appears
-            # in non_goals it is an exclusion even when the same word shows
-            # up in the request text as part of "不要做成桌面应用".
             excluded.add(label)
         elif in_positive:
             matches.add(label)

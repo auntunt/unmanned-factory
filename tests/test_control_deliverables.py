@@ -106,6 +106,22 @@ def test_infer_non_goal_alone_does_not_produce_type():
     assert infer_delivery_type_from_text('做个工具', spec) is None
 
 
+def test_english_word_boundary_client_not_cli():
+    """'Build a client portal' must NOT match cli (client contains cli substring)."""
+    assert infer_delivery_type_from_text('Build a client portal') is None
+
+
+def test_english_word_boundary_cli_tool_matches():
+    """'build a cli tool' must match cli with word boundary."""
+    assert infer_delivery_type_from_text('build a cli tool') == 'cli'
+
+
+def test_deploy_non_goal_does_not_negate_service():
+    """goal=website + non_goal=deployment phrasing must still infer service."""
+    spec = {'goal': '做一个网站', 'flows': [], 'non_goals': ['部署到线上服务'], 'data_model': []}
+    assert infer_delivery_type_from_text('做一个网站', spec) == 'service'
+
+
 def test_listing_returns_delivery_type_and_installer_targets(app_env):
     client, store, svc, repo = app_env
     from tests.test_control_app import login, project
