@@ -131,3 +131,39 @@ it('uses the shared form layout for server registration controls', async () => {
   expect(name.closest('form')?.className).toContain('wb-form')
   expect(name.closest('.wb-form-grid')).toBeTruthy()
 })
+
+it('displays service_url as a link when set', async () => {
+  const targetWithUrl = { ...target, service_url: 'https://staging.example.com' }
+  mockTargetsAndChecks([targetWithUrl])
+  render(<ServerTargets csrfToken="csrf" onUnauthorized={onUnauthorized} />)
+  await screen.findByText('生产服务')
+  const link = screen.getByText('https://staging.example.com')
+  expect(link.tagName).toBe('A')
+  expect(link.getAttribute('href')).toBe('https://staging.example.com')
+  expect(link.getAttribute('target')).toBe('_blank')
+})
+
+it('does not display service_url line when empty', async () => {
+  mockTargetsAndChecks([{ ...target, service_url: '' }])
+  render(<ServerTargets csrfToken="csrf" onUnauthorized={onUnauthorized} />)
+  await screen.findByText('生产服务')
+  expect(screen.queryByText(/可展示地址：/)).toBeNull()
+})
+
+it('has a service_url input field in the registration form', async () => {
+  mockTargetsAndChecks([target])
+  render(<ServerTargets csrfToken="csrf" onUnauthorized={onUnauthorized} />)
+  const urlInput = await screen.findByLabelText('可展示地址')
+  expect(urlInput).toBeTruthy()
+  expect(urlInput.getAttribute('type')).toBe('url')
+  expect(urlInput.getAttribute('placeholder')).toBe('https://example.com')
+})
+
+it('member sees service_url in project targets listing', async () => {
+  const available = [{ id: 't1', name: '生产服务', service_url: 'https://prod.example.com', revision: 3 }]
+  api.mockResolvedValue({ targets: ['t1'], revision: 1, available } as never)
+  render(<ProjectTargets projectId="p1" csrfToken="csrf" onUnauthorized={onUnauthorized} isAdmin={false} />)
+  const link = await screen.findByText('https://prod.example.com')
+  expect(link.tagName).toBe('A')
+  expect(link.getAttribute('href')).toBe('https://prod.example.com')
+})
