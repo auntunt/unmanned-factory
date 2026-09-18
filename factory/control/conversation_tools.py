@@ -2,31 +2,41 @@
 construction: the model cannot target another conversation, user or run. Exposed
 to the model as mcp__session__calc and mcp__session__export. The pure methods are
 directly callable so a fake model can exercise registration, validation,
-invocation, result and permission without the real SDK."""
+invocation, result and permission without the real SDK.
+
+Admin configuration tools (runtime / operations / deploy-targets) are registered
+conditionally when the bound actor has the admin role."""
 from __future__ import annotations
 
 import json
 
-TOOL_NAMES = frozenset(('mcp__session__calc', 'mcp__session__export'))
+from factory.control.admin_config_tools import ADMIN_TOOL_NAMES
+
+TOOL_NAMES = frozenset(('mcp__session__calc', 'mcp__session__export')) | ADMIN_TOOL_NAMES
 
 
-def binding_for(store, cid, actor_id) -> dict:
+def binding_for(store, cid, actor_id, *, actor_role=None) -> dict:
     """Server-generated, serializable binding config for crossing the process
     boundary to the SDK worker. It carries ONLY the on-disk store path plus the
     conversation and actor the server already authorized; the model never supplies
     or sees these, and cannot point the tools at another database, user or
-    conversation. Reconstructed with ConversationTools.from_binding in the worker."""
+    conversation. Reconstructed with ConversationTools.from_binding in the worker.
+
+    *actor_role* is the server-verified role ('admin' or 'member') at binding
+    time.  When omitted the binding defaults to 'member' (safe minimum)."""
     # Preserve cid/actor_id types (actor_id is often an int user id); the owner
     # check compares by equality, so coercing to str would break it. All three
     # values are JSON-serializable and survive the JSONL round-trip unchanged.
-    return {'db_path': str(store.path), 'conversation_id': cid, 'actor_id': actor_id}
+    return {'db_path': str(store.path), 'conversation_id': cid, 'actor_id': actor_id,
+            'actor_role': actor_role or 'member'}
 
 
 class ConversationTools:
-    def __init__(self, store, cid, actor_id):
+    def __init__(self, store, cid, actor_id, *, actor_role='member'):
         self.store = store
         self.cid = cid
         self.actor_id = actor_id
+        self.actor_role = actor_role
 
     @classmethod
     def from_binding(cls, binding: dict) -> 'ConversationTools':
@@ -42,7 +52,8 @@ class ConversationTools:
         except KeyError as exc:
             raise ValueError(f'conversation binding missing field: {exc}') from None
         from factory.control.store import Store
-        return cls(Store(db_path), cid, actor_id)
+        actor_role = binding.get('actor_role', 'member')
+        return cls(Store(db_path), cid, actor_id, actor_role=actor_role)
 
     def calc(self, items, discount_rate='1'):
         """Deterministic quote arithmetic; the inputs are the source of truth."""
@@ -96,4 +107,11 @@ def create_server(tools: ConversationTools, emit):
         emit('session.export', {'conversation_id': tools.cid, 'export_id': item['id']})
         return {'content': [{'type': 'text', 'text': '已导出：' + json.dumps(item, ensure_ascii=False)}]}
 
-    return create_sdk_mcp_server('session', tools=[calc, export])
+    # Admin configuration tools (runtime / operations / deploy-targets).
+    # Registered for all roles: each tool checks admin role internally and
+    # returns a structured rejection for non-admin callers.
+    from factory.control.admin_config_tools import AdminConfigTools, register_admin_tools
+    admin = AdminConfigTools(tools.store, tools.actor_id, tools.actor_role)
+    admin_tools_list = register_admin_tools(admin, emit, tool_decorator=tool)
+
+    return create_sdk_mcp_server('session', tools=[calc, export, *admin_tools_list])
