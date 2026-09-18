@@ -1,12 +1,13 @@
 import Icon from './Icon'
 import { useEffect, useState } from 'react'
 import { request } from '../workspace/api'
-import type { Run } from '../workspace/types'
+import type { Run, CapabilitySources, ServiceUrl } from '../workspace/types'
 import GithubDelivery, { githubPublicationLabel } from './GithubDelivery'
 import { DELIVERY_TYPE_LABEL, type DeliveryType } from '../conversation/delivery-constants'
+import CapabilitySourcePanel from './CapabilitySourcePanel'
 
 type Item = { id: number; name: string; kind: string; size: number; sha256: string; origin: string; preview: boolean }
-type Catalog = { recommended_preview_id?: number | null; saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string; delivery_type?: DeliveryType; installer_targets?: string[] | null }
+type Catalog = { recommended_preview_id?: number | null; saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string; delivery_type?: DeliveryType; installer_targets?: string[] | null; capability_sources?: CapabilitySources; service_urls?: ServiceUrl[] }
 const labels: Record<string, string> = { installer: '安装包', package: '压缩包 / 软件包', web: '网页', image: '图片', document: '文档', source: '源码 / 文件' }
 function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` }
 
@@ -54,7 +55,7 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
     {!catalog && !error && <p role="status">正在读取成果…</p>}
     {catalog && <>
       <div className="wb-notice">成果：{catalog.saved ? `已保存 · ${catalog.items.length} 个文件` : '尚未保存'} · GitHub：{githubPublicationLabel(run, catalog.github_configured, catalog.github_repository_bound)}{catalog.delivery_type ? ` · 交付类型：${DELIVERY_TYPE_LABEL[catalog.delivery_type] || catalog.delivery_type}` : ' · 交付类型：未声明'}</div>
-      <DeliverableDeliverySection deliveryType={catalog.delivery_type ?? null} installerTargets={catalog.installer_targets ?? null} run={run} />
+      <DeliverableDeliverySection deliveryType={catalog.delivery_type ?? null} installerTargets={catalog.installer_targets ?? null} run={run} serviceUrls={catalog.service_urls ?? []} />
       {catalog.publish_error && <p role="alert">{catalog.publish_error}</p>}
       {!catalog.github_configured && <p>如需推送仓库，请联系管理员配置 GitHub 发布凭据；查看和下载成果不依赖 GitHub。</p>}
       {!catalog.saved && <><p>{catalog.collection_error || (catalog.can_collect ? '这次运行尚未归档实际文件，保存后即可预览和下载。' : '执行与验证完成后，系统会自动保存成果。')}</p>{catalog.can_collect && (isAdmin ? <button className="wb-button wb-button-primary" disabled={busy} onClick={() => void collect()}>{busy ? '正在保存…' : '保存本次成果'}</button> : <p>请管理员保存本次成果后即可下载。</p>)}</>}
@@ -69,13 +70,15 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
         </details>
         <details><summary><Icon name="triangle" className="wb-disclosure-icon" />如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
       </>}
+      {catalog.capability_sources && <CapabilitySourcePanel sources={catalog.capability_sources} />}
+      <ContinueModify run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />
     </>}
   </section>
 }
 
 /** Delivery-type-specific status, consistent with RunWorkspace's DeliverySection.
  *  Uses the same shared DELIVERY_TYPE_LABEL constant to guarantee label parity. */
-function DeliverableDeliverySection({ deliveryType, installerTargets, run }: { deliveryType: DeliveryType; installerTargets: string[] | null; run: Run }) {
+function DeliverableDeliverySection({ deliveryType, installerTargets, run, serviceUrls }: { deliveryType: DeliveryType; installerTargets: string[] | null; run: Run; serviceUrls: ServiceUrl[] }) {
   const deployed = run.status === 'published'
   if (deliveryType === 'cli') {
     return <div className="wb-delivery-type-section" data-delivery-type="cli">
@@ -93,9 +96,62 @@ function DeliverableDeliverySection({ deliveryType, installerTargets, run }: { d
   if (deliveryType === 'service') {
     return <div className="wb-delivery-type-section" data-delivery-type="service">
       <p><strong>部署：</strong>{deployed ? <span>已部署</span> : <span>待部署</span>}</p>
+      {serviceUrls.length > 0 ? (
+        <div data-testid="service-urls">
+          <p><strong>固定测试地址：</strong></p>
+          <ul>{serviceUrls.map(s => (
+            <li key={s.url}><a href={s.url} target="_blank" rel="noopener noreferrer">{s.url}</a>{s.name ? ` (${s.name})` : ''}</li>
+          ))}</ul>
+        </div>
+      ) : (
+        <p data-testid="no-service-url">未登记固定地址，请管理员补齐。</p>
+      )}
     </div>
   }
   return <div className="wb-delivery-type-section" data-delivery-type="undeclared">
     <p><strong>交付类型：</strong><span>未声明</span></p>
   </div>
+}
+
+/** "继续修改" entry in the delivery view.
+ *  Submits a followup note via the existing notes API (POST /api/v2/runs/{rid}/notes). */
+function ContinueModify({ run, csrfToken, onUnauthorized }: { run: Run; csrfToken: string; onUnauthorized: () => void }) {
+  const [content, setContent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!content.trim() || busy) return
+    setBusy(true); setError('')
+    try {
+      await request(`/api/v2/runs/${encodeURIComponent(String(run.id))}/notes`, {
+        method: 'POST', csrfToken, onUnauthorized,
+        body: { content: content.trim(), idempotency_key: crypto.randomUUID() },
+      })
+      setSent(true); setContent('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '提交失败')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <details className="wb-continue-modify" data-testid="continue-modify">
+      <summary><Icon name="triangle" className="wb-disclosure-icon" />继续修改</summary>
+      {sent ? (
+        <p>修改要求已提交，系统将基于当前成果继续处理。</p>
+      ) : (
+        <form onSubmit={e => void submit(e)}>
+          <p>描述需要继续修改的内容，系统会基于当前版本和项目设置继续处理。</p>
+          <div className="wb-field">
+            <label htmlFor="continue-modify-content">修改内容</label>
+            <textarea id="continue-modify-content" value={content} onChange={e => setContent(e.target.value)} placeholder="说明需要修改的部分…" />
+          </div>
+          <button className="wb-button wb-button-primary" disabled={busy || !content.trim()} type="submit">{busy ? '正在提交…' : '提交修改要求'}</button>
+          {error && <p role="alert" className="wb-billing-warning">{error}</p>}
+        </form>
+      )}
+    </details>
+  )
 }

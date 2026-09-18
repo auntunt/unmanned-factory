@@ -147,6 +147,34 @@ export interface AuditEvent {
   at: string
 }
 
+// --- Capability source types (N6) ---
+
+export type CapabilitySourceStatus = 'available' | 'no_record'
+export type LoadedOrigin = 'project_module' | 'session_skill'
+
+export interface LoadedItem {
+  name: string
+  id: string
+  origin: LoadedOrigin
+}
+
+export interface InvokedItem {
+  name: string
+  count: number
+  first_at: string
+  last_at: string
+}
+
+export interface CapabilitySources {
+  loaded: { status: CapabilitySourceStatus; items: LoadedItem[] }
+  invoked: { status: CapabilitySourceStatus; items: InvokedItem[] }
+}
+
+export interface ServiceUrl {
+  name: string
+  url: string
+}
+
 export function runId(run: Pick<Run, 'id'>): string {
   return String(run.id)
 }
