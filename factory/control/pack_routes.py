@@ -11,6 +11,7 @@ never supplies the actor, the provider, or another user's artifact id and gets a
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -24,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from factory.control.capability_packs import MAX_ARTIFACT_BYTES, PackStore
 from factory.control.pack_runtime import environment_report, evaluate, run_tool
+from factory.control.pack_zip import build_tool_zip
 from factory.control.store import Conflict, now
 
 KEY = r'^[A-Za-z0-9_-]{8,100}$'
@@ -322,6 +324,27 @@ def router(store, service):
             # downloadable, but never presented as verified.
             'X-Validation-Status': body['validation_status']})
 
+
+    # ---- 工具执行包下载 ---------------------------------------------------
+    @api.get('/versions/{version_id}/tool-pack')
+    def download_tool_pack(version_id: str, request: Request):
+        """下载可独立运行的工具执行包（含 CLI harness、版本标识、sha256 校验文件）。
+
+        与 agent-pack ZIP（模板包）不同，这是用户能在平台外直接
+        `python cli.py --input x --output y` 运行的那一份。
+        """
+        version = guarded(packs.version, version_id)
+        files = guarded(packs.files, version_id=version_id)
+        raw = build_tool_zip(version, files)
+        zip_sha256 = hashlib.sha256(raw).hexdigest()
+        slug = version.get('manifest', {}).get('tool', {}).get('name', 'tool')
+        filename = f'{slug}-v{version["version"]}.zip'
+        return Response(raw, media_type='application/zip', headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'X-Content-Type-Options': 'nosniff',
+            'X-Pack-Version': str(version['version']),
+            'X-Pack-SHA256': zip_sha256,
+        })
 
     # ---- 动态段放最后 ----------------------------------------------------
     # `/{pack_id}` 会吞掉任何在它之后声明的同层静态路径（实测 GET /invocations 返回 404）。
