@@ -35,6 +35,12 @@ def _plan(self, rid):
         if module_state:
             run = self.store.update(rid, module_state, expected=('planning',),
                 event=('modules.frozen', {'modules': [{'id': m['id'], 'version': m['version'], 'name': m['name']} for m in module_state['module_snapshot']]}))
+        if 'session_skill_snapshot' not in run and run.get('conversation_id'):
+            from factory.control.session_skills import SessionSkillStore
+            session_snapshot = SessionSkillStore(self.store).freeze(run['conversation_id'])
+            if session_snapshot is not None:
+                run = self.store.update(rid, {'session_skill_snapshot': session_snapshot}, expected=('planning',),
+                    event=('session_skills.frozen', {'skills': [{'id': s['id'], 'name': s['name']} for s in session_snapshot]}))
         project = self._project_for_run(run)
         if run.get('spec_confirmation'):
             run = {**run, 'request': run['request'] + requirement_analysis.contract(run)}
