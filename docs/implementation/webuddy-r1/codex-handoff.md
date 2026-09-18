@@ -77,3 +77,20 @@
 
 ## 待你复核与后续
 R2-01/R2-02 修复复核 → 服务器隔离验收（GitHub 发布、固定地址、隔离终端可用性、Linux bwrap 全链）。
+
+
+---
+# r2 服务器阻塞修复交接（2026-09-18，基线 0b39155 → 候选见推送）
+
+## 提交
+- merge T13（7c486f5）：verification.py 提取层改 _extract_verdict_json/_validate_verdict_fields——纯 JSON / 全文围栏 / 说明段+唯一 ```json 围栏三形式；多候选块、冲突 verdict、非法字段仍 invalid_response；接线单点替换，coverage/fidelity/scope/browser 规则未动。
+- merge T14（f5f1632）：scope_declaration.exempt 增加 .webuddy/coding-progress.md 精确路径窄豁免（非目录前缀），符号链接不豁免（workspace 透传判定）；其余 .webuddy 与业务文件照旧管控。
+
+## 证据
+- receipts/T13.md、T14.md：修复前失败输出（T13 另有规划者行为级验证：旧四行逻辑对你 S1 引文形式 JSONDecodeError；新解析 verdict=pass 结构完整）。
+- 定向：test_verification_response_parsing 12、test_scope_declaration 16、验收合同/证据 22+3skip、continuous 36 → 合并树集合 87 passed / 2 skipped。
+- 按本轮节奏未跑 2434 全量与前端；如你判断存在共享影响再扩。
+- 你的服务器现场结果原样引用（不据为己有）：T08 auto-resume 首段无人观察成立、后半段人工继续一次；bwrap/隔离终端/settings 通过；旧现场（live-20260918-115212、成果 8d64c54）未触碰，修复后复验请另记新结果。
+
+## 环境缺口（非代码，待用户/运维）
+固定测试地址未明确；生产部署目标登记为空。

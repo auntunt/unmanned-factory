@@ -41,3 +41,9 @@ Codex 初审：/Users/auntlee/Desktop/自动化harness构建/docs/webuddy-r1-han
 - T12（R2-02）：local_reviewed，已合并。ASCII 关键词词边界匹配（client 不再命中 cli）；关键词分 form/deploy 两层，非目标里的部署措辞不否定交付形态；歧义 None 保守策略保持。3 条新回归修复前失败在案。
 - 集成（318e57f）：Codex 六文件定向集 210 passed（其复核时 203 + 7 新回归）；后端全量一次 2434 passed / 0 failed。前端零改动未重跑（沿用 eff65ec 的 364/364）。
 - 证据边界修正（采纳 Codex）：T10 矩阵中 hooks/permissions/env 加载一格的证据为「SDK 参数传入 + CLI 帮助与 SDK 源码」，隔离 canary 因认证段先失败未观测到 hook 实际执行，不以本机现象推断所有环境；T08 现场自动接续仍未验证；两条重启形态偶发失败不因本轮通过而消除。
+
+## r2 服务器阻塞修复轮（2026-09-18，Codex 现场复核 0b39155 后）
+- T13（S1）：local_reviewed，已合并（7c486f5）。验收响应解析支持「说明段+唯一 JSON 围栏」；多块/冲突/非法字段仍 invalid_response；下游 coverage/fidelity/scope 未动。规划者行为级变异验证：旧逻辑对真实形式 JSONDecodeError。
+- T14（S2）：local_reviewed，已合并（f5f1632）。方案 A：.webuddy/coding-progress.md 精确路径窄豁免（==，非目录），符号链接不豁免；.webuddy 其余文件仍受管控；旧现场证据未改。
+- 集成：验收/范围/连续执行相关集合 87 passed / 2 skipped。按本轮节奏未跑全量与前端（前端零改动）。
+- Codex 现场事实入账：T08 真实观察到 run.auto_resumed（actor=system/auto）与对应 followup.applied（无人工继续）；后半段经预算/时限调高后人工继续一次完成，不称无人完整交付；故障门本轮未被真正触发（先被超时自动接续抢先）。Linux bwrap、隔离终端、服务身份 settings 现场检查通过。固定测试地址与生产部署目标为空是环境缺口，未发明新功能。
