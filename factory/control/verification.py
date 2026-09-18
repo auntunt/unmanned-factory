@@ -6,6 +6,7 @@ from factory.control import fidelity, requirement_analysis
 from pathlib import Path
 from string import Template
 import json
+import re
 import time
 import uuid
 
@@ -25,6 +26,66 @@ from factory.control import skill_ingestion_runs
 
 
 _VERIFIER_CONTRACT_MAX_CHARS = 80_000
+
+_FENCE_RE = re.compile(r'```(?:json)?\s*\n(.*?)\n\s*```', re.DOTALL)
+
+
+def _extract_verdict_json(text: str) -> dict:
+    """Extract and validate the structured verdict from a verification response.
+
+    Accepted forms:
+    1. Pure JSON text.
+    2. Entire text is a single code fence (```json ... ``` or ``` ... ```).
+    3. Explanation text followed by exactly one code fence containing a valid
+       JSON object.
+
+    Raises ValueError when:
+    - Multiple code fences with JSON objects are found.
+    - No valid JSON object is found.
+    - verdict is not in {pass, fail, unverified} or reason is not a string.
+    """
+    source = text.strip()
+
+    # Form 1: pure JSON.
+    try:
+        obj = json.loads(source)
+        if isinstance(obj, dict):
+            _validate_verdict_fields(obj)
+            return obj
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # Form 2 & 3: look for code fences.
+    fences = list(_FENCE_RE.finditer(source))
+
+    if not fences:
+        raise ValueError('no JSON code fence found')
+
+    # Try to parse each fence as a JSON object.
+    candidates = []
+    for match in fences:
+        body = match.group(1).strip()
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict):
+                candidates.append(obj)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    if len(candidates) == 0:
+        raise ValueError('no valid JSON object in code fence')
+    if len(candidates) > 1:
+        raise ValueError('multiple JSON objects in code fences')
+
+    _validate_verdict_fields(candidates[0])
+    return candidates[0]
+
+
+def _validate_verdict_fields(obj: dict) -> None:
+    if obj.get('verdict') not in ('pass', 'fail', 'unverified'):
+        raise ValueError(f"invalid verdict: {obj.get('verdict')!r}")
+    if not isinstance(obj.get('reason'), str):
+        raise ValueError(f"reason must be a string, got {type(obj.get('reason'))!r}")
 
 
 _AGENT_FEEDBACK_PREFIXES = (
@@ -283,13 +344,8 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
                 continue
         raise ExecutionError('独立验证调用失败：' + str(failure), artifacts=artifacts) from failure
     try:
-        response_text = result.text.strip()
-        if response_text.startswith('```') and response_text.endswith('```'):
-            response_text = response_text.split('\n', 1)[1].rsplit('```', 1)[0]
-        verdict = json.loads(response_text)
-        if verdict.get('verdict') not in ('pass', 'fail', 'unverified') or not isinstance(verdict.get('reason'), str):
-            raise ValueError
-    except Exception:
+        verdict = _extract_verdict_json(result.text)
+    except (ValueError, TypeError):
         artifacts['verification'] = {'verdict': 'fail', 'reason': '独立验证模型未返回有效 verdict', 'error_type': 'invalid_response'}
         raise ExecutionError('独立验证未返回有效结构化结果', artifacts=artifacts)
     ledger = coverage(criteria, verdict, artifacts.get('verification_commit'), skills=(run.get('agent_snapshot') or {}).get('manifest', {}).get('skills', []))
