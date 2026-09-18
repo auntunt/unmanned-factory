@@ -31,3 +31,28 @@
 
 ## 模型与流程事实
 规划/监工 Fable 5；执行子任务请求 sonnet、宿主实际均为 claude-opus-4-6（转写元数据核实），未以 Sonnet 名义记录。并行 4 执行者、独立 worktree（webuddy-r1-t03/t04/t05/t06），冲突仅 conversation.css 一处由规划者裁决。
+
+
+---
+# r2 验收前修复交接（2026-09-18，基线 5018e7d → 候选见推送）
+
+## 提交范围（集成顺序）
+- 4bcc5d0 merge T07：checks 命令契约——执行端 _normalize_check_argv（仅单元素含空格 shlex.split，非 shell=True）、非法格式结构化错误、存储入口形状校验（b3e71ce）。
+- 8b133ea merge T08 首轮：安全节点自动消费 + 逐条 pending_id 徽标 + expired 独立态 + 恢复收尾扫描（1e1e925/e6660be）。
+- c5a4cbc merge T09：delivery_type 由 requirement_analysis.confirm 真实流程写入；关键词推导唯一正向命中才定型、non_goals 负向减除；delivery-constants.ts 两页一致（9bbd975/9573cca）。
+- d8ffe41 merge T10：setting_sources 边界矩阵与固定回归，不改行为（7983970）。
+- 60fb644 merge T08 追加：自动消费钩子移至 service._job finally（active_jobs 时序缺陷，联测发现）；基线检查异常事件化 followup.auto_resume_skipped（c658c74/ae906a3）。
+
+## 已验证行为与证据路径
+- 各任务回执（docs/implementation/webuddy-r1/receipts/T07–T10.md）含命令、退出码、变异验证记录。
+- 真实模型现场（临时库+uvicorn，非 TestClient）：T07 checks 拆分执行（exit 4→0）；T09 spec.auto_confirmed→delivery_type_inferred=cli；T08 followup.pending 落库、界面文案不再要求重输。
+- T08 自动接续机制：全路径回归（_submit/_job 线程池）修复前失败、修复后通过（变异验证）；**现场自动接续未在本机观察到**——三次真实尝试因执行段超窗（账号节流）未到 needs_human，请在服务器长任务验收按 T08 回执 10 步清单确认，判据：needs_human 后无人工操作出现 run.auto_resumed 且 followups 逐条 applied。
+- 集成：前端 364/364 + tsc + build；后端全量三次（1 failed / 1 failed / 全绿，失败为两条不同重启形态用例各一次、均不可复现——观察项）。
+
+## 剩余阻塞与观察项
+1. 现场自动接续确认（上）。
+2. 两条一次性全量失败（test_continuous_restart_derives_safe_resume_stage[budget-finalization]、test_restart_moves_in_flight_tasks_to_an_explicit_terminal_state）——Linux 复验请留意重启形态用例。
+3. setting_sources 服务器 6 步检查（T10 回执）仍是 79b7035 上线前置。
+4. 「独立验收需要可用的隔离终端」（providers.py:538）在本机联测环境成立，服务器环境需确认隔离终端可用性。
+5. 非 general 操作（bugfix/release）无 delivery_type 推导写入（T09 已登记缺口，后续小项）。
+6. 真实 GitHub 发布、固定测试地址业务操作、Linux bwrap 全链复跑：归你。
