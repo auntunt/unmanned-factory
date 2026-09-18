@@ -1,6 +1,6 @@
 # webuddy-next 本轮状态（唯一进度入口）
 
-最后更新：2026-09-19（wave 2 推进中，N6 未回）
+最后更新：2026-09-19（本轮代码与本地验证完成，已交接 Codex）
 
 ## 基线（已实查）
 - 集成工作区：`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`
@@ -43,9 +43,11 @@
 | N9 工具独立使用 | D3 | webuddy-next-n9 | opus-4.6 | 8bcf5c3 | 已集成，平台外实跑 sha256 一致 |
 | N4 GitHub 来源 Skill 导入 | D2 | webuddy-next-n4 | opus-4.6 | e5e3b1c | 已集成，真实公开仓库拉取验证通过 |
 | N5 前端会话 Skill 面板 + 术语呈现 | D2 | webuddy-next-n5 | opus-4.6 | 已合并 | 已集成（主会话改挂载点 + 修健壮性缺陷） |
-| N6 能力来源摘要 + 继续修改入口 + 地址展示 | D1/D6 | webuddy-next-n6 | opus-4.6 | — | running |
+| N6 能力来源摘要 + 继续修改入口 + 地址展示 | D1/D6 | webuddy-next-n6 | opus-4.6 | 800b4eb | 已集成 |
 | N7 非 general 操作 delivery_type 写入 | D1 | webuddy-next-n7 | opus-4.6 | 已合并 | 已集成 |
-| N10 独立 pause 语义 | D5 | — | — | — | 候选，优先级最低 |
+| N10 独立 pause 语义 | D5 | — | — | — | **本轮未做**，见交接第六节 |
+| N11 管理员配置对话入口 | D4 | webuddy-next-n11 | opus-4.6 | 81e8213 | 已集成 |
+| V1 真实服务器核查 | 全部 | 独立验证员 | opus-4.6 | — | 6/6 通过，证据 receipts/V1-live-check.md |
 
 ## 已有证据（引用，不重跑）
 - r1/r2 全部证据见 `docs/implementation/webuddy-r1/`（status.md、codex-handoff.md、receipts/T01–T14.md）。
@@ -78,4 +80,12 @@ wave 1 五单回来后：主会话核对证据 → 逐单集成到 `v3-conversat
 - delivery 相关（N7 合并后）：182 passed，退出码 0
 - 前端：`npx tsc --noEmit` 退出码 0；`npx vitest run` 376 passed（基线 364）→ 加回归测试后 378
 - 待做：N6 合并后跑一次后端全量 + 前端全量
+
+## 本轮结论（2026-09-19）
+- 候选 HEAD：`b4c970f`（代码最终态 `16dfdaa`），基线 `6fe1883`，50+ 提交。
+- 后端全量：**2582 passed / 0 failed / 20 skipped**，退出码 0。
+- 前端：`tsc --noEmit` 0、`npm run build` 0、`vitest` **387 passed / 50 files**（基线 364）。
+- 真实服务器核查 V1：6/6 通过（uvicorn + httpx，非 TestClient，非演练夹具），证据 `receipts/V1-live-check.md`。
+- 交接文档：`docs/implementation/webuddy-next/codex-handoff.md`。
+- **线上未验证项与环境缺口见交接第四、五节。本轮未部署生产，不宣称整个平台已验收通过。**
 
