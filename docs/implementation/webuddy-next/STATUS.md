@@ -1,6 +1,6 @@
 # webuddy-next 本轮状态（唯一进度入口）
 
-最后更新：2026-09-19（wave 1 派工完成）
+最后更新：2026-09-19（wave 2 推进中，N6 未回）
 
 ## 基线（已实查）
 - 集成工作区：`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`
@@ -36,15 +36,15 @@
 ## 任务进度
 | 任务 | 维度 | worktree/分支 | 模型 | 提交 | 状态 |
 |---|---|---|---|---|---|
-| N1 运行环境角色边界 | D4 | webuddy-next-n1 | 请求sonnet/实际opus-4.6 | — | running |
-| N2 管理员配置对话 | D4 | webuddy-next-n2 | 请求sonnet/实际opus-4.6 | — | running |
-| N3 会话级 Skill 绑定（契约单） | D2 | webuddy-next-n3 | 请求sonnet/实际opus-4.6 | — | running |
-| N8 固定测试地址字段 | D6 | webuddy-next-n8 | 请求sonnet/实际opus-4.6 | — | running |
-| N9 工具独立使用 | D3 | webuddy-next-n9 | 请求sonnet/实际opus-4.6 | — | running |
-| N4 GitHub 来源 Skill 导入 | D2 | 待建 | — | — | 等 N3 契约 |
-| N5 前端会话 Skill 面板 + 术语呈现 | D2 | 待建 | — | — | 等 N3 契约 |
-| N6 能力来源摘要 + 继续修改入口 + 地址展示 | D1/D6 | 待建 | — | — | 等 N3/N8 |
-| N7 非 general 操作 delivery_type 写入 | D1 | 待建 | — | — | 等 N3（run 创建处冲突） |
+| N1 运行环境角色边界 | D4 | webuddy-next-n1 | opus-4.6 | 27d3b25 | 已集成（含 App/Workbench 接线） |
+| N2 管理员配置对话 | D4 | webuddy-next-n2 | opus-4.6 | ff583c8 | 已集成（含 agent_routes 角色接线） |
+| N3 会话级 Skill 绑定（契约单） | D2 | webuddy-next-n3 | opus-4.6 | 13e823e | 已集成，契约生效 |
+| N8 固定测试地址字段 | D6 | webuddy-next-n8 | opus-4.6 | 44f124e | 已集成 |
+| N9 工具独立使用 | D3 | webuddy-next-n9 | opus-4.6 | 8bcf5c3 | 已集成，平台外实跑 sha256 一致 |
+| N4 GitHub 来源 Skill 导入 | D2 | webuddy-next-n4 | opus-4.6 | e5e3b1c | 已集成，真实公开仓库拉取验证通过 |
+| N5 前端会话 Skill 面板 + 术语呈现 | D2 | webuddy-next-n5 | opus-4.6 | 已合并 | 已集成（主会话改挂载点 + 修健壮性缺陷） |
+| N6 能力来源摘要 + 继续修改入口 + 地址展示 | D1/D6 | webuddy-next-n6 | opus-4.6 | — | running |
+| N7 非 general 操作 delivery_type 写入 | D1 | webuddy-next-n7 | opus-4.6 | 已合并 | 已集成 |
 | N10 独立 pause 语义 | D5 | — | — | — | 候选，优先级最低 |
 
 ## 已有证据（引用，不重跑）
@@ -65,3 +65,17 @@
 
 ## 下一步
 wave 1 五单回来后：主会话核对证据 → 逐单集成到 `v3-conversation-workspace` → 依 N3 契约派 wave 2（N4/N5/N6/N7）→ 集成验证 → 推送 `codex/autonomous-factory-v3` → 写 codex-handoff。
+
+## 集成期发现并修复的问题（主会话）
+1. **N9 的「pre-existing 失败」判断错误**：`test_codex_isolation_*` 在子 worktree 报 `ModuleNotFoundError: No module named 'openai_codex'`。根因是 `git worktree add` 出来的工作区各建新 `.venv`，只装默认依赖，不含 `pyproject.toml` 的 `codex` extra。集成工作区复跑为绿 → 既不是回归也不是基线失败，是环境差异。**权威验收一律在集成工作区跑**。
+2. **N2 自报的接线缺口属实**：`agent_routes.py:366` 不传 `actor_role`，对话绑定默认 member，admin 配置工具在真实对话中根本不会生效。已接线并复验。
+3. **N5 的挂载点判断错误**：回执称挂在 `RunWorkspace`，但 `RunWorkspace` 只有 `runId`，没有 `agent_conversations.id`。实际正确位置是 `AgentChatPage` 的 `cv-dock`（与既有 `CapabilityPanel` 并列），该处有 `conv.id`。主会话改挂。
+4. **N5 组件两处健壮性缺陷**：`setSkills(data.items)` 与 `deps.length` 均未防御，响应缺字段时整个会话页白屏（集成后 6 条既有测试变红暴露）。已加防御 + 2 条回归测试。
+
+## 集成验证记录（集成工作区，`-p no:randomly`）
+- 定向后端（wave 1 合并后）：389 passed / 1 skipped，退出码 0
+- 对话与配置：47 passed，退出码 0
+- delivery 相关（N7 合并后）：182 passed，退出码 0
+- 前端：`npx tsc --noEmit` 退出码 0；`npx vitest run` 376 passed（基线 364）→ 加回归测试后 378
+- 待做：N6 合并后跑一次后端全量 + 前端全量
+
