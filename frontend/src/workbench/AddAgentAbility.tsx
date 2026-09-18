@@ -46,9 +46,9 @@ export default function AddAgentAbility({ agentId, onChanged, ...props }: PagePr
       setEpoch(v => v + 1)
     } catch (e) { setError(errorText(e)) } finally { setBusy(false) }
   }
-  return <section aria-label="为职能体添加能力">
+  return <section aria-label="为职能体加载方法或安装工具">
     <details className="wb-card wb-form" open>
-      <summary><Icon name="triangle" className="wb-disclosure-icon" />为职能体添加能力</summary>
+      <summary><Icon name="triangle" className="wb-disclosure-icon" />为职能体加载方法或安装工具</summary>
       <p>上传能力包即可自动准备和验收，无需项目或另开维护对话。完成后在此核对启用。</p>
       {preflight?.ready === false && <p role="alert">{preflight.message}</p>}
       <details><summary>其他资料来源</summary><div className="wb-import-tabs" role="group" aria-label="能力素材类型">{[['prompt', '粘贴 Prompt'], ['file', '选择文件'], ['directory', '读取目录']].map(([value, label]) => <button type="button" key={value} aria-pressed={kind === value} className="wb-button wb-button-secondary" disabled={busy} onClick={() => setKind(value)}>{label}</button>)}</div></details>

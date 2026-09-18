@@ -10,9 +10,16 @@ const m={revision:2,identity:'维护职责',skills:[{id:'s1',version:1}],asserti
 const props={csrfToken:'csrf',onUnauthorized:vi.fn(),user:{id:1,username:'admin',role:'admin' as const}}
 beforeEach(()=>{api.mockReset();api.mockImplementation(async(path)=>path==='/api/v4/modules?agent_id=a1'?{modules:[{id:'s1',version:2,name:'回归检查'},{id:'s2',version:1,name:'日志检查'}]}:m)})
 afterEach(cleanup)
-it('shows pinned skills, source, assertions and saves a human manifest with revision',async()=>{render(<MemoryRouter><AgentManifest agentId="a1" {...props}/></MemoryRouter>);await screen.findByRole('link',{name:'回归检查'});expect(screen.getByText(/来源：legacy/)).toBeTruthy();fireEvent.change(screen.getByLabelText('身份段'),{target:{value:'新职责'}});fireEvent.change(screen.getByLabelText('加入 skill'),{target:{value:'s2'}});fireEvent.click(screen.getByRole('button',{name:'保存清单'}));await waitFor(()=>expect(api).toHaveBeenCalledWith('/api/v4/agents/a1/manifest',expect.objectContaining({method:'PUT',body:expect.objectContaining({revision:2,identity:'新职责',skills:[{id:'s1',version:1},{id:'s2',version:1}]})})));expect(screen.getByRole('link',{name:'导出职能包 v2 ZIP'}).getAttribute('href')).toContain('/a1/pack')})
+it('shows pinned skills, source, assertions and saves a human manifest with revision',async()=>{render(<MemoryRouter><AgentManifest agentId="a1" {...props}/></MemoryRouter>);await screen.findByRole('link',{name:'回归检查'});expect(screen.getByText(/来源：legacy/)).toBeTruthy();fireEvent.change(screen.getByLabelText('身份段'),{target:{value:'新职责'}});fireEvent.change(screen.getByLabelText('加载 skill'),{target:{value:'s2'}});fireEvent.click(screen.getByRole('button',{name:'保存清单'}));await waitFor(()=>expect(api).toHaveBeenCalledWith('/api/v4/agents/a1/manifest',expect.objectContaining({method:'PUT',body:expect.objectContaining({revision:2,identity:'新职责',skills:[{id:'s1',version:1},{id:'s2',version:1}]})})));expect(screen.getByRole('link',{name:'导出职能包 v2 ZIP'}).getAttribute('href')).toContain('/a1/pack')})
 it('restores history as a new revision, rather than changing the old entry',async()=>{render(<MemoryRouter><AgentManifest agentId="a1" {...props}/></MemoryRouter>);fireEvent.click(await screen.findByText('清单历史'));fireEvent.click(screen.getByRole('button',{name:'恢复 revision 1'}));await waitFor(()=>expect(api).toHaveBeenCalledWith('/api/v4/agents/a1/manifest/restore',expect.objectContaining({body:{revision:2,target_revision:1}})))})
 it('member sees manifest without write controls',async()=>{render(<MemoryRouter><AgentManifest agentId="a1" {...props} user={{...props.user,role:'member'}}/></MemoryRouter>);await screen.findByLabelText('身份段');expect((screen.getByLabelText('身份段') as HTMLTextAreaElement).disabled).toBe(true);expect(screen.queryByRole('button',{name:'保存清单'})).toBeNull()})
+it('describes skill as method-and-knowledge, not as a tool (T5 terminology)',async()=>{
+ render(<MemoryRouter><AgentManifest agentId="a1" {...props}/></MemoryRouter>)
+ await screen.findByRole('heading',{name:/岗位清单/})
+ const description = screen.getByText(/skill 是/)
+ expect(description.textContent).toContain('skill 是方法与知识')
+ expect(description.textContent).not.toContain('skill 是工具')
+})
 it('disambiguates legacy options and pinned references using source or body summary',async()=>{
  const legacy=[{id:'legacy-a',version:1,name:'遗留能力',instructions:'维护旧项目。后续步骤'},{id:'legacy-b',version:1,name:'遗留能力',instructions:'构建 CLI。后续步骤'},{id:'legacy-c',version:1,name:'遗留能力',source:{agent_name:'代码审查员'}}]
  api.mockImplementation(async path=>path==='/api/v4/modules?agent_id=a1'?{modules:legacy}:{...m,skills:[{id:'legacy-a',version:1}],resolved_skills:[legacy[0]]})
@@ -20,6 +27,6 @@ it('disambiguates legacy options and pinned references using source or body summ
  expect((await screen.findByRole('link',{name:/遗留能力 · 维护旧项目/})).textContent).toContain('legacy-a')
  expect(screen.getByRole('option',{name:/遗留能力 · 构建 CLI/})).toBeTruthy()
  expect(screen.getByRole('option',{name:/遗留能力 · 代码审查员/})).toBeTruthy()
- fireEvent.change(screen.getByLabelText('加入 skill'),{target:{value:'legacy-b'}})
+ fireEvent.change(screen.getByLabelText('加载 skill'),{target:{value:'legacy-b'}})
  expect(screen.getByRole('link',{name:/遗留能力 · 构建 CLI/})).toBeTruthy()
 })
