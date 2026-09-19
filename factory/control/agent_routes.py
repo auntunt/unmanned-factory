@@ -566,6 +566,11 @@ def router(store, service):
     # ------------------------------------------------------------------
 
     _ADMIN_CONFIG_AGENT = '__admin_config__'
+    # Identifies this process/app instance. A restart produces a new value,
+    # which is how we tell 'the job record is gone because we restarted' apart
+    # from 'the job is not registered yet because it is still being dispatched'.
+    _ADMIN_CONFIG_BOOT = uuid.uuid4().hex
+    _ADMIN_CONFIG_PLACEHOLDER = '正在回答'
 
     def _ensure_admin_config_table():
         with store.connect() as db:
@@ -585,6 +590,33 @@ def router(store, service):
         with store.connect() as db:
             db.execute('INSERT OR REPLACE INTO admin_config_conversations VALUES (?,?)',
                        (conv['id'], json.dumps(conv, ensure_ascii=False)))
+
+    def _mutate_admin_config_conv(cid, mutate):
+        """Read-modify-write one conversation inside a single write transaction.
+
+        Every writer that touches an existing conversation goes through here.
+        BEGIN IMMEDIATE takes the write lock *before* the SELECT, so no other
+        writer can commit between our read and our write. That is exactly the
+        hole that let a poll clobber a just-saved answer: the poll had read the
+        conversation while it still said '正在回答', and later wrote that whole
+        stale copy back over the real answer.
+
+        *mutate* receives the freshest conversation and returns True when it
+        changed something. Returns the conversation as persisted.
+        """
+        from factory.control.store import now
+        with store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM admin_config_conversations WHERE id=?',
+                             (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            conv = json.loads(row[0])
+            if mutate(conv):
+                conv['updated_at'] = now()
+                db.execute('UPDATE admin_config_conversations SET data=? WHERE id=?',
+                           (json.dumps(conv, ensure_ascii=False), cid))
+            return conv
 
     @api.post('/admin-config/conversations', status_code=201)
     def create_admin_config_conversation(request: Request):
@@ -614,38 +646,74 @@ def router(store, service):
         return {'conversations': [c for c in convs if c.get('actor_id') == uid]}
 
     def _resolve_stale_pending(conv):
-        """Recover stale pending/running messages by checking maintenance job status.
+        """Reconcile pending/running messages against authoritative job state.
 
-        If the server restarted or the answer callback failed to update the
-        message, the maintenance_jobs table has the authoritative terminal
-        state.  We reconcile here so the frontend sees a consistent view.
+        Job status is queried OUTSIDE the write transaction, because that query
+        can block and we must not hold the conversation's write lock while it
+        runs. The observed states are then applied per job_id against a freshly
+        read conversation. We never write back the copy we read before querying:
+        by then the job may have finished and saved its answer, and writing our
+        copy back would replace that answer with '正在回答'.
         """
-        changed = False
-        for m in conv.get('messages', []):
-            if m.get('status') not in ('pending', 'running'):
-                continue
-            jid = m.get('job_id')
-            if not jid:
-                continue
+        pending = [m['job_id'] for m in conv.get('messages', [])
+                   if m.get('status') in ('pending', 'running') and m.get('job_id')]
+        if not pending:
+            return conv
+
+        observed = {}
+        for jid in pending:
             try:
-                job = service.maintenance_status(jid)
+                observed[jid] = service.maintenance_status(jid)
             except KeyError:
-                m['status'] = 'interrupted'
-                m['content'] = '任务记录丢失'
-                changed = True
-                continue
-            if job['status'] in ('completed', 'failed', 'cancelled', 'interrupted'):
+                observed[jid] = None  # no job record under this id
+
+        def apply(fresh):
+            changed = False
+            for m in fresh.get('messages', []):
+                # Already terminal in the fresh copy means the answer callback
+                # won the race and wrote the real result. Leave it alone.
+                if m.get('status') not in ('pending', 'running'):
+                    continue
+                jid = m.get('job_id')
+                if jid not in observed:
+                    continue
+                job = observed[jid]
+                if job is None:
+                    if m.get('boot_id') != _ADMIN_CONFIG_BOOT:
+                        # Another process owned this job and is gone: a real restart.
+                        m['status'] = 'interrupted'
+                        m['content'] = '服务重启，任务中断'
+                        changed = True
+                    elif m.get('dispatch') == 'queued':
+                        # Persisted but not registered yet: still inside the
+                        # dispatch window of THIS process, not a lost record.
+                        continue
+                    else:
+                        m['status'] = 'interrupted'
+                        m['content'] = '任务记录丢失'
+                        changed = True
+                    continue
+                if job['status'] not in ('completed', 'failed', 'cancelled', 'interrupted'):
+                    continue
+                if job['status'] == 'completed' and m.get('content') == _ADMIN_CONFIG_PLACEHOLDER:
+                    # The job finished but its answer never reached the message.
+                    # Report the truth instead of an empty success.
+                    m['status'] = 'interrupted'
+                    m['content'] = '任务已结束，但回答未能保存'
+                    changed = True
+                    continue
                 m['status'] = job['status']
                 if job.get('error'):
                     m['content'] = job['error']
                 elif job['status'] == 'interrupted':
                     m['content'] = '服务重启，任务中断'
                 changed = True
-        if changed:
-            from factory.control.store import now
-            conv['updated_at'] = now()
-            _save_admin_config_conv(conv)
-        return conv
+            return changed
+
+        try:
+            return _mutate_admin_config_conv(conv['id'], apply)
+        except KeyError:
+            return conv
 
     @api.get('/admin-config/conversations/{cid}')
     def get_admin_config_conversation(cid: str, request: Request):
@@ -673,19 +741,22 @@ def router(store, service):
             raise HTTPException(403, '无权访问该会话')
 
         from factory.control.store import now
-        # Append user message
+        # Append the user message by merging into the freshest copy, never by
+        # writing back the copy read above.
         msg_id = uuid.uuid4().hex
-        conv['messages'].append({
-            'id': msg_id, 'role': 'user', 'content': body.content,
-            'created_at': now(),
-        })
+        user_msg = {'id': msg_id, 'role': 'user', 'content': body.content,
+                    'created_at': now()}
+
+        def _append_user(fresh):
+            fresh.setdefault('messages', []).append(user_msg)
+            return True
+
+        conv = _mutate_admin_config_conv(cid, _append_user)
 
         # Get runtime config for model settings
         cfg = service.runtime_settings.get()
         settings = cfg['profiles']['planner']
         if not settings.get('model'):
-            conv['updated_at'] = now()
-            _save_admin_config_conv(conv)
             return {'conversation': conv, 'status': 'failed',
                     'message': '规划模型未配置，无法回答'}
 
@@ -727,12 +798,21 @@ def router(store, service):
         # the pending row and the subsequent _save_admin_config_conv(conv)
         # below overwrites the completed result with stale data.
         pending_id = uuid.uuid4().hex
-        conv['messages'].append({
-            'id': pending_id, 'role': 'assistant', 'content': '正在回答',
+        pending_msg = {
+            'id': pending_id, 'role': 'assistant',
+            'content': _ADMIN_CONFIG_PLACEHOLDER,
             'status': 'pending', 'job_id': job_id, 'created_at': now(),
-        })
-        conv['updated_at'] = now()
-        _save_admin_config_conv(conv)
+            # Who dispatched it and how far dispatch got. Both are read by
+            # _resolve_stale_pending to avoid calling a message that is merely
+            # mid-dispatch a lost job record.
+            'boot_id': _ADMIN_CONFIG_BOOT, 'dispatch': 'queued',
+        }
+
+        def _append_pending(fresh):
+            fresh.setdefault('messages', []).append(pending_msg)
+            return True
+
+        conv = _mutate_admin_config_conv(cid, _append_pending)
 
         def answer(cancel):
             with tempfile.TemporaryDirectory(prefix='factory-admin-config-') as workspace:
@@ -759,26 +839,50 @@ def router(store, service):
             return {'status': 'completed'}
 
         answer.on_error = lambda exc: _admin_config_error(cid, job_id, exc)
-        service.start_maintenance(answer, job_id=job_id,
-                                  conversation_id=cid,
-                                  actor_id=actor(request)['id'])
+        try:
+            service.start_maintenance(answer, job_id=job_id,
+                                      conversation_id=cid,
+                                      actor_id=actor(request)['id'])
+        except Exception as exc:
+            # Dispatch itself failed, so no job will ever exist for this
+            # message. Give it a real terminal state now rather than leaving a
+            # pending row that nothing can ever resolve.
+            _update_admin_config_msg(cid, job_id, 'failed', '派发失败：' + str(exc))
+            raise
+
+        # Dispatch completed: the job is registered, so a missing job record
+        # from here on is a genuine loss rather than the dispatch window.
+        def _mark_registered(fresh):
+            for m in fresh.get('messages', []):
+                if m.get('job_id') == job_id and m.get('dispatch') == 'queued':
+                    m['dispatch'] = 'registered'
+                    return True
+            return False
+
+        conv = _mutate_admin_config_conv(cid, _mark_registered)
 
         return {'conversation': conv, 'job_id': job_id, 'status': 'pending'}
 
     def _update_admin_config_msg(cid, job_id, status, content):
-        """Find the pending/running message for *job_id* and set its terminal state."""
-        from factory.control.store import now
+        """Set the terminal state of the pending/running message for *job_id*.
+
+        Goes through the same atomic mutator as every other writer, so the
+        answer this writes cannot be overwritten by a poll that read the
+        conversation earlier.
+        """
+        def _apply(fresh):
+            for m in fresh.get('messages', []):
+                if m.get('job_id') == job_id and m.get('status') in ('pending', 'running'):
+                    m['status'] = status
+                    m['content'] = content
+                    m['dispatch'] = 'done'
+                    return True
+            return False
+
         try:
-            fresh = _admin_config_conv(cid)
+            _mutate_admin_config_conv(cid, _apply)
         except KeyError:
             return
-        for m in fresh.get('messages', []):
-            if m.get('job_id') == job_id and m.get('status') in ('pending', 'running'):
-                m['status'] = status
-                m['content'] = content
-                break
-        fresh['updated_at'] = now()
-        _save_admin_config_conv(fresh)
 
     def _admin_config_error(cid, job_id, exc):
         from factory.control.providers import ProviderCancelled
