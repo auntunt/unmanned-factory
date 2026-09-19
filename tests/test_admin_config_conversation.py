@@ -328,3 +328,163 @@ def test_normal_do_session_unaffected(env, monkeypatch):
     assert binding['admin_config'] is False, \
         'Normal do conversation must NOT have admin_config=True'
     assert binding['actor_role'] == 'admin'
+
+
+# ---------------------------------------------------------------------------
+# R3: 配置对话作业状态生命周期
+# ---------------------------------------------------------------------------
+
+import threading
+
+
+def test_failed_runner_marks_pending_as_failed(env, monkeypatch):
+    """Runner raises → that pending message becomes a real 'failed' terminal
+    state; no stale pending remains."""
+    client, store, service = env
+    h = _login(client)
+
+    def failing_run(req, emit, cancel):
+        raise RuntimeError('provider 断连')
+    monkeypatch.setattr(service.runner, 'run', failing_run)
+
+    cid = _create_config_conv(client, h).json()['id']
+    r = _send(client, h, cid, '改个配置')
+    assert r.status_code == 201
+    job_id = r.json()['job_id']
+    st = _wait_job(service, job_id)
+    assert st['status'] == 'failed'
+
+    conv = client.get(f'/api/v4/admin-config/conversations/{cid}', headers=h).json()
+    statuses = [m.get('status') for m in conv['messages'] if m.get('job_id') == job_id]
+    assert 'failed' in statuses, 'Runner error must produce a failed terminal message'
+    assert 'pending' not in statuses, 'Stale pending must not remain after failure'
+    assert 'running' not in statuses
+
+
+def test_cancelled_job_has_terminal_state(env, monkeypatch):
+    """Cancel a running admin-config job → the pending message reaches a real
+    terminal state (cancelled), not left as pending forever."""
+    client, store, service = env
+    h = _login(client)
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def slow_run(req, emit, cancel):
+        entered.set()          # signal that the runner is actually executing
+        gate.wait(5)
+        if cancel.is_set():
+            from factory.control.providers import ProviderCancelled
+            raise ProviderCancelled('调用已取消')
+        return ProviderResult('done')
+    monkeypatch.setattr(service.runner, 'run', slow_run)
+
+    cid = _create_config_conv(client, h).json()['id']
+    r = _send(client, h, cid, '慢操作')
+    assert r.status_code == 201
+    job_id = r.json()['job_id']
+
+    # Wait until runner is actually executing before cancelling
+    assert entered.wait(5), 'Runner never started'
+    service.cancel_maintenance(job_id, actor={'id': 1})
+    gate.set()
+    # _wait_job doesn't match 'cancelled'; poll directly for any terminal state
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        st = service.maintenance_status(job_id)
+        if st['status'] in ('completed', 'failed', 'cancelled', 'interrupted'):
+            break
+        time.sleep(0.05)
+    assert st['status'] in ('cancelled', 'interrupted'), f'Unexpected: {st}'
+
+    conv = client.get(f'/api/v4/admin-config/conversations/{cid}', headers=h).json()
+    live = [m.get('status') for m in conv['messages'] if m.get('job_id') == job_id]
+    assert not any(s in ('pending', 'running') for s in live), \
+        f'Cancelled job must not leave pending/running messages: {live}'
+
+
+def test_pending_persisted_before_dispatch(env, monkeypatch):
+    """Pending message is already in the DB *before* the runner starts.
+
+    Without this, a fast-completing runner reads the conv before pending is
+    saved, and the subsequent stale-conv save overwrites the completed result.
+
+    We verify by checking that the POST response (returned before the runner
+    finishes) already contains the pending message, and that after completion
+    the conversation has the completed result intact (not overwritten).
+    """
+    client, store, service = env
+    h = _login(client)
+    gate = threading.Event()
+
+    def gated_run(req, emit, cancel):
+        gate.wait(5)
+        return ProviderResult('fast result')
+    monkeypatch.setattr(service.runner, 'run', gated_run)
+
+    cid = _create_config_conv(client, h).json()['id']
+    r = _send(client, h, cid, '快速操作')
+    assert r.status_code == 201
+    job_id = r.json()['job_id']
+
+    # Before releasing the runner: the pending must already be in the DB
+    with store.connect() as db:
+        row = db.execute('SELECT data FROM admin_config_conversations WHERE id=?', (cid,)).fetchone()
+    conv_data = json.loads(row[0])
+    assert any(m.get('status') == 'pending' and m.get('job_id') == job_id
+               for m in conv_data.get('messages', [])), \
+        'MUTATION CAUGHT: pending message must be in DB before runner starts'
+
+    gate.set()
+    st = _wait_job(service, job_id)
+    assert st['status'] == 'completed'
+
+    # After completion the result must be intact (not overwritten by stale save)
+    conv = client.get(f'/api/v4/admin-config/conversations/{cid}', headers=h).json()
+    assert any(m.get('status') == 'completed' for m in conv['messages']), \
+        'Completed result must survive (not be overwritten by stale conv save)'
+    assert not any(m.get('status') in ('pending', 'running') for m in conv['messages']), \
+        'No stale pending/running after job completion'
+
+
+def test_pending_before_dispatch_mutation_verification(env, monkeypatch):
+    """Mutation verification for the pending-before-dispatch invariant.
+
+    Strategy: inside the runner, verify that the conv in the DB already has
+    the pending message for this job_id.  The runner runs on the maintenance
+    worker thread AFTER start_maintenance; if the pending were saved after
+    dispatch, the worker could see a conv without the pending.
+
+    We use monkeypatch on the underlying _save function to intercept and
+    record the DB state at the moment the runner executes.
+    """
+    client, store, service = env
+    h = _login(client)
+    pending_found_in_runner = threading.Event()
+    runner_job_id = {}
+
+    original_save = None
+
+    def verifying_run(req, emit, cancel):
+        # Read the conv directly from the DB.
+        # The pending for our job_id must already be there.
+        with store.connect() as db:
+            rows = db.execute('SELECT data FROM admin_config_conversations').fetchall()
+        for row in rows:
+            d = json.loads(row[0])
+            for m in d.get('messages', []):
+                if m.get('status') == 'pending' and m.get('job_id'):
+                    runner_job_id['id'] = m['job_id']
+                    pending_found_in_runner.set()
+        return ProviderResult('verified result')
+    monkeypatch.setattr(service.runner, 'run', verifying_run)
+
+    cid = _create_config_conv(client, h).json()['id']
+    r = _send(client, h, cid, '变异验证')
+    assert r.status_code == 201
+    job_id = r.json()['job_id']
+    _wait_job(service, job_id)
+
+    assert pending_found_in_runner.is_set(), \
+        'MUTATION CAUGHT: pending message must be in DB before runner starts'
+    assert runner_job_id.get('id') == job_id, \
+        'The pending message in DB must be for the current job'

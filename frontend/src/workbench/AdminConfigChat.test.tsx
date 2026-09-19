@@ -45,4 +45,48 @@ describe('AdminConfigChat', () => {
     fireEvent.click(screen.getByText('展开'))
     await waitFor(() => expect(screen.getByText('新对话')).toBeTruthy())
   })
+
+  it('任务完成后停止轮询并调用 onConfigChanged', async () => {
+    vi.useFakeTimers()
+    try {
+      const onConfigChanged = vi.fn()
+      render(<AdminConfigChat csrfToken="x" onUnauthorized={noop} onConfigChanged={onConfigChanged} />)
+
+      const pendingConv = {
+        id: 'c1', purpose: 'admin_config', actor_id: '1',
+        messages: [
+          { id: 'm1', role: 'user', content: '查看配置' },
+          { id: 'm2', role: 'assistant', content: '正在回答', status: 'pending', job_id: 'j1' },
+        ],
+      }
+      const completedConv = {
+        ...pendingConv,
+        messages: [
+          { id: 'm1', role: 'user', content: '查看配置' },
+          { id: 'm2', role: 'assistant', content: '配置已完成', status: 'completed', job_id: 'j1' },
+        ],
+      }
+
+      // Expand: loads conversation list, then full conv with pending
+      api
+        .mockResolvedValueOnce({ conversations: [pendingConv] } as never)
+        .mockResolvedValueOnce(pendingConv as never)
+      fireEvent.click(screen.getByText('展开'))
+      // Flush the two initial fetches
+      await vi.advanceTimersByTimeAsync(0)
+
+      // First poll tick (2s): return completed conv
+      api.mockResolvedValueOnce(completedConv as never)
+      await vi.advanceTimersByTimeAsync(2100)
+
+      expect(onConfigChanged).toHaveBeenCalledTimes(1)
+
+      // After completion, pending is false → no more intervals fire.
+      const callsBefore = api.mock.calls.length
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(api.mock.calls.length).toBe(callsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
