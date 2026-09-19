@@ -628,3 +628,98 @@ def _register_artifact(store, cid, actor_id, name, content, task_id):
     return art['id']
 
 
+
+
+# ---- 分页必须按完整 UTF-8 字符切 ------------------------------------------
+
+def test_multibyte_text_pages_without_losing_a_single_character(bound_chat):
+    """64 KB 边界会落在中文或 emoji 中间。合法文本不得因此被判成二进制，
+    逐页拼回来也必须与原文逐字节一致——不能用 ignore/replace 把字吃掉。"""
+    from factory.control.conversation_pack_tools import PackTools, READ_MAX_BYTES
+    client, store, headers, pack, version, aid, cid = bound_chat
+    original = '会议纪要：待确认。🙂' * 3000
+    artifact = _register_text_artifact(store, cid, _actor_id(store, cid), '纪要.md', original)
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+
+    pages, offset = [], 0
+    while True:
+        page = reader.read_artifact(artifact, offset=offset)
+        assert page['offset'] == offset
+        assert 0 < page['returned_bytes'] <= READ_MAX_BYTES
+        # 返回的字节数就是返回文本的真实字节数，续读偏移据此可靠
+        assert len(page['text'].encode('utf-8')) == page['returned_bytes']
+        assert page['next_offset'] == offset + page['returned_bytes']
+        pages.append(page['text'])
+        offset = page['next_offset']
+        if not page['truncated']:
+            break
+    assert len(pages) > 1, '样本应当跨页，否则这条测不到边界'
+    assert ''.join(pages) == original
+    assert offset == len(original.encode('utf-8'))
+
+
+def test_small_window_still_advances_by_whole_characters(bound_chat):
+    """窗口小到只够一两个字符时也要逐字符前进，不能返回空页卡死。"""
+    from factory.control.conversation_pack_tools import PackTools
+    client, store, headers, pack, version, aid, cid = bound_chat
+    original = '甲方确认🙂乙方待办'
+    artifact = _register_text_artifact(store, cid, _actor_id(store, cid), '短稿.md', original)
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+
+    pages, offset, guard = [], 0, 0
+    while True:
+        guard += 1
+        assert guard < 200, '分页没有推进'
+        page = reader.read_artifact(artifact, offset=offset, max_bytes=4)
+        assert page['returned_bytes'] > 0
+        pages.append(page['text'])
+        offset = page['next_offset']
+        if not page['truncated']:
+            break
+    assert ''.join(pages) == original
+
+
+def test_offset_inside_a_character_is_bad_range_not_binary(bound_chat):
+    """落在半个字符上的 offset 要明确区分于真正的二进制，并指回 next_offset。"""
+    from factory.control.conversation_pack_tools import PackTools, PackToolError
+    client, store, headers, pack, version, aid, cid = bound_chat
+    artifact = _register_text_artifact(store, cid, _actor_id(store, cid), '纪要.md', '会议纪要')
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+
+    try:
+        reader.read_artifact(artifact, offset=1)  # '会' 是三字节，偏移 1 在字符中间
+    except PackToolError as exc:
+        assert exc.code == 'bad_range', exc.code
+        assert 'next_offset' in exc.message
+    else:
+        raise AssertionError('半个字符的 offset 应判 bad_range')
+
+
+def test_max_bytes_too_small_for_one_character_is_bad_range(bound_chat):
+    from factory.control.conversation_pack_tools import PackTools, PackToolError
+    client, store, headers, pack, version, aid, cid = bound_chat
+    artifact = _register_text_artifact(store, cid, _actor_id(store, cid), '纪要.md', '会议纪要')
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+
+    try:
+        reader.read_artifact(artifact, max_bytes=1)  # 装不下三字节的 '会'
+    except PackToolError as exc:
+        assert exc.code == 'bad_range', exc.code
+    else:
+        raise AssertionError('窗口装不下一个完整字符时应判 bad_range，而不是返回空页')
+
+
+def test_genuinely_invalid_encoding_is_still_binary_not_bad_range(bound_chat):
+    """边界修复不得把真正的非法编码也说成分页问题。"""
+    from factory.control.conversation_pack_tools import PackTools, PackToolError
+    client, store, headers, pack, version, aid, cid = bound_chat
+    bad = _register_artifact(store, cid, _actor_id(store, cid), 'broken.bin',
+                             '正常开头'.encode('utf-8') + b'\xff\xfe' + '结尾'.encode('utf-8'),
+                             'invalid-task')
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+    try:
+        reader.read_artifact(bad)
+    except PackToolError as exc:
+        assert exc.code == 'binary_not_supported', exc.code
+    else:
+        raise AssertionError('非法编码应仍判二进制')

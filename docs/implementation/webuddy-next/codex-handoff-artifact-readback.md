@@ -52,3 +52,38 @@
 2. 会议包（`webuddy.meeting/v1`）产物的真实回读；我用仓库既有 csv→xml 包验证通用链路。
 3. Linux/bwrap 复跑；线上发布。
 4. 未做前端展示改动：回读是模型侧能力，界面上没有新增状态，也没有让前端凭模型一句话显示额外成功。
+
+---
+
+# 补修：按完整 UTF-8 字符分页（基线 `dfc4c55` → 候选见推送）
+
+## 复现
+你的 `test_utf8_readback.py` 原样入库 `docs/acceptance/meeting-tool-review-dfc4c55/`，原样跑（用你给的 rootdir/pythonpath 参数避开工作区遮蔽）：
+修复前 **1 failed** ——『会议纪要.md』不是 UTF-8 文本。断言一字未改。
+
+根因确认：`read_artifact` 先按**字节**切 `raw[offset:offset+limit]` 再严格解码，64 KB 边界落在中文或 emoji 中间时，合法文本被判成二进制。
+
+## 改法（只动 `conversation_pack_tools.py`）
+新增 `_whole_characters(window, more_follows)`：当窗口后面还有内容时，回看至多 3 字节找到多字节序列的首字节；若该序列在窗口边缘被截断，就把这几个字节**留给下一页**。
+
+- **不丢字**：留下的字节由下一次读取原样返回，全程没有 `errors='ignore'/'replace'`。
+- **能续读**：返回新增 `next_offset`（= `offset + returned_bytes`），且 `returned_bytes` 恒等于返回文本的真实 UTF-8 字节数，所以按它推进一定对齐。
+- **不空转**：窗口装不下一个完整字符时报 `bad_range`（提示调大 `max_bytes`），不返回空页导致死循环。
+- **区分三类**：`offset` 落在续字节上 → `bad_range`（提示用 `next_offset`）；窗口太小 → `bad_range`；真正非法编码或含 NUL → 仍是 `binary_not_supported`。
+- 会话归属先于读取、发起者校验、二进制拒绝、你已发布的原子取消与成果隔离，一处未改。
+
+## 边界口径更正（采纳你的要求）
+64 KB **只是单次返回窗口的上限**，不是底层 I/O 粒度。`_artifact_bytes` / `PackStore.artifact(with_content=True)` 仍是**整份取出存储的 blob**，其总大小受既有 `MAX_ARTIFACT_BYTES`（16 MB）约束。本轮没有、也不需要重写公共存储；代码注释已按此改正，原先"one read returns at most"的措辞容易被误读成底层每次只读 64 KB。
+
+## 验证（`uv run --extra codex --extra claude pytest -p no:randomly`）
+- 你的复现：修复前 1 failed → 修复后 **1 passed**。
+- `tests/test_chat_attached_tool.py`：**28 passed**（新增 5 条分页边界）。
+- 回读 / worker / 取消 / 能力包定向（`test_chat_attached_tool` + `admin_config_surface_gate` + `admin_config_conversation` + `agent_chat_capability` + `capability_packs`）：**88 passed**。
+- **前端未改动，未跑前端；未跑全量。**
+
+新增用例：跨页拼回与原文逐字节一致且页数 > 1；`max_bytes=4` 的小窗口仍逐字符推进（带死循环护栏）；半个字符的 `offset` 判 `bad_range` 并指回 `next_offset`；窗口装不下一个字符判 `bad_range`；夹在合法中文之间的 `\xff\xfe` 仍判 `binary_not_supported`。
+
+变异验证：去掉字符边界切分 → 你的复现与 3 条新用例同时变红；去掉半字符 offset 检查 → 对应用例变红；去掉空窗口检查 → 对应用例变红。还原后 29 passed。
+
+## 未验证
+真实模型下的跨页回读、会议包真实产物、Linux/bwrap 与发布，仍归 Codex。生产 `67e9179` 未动，标签未动，集成主分支未推。
