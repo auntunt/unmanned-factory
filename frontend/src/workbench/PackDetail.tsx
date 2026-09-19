@@ -7,6 +7,7 @@ import {
   type Evaluation, type PackDetail as Detail, type SupportRow,
 } from './pack-types'
 import './packs.css'
+import PackBind from './PackBind'
 
 const TABS = [['overview', '概览'], ['content', '内容'], ['validation', '验证'], ['versions', '版本']] as const
 type Tab = typeof TABS[number][0]
@@ -153,6 +154,7 @@ export default function PackDetail({ csrfToken, onUnauthorized }: PageProps) {
           <strong>环境检查已过期</strong>
           <p>{environment.stale_reason}；发布状态不变，重新检查后再调用更稳妥。</p>
         </div>}
+        {detail.can_maintain && published && <PackBind key={`${id}:${published.id}`} packId={id} versionId={published.id} version={published.version} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onChanged={() => void load()} />}
         {detail.bindings.length > 0 && <div className="pk-section"><h2>已挂靠的职能体</h2>
           <ul className="pk-list">{detail.bindings.map(binding => <li key={binding.id} className="pk-row">
             <Link className="pk-link" to={`/agents/${encodeURIComponent(binding.agent_id)}`}>{binding.agent_id.slice(0, 8)}</Link>

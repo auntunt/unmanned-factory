@@ -5,6 +5,7 @@ import type { Run, CapabilitySources, ServiceUrl } from '../workspace/types'
 import GithubDelivery, { githubPublicationLabel } from './GithubDelivery'
 import { DELIVERY_TYPE_LABEL, type DeliveryType } from '../conversation/delivery-constants'
 import CapabilitySourcePanel from './CapabilitySourcePanel'
+import PackFromDeliverables from './PackFromDeliverables'
 
 type Item = { id: number; name: string; kind: string; size: number; sha256: string; origin: string; preview: boolean }
 type Catalog = { recommended_preview_id?: number | null; saved: boolean; can_collect: boolean; github_configured: boolean; github_repository_bound?: boolean; publish_error?: string; collection_error?: string; items: Item[]; note?: string; delivery_type?: DeliveryType; installer_targets?: string[] | null; capability_sources?: CapabilitySources; service_urls?: ServiceUrl[] }
@@ -71,6 +72,7 @@ export default function Deliverables({ run, csrfToken, onUnauthorized, isAdmin }
         <details><summary><Icon name="triangle" className="wb-disclosure-icon" />如何提供安装包和其他成果</summary><p>构建结果放在 dist、release 或 out 目录会自动收集。其他文件可在仓库的 .factory-delivery.json 中用 files 列出相对路径，例如：</p><pre>{'{"files": ["packages/app.dmg", "reports/使用说明.pdf"]}'}</pre><p>清单必须提交后参与本次执行。成果会在验证完成后保存；大型文件上限为单个 256 MB、合计 512 MB。</p></details>
       </>}
       {catalog.capability_sources && <CapabilitySourcePanel sources={catalog.capability_sources} />}
+      {isAdmin && catalog.saved && <PackFromDeliverables key={String(run.id)} runId={String(run.id)} files={catalog.items} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
       <ContinueModify run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />
     </>}
   </section>

@@ -183,6 +183,11 @@ ADAPTER_PROMPT = '''你负责将外部 skill 包翻译为 webuddy 职能包 v2 �
 不拥有工具调用权限。identity 只是供人签的建议。不得删除或修改安全标记。
 识别根/router 与叶子或扁平集合；全部 skill 均要引用，正文由平台原样保留。
 将 MUST/MUST NOT/gate 逐条放进对应步骤断言。无法机械核对的使用 advisory。
+一次返回完整、可解析的 JSON 对象，不分段、不预告后续部分、不用省略号。
+可采用紧凑 JSON 减少行数；文件编辑的分批写入习惯不适用于这次结构化响应。
+逐项覆盖来源的全部工作步骤、输出要求、引用材料、限制和自检，不能只映射开头两步。
+basis 必须逐字复制对应 skill 正文中实际存在的连续文本，不从引用文件拼接或改写。
+来源已标记 requires_authorization 的路径须显式登记，不能因为你判断无需授权而省略。
 输出且仅输出 JSON：
 {"identity":"身份建议","steps":[{"title":"步骤","skill_path":"源路径",
 "role":"router 或 leaf","assertions":[{"text":"断言","kind":"mechanical 或 advisory",
