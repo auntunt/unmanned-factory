@@ -1,6 +1,6 @@
 # webuddy-next 本轮状态（唯一进度入口）
 
-最后更新：2026-09-19（R 轮：Codex 三项 P1 已修复，等 Codex 复验）
+最后更新：2026-09-19（配置对话并发覆盖已修，候选 01db2f7，停止编码交回 Codex）
 
 ## 基线（已实查）
 - 集成工作区：`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`
@@ -115,4 +115,28 @@ Codex 三条里有两条是我方 V1「6/6 通过」的**测试设计盲区**：
 
 ### 仍待 Codex
 配置对话真实模型链路、私有仓库 token 导入、旧开发现场与发布链路、Linux 下三项修复复验。我方未访问服务器、未读凭据、未部署。`paused` 继续后置。
+
+## 竞态轮：配置对话并发覆盖（2026-09-19，基线 `274de00` → 候选 `01db2f7`）
+
+Codex 对 `274de00` 的复核：原三条 P1 全部通过，R1/R2 有实际修复；但 R3 新增的读取时恢复存在**可确定性复现的并发覆盖**——GET 读到 pending 旧 JSON，后台完成并保存回答，GET 再看到 completed 就把整份旧 JSON 写回，把真实回答盖成「正在回答」。正常页面轮询即可触发。
+
+**根因**：每个写入者都在做整份 JSON 的读-改-写，读与写分处两个连接，中间无事务无版本约束。缩小窗口无意义。
+
+**修法**：新增唯一原子写入口 `_mutate_admin_config_conv`（`BEGIN IMMEDIATE` 先取写锁再 SELECT），admin-config 块内**所有**触及既有会话的写入口全部改走它——恢复、完成/失败/取消回调、用户消息追加、pending 追加、dispatch 翻转。job 状态查询移到事务外（该查询可能阻塞，不能持锁）。恢复只按 `job_id` 把观测结果应用到重新读到的最新会话上；最新副本中已是终态的一律跳过。
+
+**派发窗口 vs 真实中断**：用 `boot_id`（进程实例标识，重启必变）+ `dispatch`（queued/registered/done）判别，不用时间阈值。不同 boot_id → 真实重启中断；同 boot_id + queued → 仍是 pending（派发中）；同 boot_id + registered → 任务记录丢失。`start_maintenance` 抛异常时当场置 failed。
+
+**不伪装成功**：job 报 completed 但正文仍是占位符 → `interrupted` / `任务已结束，但回答未能保存`。
+
+### 验证
+- 你的复现：修复前 1 failed → 修复后 **1 passed**（断言未改一字）。
+- 原三条复现：**3 passed**（未回退）。新增定向回归 `tests/test_admin_config_race.py`：**4 passed**。
+- 既有配置对话相关：**69 passed**；更宽相关集：**86 passed**。
+- 变异验证 4 条，逐条改坏→对应测试变红→还原 5 passed：A 恢复写回旧 JSON、B 去派发窗口守卫、C 去回答丢失守卫、D 去 boot_id 判别。
+- **未跑后端全量、未跑前端与构建**（按 Codex 限定）：改动只落在 `factory/control/agent_routes.py` 一个源文件的 admin-config 块，未触及 `store.py`、中间件、共享挂载或任何前端。
+
+### 已登记的未验证边界
+**多 worker 部署下 `boot_id` 判别会误判**：A worker 的 pending 在 B worker 眼里 boot_id 不同，会被当成「服务重启，任务中断」。当前单进程部署不成立，**多 worker 上线前必须重新设计该判别**。已写入交接文档请 Codex 在确认服务器形态时一并核。
+
+其余未验证：真实模型配置对话全链路、真实并发压力、Linux 复验、私有仓库导入、旧开发现场到固定地址发布。`paused` 继续后置。
 
