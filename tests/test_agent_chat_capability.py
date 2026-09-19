@@ -241,11 +241,15 @@ def test_session_attachment_is_read_by_this_conversation_only(app_env, monkeypat
     _wait_job(service, store, _send(client, headers, cid, '按附件算总价').json()['job_id'])
     texts = ' '.join(d.get('text', '') for d in (reqs[-1].reference_mount or {'documents': []})['documents'])
     assert '张三,100,3' in texts
+    assert 'quote.csv' in reqs[-1].prompt
+    assert 'attachment/' + up.json()['attachment']['id'] in reqs[-1].prompt
+    assert '张三,100,3' not in reqs[-1].prompt  # inventory only; body stays behind read tools
 
     # A different conversation of the same role does not see this attachment.
     cid2 = _do_convo(client, headers, agent['id'])
     _wait_job(service, store, _send(client, headers, cid2, '你好').json()['job_id'])
     other = reqs[-1].reference_mount
+    assert 'quote.csv' not in reqs[-1].prompt
     assert other is None or all('张三,100,3' not in d.get('text', '') for d in other['documents'])
 
 
