@@ -1,6 +1,6 @@
 # webuddy-next 本轮状态（唯一进度入口）
 
-最后更新：2026-09-19（配置对话并发覆盖已修，候选 01db2f7，停止编码交回 Codex）
+最后更新：2026-09-19（否定观察有效性已补，停止编码交回 Codex）
 
 ## 基线（已实查）
 - 集成工作区：`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`
@@ -136,7 +136,15 @@ Codex 对 `274de00` 的复核：原三条 P1 全部通过，R1/R2 有实际修�
 - **未跑后端全量、未跑前端与构建**（按 Codex 限定）：改动只落在 `factory/control/agent_routes.py` 一个源文件的 admin-config 块，未触及 `store.py`、中间件、共享挂载或任何前端。
 
 ### 已登记的未验证边界
-**多 worker 部署下 `boot_id` 判别会误判**：A worker 的 pending 在 B worker 眼里 boot_id 不同，会被当成「服务重启，任务中断」。当前单进程部署不成立，**多 worker 上线前必须重新设计该判别**。已写入交接文档请 Codex 在确认服务器形态时一并核。
+**多 worker 下 `boot_id` 判别的限制**（表述已按 Codex 更正收窄）：`boot_id` **只在 job 查询缺失时**才被检查，所以只有「跨 worker 读取 + 恰好查不到该 job」的组合才会被误判成重启中断，**并非所有跨 worker 读取都会误判**——此前本文写成后者，属于夸大，已更正。当前生产为单进程（Codex 只读确认 `factory-web.service` active、MainPID 1468377、仍 `4c56632`、无子进程），该限制继续后置，不为本轮扩分布式架构。
 
 其余未验证：真实模型配置对话全链路、真实并发压力、Linux 复验、私有仓库导入、旧开发现场到固定地址发布。`paused` 继续后置。
+
+## 否定观察有效性补修（2026-09-19，基线 `6f01729` → 候选 `01db2f7` 之后）
+
+Codex 复核 `6f01729`：原子更新方案正确、原复现与相关 19 条全绿，但恢复用的是**事务外取得的过期否定观察**——GET 查到「无此 job」（当时确实还没注册），随后 POST 真注册并把 `dispatch` 置 `registered`，GET 却把旧的 None 应用到这条更新后的消息上，误标 `interrupted/任务记录丢失`；runner 正常完成，回调却因消息已终态而丢弃真实回答。**单进程即可发生，与多 worker 无关。**
+
+**修法**：区分两类观察。肯定观察单调（终态不回退），无需失效；**否定观察只对观察那一刻的派发阶段成立**。采集时连同记录当时的 `dispatch`，应用时若该消息的 `dispatch` 已前进（`queued → registered`），这条否定证据即作废，跳过并留待下次轮询重新观察。阶段未变时原判别照旧，**真实丢失与重启恢复不受影响**，也没有再查一次缩小窗口。
+
+**验证**：新复现 1 failed → **1 passed**；Codex 那组 19 条 + 新复现 **20 passed**；配置会话定向集 **75 passed**；新增自有确定性回归 `test_stale_missing_job_evidence_is_invalidated_by_stage_change`。定向变异：有效性条件改恒假 → 新复现与自有回归双双变红，还原 6 passed。按 Codex 限定未跑全量、未跑前端与构建；改动仍只在 `factory/control/agent_routes.py` 一个源文件。
 

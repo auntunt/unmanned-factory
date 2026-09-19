@@ -655,17 +655,22 @@ def router(store, service):
         by then the job may have finished and saved its answer, and writing our
         copy back would replace that answer with '正在回答'.
         """
-        pending = [m['job_id'] for m in conv.get('messages', [])
+        # Record the dispatch stage each job was in WHEN WE LOOKED. A negative
+        # observation ('no job under this id') is only true for that stage: a
+        # message still being dispatched legitimately has no job yet, and it
+        # acquires one moments later. Positive observations need no such guard
+        # because a job's terminal state never moves backwards.
+        pending = [(m['job_id'], m.get('dispatch')) for m in conv.get('messages', [])
                    if m.get('status') in ('pending', 'running') and m.get('job_id')]
         if not pending:
             return conv
 
         observed = {}
-        for jid in pending:
+        for jid, stage_when_seen in pending:
             try:
-                observed[jid] = service.maintenance_status(jid)
+                observed[jid] = (service.maintenance_status(jid), stage_when_seen)
             except KeyError:
-                observed[jid] = None  # no job record under this id
+                observed[jid] = (None, stage_when_seen)  # no job record under this id
 
         def apply(fresh):
             changed = False
@@ -677,8 +682,16 @@ def router(store, service):
                 jid = m.get('job_id')
                 if jid not in observed:
                     continue
-                job = observed[jid]
+                job, stage_when_seen = observed[jid]
                 if job is None:
+                    if m.get('dispatch') != stage_when_seen:
+                        # The dispatch stage moved on after we looked, so our
+                        # 'no such job' evidence describes a state this message
+                        # is no longer in -- typically queued -> registered,
+                        # i.e. the job exists now and may already be running.
+                        # Stale negative evidence must never end a newer state;
+                        # drop it and observe again on the next poll.
+                        continue
                     if m.get('boot_id') != _ADMIN_CONFIG_BOOT:
                         # Another process owned this job and is gone: a real restart.
                         m['status'] = 'interrupted'

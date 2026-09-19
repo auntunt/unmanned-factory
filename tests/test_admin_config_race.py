@@ -156,3 +156,41 @@ def test_reconcile_does_not_drop_a_message_added_concurrently(env, monkeypatch):
     ids = [m['id'] for m in got['messages']]
     assert 'm-concurrent' in ids, '恢复写回抹掉了并发新增的消息：' + repr(ids)
     assert next(m for m in got['messages'] if m['id'] == 'm-stale')['status'] == 'interrupted'
+
+
+def test_stale_missing_job_evidence_is_invalidated_by_stage_change(env, monkeypatch):
+    """查询期间派发阶段前进后，旧的「查不到 job」不得用来终结新状态。
+
+    确定性构造：maintenance_status 抛 KeyError 的同时，把该消息的 dispatch 从
+    queued 推进到 registered——正是真实时序里 POST 在 GET 查询期间完成注册。
+    此时那条否定证据描述的已是过去的阶段，必须失效、留待下次轮询重新观察。
+    """
+    client, store, service = env
+    h = _login(client)
+    cid = _start_conv(client, h)
+
+    conv = _row(store, cid)
+    conv['messages'].append({
+        'id': 'm-dispatching', 'role': 'assistant', 'content': '正在回答',
+        'status': 'pending', 'job_id': 'job-being-registered',
+        'created_at': conv['created_at'],
+        'boot_id': None, 'dispatch': 'queued',
+    })
+    _write_row(store, conv)
+    # 与本进程同一 boot_id，模拟本进程正在派发的消息。
+    import factory.control.agent_routes as ar  # noqa: F401  (文档用途)
+
+    def missing_then_register(job_id):
+        latest = _row(store, cid)
+        for m in latest['messages']:
+            if m.get('job_id') == job_id:
+                m['dispatch'] = 'registered'
+        _write_row(store, latest)
+        raise KeyError(job_id)
+
+    monkeypatch.setattr(service, 'maintenance_status', missing_then_register)
+
+    got = client.get(f'/api/v4/admin-config/conversations/{cid}', headers=h).json()
+    msg = next(m for m in got['messages'] if m['id'] == 'm-dispatching')
+    assert msg['status'] == 'pending', '过期的否定观察终结了已注册的任务：' + repr(msg)
+    assert msg['content'] == '正在回答', msg
