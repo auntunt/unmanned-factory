@@ -1,0 +1,11 @@
+candidate 5f25dc7ecb9c06cd6f4aff1fc0cea5e1f5628be1
+...............                                                          [100%]
+=============================== warnings summary ===============================
+../audit-next-ebf0a64/.venv/lib/python3.12/site-packages/starlette/testclient.py:53
+  /home/ubuntu/releases/audit-next-ebf0a64/.venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+15 passed, 1 warning in 11.68s
+
+exit 0

@@ -210,5 +210,10 @@
       538
     ],
     "evidence": "未事前声明的改动：.webuddy/browser/preview-75ad3b44-e111-4505-85a2-901ab502a7d4.png、.webuddy/browser/preview-c2214ac0-05b1-4b8c-85d0-dd64d38a2958.png"
+  },
+  "budget_observation": {
+    "total_known_cost_usd": 28.563523999999997,
+    "latest_project_cap_usd": 30,
+    "policy": "No further cap increase or blind model retries while harness defects remain."
   }
 }
