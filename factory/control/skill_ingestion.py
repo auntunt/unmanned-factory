@@ -134,12 +134,21 @@ def validate_mapping(package: dict, proposal: dict) -> dict:
         if not isinstance(step['assertions'], list) or len(step['assertions']) > 100:
             raise ValueError('SOP 断言无效')
         for assertion in step['assertions']:
-            if (not isinstance(assertion, dict) or set(assertion) != {'text', 'kind', 'check', 'basis'}
+            if (not isinstance(assertion, dict) or set(assertion) - {'basis_path'} != {'text', 'kind', 'check', 'basis'}
                     or assertion['kind'] not in ('mechanical', 'advisory')
                     or any(not isinstance(assertion[k], str) or not assertion[k].strip()
-                           or len(assertion[k]) > 4000 for k in ('text', 'check', 'basis'))
-                    or assertion['basis'] not in paths[path]['body']):
+                           or len(assertion[k]) > 4000 for k in ('text', 'check', 'basis'))):
                 raise ValueError('断言必须含原文依据与核对方法；无法核对的标 advisory')
+            # Reference documents are immutable source too. Preserve their exact
+            # origin instead of pretending their text came from SKILL.md.
+            basis_path = assertion.get('basis_path', path)
+            source_texts = {f['path']: f.get('text', '') for f in package['files']}
+            source_texts[path] = paths[path]['body']
+            if (not isinstance(basis_path, str) or basis_path not in source_texts
+                    or assertion['basis'] not in source_texts[basis_path]):
+                raise ValueError('断言依据不在指定原文中：' + json.dumps({
+                    'skill_path': path, 'basis_path': basis_path, 'basis': assertion['basis'],
+                    'allowed_source_paths': sorted(source_texts)}, ensure_ascii=False))
         extracted = {a['basis'] for a in step['assertions']}
         if any(a['text'] not in extracted for a in paths[path]['assertions']):
             raise ValueError('不得遗漏源 skill 的 MUST/MUST NOT/gate 断言')
@@ -186,10 +195,10 @@ ADAPTER_PROMPT = '''你负责将外部 skill 包翻译为 webuddy 职能包 v2 �
 一次返回完整、可解析的 JSON 对象，不分段、不预告后续部分、不用省略号。
 可采用紧凑 JSON 减少行数；文件编辑的分批写入习惯不适用于这次结构化响应。
 逐项覆盖来源的全部工作步骤、输出要求、引用材料、限制和自检，不能只映射开头两步。
-basis 必须逐字复制对应 skill 正文中实际存在的连续文本，不从引用文件拼接或改写。
+basis 必须逐字复制源文件中存在的连续文本，不拼接或改写。每条断言可用 basis_path 指定 files[].path 中的准确来源文件；省略时默认 skill_path。引用 references/assets 内的断言必须指定 basis_path。
 来源已标记 requires_authorization 的路径须显式登记，不能因为你判断无需授权而省略。
 steps.skill_path 只能从 skills[].path 原样选择；references 与 assets 是参考文件，不是独立 skill。
-引用参考文件的步骤仍归属引用它的 SKILL.md，basis 只能引用该 SKILL.md 正文中的引用要求。
+引用参考文件的步骤仍归属引用它的 SKILL.md；该步骤断言用 basis_path 标明参考文件，basis 逐字复制该文件中的原文。
 decisions/dependencies/injection_risks 的 path 必须原样取 files[].path，不能追加章节名、锚点或解释。
 没有 host_primitives 时 decisions 使用空数组，不把普通业务步骤虚构成宿主机制。
 当前适配过程禁用工具，并不代表目标运行平台不能导出文件或运行受控 CLI；未知依赖按待验证记录。

@@ -208,3 +208,21 @@ def test_unsigned_draft_cannot_create_agent(app_env):
     with pytest.raises(Conflict):
         service.skill_ingestions.sign(draft['id'], 1, 'x', {}, 'human', service.agent_manifests)
     assert len(service.agents.list()) == before
+
+
+def test_reference_assertions_keep_exact_file_provenance():
+    source = read_package(package())
+    source['files'].append({'path': 'references/standard.md', 'text': 'Missing owner must stay unknown.'})
+    proposal = mapping(source)
+    assertion = {'text': 'Do not invent an owner', 'kind': 'mechanical',
+                 'check': 'Check unknown owners stay unknown', 'basis': 'Missing owner must stay unknown.',
+                 'basis_path': 'references/standard.md'}
+    proposal['steps'][0]['assertions'].append(assertion)
+    assert validate_mapping(source, proposal)['steps'][0]['assertions'][-1]['basis_path'] == 'references/standard.md'
+    assertion['basis_path'] = '/etc/passwd'
+    with pytest.raises(ValueError, match='依据不在指定原文'):
+        validate_mapping(source, proposal)
+    assertion['basis_path'] = 'references/standard.md'
+    assertion['basis'] = 'Invent an owner.'
+    with pytest.raises(ValueError, match='依据不在指定原文'):
+        validate_mapping(source, proposal)

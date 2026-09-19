@@ -28,7 +28,7 @@ function EvidenceCard({ evaluation }: { evaluation: Evaluation }) {
       <dt>候选内容摘要</dt><dd><code>{evaluation.content_digest.slice(0, 16)}…</code></dd>
       <dt>测试集</dt><dd>{evaluation.test_set || '—'}</dd>
       <dt>执行环境</dt><dd>{evaluation.environment?.python ? `Python ${evaluation.environment.python}` : '—'} ·
-        隔离 {evaluation.environment?.sandbox === 'seatbelt' ? '已启用' : '本机不可用（未隔离）'}</dd>
+        隔离 {['seatbelt', 'bwrap'].includes(evaluation.environment?.sandbox || '') ? `已启用（${evaluation.environment?.sandbox}）` : '未确认隔离后端'}</dd>
     </dl>
     <ul className="pk-list">{evaluation.cases.map(item => <li key={item.id} className="pk-row">
       <span>{item.id}{item.reason && <><br /><code>{item.reason}</code></>}</span>

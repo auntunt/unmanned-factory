@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { errorText, type PageProps } from './ui'
 
-type Assertion = { text: string; kind: string; check: string; basis: string }
+type Assertion = { text: string; kind: string; check: string; basis: string; basis_path?: string }
 type Mapping = {
   identity: string
   authorization_required?: string[]
@@ -63,7 +63,7 @@ export function IngestionReview({ draft, onChanged, ...props }: PageProps & { dr
       <ol>{mapping.steps.map((step, index) => <li key={`${step.skill_path}-${index}`}>
         <strong>{step.role === 'router' ? '路由根' : '叶子能力'}：{step.title}</strong><p>{step.skill_path}</p>
         {step.assertions.map((a, ai) => <div key={ai}>
-          <p>{a.text}</p><blockquote>{a.basis}</blockquote>
+          <p>{a.text}</p><blockquote>{a.basis}</blockquote>{a.basis_path && <small>依据来源：{a.basis_path}</small>}
           <label>核对类型<select value={a.kind} disabled={!editable} onChange={e => setMapping({ ...mapping, steps: mapping.steps.map((s, i) => i === index ? { ...s, assertions: s.assertions.map((v, j) => j === ai ? { ...v, kind: e.target.value } : v) } : s) })}><option value="mechanical">机械核对</option><option value="advisory">提示型</option></select></label>
           <label>核对方法<textarea value={a.check} disabled={!editable} onChange={e => setMapping({ ...mapping, steps: mapping.steps.map((s, i) => i === index ? { ...s, assertions: s.assertions.map((v, j) => j === ai ? { ...v, check: e.target.value } : v) } : s) })} /></label>
         </div>)}
