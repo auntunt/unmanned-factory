@@ -29,6 +29,7 @@ class FetchResult:
     description: str           # skill 描述
     version: str               # skill 版本
     dependencies: list[str] = field(default_factory=list)
+    content: bytes = field(default=b'', repr=False)  # 确定 commit 的原始内容
 
 
 class GitHubSkillFetchError(Exception):
@@ -229,6 +230,7 @@ class GitHubSkillFetcher:
             description=skill_info['description'],
             version=skill_info['version'],
             dependencies=skill_info['dependencies'],
+            content=content,
         )
 
     @staticmethod

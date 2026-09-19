@@ -158,6 +158,46 @@ def compile_mounts(store, run):
         append_document({'id': 'attachment/' + att['id'], 'title': att.get('name', att['id']),
                          'text': text, 'uri': 'attachment:' + att['id'], 'trust': 'session_attachment',
                          'source_revision': 1, 'sha256': att.get('sha256') or hashlib.sha256(text.encode()).hexdigest()})
+    # Session skills: ZIP bodies saved at import time, mounted as reference data
+    # (untrusted, never as instructions or permissions). Body is real loading
+    # evidence; metadata-only snapshots without a body are skipped.
+    session_skills_snapshot = run.get('session_skill_snapshot') or []
+    if session_skills_snapshot:
+        from factory.control.session_skills import SessionSkillStore
+        sss = SessionSkillStore(store)
+        mounted_ids = {d['id'] for d in documents}
+        for sk in session_skills_snapshot:
+            sk_id = sk.get('id')
+            if not sk_id:
+                continue
+            try:
+                raw = sss.body(sk_id)
+            except KeyError:
+                continue  # 无正文则不装载，不拿元数据冒充已装载
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                for info in sorted(archive.infolist(), key=lambda i: i.filename):
+                    if info.is_dir() or not info.filename.lower().endswith(('.md', '.txt')):
+                        continue
+                    if info.file_size > 40_000:
+                        raise ValueError('会话 Skill 文档超出 40 KB，请拆分参考资料')
+                    text = archive.read(info).decode('utf-8')
+                    norm = unicodedata.normalize('NFC', info.filename.replace('\\', '/'))
+                    doc_id = 'session_skill/' + sk_id + '/' + norm
+                    if doc_id in mounted_ids:
+                        continue
+                    append_document({
+                        'id': doc_id,
+                        'title': info.filename,
+                        'text': text,
+                        'uri': 'session_skill:' + sk_id + '/' + norm,
+                        'source_revision': sk.get('source_version', ''),
+                        'trust': 'reference_data',
+                        'sha256': hashlib.sha256(text.encode()).hexdigest(),
+                        'session_skill_id': sk_id,
+                    })
+                    mounted_ids.add(doc_id)
+            skills.append({'id': sk_id, 'sha256': hashlib.sha256(raw).hexdigest(),
+                           'origin': 'session_skill'})
     manifest = {'schema_version': 1, 'project_id': run['project_id'], 'collections': collections,
                 'modules': [{'id': m['id'], 'version': m['version']} for m in run.get('module_snapshot', [])],
                 'agent': {'id': run.get('agent_id'), 'version': run.get('agent_version')},
