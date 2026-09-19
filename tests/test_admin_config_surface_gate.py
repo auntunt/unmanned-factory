@@ -9,7 +9,8 @@ from factory.control import conversation_tools as ct
 
 # 普通会话本就有的工具：算账、导出，以及「本角色已挂靠的能力包」两件。
 # 这条测试关心的是**配置工具**不得出现，不是清单一成不变。
-BASELINE = {'calc', 'export', 'attached_tools', 'attached_tool_doc', 'run_attached_tool'}
+BASELINE = {'calc', 'export', 'attached_tools', 'attached_tool_doc', 'run_attached_tool',
+            'session_artifacts', 'read_session_artifact'}
 
 
 def _tools(tmp_path, *, actor_role, admin_config):

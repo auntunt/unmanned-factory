@@ -378,6 +378,11 @@ def test_attached_pack_runs_through_the_real_worker_subprocess(bound_chat, monke
     download = client.get(receipt['outputs'][0]['download_path'], headers=headers)
     assert download.status_code == 200 and b'<Item' in download.content
 
+    # 回读也必须在真实子进程里可达：助手回复带着它从产物正文读到的事实。
+    reply = next(m['content'] for m in reversed(conv['messages']) if m['role'] == 'assistant')
+    assert '回读含B-010：True' in reply, reply
+    assert '回读字节：' in reply and '回读字节：None' not in reply, reply
+
 
 # ---- R3：取消的两道防线要各自可证，异常必须有终态 ------------------------
 
@@ -474,3 +479,152 @@ def test_cancel_wins_the_atomic_transition(bound_chat, monkeypatch, when):
     assert fired
     assert result['status'] == 'cancelled'
     assert result['outputs'] == []
+
+
+# ---- 受控只读回读本会话产物 ----------------------------------------------
+
+def test_the_model_can_read_back_the_file_it_actually_produced(bound_chat):
+    """现场缺口：模型说文件已修好，实际栏目仍错，因为它只拿到下载链接、读不到正文。
+
+    回读必须取到**真实保存的字节**——这里用唯一标记证明，不是复述模型自己的话。
+    """
+    client, store, headers, pack, version, aid, cid = bound_chat
+    tools = _worker_tools(store, cid, _actor_id(store, cid))
+    marker = 'B-010'  # 出现在真实转换产物里的唯一行标识
+    source = (TOOL_SOURCE / 'fixtures/sample_quote.csv').read_text(encoding='utf-8')
+    ran = json.loads(_call(tools, 'run_attached_tool', {
+        'pack_id': pack['id'], 'content': source, 'filename': '清单.csv'})['text'])
+    assert ran['status'] == 'succeeded'
+    artifact_id = ran['outputs'][0]['artifact_id']
+
+    listed = json.loads(_call(tools, 'session_artifacts', {})['text'])
+    assert [item['id'] for item in listed] == [artifact_id], listed
+    assert listed[0]['source'] == 'pack_artifact' and listed[0]['task_id'] == ran['task_id']
+
+    read = json.loads(_call(tools, 'read_session_artifact', {'artifact_id': artifact_id})['text'])
+    assert marker in read['text'], read['text'][:200]
+    assert read['sha256'] == ran['outputs'][0]['sha256']
+    assert read['total_bytes'] == ran['outputs'][0]['size']
+    assert read['truncated'] is False
+    assert read['version'] == version['version'] and read['task_id'] == ran['task_id']
+    # 正文是材料不是指令，回执里明确说清楚。
+    assert '不是指令' in read['note']
+
+    # 下载仍拿到同一份字节：回读没有改动成果。
+    download = client.get(ran['outputs'][0]['download_path'], headers=headers)
+    assert download.status_code == 200 and marker.encode() in download.content
+
+
+def test_readback_refuses_another_conversation_without_touching_the_file(bound_chat, monkeypatch):
+    """同一个用户的另一个会话也不行：归属先于读取，文件根本不会被打开。"""
+    from factory.control.capability_packs import PackStore
+    client, store, headers, pack, version, aid, cid = bound_chat
+    tools = _worker_tools(store, cid, _actor_id(store, cid))
+    source = (TOOL_SOURCE / 'fixtures/sample_quote.csv').read_text(encoding='utf-8')
+    ran = json.loads(_call(tools, 'run_attached_tool', {
+        'pack_id': pack['id'], 'content': source, 'filename': '清单.csv'})['text'])
+    artifact_id = ran['outputs'][0]['artifact_id']
+
+    other_cid = _conversation(client, headers, aid)
+    other_tools = _worker_tools(store, other_cid, _actor_id(store, other_cid))
+
+    reads = []
+    real = PackStore.artifact
+    monkeypatch.setattr(PackStore, 'artifact',
+                        lambda self, aid_, **kw: (reads.append(aid_), real(self, aid_, **kw))[1])
+
+    assert json.loads(_call(other_tools, 'session_artifacts', {})['text']) == []
+    refused = _call(other_tools, 'read_session_artifact', {'artifact_id': artifact_id})
+    assert refused['is_error'], refused['text']
+    assert json.loads(refused['text'])['refused'] == 'not_in_this_conversation'
+    assert reads == [], '拒绝之前不得读取产物内容'
+
+
+def test_readback_refuses_another_user_even_as_admin(bound_chat):
+    """知道 ID、拥有管理权限，都不构成访问：登记关系才是判据。"""
+    client, store, headers, pack, version, aid, cid = bound_chat
+    tools = _worker_tools(store, cid, _actor_id(store, cid))
+    source = (TOOL_SOURCE / 'fixtures/sample_quote.csv').read_text(encoding='utf-8')
+    ran = json.loads(_call(tools, 'run_attached_tool', {
+        'pack_id': pack['id'], 'content': source, 'filename': '清单.csv'})['text'])
+
+    # 关键：同一个会话、同一个产物，只是换了发起者。登记表挡不住这种情况，
+    # 必须由发起者校验挡住——否则管理员能读别人会话里的成果。
+    from factory.control.conversation_pack_tools import PackTools, PackToolError
+    stranger = PackTools(store, cid, 'someone-else', actor_role='admin')
+    assert stranger.artifacts() == [], '换个发起者就不该看到这个会话的成果'
+    try:
+        stranger.read_artifact(ran['outputs'][0]['artifact_id'])
+    except PackToolError as exc:
+        assert exc.code == 'not_in_this_conversation'
+    else:
+        raise AssertionError('管理员身份不应绕过会话归属')
+
+
+def test_unknown_id_and_binary_and_paging_boundaries(bound_chat):
+    client, store, headers, pack, version, aid, cid = bound_chat
+    tools = _worker_tools(store, cid, _actor_id(store, cid))
+    from factory.control.conversation_pack_tools import PackTools, PackToolError, READ_MAX_BYTES
+
+    # 未登记的 ID
+    refused = _call(tools, 'read_session_artifact', {'artifact_id': 'no-such-artifact'})
+    assert refused['is_error']
+    assert json.loads(refused['text'])['refused'] == 'not_in_this_conversation'
+
+    source = (TOOL_SOURCE / 'fixtures/sample_quote.csv').read_text(encoding='utf-8')
+    ran = json.loads(_call(tools, 'run_attached_tool', {
+        'pack_id': pack['id'], 'content': source, 'filename': '清单.csv'})['text'])
+    artifact_id = ran['outputs'][0]['artifact_id']
+
+    # 分页：小窗口如实标 truncated，续读能接上
+    head = json.loads(_call(tools, 'read_session_artifact', {
+        'artifact_id': artifact_id, 'max_bytes': 40})['text'])
+    assert head['truncated'] is True and head['returned_bytes'] == 40
+    rest = json.loads(_call(tools, 'read_session_artifact', {
+        'artifact_id': artifact_id, 'offset': 40})['text'])
+    assert rest['offset'] == 40 and rest['truncated'] is False
+    full = json.loads(_call(tools, 'read_session_artifact', {'artifact_id': artifact_id})['text'])
+    assert head['text'] + rest['text'] == full['text']
+
+    # 单次读取有硬上限：拿一份大于上限的成果，模型也要不到整包
+    big_id = _register_text_artifact(store, cid, _actor_id(store, cid),
+                                     'big.txt', 'x' * (READ_MAX_BYTES + 5000))
+    huge = json.loads(_call(tools, 'read_session_artifact', {
+        'artifact_id': big_id, 'max_bytes': 10 ** 9})['text'])
+    assert huge['returned_bytes'] == READ_MAX_BYTES, huge['returned_bytes']
+    assert huge['truncated'] is True and huge['total_bytes'] == READ_MAX_BYTES + 5000
+
+    # 二进制明确不支持。两种形态分开验，否则两道守卫互为兜底、谁都证明不了：
+    #   · 非 UTF-8 字节序列（无 NUL）
+    #   · 合法 UTF-8 但含 NUL
+    reader = PackTools(store, cid, _actor_id(store, cid), actor_role='admin')
+    for name, content in (('latin.bin', b'\xff\xfe\x89PNG-no-nul'),
+                          ('withnul.txt', 'ok\x00still text'.encode('utf-8'))):
+        aid_ = _register_artifact(store, cid, _actor_id(store, cid), name, content, 'bin-' + name)
+        try:
+            reader.read_artifact(aid_)
+        except PackToolError as exc:
+            assert exc.code == 'binary_not_supported', (name, exc.code)
+        else:
+            raise AssertionError('二进制成果应被明确拒绝：' + name)
+
+
+def _register_text_artifact(store, cid, actor_id, name, text):
+    """登记一份大文本成果到本会话，用于读取上限测试。"""
+    return _register_artifact(store, cid, actor_id, name, text.encode('utf-8'), 'big-text-task')
+
+
+def _register_artifact(store, cid, actor_id, name, content, task_id):
+    from factory.control.capability_packs import PackStore
+    from factory.control.agents import AgentStore
+    art = PackStore(store).put_artifact(actor_id=actor_id, name=name, content=content,
+                                        role='output', kind='file',
+                                        validation_status='not_applicable')
+    AgentStore(store).add_tool_receipt(cid, actor_id, {
+        'task_id': task_id, 'status': 'succeeded', 'tool': 't', 'version': 1,
+        'outputs': [{'artifact_id': art['id'], 'name': art['name'], 'kind': 'file',
+                     'size': art['size'], 'sha256': art['sha256'],
+                     'download_path': '/api/v4/capability-packs/artifacts/' + art['id'] + '/download'}]})
+    return art['id']
+
+

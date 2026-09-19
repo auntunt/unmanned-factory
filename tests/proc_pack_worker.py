@@ -39,6 +39,14 @@ async def _drive(server):
                     'pack_id': pack_id, 'content': os.environ['PACK_TEST_CONTENT'],
                     'filename': 'from-worker.csv'})
                 out['ran'] = json.loads(ran.content[0].text)
+                # A model that claims a file is correct must have read it back.
+                outputs = out['ran'].get('outputs') or []
+                if outputs:
+                    listed = await session.call_tool('session_artifacts', {})
+                    out['listed'] = json.loads(listed.content[0].text)
+                    back = await session.call_tool('read_session_artifact', {
+                        'artifact_id': outputs[0]['artifact_id']})
+                    out['read'] = json.loads(back.content[0].text)
         tasks.cancel_scope.cancel()
     return out
 
@@ -57,8 +65,11 @@ def _install_fake_model():
     async def query(*, prompt, options):
         info = await _drive(options.mcp_servers['session'])
         ran = info.get('ran') or {}
+        read = info.get('read') or {}
         yield ResultMessage('工具执行状态：' + str(ran.get('status')) +
-                            '；产物数：' + str(len(ran.get('outputs') or [])))
+                            '；产物数：' + str(len(ran.get('outputs') or [])) +
+                            '；回读字节：' + str(read.get('total_bytes')) +
+                            '；回读含B-010：' + str('B-010' in (read.get('text') or '')))
 
     sdk.query = query
 
