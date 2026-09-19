@@ -455,3 +455,22 @@ def test_an_executor_crash_reaches_a_terminal_state_not_running_forever(bound_ch
     assert crashed['status'] == 'failed' and crashed['error_code'] == 'executor_crashed', crashed
     conv = client.get(f'/api/v4/conversations/{cid}', headers=headers).json()
     assert conv['tool_results'][0]['status'] == 'failed'
+
+@pytest.mark.parametrize('when', ['before_start', 'before_finish'])
+def test_cancel_wins_the_atomic_transition(bound_chat, monkeypatch, when):
+    from factory.control.capability_packs import PackStore
+    from factory.control.conversation_pack_tools import PackTools
+    client, store, headers, pack, version, aid, cid = bound_chat
+    original = PackStore.update_task
+    fired = []
+    def interleave(self, tid, patch, **kwargs):
+        if not fired and patch.get('status') == ('running' if when == 'before_start' else 'succeeded'):
+            fired.append(True)
+            original(self, tid, {'status': 'cancel_requested'})
+        return original(self, tid, patch, **kwargs)
+    monkeypatch.setattr(PackStore, 'update_task', interleave)
+    result = PackTools(store, cid, _actor_id(store, cid), actor_role='admin').run(
+        pack['id'], (TOOL_SOURCE / 'fixtures/sample_quote.csv').read_text(), 'sample.csv')
+    assert fired
+    assert result['status'] == 'cancelled'
+    assert result['outputs'] == []

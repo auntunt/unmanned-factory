@@ -20,6 +20,7 @@ import uuid
 
 from factory.control.capability_packs import MAX_ARTIFACT_BYTES, PackStore
 from factory.control.pack_runtime import run_tool
+from factory.control.store import Conflict
 
 DOWNLOAD_PREFIX = '/api/v4/capability-packs/artifacts/'
 MAX_CHAT_INPUT_BYTES = 2 * 1024 * 1024
@@ -242,8 +243,17 @@ class PackTools:
 
         version = packs.version(task['snapshot']['version_id'])
         files = packs.files(version_id=version['id'])
-        packs.update_task(task['id'], {'status': 'running'}, event=('task.running', {}),
-                          expected=('queued', 'cancel_requested'))
+        try:
+            packs.update_task(task['id'], {'status': 'running'}, event=('task.running', {}),
+                              expected=('queued',))
+        except Conflict:
+            if packs.task(task['id'])['status'] != 'cancel_requested':
+                raise
+            packs.update_task(task['id'], {'status': 'cancelled', 'outputs': [],
+                              'error_code': 'cancelled', 'error': '调用已取消',
+                              'validation_status': 'unverified'}, expected=('cancel_requested',),
+                              event=('task.cancelled', {}))
+            return self._record_receipt(packs, task['id'], actor)
         cancel = _PersistedCancel(packs, task['id'])
         try:
             outcome = run_tool(version, files,
@@ -268,13 +278,23 @@ class PackTools:
                                     role='output', task_id=task['id'], kind=out['kind'],
                                     validation_status=outcome['validation_status'])
                  for out in outcome['outputs']]
-        packs.update_task(task['id'], {
-            'status': outcome['status'], 'outputs': saved, 'error_code': outcome.get('error_code'),
-            'error': outcome.get('error'), 'result': outcome.get('result'),
-            'diagnostics': outcome.get('diagnostics', []), 'evidence': outcome['evidence'],
-            'validation_status': outcome['validation_status'], 'duration_ms': outcome.get('duration_ms')},
-            event=('task.' + outcome['status'], {'error_code': outcome.get('error_code'),
-                                                 'outputs': [a['id'] for a in saved]}))
+        try:
+            packs.update_task(task['id'], {
+                'status': outcome['status'], 'outputs': saved, 'error_code': outcome.get('error_code'),
+                'error': outcome.get('error'), 'result': outcome.get('result'),
+                'diagnostics': outcome.get('diagnostics', []), 'evidence': outcome['evidence'],
+                'validation_status': outcome['validation_status'], 'duration_ms': outcome.get('duration_ms')},
+                event=('task.' + outcome['status'], {'error_code': outcome.get('error_code'),
+                                                     'outputs': [a['id'] for a in saved]}), expected=('running',))
+        except Conflict:
+            # Cancellation may arrive after the previous check but before commit.
+            # The state precondition is checked under the database write lock.
+            if packs.task(task['id'])['status'] != 'cancel_requested':
+                raise
+            packs.update_task(task['id'], {'status': 'cancelled', 'outputs': [],
+                              'error_code': 'cancelled', 'error': '调用已取消',
+                              'validation_status': 'unverified'}, expected=('cancel_requested',),
+                              event=('task.cancelled', {}))
         return self._record_receipt(packs, task['id'], actor)
 
     def _record_receipt(self, packs, task_id, actor):

@@ -235,3 +235,14 @@ it('client-side rejects a file that exceeds the declared max_input_bytes', async
   fireEvent.change(input, { target: { files: [new File([bigContent], 'big.csv', { type: 'text/csv' })] } })
   await screen.findByText(/超过该能力的上限/)
 })
+
+it('does not restore another conversation result when used inside chat', async () => {
+  api.mockImplementation(async (url?: string) => {
+    if (url?.includes('/bindings/')) return { bindings: [binding] } as never
+    return { tasks: [task()] } as never
+  })
+  render(<MemoryRouter><CapabilityPanel agentId="a1" csrfToken="x" onUnauthorized={noop} restoreRecent={false} /></MemoryRouter>)
+  await screen.findByText('CSV 清单 → XML')
+  expect(api.mock.calls.some(([url]) => url === '/api/v4/capability-packs/invocations')).toBe(false)
+  expect(screen.queryByText('quote.xml')).toBeNull()
+})

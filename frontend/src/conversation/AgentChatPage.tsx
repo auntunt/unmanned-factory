@@ -204,7 +204,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
         {conv!.exports!.map(e => <a key={e.id} className="cv-filechip" style={{ textDecoration: 'none' }} href={`/api/v4/conversations/${encodeURIComponent(conv!.id)}/exports/${encodeURIComponent(e.id)}/download`}>
           <Icon name="download" width={13} height={13} /><span title={e.title}>{e.title}.{e.format}</span></a>)}
       </div>}
-      {agentId && <div className="cv-chat-capabilities"><CapabilityPanel agentId={agentId} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div>}
+      {agentId && <div className="cv-chat-capabilities"><CapabilityPanel key={conv?.id || "new"} restoreRecent={false} agentId={agentId} csrfToken={csrfToken} onUnauthorized={onUnauthorized} /></div>}
       <div className="cv-dock">
         <div className="cv-dock-inner">
           {conv?.id && <SessionSkillPanel sessionId={conv.id} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}

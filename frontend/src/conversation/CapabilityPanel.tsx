@@ -51,7 +51,7 @@ function InputConstraints({ binding }: { binding: PackBinding }) {
  *
  *  按职能包能力声明呈现输入范围与结果，不假设特定业务（MFD 或 CSV）。
  *  版本在提交时冻结；失败也保留候选产物并明确标注，不冒称成功。 */
-export default function CapabilityPanel({ agentId, csrfToken, onUnauthorized }: PageProps & { agentId: string }) {
+export default function CapabilityPanel({ agentId, csrfToken, onUnauthorized, restoreRecent = true }: PageProps & { agentId: string; restoreRecent?: boolean }) {
   const [bindings, setBindings] = useState<PackBinding[] | null>(null)
   const [task, setTask] = useState<PackTask | null>(null)
   const [busy, setBusy] = useState(false)
@@ -74,7 +74,7 @@ export default function CapabilityPanel({ agentId, csrfToken, onUnauthorized }: 
 
   // Restore from last invocation on mount (history recovery)
   useEffect(() => {
-    if (!bindings || bindings.length === 0) return
+    if (!restoreRecent || !bindings || bindings.length === 0) return
     const mine = gen.current
     const controller = new AbortController()
     request<{ tasks: PackTask[] }>(`${packsBase}/invocations`,
@@ -88,7 +88,7 @@ export default function CapabilityPanel({ agentId, csrfToken, onUnauthorized }: 
       })
       .catch(() => { /* non-critical: history recovery is best-effort */ })
     return () => controller.abort()
-  }, [agentId, bindings, onUnauthorized])
+  }, [agentId, bindings, onUnauthorized, restoreRecent])
 
   const poll = useCallback(async (taskId: string, mine: number) => {
     const deadline = Date.now() + 180_000
