@@ -327,3 +327,6 @@
 .cv-followup-badge.is-pending { color:var(--cv-warning); background:var(--cv-warning-bg, color-mix(in srgb, var(--cv-warning) 12%, transparent)); }
 .cv-followup-badge.is-applied { color:var(--cv-accent); background:color-mix(in srgb, var(--cv-accent) 12%, transparent); }
 .cv-followup-badge.is-expired { color:var(--cv-muted); background:color-mix(in srgb, var(--cv-muted) 12%, transparent); }
+
+/* Tool results belong to the page flow; only the compact composer sticks. */
+.cv-chat-capabilities { max-width: var(--cv-thread); width: 100%; box-sizing: border-box; margin: 0 auto; padding: 0 20px 12px; }
