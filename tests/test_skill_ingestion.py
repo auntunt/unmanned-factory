@@ -226,3 +226,19 @@ def test_reference_assertions_keep_exact_file_provenance():
     assertion['basis'] = 'Invent an owner.'
     with pytest.raises(ValueError, match='依据不在指定原文'):
         validate_mapping(source, proposal)
+
+
+def test_integrity_is_checked_by_code_before_semantic_review():
+    from factory.control.skill_ingestion_runs import source_integrity_receipt, without_hash_fields
+    from factory.control.execution import ExecutionError
+    source = read_package(package())
+    mapped = validate_mapping(source, mapping(source))
+    assert source_integrity_receipt(source, mapped)['file_hashes'] == 'pass'
+    assert 'sha256' not in without_hash_fields(source)['files'][0]
+    mapped['skills'][0] = {**mapped['skills'][0], 'body': 'changed'}
+    with pytest.raises(ExecutionError, match='修改了来源'):
+        source_integrity_receipt(source, mapped)
+    mapped = validate_mapping(source, mapping(source))
+    source['files'][0]['text'] += 'changed'
+    with pytest.raises(ExecutionError, match='来源文件摘要'):
+        source_integrity_receipt(source, mapped)
