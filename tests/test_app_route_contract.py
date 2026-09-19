@@ -28,6 +28,31 @@ def test_route_parameters_and_decorators_unchanged():
     assert sorted(rows,key=lambda r:json.dumps(r,sort_keys=True))==sorted(baseline['routes'],key=lambda r:json.dumps(r,sort_keys=True))
 
 
+def _normalize_member_chat_whitelist(block):
+    """Strip the reviewed narrow member daily-chat whitelist addition.
+
+    Members could not start a no-project do conversation at all (the global
+    middleware answered 403). This opening lists exactly the actions needed to
+    finish one's own chat; every one of them is ownership-checked in its route
+    handler. Must run BEFORE _normalize_session_skill_whitelist, whose anchor is
+    the `if session_skill_action:` line this addition extends.
+    """
+    block = block.replace(
+        "                    # 窄授权：成员自己的「无项目 do 日常会话」所必需的动作。\n"
+        "                    # 逐条列出，不放开 /api/v4 或整个 /conversations 前缀；\n"
+        "                    # retry（仅维护对话）与 project（项目绑定）刻意不在其中。\n"
+        "                    # 每条的归属校验都由对应路由处理器执行。\n"
+        "                    member_chat = request.method == 'POST' and bool(\n"
+        "                        re.fullmatch(r'/api/v4/agents/[^/]+/conversations', path)\n"
+        "                        or re.fullmatch(r'/api/v4/conversations/[^/]+/(messages|attachments|calc|export)', path)\n"
+        "                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path))\n",
+        '')
+    block = block.replace(
+        "                        if session_skill_action or member_chat:",
+        "                        if session_skill_action:")
+    return block
+
+
 def _normalize_session_skill_whitelist(block):
     """Strip the reviewed R2 narrow session-skill whitelist addition."""
     block = block.replace(
@@ -54,7 +79,7 @@ def test_middleware_remains_byte_identical_in_app():
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
-    block = _normalize_session_skill_whitelist(block)
+    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
 
 
@@ -69,7 +94,7 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
-    block = _normalize_session_skill_whitelist(block)
+    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
     # Reviewed 1 GiB project-upload limits and explicit 413 handling; auth order retained.
     assert hashlib.sha256(original.encode()).hexdigest()=='6437d9ef8a4912dae455da64b31254dcc5e9689279b19d666b95544b279467a9'

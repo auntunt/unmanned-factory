@@ -226,6 +226,11 @@ def router(store, service):
     def versions(aid:str): return {'versions':guarded(agents.versions,aid)}
     @api.post('/agents/{aid}/conversations',status_code=201)
     def conversation(aid:str,body:ConversationCreate,request:Request):
+        # Members get the daily-chat entry only: mode 'do' with no project. A
+        # maintain conversation edits the role, and a project conversation must
+        # go through project authorisation, so neither is opened up here.
+        if actor(request).get('role')!='admin' and (body.mode!='do' or body.project_id):
+            raise HTTPException(403,'成员只能开始无项目的日常会话')
         return guarded(agents.create_conversation,aid,body.mode,body.project_id,actor(request)['id'],body.client_key)
     @api.get('/agents/{aid}/conversations')
     def conversations(aid:str,request:Request):
@@ -553,7 +558,15 @@ def router(store, service):
         if job.get('actor_id') not in (0, actor(request)['id']) and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该维护任务')
         return job
     @api.post('/maintenance-jobs/{job_id}/cancel')
-    def cancel_maintenance(job_id:str,request:Request): return guarded(service.cancel_maintenance,job_id,str(actor(request)['id']))
+    def cancel_maintenance(job_id:str,request:Request):
+        # service.cancel_maintenance takes an actor but does not check it. Until
+        # now the middleware kept members out entirely; now that a member may
+        # cancel their OWN answer, ownership has to be enforced here, using the
+        # same rule the GET on this job already applies.
+        job=guarded(service.maintenance_status,job_id)
+        if job.get('actor_id') not in (0, actor(request)['id']) and actor(request).get('role')!='admin':
+            raise HTTPException(403,'无权操作该维护任务')
+        return guarded(service.cancel_maintenance,job_id,str(actor(request)['id']))
     @api.post('/agents/{aid}/skills',status_code=201)
     def skill(aid:str,request:Request,file:UploadFile=File(...)):
         guarded(agents.get, aid)

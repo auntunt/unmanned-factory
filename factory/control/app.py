@@ -240,8 +240,16 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     # 归属验证由路由处理器执行，中间件只放行路径。
                     session_skill_action = re.fullmatch(
                         r'/api/v4/sessions/[^/]+/skills(?:/[^/]+)?', path) is not None
+                    # 窄授权：成员自己的「无项目 do 日常会话」所必需的动作。
+                    # 逐条列出，不放开 /api/v4 或整个 /conversations 前缀；
+                    # retry（仅维护对话）与 project（项目绑定）刻意不在其中。
+                    # 每条的归属校验都由对应路由处理器执行。
+                    member_chat = request.method == 'POST' and bool(
+                        re.fullmatch(r'/api/v4/agents/[^/]+/conversations', path)
+                        or re.fullmatch(r'/api/v4/conversations/[^/]+/(messages|attachments|calc|export)', path)
+                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path))
                     try:
-                        if session_skill_action:
+                        if session_skill_action or member_chat:
                             pass  # 路由处理器验证会话归属
                         elif request.method == 'POST' and (run_action or creation):
                             if run_action:
