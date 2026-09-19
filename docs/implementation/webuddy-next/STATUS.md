@@ -1,6 +1,6 @@
 # webuddy-next 本轮状态（唯一进度入口）
 
-最后更新：2026-09-19（本轮代码与本地验证完成，已交接 Codex）
+最后更新：2026-09-19（R 轮：Codex 三项 P1 已修复，等 Codex 复验）
 
 ## 基线（已实查）
 - 集成工作区：`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons`
@@ -88,4 +88,31 @@ wave 1 五单回来后：主会话核对证据 → 逐单集成到 `v3-conversat
 - 真实服务器核查 V1：6/6 通过（uvicorn + httpx，非 TestClient，非演练夹具），证据 `receipts/V1-live-check.md`。
 - 交接文档：`docs/implementation/webuddy-next/codex-handoff.md`。
 - **线上未验证项与环境缺口见交接第四、五节。本轮未部署生产，不宣称整个平台已验收通过。**
+
+## R 轮：Codex 对 `4d2e3f8` 的复核修复（2026-09-19）
+
+Codex 独立验收 `4d2e3f8` **暂不通过**，复现三项 P1 阻塞（复现文件 `docs/acceptance/webuddy-next-2026-09-19/test_codex_review.py`，已入库）。
+
+| 单 | 修什么 | 分支 | 合并 | 状态 |
+|---|---|---|---|---|
+| R1 | 会话 Skill 正文保存 + 走 `compile_mounts` 实际装载（聊天 + coding 两条链路）；`loaded` 只认装载证据 | webuddy-next-r1 | `26dd137` | 已集成 |
+| R2 | GET/导入/删除统一校验会话归属，授权先于外部拉取；member 窄授权 | webuddy-next-r2 | `50fb54a` | 已集成 |
+| R3 | pending 派发前落库 + 就地更新终态 + 重启残留按作业状态恢复 | webuddy-next-r3 | `0f224d9` | 已集成 |
+
+### 三条复现的转绿轨迹（集成工作区实跑）
+修复前 `3 failed` → R1 后 `2 failed, 1 passed` → R2 后 `1 failed, 2 passed` → R3 后 **`3 passed`**，退出码 0。
+三个 worktree 的复现文件均与 Codex 原件 `diff` 逐字节一致，**无人改动其断言**。
+
+### R 轮验证
+- 后端全量：**2599 passed / 0 failed / 20 skipped**，退出码 0（对照 `16dfdaa` 的 2582，增量全为新增回归）。
+- Codex 原定向集 5 文件：**53 passed**（其复核时 49）。
+- 相关定向（session_skill/mount/capability_source/run_execution/admin_config/agent_chat/auth/permission/role/conversation）：**305 passed / 1 skipped**。
+- 前端：`tsc --noEmit` 0、`npm run build` 0、`vitest` **388 passed / 50 files**。
+- 主会话补跑变异：`app.py` 窄白名单放宽成 `/api/v4` 前缀 → 2 条测试变红，还原后 7 passed。
+
+### 本轮验收设计教训（已入记忆）
+Codex 三条里有两条是我方 V1「6/6 通过」的**测试设计盲区**：验了「跨会话删错 id 返回 404」没验「无关用户拿对的 sid 去 GET」；验了绑定存在与重启保留没验「正文到没到 runner」。**绑定表有行 ≠ 能力被用上**。
+
+### 仍待 Codex
+配置对话真实模型链路、私有仓库 token 导入、旧开发现场与发布链路、Linux 下三项修复复验。我方未访问服务器、未读凭据、未部署。`paused` 继续后置。
 
