@@ -236,8 +236,14 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     own_account = path in ('/api/auth/logout', '/api/auth/password') and request.method == 'POST'
                     run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget|follow-up)', path)
                     creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
+                    # 窄授权：member 对自己会话的 Skill 增/删/读，
+                    # 归属验证由路由处理器执行，中间件只放行路径。
+                    session_skill_action = re.fullmatch(
+                        r'/api/v4/sessions/[^/]+/skills(?:/[^/]+)?', path) is not None
                     try:
-                        if request.method == 'POST' and (run_action or creation):
+                        if session_skill_action:
+                            pass  # 路由处理器验证会话归属
+                        elif request.method == 'POST' and (run_action or creation):
                             if run_action:
                                 target = store.get(run_action[1])
                                 if target.get('source', {}).get('actor_id') != user['id']:

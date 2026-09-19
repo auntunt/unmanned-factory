@@ -9,6 +9,8 @@ POST 支持两种来源：
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from factory.control.session_skills import SessionSkillStore
@@ -19,17 +21,23 @@ def router(store):
     api = APIRouter(prefix='/api/v4')
     session_skills = SessionSkillStore(store)
 
-    def _verify_session(sid: str):
-        """确认 session_id 对应已存在的 agent_conversations 行。"""
+    def _verify_session_owner(sid: str, request: Request):
+        """确认会话存在且当前用户有权访问（拥有者或管理员）。"""
         with store.connect() as db:
             row = db.execute(
-                'SELECT 1 FROM agent_conversations WHERE id=?', (sid,)).fetchone()
+                'SELECT data FROM agent_conversations WHERE id=?', (sid,)).fetchone()
         if not row:
             raise HTTPException(404, '会话不存在')
+        conv = json.loads(row[0])
+        user = request.state.user
+        if user.get('role') == 'admin':
+            return
+        if str(conv.get('actor_id')) != str(user['id']):
+            raise HTTPException(403, '无权访问该会话')
 
     @api.post('/sessions/{sid}/skills', status_code=201)
     async def create_skill(sid: str, request: Request):
-        _verify_session(sid)
+        _verify_session_owner(sid, request)
         actor_id = request.state.user['id']
         content_type = request.headers.get('content-type', '')
 
@@ -90,12 +98,12 @@ def router(store):
 
     @api.get('/sessions/{sid}/skills')
     def list_skills(sid: str, request: Request):
-        _verify_session(sid)
+        _verify_session_owner(sid, request)
         return {'items': session_skills.list(sid)}
 
     @api.delete('/sessions/{sid}/skills/{skill_id}')
     def delete_skill(sid: str, skill_id: str, request: Request):
-        _verify_session(sid)
+        _verify_session_owner(sid, request)
         try:
             session_skills.delete(skill_id, sid)
         except KeyError:
