@@ -28,6 +28,22 @@ def test_route_parameters_and_decorators_unchanged():
     assert sorted(rows,key=lambda r:json.dumps(r,sort_keys=True))==sorted(baseline['routes'],key=lambda r:json.dumps(r,sort_keys=True))
 
 
+def _normalize_session_skill_whitelist(block):
+    """Strip the reviewed R2 narrow session-skill whitelist addition."""
+    block = block.replace(
+        "                    # 窄授权：member 对自己会话的 Skill 增/删/读，\n"
+        "                    # 归属验证由路由处理器执行，中间件只放行路径。\n"
+        "                    session_skill_action = re.fullmatch(\n"
+        "                        r'/api/v4/sessions/[^/]+/skills(?:/[^/]+)?', path) is not None\n",
+        '')
+    block = block.replace(
+        "                        if session_skill_action:\n"
+        "                            pass  # 路由处理器验证会话归属\n"
+        "                        elif request.method == 'POST' and (run_action or creation):",
+        "                        if request.method == 'POST' and (run_action or creation):")
+    return block
+
+
 def test_middleware_remains_byte_identical_in_app():
     baseline=json.loads((ROOT/'tests/fixtures/app-route-contract.json').read_text())
     source=(ROOT/'factory/control/app.py').read_text()
@@ -38,6 +54,7 @@ def test_middleware_remains_byte_identical_in_app():
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
+    block = _normalize_session_skill_whitelist(block)
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
 
 
@@ -52,6 +69,7 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
+    block = _normalize_session_skill_whitelist(block)
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
     # Reviewed 1 GiB project-upload limits and explicit 413 handling; auth order retained.
     assert hashlib.sha256(original.encode()).hexdigest()=='6437d9ef8a4912dae455da64b31254dcc5e9689279b19d666b95544b279467a9'
