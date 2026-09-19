@@ -7,6 +7,11 @@ role 必须是 admin，且 binding 必须显式要了配置面。
 from factory.control import conversation_tools as ct
 
 
+# 普通会话本就有的工具：算账、导出，以及「本角色已挂靠的能力包」两件。
+# 这条测试关心的是**配置工具**不得出现，不是清单一成不变。
+BASELINE = {'calc', 'export', 'attached_tools', 'run_attached_tool'}
+
+
 def _tools(tmp_path, *, actor_role, admin_config):
     from factory.control.store import Store
     db = str(tmp_path / 'f.db')
@@ -41,23 +46,23 @@ def _names(tools):
 
 
 def test_member_ordinary_chat_has_no_config_tools(tmp_path):
-    assert _names(_tools(tmp_path, actor_role='member', admin_config=False)) == {'calc', 'export'}
+    assert _names(_tools(tmp_path, actor_role='member', admin_config=False)) == BASELINE
 
 
 def test_admin_ordinary_chat_has_no_config_tools(tmp_path):
     """这条是关键：管理员在普通聊天里也不该看到配置工具。"""
-    assert _names(_tools(tmp_path, actor_role='admin', admin_config=False)) == {'calc', 'export'}
+    assert _names(_tools(tmp_path, actor_role='admin', admin_config=False)) == BASELINE
 
 
 def test_member_cannot_get_config_tools_by_asking_for_the_surface(tmp_path):
     """binding 就算声称要配置面，role 不是 admin 也不给。"""
-    assert _names(_tools(tmp_path, actor_role='member', admin_config=True)) == {'calc', 'export'}
+    assert _names(_tools(tmp_path, actor_role='member', admin_config=True)) == BASELINE
 
 
 def test_admin_config_surface_exposes_config_tools(tmp_path):
     from factory.control.admin_config_tools import ADMIN_TOOL_NAMES
     names = _names(_tools(tmp_path, actor_role='admin', admin_config=True))
-    assert {'calc', 'export'} <= names
+    assert BASELINE <= names
     # ADMIN_TOOL_NAMES 是模型侧的全名（mcp__session__ 前缀），清单里是裸名。
     bare = {n.rsplit('__', 1)[-1] for n in ADMIN_TOOL_NAMES}
     assert bare <= names, sorted(bare - names)

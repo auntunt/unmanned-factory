@@ -63,7 +63,7 @@ describe('session isolation', () => {
     // Mount with session A
     const { unmount } = mount('sess-aaa')
     // Open the details
-    fireEvent.click(await screen.findByText(/当前会话加载的 Skill/))
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
     await screen.findByText('Skill A')
 
     // Session B's skill must NOT appear
@@ -83,7 +83,7 @@ describe('session isolation', () => {
 
     // Now mount with session B
     mount('sess-bbb')
-    fireEvent.click(await screen.findByText(/当前会话加载的 Skill/))
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
     await screen.findByText('Skill B')
     expect(screen.queryByText('Skill A')).toBeNull()
   })
@@ -103,7 +103,7 @@ describe('dependency missing state', () => {
     }) as never)
 
     mount()
-    fireEvent.click(await screen.findByText(/当前会话加载的 Skill/))
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
 
     // Must show "已导入" for import_state
     await screen.findByText('已导入')
@@ -132,7 +132,7 @@ describe('rejected state', () => {
     }) as never)
 
     mount()
-    fireEvent.click(await screen.findByText(/当前会话加载的 Skill/))
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
 
     const badge = await screen.findByText(/导入失败/)
     expect(badge.textContent).toContain('SKILL.md 格式非法：缺少必填字段 name')
@@ -154,7 +154,7 @@ describe('removal', () => {
     })
 
     mount()
-    fireEvent.click(await screen.findByText(/当前会话加载的 Skill/))
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
     await screen.findByText('测试方法')
 
     // Click the remove button
@@ -175,8 +175,8 @@ describe('意外响应形状不崩页面', () => {
   it('响应缺 items 时渲染空态而不是抛错', async () => {
     api.mockResolvedValue({} as never)
     mount()
-    await waitFor(() => expect(screen.getByText(/当前会话加载的 Skill/)).toBeTruthy())
-    expect(screen.getByText(/当前会话加载的 Skill · 0 项/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText(/本会话临时加载的 Skill/)).toBeTruthy())
+    expect(screen.getByText(/本会话临时加载的 Skill · 0 项/)).toBeTruthy()
   })
 
   it('记录缺 dependencies 且依赖缺失时仍渲染补齐提示', async () => {
@@ -185,5 +185,15 @@ describe('意外响应形状不崩页面', () => {
     } as never)
     mount()
     await waitFor(() => expect(screen.getByText(/需要管理员补齐运行条件/)).toBeTruthy())
+  })
+})
+
+describe('不要把「0 项」误读成规范没加载', () => {
+  it('空态说明职能体已启用的规范仍然生效', async () => {
+    api.mockResolvedValue({ items: [] } as never)
+    mount()
+    fireEvent.click(await screen.findByText(/本会话临时加载的 Skill/))
+    await waitFor(() => expect(screen.getByText(/该职能体已启用的规范仍然生效/)).toBeTruthy())
+    expect(screen.getByText(/显示 0 项不代表没有加载/)).toBeTruthy()
   })
 })

@@ -12,7 +12,9 @@ import json
 
 from factory.control.admin_config_tools import ADMIN_TOOL_NAMES
 
-TOOL_NAMES = frozenset(('mcp__session__calc', 'mcp__session__export')) | ADMIN_TOOL_NAMES
+PACK_TOOL_NAMES = frozenset(('mcp__session__attached_tools', 'mcp__session__run_attached_tool'))
+TOOL_NAMES = (frozenset(('mcp__session__calc', 'mcp__session__export'))
+              | PACK_TOOL_NAMES | ADMIN_TOOL_NAMES)
 
 
 def binding_for(store, cid, actor_id, *, actor_role=None, admin_config=False) -> dict:
@@ -110,6 +112,55 @@ def create_server(tools: ConversationTools, emit):
         emit('session.export', {'conversation_id': tools.cid, 'export_id': item['id']})
         return {'content': [{'type': 'text', 'text': '已导出：' + json.dumps(item, ensure_ascii=False)}]}
 
+    # Capability packs this conversation's own role has attached. Scope comes from
+    # the binding, so registering them everywhere is safe: a role with nothing
+    # attached gets an empty list and any run is refused by PackStore.
+    from factory.control.conversation_pack_tools import PackToolError, PackTools
+    pack_tools = PackTools(tools.store, tools.cid, tools.actor_id, actor_role=tools.actor_role)
+
+    @tool('attached_tools',
+          'List the executable capability packs attached to THIS role, with their real names, '
+          'versions, operation keys, input/output schemas and limits. Call this before running one. '
+          'An empty list means this role has none attached; do not guess an identifier.',
+          {'type': 'object', 'properties': {}, 'additionalProperties': False})
+    async def attached_tools(args):
+        offered = pack_tools.available()
+        emit('session.attached_tools', {'conversation_id': tools.cid, 'count': len(offered)})
+        return {'content': [{'type': 'text', 'text': json.dumps(offered, ensure_ascii=False)}]}
+
+    @tool('run_attached_tool',
+          'Run one attached capability pack on content you provide, and return the files it actually '
+          'produced. Use pack_id exactly as attached_tools reported it. The server decides the role, '
+          'the user, the version and the idempotency key; you cannot pass a path, a command or a URL. '
+          'Report the returned status honestly: a failed run is a failed run.',
+          {'type': 'object', 'properties': {
+              'pack_id': {'type': 'string', 'maxLength': 200},
+              'content': {'type': 'string', 'maxLength': 2000000,
+                          'description': 'The structured text this tool takes as its input file.'},
+              'filename': {'type': 'string', 'maxLength': 120}},
+           'required': ['pack_id', 'content'], 'additionalProperties': False})
+    async def run_attached_tool(args):
+        try:
+            # The tool runs in its own isolated process and can take seconds; keep it
+            # off the event loop so the session stays responsive.
+            import asyncio
+            result = await asyncio.to_thread(
+                pack_tools.run, args['pack_id'], args['content'], args.get('filename'))
+        except PackToolError as exc:
+            emit('session.pack_refused', {'conversation_id': tools.cid, 'code': exc.code})
+            return {'content': [{'type': 'text', 'text': json.dumps(
+                {'refused': exc.code, 'message': exc.message}, ensure_ascii=False)}], 'is_error': True}
+        except (KeyError, ValueError, PermissionError) as exc:
+            emit('session.pack_refused', {'conversation_id': tools.cid, 'code': type(exc).__name__})
+            return {'content': [{'type': 'text', 'text': '无法调用该能力：' + str(exc)}], 'is_error': True}
+        emit('session.pack_invoked', {'conversation_id': tools.cid, 'task_id': result['task_id'],
+                                      'pack_id': result.get('pack_id'), 'status': result['status'],
+                                      'version': result.get('version'),
+                                      'outputs': [o['artifact_id'] for o in result['outputs']]})
+        # A tool that ran and failed is NOT a tool error at the MCP level: the model
+        # must read the real status and say so, rather than retrying blindly.
+        return {'content': [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]}
+
     # Admin configuration tools (runtime / operations / deploy-targets).
     # Two conditions, both required. The role must be admin, AND the binding
     # must have explicitly asked for the configuration surface: an ordinary
@@ -124,4 +175,4 @@ def create_server(tools: ConversationTools, emit):
         admin = AdminConfigTools(tools.store, tools.actor_id, tools.actor_role)
         admin_tools_list = register_admin_tools(admin, emit, tool_decorator=tool)
 
-    return create_sdk_mcp_server('session', tools=[calc, export, *admin_tools_list])
+    return create_sdk_mcp_server('session', tools=[calc, export, attached_tools, run_attached_tool, *admin_tools_list])

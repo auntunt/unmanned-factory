@@ -146,12 +146,13 @@ export default function SessionSkillPanel({
       <details>
         <summary>
           <Icon name="triangle" className="cv-disclosure" width={13} height={13} />
-          当前会话加载的 Skill · {skills.length} 项
+          本会话临时加载的 Skill · {skills.length} 项
         </summary>
 
         <div className="ss-body">
           <p className="ss-hint">
-            加载到本会话的方法只在本次会话有效，不影响团队能力库。
+            这里只统计临时加载到本会话的方法，只在本次会话有效，不影响团队能力库。
+            该职能体自身已启用的规范与已挂靠的工具不在此列，它们始终生效；显示 0 项不代表没有加载。
           </p>
 
           <label className="ss-import" title="上传 Skill ZIP 加载到当前会话">
@@ -174,7 +175,9 @@ export default function SessionSkillPanel({
           {loading && <p role="status">正在读取会话 Skill…</p>}
 
           {!loading && skills.length === 0 && (
-            <p className="ss-empty">本会话尚未加载任何 Skill。</p>
+            <p className="ss-empty">
+              本会话没有额外加载的 Skill。该职能体已启用的规范仍然生效。
+            </p>
           )}
 
           {skills.map(skill => (

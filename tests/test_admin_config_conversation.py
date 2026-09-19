@@ -205,7 +205,7 @@ def test_client_lie_admin_config_ignored(env):
     tools = ct.ConversationTools.from_binding(binding)
     from tests.test_admin_config_surface_gate import _names
     names = _names(tools)
-    assert names == {'calc', 'export'}, \
+    assert names == {'calc', 'export', 'attached_tools', 'run_attached_tool'}, \
         f'MUTATION CAUGHT: member + admin_config=True must not get config tools, got: {names}'
 
 
