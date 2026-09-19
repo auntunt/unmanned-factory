@@ -28,6 +28,9 @@ class SessionSkillStore:
                     created_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS session_skills_session
                     ON session_skills(session_id);
+                CREATE TABLE IF NOT EXISTS session_skill_bodies(
+                    skill_id TEXT PRIMARY KEY,
+                    body BLOB NOT NULL);
             ''')
 
     def list(self, session_id: str) -> list[dict]:
@@ -85,10 +88,17 @@ class SessionSkillStore:
             db.execute(
                 'INSERT INTO session_skills(id, session_id, data, created_at) VALUES (?,?,?,?)',
                 (sid, session_id, json.dumps(data, ensure_ascii=False), at))
+            db.execute(
+                'INSERT INTO session_skill_bodies(skill_id, body) VALUES (?,?)',
+                (sid, raw))
         return data
 
-    def create_from_data(self, session_id: str, payload: dict, actor_id: str) -> dict:
-        """直接从结构化数据创建绑定（供内部或兼容调用）。"""
+    def create_from_data(self, session_id: str, payload: dict, actor_id: str,
+                         body: bytes | None = None) -> dict:
+        """直接从结构化数据创建绑定（供内部或兼容调用）。
+
+        body 为 ZIP 格式的实际内容，可选。不提供时该 skill 不参与运行时装载。
+        """
         sid = uuid.uuid4().hex
         at = now()
         origin = payload.get('origin', 'github')
@@ -112,17 +122,25 @@ class SessionSkillStore:
             db.execute(
                 'INSERT INTO session_skills(id, session_id, data, created_at) VALUES (?,?,?,?)',
                 (sid, session_id, json.dumps(data, ensure_ascii=False), at))
+            if body is not None:
+                db.execute(
+                    'INSERT INTO session_skill_bodies(skill_id, body) VALUES (?,?)',
+                    (sid, body))
         return data
 
     def create_from_github(self, session_id: str, fetch_result, actor_id: str) -> dict:
         """从 GitHub 拉取结果创建 session skill 绑定。
 
         fetch_result 是 github_skill_fetch.FetchResult。
+        用确定 commit 的内容构建 ZIP 存储，不在运行时重拉活动分支。
         不触碰 instruction_modules / skill_assets / project_modules / agent manifests。
         不授予任何工具权限、凭据或部署权限。
         """
         dependencies = list(fetch_result.dependencies)
         dependency_state = 'ready' if not dependencies else 'missing'
+
+        # 构建 ZIP 包存储 GitHub 拉取的确定内容，供运行时装载
+        body = _build_github_zip(fetch_result)
 
         return self.create_from_data(session_id, {
             'name': fetch_result.name,
@@ -135,7 +153,17 @@ class SessionSkillStore:
             'dependencies': dependencies,
             'import_state': 'imported',
             'dependency_state': dependency_state,
-        }, actor_id)
+        }, actor_id, body=body)
+
+    def body(self, skill_id: str) -> bytes:
+        """返回导入时保存的原始 ZIP 正文。不存在则抛 KeyError。"""
+        with self.store.connect() as db:
+            row = db.execute(
+                'SELECT body FROM session_skill_bodies WHERE skill_id=?',
+                (skill_id,)).fetchone()
+        if not row:
+            raise KeyError(skill_id)
+        return bytes(row[0])
 
     def delete(self, skill_id: str, session_id: str) -> None:
         """解绑。已产生的 run 记录与其 session_skill_snapshot 不受影响。"""
@@ -214,3 +242,14 @@ def _extract_dependencies(package: dict) -> list[str]:
                 if isinstance(d, str) and d not in deps:
                     deps.append(d)
     return deps
+
+
+def _build_github_zip(fetch_result) -> bytes:
+    """从 GitHub FetchResult 构建一个最小 ZIP 包，用于与 ZIP 导入统一存储。
+
+    运行时不再重拉活动分支，使用导入时确定的 commit 内容。
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        z.writestr(fetch_result.entry, fetch_result.content)
+    return buf.getvalue()

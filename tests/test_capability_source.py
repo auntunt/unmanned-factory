@@ -18,7 +18,8 @@ def store(tmp_path):
     return Store(tmp_path / 'test.db')
 
 
-def _create_run(store, rid, *, module_snapshot=None, session_skill_snapshot=None, project_id='p1'):
+def _create_run(store, rid, *, module_snapshot=None, session_skill_snapshot=None,
+                mount_snapshot=None, project_id='p1'):
     """Helper: insert a minimal run into the store."""
     data = {'id': rid, 'project_id': project_id, 'status': 'published', 'request': 'test',
             'revision': 1, 'created_at': '2026-09-19T00:00:00Z', 'updated_at': '2026-09-19T00:00:00Z'}
@@ -26,6 +27,8 @@ def _create_run(store, rid, *, module_snapshot=None, session_skill_snapshot=None
         data['module_snapshot'] = module_snapshot
     if session_skill_snapshot is not None:
         data['session_skill_snapshot'] = session_skill_snapshot
+    if mount_snapshot is not None:
+        data['mount_snapshot'] = mount_snapshot
     with store.connect() as db:
         db.execute('INSERT INTO runs VALUES(?,?)', (rid, json.dumps(data)))
     return data
@@ -137,7 +140,11 @@ def test_origin_distinguishable(store):
                       ],
                       session_skill_snapshot=[
                           {'id': 'sk-1', 'name': '会话技能B'},
-                      ])
+                      ],
+                      mount_snapshot={
+                          'documents': [{'id': 'session_skill/sk-1/SKILL.md',
+                                         'session_skill_id': 'sk-1'}],
+                      })
 
     result = aggregate(store, run)
 
@@ -171,7 +178,11 @@ def test_only_session_skill_snapshot(store):
     run = _create_run(store, 'r-session-only',
                       session_skill_snapshot=[
                           {'id': 'sk-2', 'name': '会话技能X'},
-                      ])
+                      ],
+                      mount_snapshot={
+                          'documents': [{'id': 'session_skill/sk-2/SKILL.md',
+                                         'session_skill_id': 'sk-2'}],
+                      })
 
     result = aggregate(store, run)
 

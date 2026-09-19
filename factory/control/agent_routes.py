@@ -352,9 +352,12 @@ def router(store, service):
                 if not settings.get('model'): return {'conversation':agents.conversation(cid),'run':None,'needs_project':True}
                 # Bounded, read-only mount of this role's granted skills and reference
                 # materials; ownership is enforced inside compile_mounts (no cross-role/user).
+                # Session skills: freeze and include so their bodies reach the runner.
+                from factory.control.session_skills import SessionSkillStore
+                session_skill_snapshot=SessionSkillStore(store).freeze(cid)
                 from factory.control.mounts import compile_mounts
                 try:
-                    mount=compile_mounts(store,{'agent_snapshot':snapshot,'agent_id':c['agent_id'],'project_id':None,'module_snapshot':[],'context':{},'conversation_attachments':agents.conversation_attachments(cid)})
+                    mount=compile_mounts(store,{'agent_snapshot':snapshot,'agent_id':c['agent_id'],'project_id':None,'module_snapshot':[],'context':{},'conversation_attachments':agents.conversation_attachments(cid),'session_skill_snapshot':session_skill_snapshot})
                 except (ValueError, PermissionError) as exc:
                     job_id=uuid.uuid4().hex
                     agents.append_message(cid,'assistant','能力资料装载失败，未作答：'+str(exc),status='failed',job_id=job_id)

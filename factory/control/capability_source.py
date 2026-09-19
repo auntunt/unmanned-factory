@@ -44,13 +44,23 @@ def aggregate(store, run):
                 'id': m.get('id', ''),
                 'origin': 'project_module',
             })
+    # Session skills: only count as loaded when their body actually appears in
+    # the mount_snapshot documents. Metadata-only snapshots (no body stored or
+    # mount not built) must NOT be reported as loaded.
     if session_skill_snapshot is not None:
+        mount = run.get('mount_snapshot') or {}
+        mounted_skill_ids = {
+            d.get('session_skill_id')
+            for d in mount.get('documents', [])
+            if d.get('session_skill_id')
+        }
         for s in session_skill_snapshot:
-            loaded_items.append({
-                'name': s.get('name', ''),
-                'id': s.get('id', ''),
-                'origin': 'session_skill',
-            })
+            if s.get('id') in mounted_skill_ids:
+                loaded_items.append({
+                    'name': s.get('name', ''),
+                    'id': s.get('id', ''),
+                    'origin': 'session_skill',
+                })
 
     loaded = {
         'status': 'available' if has_loaded_record else 'no_record',
