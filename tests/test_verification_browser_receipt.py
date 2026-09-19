@@ -188,3 +188,92 @@ def test_coverage_retry_cannot_reset_the_browser_correction_budget(app_env, monk
                if e['type'] == 'verification.browser_review_retry']
     assert len(retries) == 1, f'浏览器回执纠正只允许一次，实际 {len(retries)} 次'
     assert artifacts['verification']['verdict'] != 'pass', artifacts['verification']
+
+
+def test_snapshot_error_not_superseded_at_all_is_not_correctable(app_env, monkeypatch):
+    """快照里的错误没有被任何更新观察取代时，不得换来纠正机会。
+
+    用 coding 任务的 errors（ok=True、无 error 串），刻意绕开「本轮仍有未解决失败」
+    那条分支，好让覆盖判定成为唯一决定因素——否则这条测试测不到它。
+    """
+    service, run, p, repo = setup_review(app_env)
+    service.store.append(run['id'], 'browser.observed', {
+        'ok': True, 'action': 'open', 'url': 'http://127.0.0.1:8080/',
+        'errors': ['HTTP 404: http://127.0.0.1:8080/favicon.ico']}, 'coding')
+    calls = []
+
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        snapshot = _prompt_observations(request)
+        verdict = json.loads(passing_review(request, 'claiming clean'))
+        verdict['browser_review'] = {'event_ids': [o['event_id'] for o in snapshot['latest']],
+                                     'disposition': 'clean', 'reason': 'claimed clean'}
+        return ProviderResult(json.dumps(verdict), cost_usd=.01)
+
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(Exception):
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+
+    retries = [e for e in service.store.export_events(run['id'])
+               if e['type'] == 'verification.browser_review_retry']
+    assert retries == [], '没有更新观察覆盖旧失败，不得触发回执纠正'
+    assert artifacts['verification']['verdict'] != 'pass', artifacts['verification']
+
+
+def test_newer_but_still_failing_observation_does_not_count_as_superseding(app_env, monkeypatch):
+    """更新的观察本身仍然失败：不算「已解决」，同样不得换来纠正机会。"""
+    service, run, p, repo = setup_review(app_env)
+    service.store.append(run['id'], 'browser.observed', {
+        'ok': True, 'action': 'open', 'errors': ['HTTP 404: /favicon.ico']}, 'coding')
+    calls = []
+
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        snapshot = _prompt_observations(request)
+        # 本轮之后 coding 又有一次观察，但它仍然带错误。
+        service.store.append(run['id'], 'browser.observed', {
+            'ok': True, 'action': 'open', 'errors': ['HTTP 500: /api/items']}, 'coding')
+        verdict = json.loads(passing_review(request, 'claiming resolved'))
+        verdict['browser_review'] = {'event_ids': [o['event_id'] for o in snapshot['latest']],
+                                     'disposition': 'clean', 'reason': 'claimed resolved'}
+        return ProviderResult(json.dumps(verdict), cost_usd=.01)
+
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(Exception):
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+
+    retries = [e for e in service.store.export_events(run['id'])
+               if e['type'] == 'verification.browser_review_retry']
+    assert retries == [], '更新观察仍失败，不算已解决'
+    assert artifacts['verification']['verdict'] != 'pass', artifacts['verification']
+
+
+def test_superseded_correction_also_counts_against_the_single_attempt(app_env, monkeypatch):
+    """走「旧失败已被覆盖」这条路的纠正，同样计入唯一一次配额。"""
+    service, run, p, repo = setup_review(app_env)
+    _stale_failure_then_clean(service, run['id'])
+    calls = []
+
+    def reviewer(request, emit, cancel=None):
+        calls.append(request)
+        snapshot = _prompt_observations(request)
+        emit('browser.observed', {'ok': True, 'action': 'screenshot', 'errors': []})
+        verdict = json.loads(passing_review(request, 'review'))
+        # 每轮都把历史失败混进引用：纠正后仍错。
+        verdict['browser_review'] = {
+            'event_ids': [o['event_id'] for o in snapshot['latest']]
+                         + [o['event_id'] for o in snapshot['recent_failures']],
+            'disposition': 'clean', 'reason': 'still wrong'}
+        return ProviderResult(json.dumps(verdict), cost_usd=.01)
+
+    monkeypatch.setattr(service.runner, 'run', reviewer)
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(Exception):
+        service._independent_verify(run['id'], run, p, service.runtime_settings.get(), artifacts)
+
+    retries = [e for e in service.store.export_events(run['id'])
+               if e['type'] == 'verification.browser_review_retry']
+    assert len(retries) == 1, f'全过程只允许一次浏览器回执纠正，实际 {len(retries)} 次'
+    assert artifacts['verification']['verdict'] != 'pass', artifacts['verification']

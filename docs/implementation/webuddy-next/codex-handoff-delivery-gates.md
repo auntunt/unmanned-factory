@@ -76,3 +76,45 @@
 2. 若 git 仓库用 sha256 对象格式，`rev-parse` 返回 64 位 id 与我们记录的 sha1 blob id 不等 → **失败保守，不豁免**（不会误放行）。
 3. 内容绑定在**产出时**读取文件计算；文件当时不可读则不记录绑定，该截图不豁免。
 4. 本轮所有证据均为本地测试，**不是服务器现场**。真实模型下的回执纠正、Docker/IP 全流程仍归你。
+
+---
+
+# 补修：快照旧失败已被新观察覆盖时给同一次有界纠正（基线 `58b207e` → 候选见推送）
+
+## 复现
+你的 `test_resolved_browser_snapshot.py` 原样入库到 `docs/acceptance/webuddy-docker-delivery/`，原样跑：
+```
+uv run --extra codex pytest -q -p no:randomly docs/acceptance/webuddy-docker-delivery/test_resolved_browser_snapshot.py
+# 修复前：1 failed —— 独立验证未通过：浏览器仍有错误或证据被截断，需要说明具体影响并提供非阻塞依据
+```
+与你描述一致：模型**正确**引用了提示词里的 latest ids 并填 clean，但闸门仍按快照里那条旧 favicon 404 要求 `non_blocking`，直接 fail，且这条缺口不在可纠正集合里，所以连一次纠正机会都没有。
+
+这正是交接目标「旧 404 不得无限阻断新的干净观察」，不是新增功能。
+
+## 补修
+把 `浏览器仍有错误或证据被截断…` 这条缺口**有条件地**纳入同一次有界纠正，条件是
+`_superseded_by_fresh_observation(snapshot, current)`：
+
+- 快照 `latest` 里**每一条**带 errors/error_count/truncated 的观察，
+- 在当前 `latest` 中，**同一个 task** 都有一条 **event_id 更大**的观察，
+- 且那条新观察本身**干净**（ok、无 error、无 errors、无 error_count、未截断）。
+
+任一条不满足 → 不可纠正。再叠加原有前提：本轮**没有**未解决失败（`unresolved` 优先，且会把 `correctable` 直接置否）。
+
+纠正本身仍是原来那一次：**不改 ids、不抹旧证据、不替模型下结论**。重试时 `browser_observations` 会重建，届时被取代的失败已不在 `latest`，模型据此**自行重新判定**。反馈里明确写了「不要把未解决的失败报成已解决」。
+
+**全程仍最多一次**浏览器回执纠正，且这条路径的纠正**计入同一配额**（新增测试覆盖）。
+
+## 测试
+- 你的断言：修复前 1 failed → 修复后 **passed**，`len(calls) <= 2` 成立。
+- 新增守卫：快照错误**完全没有**被更新观察取代 → 不可纠正；更新观察**本身仍失败** → 不算已解决；走这条路的纠正**计入唯一配额**。
+- 相关定向（verification receipt / evidence / response parsing / active verification / operation workflows / scope 平台产物 / 整个 acceptance 目录）：**66 passed / 2 skipped**。
+- 按你的限定：未重跑 208、未跑全量、未访问服务器。
+
+## 一处自我修正
+我第一版守卫测试**没有承重**：它用 verification 任务构造，被「本轮仍有未解决失败」那条分支先拦下了，根本没走到覆盖判定——两条变异都不变红。改用 coding 任务的 errors（ok=True、无 error 串）绕开那条分支后，覆盖判定才成为唯一决定因素，两条变异这才如期变红。记在这里，免得后人误以为那两条守卫一直有效。
+
+## 边界
+- 判定只看**同一 task 的更新观察**。跨 task 的「另一处修好了」不算覆盖。
+- `event_id` 单调递增是判「更新」的依据；不依赖时间戳。
+- 仍为本地测试证据，非服务器现场。

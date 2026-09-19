@@ -27,6 +27,34 @@ from factory.control.verification_evidence import browser_evidence, browser_revi
 # an actual browser failure. Only these earn a bounded verification-only retry.
 _RECEIPT_ONLY_GAPS = ('验收未核对最新浏览器观察记录，不能判定通过',
                       '请依据最新浏览器观察明确记录验收结论')
+# Raised when the prompt snapshot still carries errors. Correctable only when a
+# genuine newer observation has already superseded every one of them.
+_SUPERSEDED_ERROR_GAP = '浏览器仍有错误或证据被截断，需要说明具体影响并提供非阻塞依据'
+
+
+def _superseded_by_fresh_observation(snapshot, current):
+    """True when every error-bearing entry of the prompt snapshot has since been
+    replaced, for that same task, by a newer observation that is clean.
+
+    The model is shown a snapshot. If a failure in it was already fixed earlier
+    in this run, the snapshot still reads 'errors' while the current state is
+    clean, and the model is asked to justify a failure that no longer exists.
+    That must not block forever -- but only a real newer observation may resolve
+    it. Old evidence is kept as-is; nothing here rewrites ids or erases history.
+    """
+    current_by_task = {o.get('task_id'): o for o in current.get('latest', [])}
+    stale = [o for o in snapshot.get('latest', [])
+             if o.get('errors') or o.get('error_count') or o.get('truncated')]
+    if not stale:
+        return False
+    for old in stale:
+        fresh = current_by_task.get(old.get('task_id'))
+        if not fresh or (fresh.get('event_id') or 0) <= (old.get('event_id') or 0):
+            return False
+        if (not fresh.get('ok') or fresh.get('error') or fresh.get('errors')
+                or fresh.get('error_count') or fresh.get('truncated')):
+            return False
+    return True
 from factory.control import skill_ingestion_runs
 
 
@@ -406,9 +434,14 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     for observation in latest_browser.get('latest', []):
         if observation.get('error_type') != 'browser_unavailable' and (not observation.get('ok') or observation.get('error') or (observation.get('task_id') == 'verification' and observation.get('error_count'))):
             unresolved = '独立验收浏览器仍有未解决的失败：' + str(observation.get('error') or observation.get('errors'))
+    current_observations = {**latest_browser, 'latest': _visible(latest_browser)}
+    correctable = browser_gap in _RECEIPT_ONLY_GAPS or (
+        browser_gap == _SUPERSEDED_ERROR_GAP
+        and _superseded_by_fresh_observation(available_observations, current_observations))
     if unresolved:
         browser_gap = unresolved
-    elif browser_gap in _RECEIPT_ONLY_GAPS:
+        correctable = False
+    elif correctable:
         # The application was reviewed; only the receipt's citation is wrong.
         # Give the same verification session exactly one bounded correction --
         # never hand accepted business code back to coding, and never write the
@@ -417,20 +450,23 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         if not browser_receipt_retry and remaining > 5 and not self.cancels[rid].is_set():
             expected = [o['event_id'] for o in available_observations['latest']]
             self._emit(rid, 'verification.browser_review_retry', {
-                'message': '验收回执的浏览器引用不符，继续当前验收改正；不重跑开发',
+                'message': '验收回执与最新浏览器观察不符，继续当前验收改正；不重跑开发',
                 'gap': browser_gap, 'expected_event_ids': expected}, 'verification')
-            feedback = ('\n\nYour previous verdict was rejected for its browser_review citation only; '
+            feedback = ('\n\nYour previous verdict was rejected over its browser_review only; '
                         'the application review itself was not questioned. ' + browser_gap +
                         ' Cite exactly the event_ids listed in browser_observations.latest, in that order. '
                         'Do not include recent_failures: those are superseded history, not the current state. '
-                        'Re-state your own disposition and reason; do not copy them from this message.')
+                        'browser_observations has been rebuilt for this attempt, so an error that a later '
+                        'observation already resolved is no longer in latest. Judge the observations you are '
+                        'given now and re-state your own disposition and reason; do not copy them from this '
+                        'message, and do not report a failure as resolved unless latest shows it resolved.')
             bounded = {**configuration, 'limits': {**configuration['limits'], 'timeout_s': int(remaining)}}
             return self._verify_snapshot(rid, run, project, bounded, artifacts, workspace,
                                          coverage_retry=coverage_retry, browser_receipt_retry=True,
                                          receipt_feedback=feedback)
     if browser_gap:
         verdict = {'verdict': 'fail', 'reason': browser_gap, 'browser_review': verdict.get('browser_review')}
-        if browser_gap in _RECEIPT_ONLY_GAPS:
+        if correctable:
             # Say what actually happened: the receipt was never reconciled.
             # Not a functional failure, and certainly not a pass.
             verdict['error_type'] = 'browser_review_unreconciled'
