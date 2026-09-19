@@ -610,6 +610,40 @@ def router(store, service):
         uid = actor(request)['id']
         return {'conversations': [c for c in convs if c.get('actor_id') == uid]}
 
+    def _resolve_stale_pending(conv):
+        """Recover stale pending/running messages by checking maintenance job status.
+
+        If the server restarted or the answer callback failed to update the
+        message, the maintenance_jobs table has the authoritative terminal
+        state.  We reconcile here so the frontend sees a consistent view.
+        """
+        changed = False
+        for m in conv.get('messages', []):
+            if m.get('status') not in ('pending', 'running'):
+                continue
+            jid = m.get('job_id')
+            if not jid:
+                continue
+            try:
+                job = service.maintenance_status(jid)
+            except KeyError:
+                m['status'] = 'interrupted'
+                m['content'] = '任务记录丢失'
+                changed = True
+                continue
+            if job['status'] in ('completed', 'failed', 'cancelled', 'interrupted'):
+                m['status'] = job['status']
+                if job.get('error'):
+                    m['content'] = job['error']
+                elif job['status'] == 'interrupted':
+                    m['content'] = '服务重启，任务中断'
+                changed = True
+        if changed:
+            from factory.control.store import now
+            conv['updated_at'] = now()
+            _save_admin_config_conv(conv)
+        return conv
+
     @api.get('/admin-config/conversations/{cid}')
     def get_admin_config_conversation(cid: str, request: Request):
         if actor(request).get('role') != 'admin':
@@ -620,7 +654,7 @@ def router(store, service):
             raise HTTPException(404, '会话不存在')
         if conv.get('actor_id') != actor(request)['id']:
             raise HTTPException(403, '无权访问该会话')
-        return conv
+        return _resolve_stale_pending(conv)
 
     @api.post('/admin-config/conversations/{cid}/messages', status_code=201)
     def admin_config_message(cid: str, body: AdminConfigMessage, request: Request):
@@ -642,13 +676,13 @@ def router(store, service):
             'id': msg_id, 'role': 'user', 'content': body.content,
             'created_at': now(),
         })
-        conv['updated_at'] = now()
-        _save_admin_config_conv(conv)
 
         # Get runtime config for model settings
         cfg = service.runtime_settings.get()
         settings = cfg['profiles']['planner']
         if not settings.get('model'):
+            conv['updated_at'] = now()
+            _save_admin_config_conv(conv)
             return {'conversation': conv, 'status': 'failed',
                     'message': '规划模型未配置，无法回答'}
 
@@ -684,6 +718,19 @@ def router(store, service):
 
         job_id = uuid.uuid4().hex
 
+        # ── Persist pending BEFORE dispatching ──────────────────────────
+        # The pending message must be in the DB before the job starts;
+        # otherwise a fast-completing job's answer() reads the conv without
+        # the pending row and the subsequent _save_admin_config_conv(conv)
+        # below overwrites the completed result with stale data.
+        pending_id = uuid.uuid4().hex
+        conv['messages'].append({
+            'id': pending_id, 'role': 'assistant', 'content': '正在回答',
+            'status': 'pending', 'job_id': job_id, 'created_at': now(),
+        })
+        conv['updated_at'] = now()
+        _save_admin_config_conv(conv)
+
         def answer(cancel):
             with tempfile.TemporaryDirectory(prefix='factory-admin-config-') as workspace:
                 from factory.control.providers import ProviderRequest
@@ -704,54 +751,38 @@ def router(store, service):
                     lambda *_: None,
                     cancel,
                 )
-            # Append assistant reply
-            try:
-                fresh = _admin_config_conv(cid)
-            except KeyError:
-                fresh = conv
-            fresh['messages'].append({
-                'id': uuid.uuid4().hex,
-                'role': 'assistant',
-                'content': result.text,
-                'status': 'completed',
-                'job_id': job_id,
-                'created_at': now(),
-            })
-            fresh['updated_at'] = now()
-            _save_admin_config_conv(fresh)
+            # Update the pending message to completed (not append a new one)
+            _update_admin_config_msg(cid, job_id, 'completed', result.text)
             return {'status': 'completed'}
 
         answer.on_error = lambda exc: _admin_config_error(cid, job_id, exc)
-        job = service.start_maintenance(answer, job_id=job_id,
-                                        conversation_id=cid,
-                                        actor_id=actor(request)['id'])
-
-        # Append pending message
-        pending_id = uuid.uuid4().hex
-        conv['messages'].append({
-            'id': pending_id, 'role': 'assistant', 'content': '正在回答',
-            'status': 'pending', 'job_id': job_id, 'created_at': now(),
-        })
-        _save_admin_config_conv(conv)
+        service.start_maintenance(answer, job_id=job_id,
+                                  conversation_id=cid,
+                                  actor_id=actor(request)['id'])
 
         return {'conversation': conv, 'job_id': job_id, 'status': 'pending'}
 
-    def _admin_config_error(cid, job_id, exc):
+    def _update_admin_config_msg(cid, job_id, status, content):
+        """Find the pending/running message for *job_id* and set its terminal state."""
         from factory.control.store import now
         try:
-            conv = _admin_config_conv(cid)
+            fresh = _admin_config_conv(cid)
         except KeyError:
             return
-        conv['messages'].append({
-            'id': uuid.uuid4().hex,
-            'role': 'assistant',
-            'content': '回答失败：' + str(exc),
-            'status': 'failed',
-            'job_id': job_id,
-            'created_at': now(),
-        })
-        conv['updated_at'] = now()
-        _save_admin_config_conv(conv)
+        for m in fresh.get('messages', []):
+            if m.get('job_id') == job_id and m.get('status') in ('pending', 'running'):
+                m['status'] = status
+                m['content'] = content
+                break
+        fresh['updated_at'] = now()
+        _save_admin_config_conv(fresh)
+
+    def _admin_config_error(cid, job_id, exc):
+        from factory.control.providers import ProviderCancelled
+        is_cancel = isinstance(exc, ProviderCancelled)
+        status = 'cancelled' if is_cancel else 'failed'
+        content = '调用已取消' if is_cancel else ('回答失败：' + str(exc))
+        _update_admin_config_msg(cid, job_id, status, content)
 
     return api
 
