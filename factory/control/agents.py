@@ -762,6 +762,64 @@ class AgentStore:
             if expected_updated_at is not None and c.get("updated_at") != expected_updated_at: raise Conflict("会话已更新，请重新加载")
             c["messages"].append({"id": uuid.uuid4().hex, "role": role, "content": scrub(content), "created_at": now(), **scrub(extra)}); c["updated_at"] = now(); db.execute("UPDATE agent_conversations SET data=? WHERE id=?", (_json(c), cid))
         return c
+    def resolve_answer_message(self, cid, job_id, status, content, **extra):
+        """Put the assistant message dispatched for *job_id* into its terminal state.
+
+        The chat path used to append a SECOND assistant message when the answer
+        arrived, leaving the original 'pending' one in place forever. The UI keys
+        its typing indicator and its polling off any pending/running message, so
+        a finished conversation kept saying 正在回答. Resolving in place keeps one
+        assistant message per job.
+
+        If no pending/running message is found for this job (an older
+        conversation, or one whose pending row never landed) we append instead:
+        an answer must never be dropped just because its placeholder is missing.
+        """
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM agent_conversations WHERE id=?", (cid,)).fetchone()
+            if not row: raise KeyError(cid)
+            c = self._decode(row)
+            target = next((m for m in c["messages"]
+                           if m.get("job_id") == job_id and m.get("role") == "assistant"
+                           and m.get("status") in ("pending", "running")), None)
+            if target is None:
+                c["messages"].append({"id": uuid.uuid4().hex, "role": "assistant",
+                                      "content": scrub(content), "created_at": now(),
+                                      "status": status, "job_id": job_id, **scrub(extra)})
+            else:
+                target.update(status=status, content=scrub(content), **scrub(extra))
+            c["updated_at"] = now()
+            db.execute("UPDATE agent_conversations SET data=? WHERE id=?", (_json(c), cid))
+        return c
+
+    def resolve_messages_from_dead_process(self, cid, live_boot_id):
+        """End pending answers left behind by a process that is no longer running.
+
+        A pending message records the process that dispatched it. If that value
+        differs from the live process, whoever was going to answer it is gone,
+        so the message can be ended without asking any job table -- which is why
+        this needs no external status call and carries no stale-observation
+        risk. Messages with no recorded process are left alone: we cannot tell,
+        so we do not guess.
+        """
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM agent_conversations WHERE id=?", (cid,)).fetchone()
+            if not row: raise KeyError(cid)
+            c = self._decode(row)
+            changed = False
+            for m in c["messages"]:
+                if (m.get("role") == "assistant" and m.get("status") in ("pending", "running")
+                        and m.get("boot_id") and m["boot_id"] != live_boot_id):
+                    m["status"] = "interrupted"
+                    m["content"] = "服务重启，回答中断"
+                    changed = True
+            if changed:
+                c["updated_at"] = now()
+                db.execute("UPDATE agent_conversations SET data=? WHERE id=?", (_json(c), cid))
+        return c
+
     def attach_run(self, cid, rid, expected_updated_at=None):
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE"); row = db.execute("SELECT data FROM agent_conversations WHERE id=?", (cid,)).fetchone()

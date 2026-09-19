@@ -221,3 +221,38 @@ it('a delayed poll for the previous conversation keeps the new one, and the next
   expect(api.mock.calls.some(([u, o]) => u === '/api/v4/conversations/A/messages' && (o as { method?: string })?.method === 'POST')).toBe(false)
   vi.useRealTimers()
 })
+
+it('停止 typing 与轮询：一旦后端把同一条回答置为终态', async () => {
+  // 现场问题是后端在完成时另起一条 assistant 消息，原 pending 永远留着，
+  // 于是这里的 typing 与 2s 轮询永不停。修复后同一条消息就地变终态，
+  // 这条定向证明前端据此收起 typing 并停止轮询。
+  vi.useFakeTimers()
+  try {
+    const settled = { id: 'c5', agent_id: 'a1', mode: 'do', project_id: null, run_id: null,
+      messages: [{ id: 'u', role: 'user', content: '按资料报价' },
+                 { id: 'a', role: 'assistant', content: '报价单已生成：260.74 元', status: 'completed', job_id: 'j1' }] }
+    const answering = { ...settled,
+      messages: [settled.messages[0], { id: 'a', role: 'assistant', content: '正在回答', status: 'pending', job_id: 'j1' }] }
+    let conv: typeof settled = answering
+    api.mockImplementation(async (url?: string) => {
+      if (url === '/api/v4/agents/a1') return agent as never
+      if (url === '/api/v4/agents/a1/conversations') return { conversations: [answering] } as never
+      if (url === '/api/v4/conversations/c5') return conv as never
+      return {} as never
+    })
+    mount()
+    await vi.waitFor(() => expect(document.querySelector('.cv-typing')).toBeTruthy())
+
+    // 后端结束了同一条消息（不是新增一条）。
+    conv = settled
+    await vi.advanceTimersByTimeAsync(2100)
+    await vi.waitFor(() => expect(document.querySelector('.cv-typing')).toBeNull())
+
+    const before = api.mock.calls.filter(([u]) => u === '/api/v4/conversations/c5').length
+    await vi.advanceTimersByTimeAsync(6000)
+    const after = api.mock.calls.filter(([u]) => u === '/api/v4/conversations/c5').length
+    expect(after).toBe(before)  // 轮询已停
+  } finally {
+    vi.useRealTimers()
+  }
+})

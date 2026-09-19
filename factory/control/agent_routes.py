@@ -69,6 +69,11 @@ class AdminConfigMessage(Body):
     content: str = Field(min_length=1, max_length=50000)
 
 
+# Identifies this process. A pending chat answer records it, so a restart can
+# end answers nobody is producing any more -- without querying any job table.
+_CHAT_PROCESS_BOOT = uuid.uuid4().hex
+
+
 def router(store, service):
     api=APIRouter(prefix='/api/v4'); agents=AgentStore(store)
     def actor(req): return req.state.user
@@ -78,7 +83,8 @@ def router(store, service):
         except KeyError: raise HTTPException(404,'记录不存在')
         except ValueError as e: raise HTTPException(400,str(e)) from None
     def _append_pending(cid, content, job_id):
-        return agents.append_message(cid, 'assistant', content, status='pending', job_id=job_id)
+        return agents.append_message(cid, 'assistant', content, status='pending',
+                                     job_id=job_id, boot_id=_CHAT_PROCESS_BOOT)
     def _json_model(text):
         raw=str(text).strip()
         if raw.startswith('```'):
@@ -229,7 +235,12 @@ def router(store, service):
     def read_conversation(cid:str,request:Request):
         c=guarded(agents.conversation,cid)
         if c.get('actor_id')!=actor(request)['id'] and actor(request).get('role')!='admin': raise HTTPException(403,'无权访问该会话')
-        return c
+        # Only answers stranded by a previous process are ended here, decided
+        # purely by the recorded process id. Nothing is marked successful on
+        # read, and no job state is consulted, so there is no stale observation
+        # to go wrong.
+        guarded(agents.resolve_messages_from_dead_process,cid,_CHAT_PROCESS_BOOT)
+        return guarded(agents.conversation,cid)
     @api.post('/conversations/{cid}/attachments',status_code=201)
     def add_attachment(cid:str,request:Request,file:UploadFile=File(...)):
         c=guarded(agents.conversation,cid)
@@ -377,12 +388,27 @@ def router(store, service):
                     with tempfile.TemporaryDirectory(prefix='factory-agent-chat-') as workspace:
                         runner=GovernedRunner(service.runner,service.governance,run_id=None,actor_id=actor(request)['id']) if service.governance else service.runner
                         result=runner.run(ProviderRequest(provider=settings['provider'],model=settings['model'],prompt=prompt,workspace=workspace,timeout_s=cfg['limits']['timeout_s'],read_only=True,reference_mount=reference,conversation_binding=conversation_binding),lambda *_:None,cancel)
-                    agents.append_message(cid,'assistant',result.text,status='completed',job_id=job_id,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
+                    agents.resolve_answer_message(cid,job_id,'completed',result.text,usage={'cost_usd':getattr(result,'cost_usd',None),'tokens_in':getattr(result,'tokens_in',None),'tokens_out':getattr(result,'tokens_out',None)})
                     return {'status':'completed'}
-                answer.on_error=lambda exc: agents.append_message(cid,'assistant','回答失败：'+str(exc),status='failed',job_id=job_id)
-                job=service.start_maintenance(answer,job_id=job_id,conversation_id=cid,actor_id=actor(request)['id'])
+                def _chat_answer_error(exc):
+                    from factory.control.providers import ProviderCancelled
+                    cancelled=isinstance(exc,ProviderCancelled)
+                    agents.resolve_answer_message(cid,job_id,
+                        'cancelled' if cancelled else 'failed',
+                        '回答已取消' if cancelled else '回答失败：'+str(exc))
+                answer.on_error=_chat_answer_error
+                # Both the receipt binding and the pending placeholder must be in
+                # the store BEFORE dispatch: a fast job would otherwise resolve an
+                # answer whose placeholder does not exist yet, and the placeholder
+                # appended afterwards would sit there as a permanent 正在回答.
                 agents.link_answer_job(cid,job_id,key)  # bind this job to the message it answers
                 _append_pending(cid,'正在回答',job_id)
+                try:
+                    job=service.start_maintenance(answer,job_id=job_id,conversation_id=cid,actor_id=actor(request)['id'])
+                except Exception as exc:
+                    # Dispatch failed, so no job will ever answer this placeholder.
+                    agents.resolve_answer_message(cid,job_id,'failed','派发失败：'+str(exc))
+                    raise
                 return {'conversation':agents.conversation(cid),'run':None,'job_id':job['id'],'status':'pending'}
             # A conversation has at most one active run.
             with service.lock:
