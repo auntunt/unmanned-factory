@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-19",
+  "milestone": "V1 RC1 — development workspace and team capabilities",
+  "production": {
+    "tag": "webuddy-prod-baseline-2026-09-19",
+    "commit": "4c56632d4cc18918f9c5c0396b6a05ca816b5547",
+    "service": "factory-web.service",
+    "release_dir": "/home/ubuntu/releases/factory/4c56632",
+    "observed_state": "active"
+  },
+  "candidate": {
+    "tag": "webuddy-v1-rc1-2026-09-19",
+    "commit": "ebf0a64394051d92d2696e6cbc03220874648769",
+    "deployed": false,
+    "full_v1_accepted": false
+  },
+  "rollback": {
+    "code_anchor_created": true,
+    "pre_cutover_data_config_backup_created_this_turn": false,
+    "rollback_rehearsed": false
+  },
+  "remaining": [
+    "fixed-company-test-address deployment",
+    "core operation at live application address",
+    "follow-up iteration updates same address",
+    "latest full UI walkthrough",
+    "long-running intervention full scenario"
+  ]
+}

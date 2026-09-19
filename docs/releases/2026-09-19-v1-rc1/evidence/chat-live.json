@@ -1,0 +1,62 @@
+{
+  "candidate": "ebf0a64",
+  "data_dir": "/home/ubuntu/releases/audit-next-ebf0a64/live-20260919-190317",
+  "production_changed": false,
+  "model": {
+    "provider": "claude",
+    "model": "claude-sonnet-5"
+  },
+  "checks": {
+    "member_create": {
+      "passed": true,
+      "http_status": 201
+    },
+    "member_boundaries": {
+      "passed": true,
+      "statuses": {
+        "foreign_read": 403,
+        "admin_entry": 403,
+        "maintain": 403
+      }
+    },
+    "member_send": {
+      "passed": true,
+      "http_status": 201,
+      "job_id": "ad60e56063094c1ebb27bf165918eb15"
+    },
+    "real_member_answer": {
+      "passed": true,
+      "job_status": "completed",
+      "assistant_messages": [
+        {
+          "id": "4830c9218af64494a84852cf9de33ac6",
+          "role": "assistant",
+          "content": "已完成。",
+          "created_at": "2026-09-19T11:03:53.789183+00:00",
+          "status": "completed",
+          "job_id": "ad60e56063094c1ebb27bf165918eb15",
+          "boot_id": "58dfbd6b95f246fa88a3c9b8b694afa9",
+          "usage": {
+            "cost_usd": 0.209558,
+            "tokens_in": 46494,
+            "tokens_out": 11657
+          }
+        }
+      ],
+      "active_pending_count": 0,
+      "downloads": [
+        {
+          "status": 200,
+          "marker_present": true,
+          "sha256": "868b3f77f854a9cc7461dfce1b7889ef89472c6ce0dbb60bdc10197456511e3d"
+        }
+      ]
+    },
+    "restart": {
+      "passed": true,
+      "message_count": 2,
+      "export_count": 1
+    }
+  },
+  "conversation_id": "da75a6eaf7674a28b55417a3d7543aae"
+}
