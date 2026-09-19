@@ -9,6 +9,7 @@ import { STAGES, HEAD_LABEL, TERMINAL_DONE, isTerminal, headState, stageIndex, c
 import { DELIVERY_TYPE_LABEL, type DeliveryType } from './delivery-constants'
 import OperationResults from '../workbench/OperationResults'
 import RequirementConfirmation from '../workbench/RequirementConfirmation'
+import PackFromDeliverables from '../workbench/PackFromDeliverables'
 import './conversation.css'
 
 type Deliverable = { id: string | number; name: string; kind?: string; size?: number; preview?: boolean }
@@ -102,7 +103,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
       } else if (mode.kind === 'continue') {
         const analysisRetry = !run.plan && !run.spec_confirmation && run.source?.operation === 'general'
         if (analysisRetry && text) throw new Error('本次重试会沿用原始需求重新分析，补充文字尚未提交。请保留这段文字，清空输入后重试分析。')
-        const resumable = analysisRetry || Boolean(run.artifacts?.base_sha && run.artifacts?.tasks)
+        const resumable = analysisRetry || run.source?.type === 'skill_ingestion' || Boolean(run.artifacts?.base_sha && run.artifacts?.tasks)
         if (!resumable && text) {
           await request(`/api/v2/runs/${rid}/clarify`, { ...options, body: { answer: text } })
           setDraft(''); await load(); return
@@ -279,6 +280,7 @@ function ProductCard({ run, title, rid, ledger, csrfToken, onUnauthorized, isAdm
     {deliver && !deliver.saved && <p>{deliver.collection_error || (isAdmin ? '成果尚未归档。' : '请管理员保存成果后再下载。')}</p>}
     {preview && <section aria-label="成果预览"><h3>{preview.name}</h3><button className="cv-btn" onClick={() => setPreview(null)}>关闭预览</button>{preview.kind === 'image' && preview.image_url ? <img style={{ maxWidth: '100%' }} src={preview.image_url} alt={preview.name} /> : preview.kind === 'web' ? <><p>这是静态外观预览，脚本不运行；完整交互请下载并按说明启动。</p><iframe style={{ width: '100%', minHeight: 350 }} title={preview.name} sandbox="" srcDoc={`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">${preview.content}`} /></> : <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{preview.content}</pre>}</section>}
     {deliver?.saved && items.length > 0 && <details className="cv-collapse"><summary>全部文件 · {items.length}</summary>{items.map(item => <div className="cv-file" key={item.id}><div className="cv-file-meta"><strong>{item.name}</strong><small>{sizeLabel(item.size)}</small></div><a className="cv-btn cv-btn-secondary" href={`${base}/files/${item.id}`}>下载</a></div>)}</details>}
+    {isAdmin && deliver?.saved && items.length > 0 && <PackFromDeliverables runId={String(run.id)} files={items} csrfToken={csrfToken} onUnauthorized={onUnauthorized} />}
     <VerificationDrawer run={run} ledger={ledger} />
   </div></div>
 }

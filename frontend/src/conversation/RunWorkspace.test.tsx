@@ -280,3 +280,10 @@ it('keeps the result area visible on mobile breakpoint without input occlusion',
   const resultCard = document.querySelector('.cv-artifact')
   expect(resultCard).toBeTruthy()
 })
+
+it('resumes skill ingestion on the same run instead of creating a generic retry', async () => {
+  mount({ ...base, status: 'needs_human', source: { type: 'skill_ingestion' }, resume_count: 2 })
+  fireEvent.click(await screen.findByRole('button', { name: '继续处理' }))
+  await waitFor(() => expect(api.mock.calls.some(([url]) => url.endsWith('/continue'))).toBe(true))
+  expect(api.mock.calls.some(([url]) => url.endsWith('/retry'))).toBe(false)
+})

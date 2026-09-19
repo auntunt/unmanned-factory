@@ -127,7 +127,7 @@ def validate_mapping(package: dict, proposal: dict) -> dict:
             raise ValueError('SOP 步骤字段无效')
         path = step['skill_path']
         if not isinstance(path, str) or path not in paths or step['role'] not in ('router', 'leaf'):
-            raise ValueError('SOP 引用了不存在的 skill 或角色')
+            raise ValueError('SOP 引用了不存在的 skill 或角色：' + json.dumps({'skill_path': path, 'role': step['role'], 'allowed_skill_paths': sorted(paths), 'allowed_roles': ['router', 'leaf']}, ensure_ascii=False))
         if not isinstance(step['title'], str) or not 1 <= len(step['title']) <= 200:
             raise ValueError('SOP 标题无效')
         covered.add(path)
@@ -188,6 +188,11 @@ ADAPTER_PROMPT = '''你负责将外部 skill 包翻译为 webuddy 职能包 v2 �
 逐项覆盖来源的全部工作步骤、输出要求、引用材料、限制和自检，不能只映射开头两步。
 basis 必须逐字复制对应 skill 正文中实际存在的连续文本，不从引用文件拼接或改写。
 来源已标记 requires_authorization 的路径须显式登记，不能因为你判断无需授权而省略。
+steps.skill_path 只能从 skills[].path 原样选择；references 与 assets 是参考文件，不是独立 skill。
+引用参考文件的步骤仍归属引用它的 SKILL.md，basis 只能引用该 SKILL.md 正文中的引用要求。
+decisions/dependencies/injection_risks 的 path 必须原样取 files[].path，不能追加章节名、锚点或解释。
+没有 host_primitives 时 decisions 使用空数组，不把普通业务步骤虚构成宿主机制。
+当前适配过程禁用工具，并不代表目标运行平台不能导出文件或运行受控 CLI；未知依赖按待验证记录。
 输出且仅输出 JSON：
 {"identity":"身份建议","steps":[{"title":"步骤","skill_path":"源路径",
 "role":"router 或 leaf","assertions":[{"text":"断言","kind":"mechanical 或 advisory",

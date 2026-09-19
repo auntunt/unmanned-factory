@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { request } from '../workspace/api'
 
-type File = { name: string; size: number }
+type File = { name: string; size?: number }
 type Scope = '' | 'synthetic' | 'licensed'
 
 /** This is the missing user entry into the existing executable-pack lifecycle.
