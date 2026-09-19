@@ -330,3 +330,11 @@
 
 /* Tool results belong to the page flow; only the compact composer sticks. */
 .cv-chat-capabilities { max-width: var(--cv-thread); width: 100%; box-sizing: border-box; margin: 0 auto; padding: 0 20px 12px; }
+
+/* 本会话工具回执：真实任务状态与真实产物，不是模型自述。 */
+.cv-tool-results { display: grid; gap: 8px; margin-bottom: 8px; }
+.cv-tool-result { border: 1px solid var(--cv-line); border-radius: 8px; padding: 8px 10px; }
+.cv-tool-result.is-succeeded { border-color: var(--cv-ok, var(--cv-line)); }
+.cv-tool-result-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.cv-tool-result-head small { color: var(--cv-faint); }
+.cv-tool-result-error { margin: 0; color: var(--cv-faint); font-size: 12px; overflow-wrap: anywhere; }

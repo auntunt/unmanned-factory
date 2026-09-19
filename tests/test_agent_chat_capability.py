@@ -522,7 +522,7 @@ def test_real_session_mcp_server_calc_and_export_handlers(app_env, monkeypatch):
                 # 普通会话的真实清单：算账、导出，加上「本角色已挂靠能力包」的
                 # 列举与执行。后两件由挂靠关系限定范围，未挂靠即为空清单。
                 assert {t.name for t in inventory.tools} == {
-                    'calc', 'export', 'attached_tools', 'run_attached_tool'}
+                    'calc', 'export', 'attached_tools', 'attached_tool_doc', 'run_attached_tool'}
                 ok = await session.call_tool('calc', {'items': [{'name': '演示', 'unit_price': '100', 'quantity': '3'}], 'discount_rate': '0.9'})
                 assert not ok.is_error
                 assert json.loads(ok.content[0].text)['total'] == '270.00'          # verifiable result

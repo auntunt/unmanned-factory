@@ -12,7 +12,8 @@ import json
 
 from factory.control.admin_config_tools import ADMIN_TOOL_NAMES
 
-PACK_TOOL_NAMES = frozenset(('mcp__session__attached_tools', 'mcp__session__run_attached_tool'))
+PACK_TOOL_NAMES = frozenset(('mcp__session__attached_tools', 'mcp__session__attached_tool_doc',
+                             'mcp__session__run_attached_tool'))
 TOOL_NAMES = (frozenset(('mcp__session__calc', 'mcp__session__export'))
               | PACK_TOOL_NAMES | ADMIN_TOOL_NAMES)
 
@@ -128,6 +129,26 @@ def create_server(tools: ConversationTools, emit):
         emit('session.attached_tools', {'conversation_id': tools.cid, 'count': len(offered)})
         return {'content': [{'type': 'text', 'text': json.dumps(offered, ensure_ascii=False)}]}
 
+    @tool('attached_tool_doc',
+          "Read one of the attached pack's own documents in full -- this is where the pack "
+          'states the format of the file you must pass as `content`. Read it BEFORE running '
+          'the tool; the invocation_schema in attached_tools describes how the platform starts '
+          'the program, not the file format.',
+          {'type': 'object', 'properties': {
+              'pack_id': {'type': 'string', 'maxLength': 200},
+              'path': {'type': 'string', 'maxLength': 300,
+                       'description': 'One of content_contract_files; omit for the main document.'}},
+           'required': ['pack_id'], 'additionalProperties': False})
+    async def attached_tool_doc(args):
+        try:
+            doc = pack_tools.documentation(args['pack_id'], args.get('path'))
+        except PackToolError as exc:
+            return {'content': [{'type': 'text', 'text': json.dumps(
+                {'refused': exc.code, 'message': exc.message}, ensure_ascii=False)}], 'is_error': True}
+        except (KeyError, ValueError, PermissionError) as exc:
+            return {'content': [{'type': 'text', 'text': '无法读取该文档：' + str(exc)}], 'is_error': True}
+        return {'content': [{'type': 'text', 'text': json.dumps(doc, ensure_ascii=False)}]}
+
     @tool('run_attached_tool',
           'Run one attached capability pack on content you provide, and return the files it actually '
           'produced. Use pack_id exactly as attached_tools reported it. The server decides the role, '
@@ -175,4 +196,4 @@ def create_server(tools: ConversationTools, emit):
         admin = AdminConfigTools(tools.store, tools.actor_id, tools.actor_role)
         admin_tools_list = register_admin_tools(admin, emit, tool_decorator=tool)
 
-    return create_sdk_mcp_server('session', tools=[calc, export, attached_tools, run_attached_tool, *admin_tools_list])
+    return create_sdk_mcp_server('session', tools=[calc, export, attached_tools, attached_tool_doc, run_attached_tool, *admin_tools_list])

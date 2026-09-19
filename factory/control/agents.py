@@ -530,6 +530,39 @@ class AgentStore:
             db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
         return {k: v for k, v in item.items() if k != 'content'}
 
+    def add_tool_receipt(self, cid, actor_id, receipt):
+        """Attach a capability-pack task receipt to THIS conversation.
+
+        The receipt is what the platform actually recorded -- task id, frozen
+        version, real status, input digests and the saved artifact ids -- not the
+        model's prose about what it did. Storing it on the conversation is what
+        makes the result belong to this session: it survives a refresh, and
+        another session of the same role cannot show it.
+        """
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM agent_conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise KeyError(cid)
+            c = self._decode(row)
+            if c.get('actor_id') != actor_id:
+                raise PermissionError('无权访问该会话')
+            results = c.setdefault('tool_results', [])
+            item = {k: v for k, v in scrub(receipt).items()}
+            item['at'] = now()
+            # Re-running the same task id updates its receipt in place rather than
+            # stacking duplicates; a genuinely new task appends.
+            for index, existing in enumerate(results):
+                if existing.get('task_id') == item.get('task_id'):
+                    results[index] = item
+                    break
+            else:
+                results.append(item)
+                del results[:-20]
+            c['updated_at'] = now()
+            db.execute('UPDATE agent_conversations SET data=? WHERE id=?', (_json(c), cid))
+        return item
+
     def export_document(self, cid, eid, actor_id):
         c = self._row("agent_conversations", "id", cid)
         if c.get('actor_id') != actor_id:

@@ -10,7 +10,10 @@ import { useWorkTitle } from './title-context'
 import './conversation.css'
 
 type Msg = { id?: string; role: string; content: string; at?: string; created_at?: string; status?: string; job_id?: string }
-type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string; attachments?: Array<{ id: string; name: string; size?: number }>; exports?: Array<{ id: string; title: string; format: string; size?: number }> }
+type Conv = { id: string; agent_id: string; mode: string; project_id?: string | null; messages: Msg[]; run_id?: string | null; updated_at?: string; attachments?: Array<{ id: string; name: string; size?: number }>; exports?: Array<{ id: string; title: string; format: string; size?: number }>; tool_results?: ToolReceipt[] }
+type ToolReceipt = { task_id: string; status: string; tool?: string | null; version?: number | null;
+  error?: string | null; error_code?: string | null; at?: string;
+  outputs?: Array<{ artifact_id: string; name?: string; kind?: string; size?: number; download_path: string }> }
 type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number }
 const base = '/api/v4'
 
@@ -177,6 +180,26 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
           : <div className="cv-msg is-assistant" key={m.id || m.at}><div className="cv-msg-head"><span className="cv-msg-avatar">{Array.from(agent?.name || 'w')[0]}</span>{agent?.name || 'webuddy'}<span style={{ marginLeft: 'auto', color: 'var(--cv-faint)', fontWeight: 400 }}>{formatDate(m.at || m.created_at)}</span></div><div className="cv-msg-body">{m.content}</div></div>)}
         {pending && <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">{Array.from(agent?.name || 'w')[0]}</span>{agent?.name || 'webuddy'}</div><div className="cv-msg-body"><span className="cv-typing"><i /><i /><i /></span></div></div>}
       </div>
+      {(conv?.tool_results?.length ?? 0) > 0 && <div className="cv-tool-results">
+        {conv!.tool_results!.map(receipt => (
+          <div className={`cv-tool-result is-${receipt.status}`} key={receipt.task_id}
+               data-testid={`tool-result-${receipt.task_id}`}>
+            <div className="cv-tool-result-head">
+              <strong>{receipt.tool || '已挂靠工具'}</strong>
+              <span>{receipt.status === 'succeeded' ? '已生成'
+                : receipt.status === 'cancelled' ? '已取消' : '未生成'}</span>
+              {receipt.version != null && <small>版本 v{receipt.version}</small>}
+            </div>
+            {receipt.status === 'succeeded'
+              ? (receipt.outputs || []).map(out => (
+                  <a key={out.artifact_id} className="cv-filechip" style={{ textDecoration: 'none' }}
+                     href={out.download_path}>
+                    <Icon name="download" width={13} height={13} />
+                    <span title={out.name}>{out.name || out.artifact_id}</span>
+                  </a>))
+              : <p className="cv-tool-result-error">{receipt.error || receipt.error_code || '工具未产出文件'}</p>}
+          </div>))}
+      </div>}
       {(conv?.exports?.length ?? 0) > 0 && <div className="cv-chat-history" style={{ marginBottom: 8 }}>
         {conv!.exports!.map(e => <a key={e.id} className="cv-filechip" style={{ textDecoration: 'none' }} href={`/api/v4/conversations/${encodeURIComponent(conv!.id)}/exports/${encodeURIComponent(e.id)}/download`}>
           <Icon name="download" width={13} height={13} /><span title={e.title}>{e.title}.{e.format}</span></a>)}

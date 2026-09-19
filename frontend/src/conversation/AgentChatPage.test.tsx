@@ -256,3 +256,33 @@ it('停止 typing 与轮询：一旦后端把同一条回答置为终态', async
     vi.useRealTimers()
   }
 })
+
+it('本会话工具回执：成功给可点击下载，失败说实话，不靠模型自述', async () => {
+  const conv = {
+    id: 'c7', agent_id: 'a1', mode: 'do', project_id: null, run_id: null,
+    messages: [{ id: 'u', role: 'user', content: '按规范整理并生成文件' },
+               { id: 'a', role: 'assistant', content: '已按规范整理。', status: 'completed' }],
+    tool_results: [
+      { task_id: 't-ok', status: 'succeeded', tool: 'meeting_doc', version: 2,
+        outputs: [{ artifact_id: 'art-1', name: '会议纪要.html',
+                    download_path: '/api/v4/capability-packs/artifacts/art-1/download' }] },
+      { task_id: 't-bad', status: 'failed', tool: 'meeting_doc', version: 2,
+        error: '需要 webuddy.meeting/v1 结构化纪要', outputs: [] }],
+  }
+  api.mockImplementation(async (url?: string) => {
+    if (url === '/api/v4/agents/a1') return agent as never
+    if (url === '/api/v4/agents/a1/conversations') return { conversations: [conv] } as never
+    if (url === '/api/v4/conversations/c7') return conv as never
+    return {} as never
+  })
+  mount()
+  const ok = await screen.findByTestId('tool-result-t-ok')
+  const link = ok.querySelector('a') as HTMLAnchorElement
+  expect(link.getAttribute('href')).toBe('/api/v4/capability-packs/artifacts/art-1/download')
+  expect(ok.textContent).toContain('已生成')
+
+  const bad = screen.getByTestId('tool-result-t-bad')
+  expect(bad.textContent).toContain('未生成')
+  expect(bad.textContent).toContain('需要 webuddy.meeting/v1')
+  expect(bad.querySelector('a')).toBeNull()
+})

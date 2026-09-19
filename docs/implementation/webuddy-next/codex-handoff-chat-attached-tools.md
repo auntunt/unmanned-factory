@@ -44,7 +44,9 @@
 
 `uv run --extra codex --extra claude pytest -p no:randomly`
 
-`tests/test_chat_attached_tool.py` **7 passed**，每条都走「服务端绑定 → JSON 序列化跨进程 → `from_binding` 重建 → 真实 MCP ClientSession 往返 → PackStore 闸门 → `run_tool` 真实隔离执行」：
+`tests/test_chat_attached_tool.py` **7 passed**，每条都走「服务端绑定 → JSON 序列化 → `from_binding` 重建 → 真实 MCP ClientSession 往返 → PackStore 闸门 → `run_tool` 真实隔离执行」：
+
+> **口径更正（采纳 Codex 复核）**：上面这句我原文写成「跨进程」，**不成立**。`_worker_tools` 只是在**同一进程**里做 `json.dumps/loads` + `from_binding`，没有启动 SDKRunner / sdk_worker 子进程，也没有从用户消息打通 provider executor。这 7 条验证的是绑定可序列化、MCP 注册与调用、PackStore 闸门和真实包执行——有价值，但不是进程边界证明。真正的进程边界验证见下一轮补的 `test_attached_pack_runs_through_the_real_worker_subprocess`。
 - 列出并运行已挂靠包，产物经**真实 HTTP 下载端点**取回，XML 的 `<Item>` 行与 fixture **逐行一致**。
 - 修订保留旧版：两次不同内容 → 两个 task、两份产物，输入 sha256 不同，旧产物仍可下载。
 - 重复派发保护：同样内容第二次 `replayed=true`、同一 task_id，且 `run_tool` **调用次数为 0**。
