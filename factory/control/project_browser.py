@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,25 @@ import shlex
 import threading
 import time
 import uuid
+
+def _artifact_binding(path):
+    """sha256 plus the git blob id of a screenshot we just wrote.
+
+    The git blob id is what `git rev-parse <commit>:<path>` returns for the
+    committed file, so reconciliation can confirm the committed bytes are the
+    ones the platform produced -- without decoding binary content. sha256 is
+    carried for human-readable audit. Unreadable file: record nothing, and the
+    artefact simply will not be exempt.
+    """
+    if not isinstance(path, str) or not path:
+        return {}
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return {}
+    return {'screenshot_sha256': hashlib.sha256(data).hexdigest(),
+            'screenshot_blob': hashlib.sha1(b'blob %d\x00' % len(data) + data).hexdigest()}
+
 
 TOOL_NAMES = frozenset('mcp__project__browser_' + name for name in ('open', 'snapshot', 'click', 'fill', 'screenshot'))
 DEFAULT_RUNTIME = '/opt/webuddy-browser'
@@ -121,7 +141,12 @@ def create_tools(session, emit=None):
                 finally:
                     if emit: emit('task.activity', {'phase': 'model'})
                 if emit:
+                    # Bind the artefact to its bytes at the moment WE produce it.
+                    # A recorded path alone only proves the platform once wrote
+                    # there; it says nothing about what is committed later, so
+                    # scope reconciliation needs content it can re-verify.
                     emit('browser.observed', {'action': action, 'ok': result.get('ok', False),
+                        **_artifact_binding(result.get('screenshot_path')),
                         'url': result.get('url'), 'errors': result.get('errors', []),
                         'error': result.get('error'), 'error_type': result.get('error_type'), 'truncated': result.get('truncated', False),
                         'screenshot_path': result.get('screenshot_path'), 'wait_s': result.get('wait_s'),

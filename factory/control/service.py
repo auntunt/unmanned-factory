@@ -559,9 +559,9 @@ class Service:
     def _independent_verify(self, rid, run, project, configuration, artifacts):
         return verification._independent_verify(self, rid, run, project, configuration, artifacts)
 
-    def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspace, coverage_retry=False):
+    def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspace, coverage_retry=False, browser_receipt_retry=False, receipt_feedback=None):
         'Ask the configured verification model for a bounded evidence verdict.'
-        return verification._verify_snapshot(self, rid, run, project, configuration, artifacts, workspace, coverage_retry)
+        return verification._verify_snapshot(self, rid, run, project, configuration, artifacts, workspace, coverage_retry, browser_receipt_retry, receipt_feedback)
 
     def github_options(self, rid, *, page=1):
         return run_lifecycle.github_options(self, rid, page=page)

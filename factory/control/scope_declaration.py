@@ -18,12 +18,70 @@ def declarations(store, rid):
 _PLATFORM_PROGRESS_NOTE = '.webuddy/coding-progress.md'
 
 
-def exempt(path, workspace=None):
+def platform_browser_artifacts(store, rid, workspace, commit=None):
+    """Screenshot files this run's platform browser wrote, whose COMMITTED BYTES
+    are still the ones it produced.
+
+    Two conditions, both required:
+
+    1. The path was recorded on a browser.observed event of THIS run. The path is
+       chosen by the platform bridge -- a random UUID under .webuddy/browser
+       (runtime/project-browser/bridge.mjs::screenshotPath) -- never by the model.
+    2. The content still matches what the platform bound to that path when it
+       produced it. A recorded path on its own only proves the platform once
+       wrote there; it does not prove the bytes that ended up in the commit. So
+       the git blob id of the committed file must equal the one recorded at
+       production time, which is exactly what `git rev-parse <commit>:<path>`
+       returns -- and needs no binary decoding.
+
+    Fails closed: events with no recorded binding (produced before this contract
+    existed) are NOT exempt. We never reconstruct a past hash after the fact.
+    """
+    from pathlib import Path
+    try:
+        base = Path(workspace).resolve()
+    except OSError:
+        return frozenset()
+    bound = {}
+    for event in store.export_events(rid, kind='browser.observed'):
+        payload = event.get('payload') or {}
+        blob = payload.get('screenshot_blob')
+        if not isinstance(blob, str) or not blob:
+            continue  # no verifiable binding recorded: never exempt
+        for key in ('screenshot_path', 'source_screenshot_path'):
+            raw = payload.get(key)
+            if not isinstance(raw, str) or not raw:
+                continue
+            try:
+                relative = Path(raw).resolve().relative_to(base)
+            except (ValueError, OSError):
+                continue  # outside the workspace, or unreadable
+            bound.setdefault(relative.as_posix(), set()).add(blob)
+    if not bound:
+        return frozenset()
+    verified = set()
+    for path, blobs in bound.items():
+        try:
+            if commit:
+                actual = git(workspace, 'rev-parse', '--verify', '--end-of-options',
+                             f'{commit}:{path}').strip()
+            else:
+                data = (base / path).read_bytes()
+                import hashlib
+                actual = hashlib.sha1(b'blob %d\x00' % len(data) + data).hexdigest()
+        except (SpecError, OSError):
+            continue  # not present, or unreadable: not exempt
+        if actual in blobs:
+            verified.add(path)
+    return frozenset(verified)
+
+
+def exempt(path, workspace=None, platform_artifacts=frozenset()):
     name = PurePosixPath(path).name
     if path.startswith('.spec/') or bool(re.fullmatch(
             r'(?:test_.+\.py|.+_test\.py|.+\.(?:test|spec)\.(?:js|jsx|ts|tsx)|.+_test\.go)', name)):
         return True
-    if path == _PLATFORM_PROGRESS_NOTE:
+    if path == _PLATFORM_PROGRESS_NOTE or path in platform_artifacts:
         if workspace is not None:
             from pathlib import Path
             full = Path(workspace) / path
@@ -133,7 +191,8 @@ def evidence(store, rid, project, workspace, commit, artifacts=None):
         actual = changed(workspace, base, commit)
         records = declarations(store, rid)
         declared = {f['path'] for e in records for f in e['payload'].get('files', []) if f.get('accepted')}
-        excluded = {p for p in actual if exempt(p, workspace=workspace)}
+        produced = platform_browser_artifacts(store, rid, workspace, commit)
+        excluded = {p for p in actual if exempt(p, workspace=workspace, platform_artifacts=produced)}
         undeclared = sorted(actual - excluded - declared)
         item.update(status='fail' if undeclared else 'pass', baseline=base, commit=commit,
                     actual_changes=sorted(actual), declared_files=sorted(declared), exempt_files=sorted(excluded),

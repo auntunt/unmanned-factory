@@ -1,0 +1,214 @@
+{
+  "candidate": "ebf0a64",
+  "run_id": "88256a6c708843318c58a850938701ac",
+  "data": "/home/ubuntu/releases/audit-r2-0b39155/live-20260918-115212",
+  "final_status": "needs_human",
+  "error": "独立验证未通过：验收未核对最新浏览器观察记录，不能判定通过",
+  "states": [
+    {
+      "status": "queued",
+      "elapsed_s": 0
+    },
+    {
+      "status": "running",
+      "elapsed_s": 4
+    },
+    {
+      "status": "needs_human",
+      "elapsed_s": 229
+    }
+  ],
+  "artifacts": {
+    "commit": "75b89f3da9a014e5476a23cc3a4c2a605e86d212",
+    "worktree": "/home/ubuntu/releases/audit-r2-0b39155/live-20260918-115212/ws/.factory-requirements/.factory-88256a6c708843318c58a850938701ac-r3-blyjc2gc/coding",
+    "branch": "factory/88256a6c708843318c58a850938701ac-r3",
+    "verification": {
+      "verdict": "fail",
+      "reason": "验收未核对最新浏览器观察记录，不能判定通过",
+      "browser_review": {
+        "event_ids": [
+          1338,
+          1225,
+          1218,
+          1212
+        ],
+        "disposition": "clean",
+        "reason": "Fresh browser_open/click/snapshot cycle performed in this review against the running server produced errors:[] on every step (open, two increment/decrement/reset click cycles, snapshot, screenshot). The favicon.ico 404 recorded in the prior observation (event 1225/1218/1212) is resolved: app.py now returns 204 for /favicon.ico, verified by curl (favicon:204) and by the absence of any 404/favicon error in the new browser session."
+      }
+    },
+    "verification_observations": {
+      "latest": [
+        {
+          "event_id": 1538,
+          "task_id": "verification",
+          "at": "2026-09-19T12:48:04.927432+00:00",
+          "action": "screenshot",
+          "ok": true,
+          "error_type": null,
+          "url": "http://127.0.0.1:8080/",
+          "error_count": 0,
+          "errors": [],
+          "error": "",
+          "truncated": false,
+          "viewport": {
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false
+          },
+          "screenshot_path": "/home/ubuntu/releases/audit-r2-0b39155/live-20260918-115212/verification-evidence/88256a6c708843318c58a850938701ac/9fcdba53b8454ab18472593267165503.png"
+        },
+        {
+          "event_id": 1338,
+          "task_id": "coding",
+          "at": "2026-09-19T12:46:03.303690+00:00",
+          "action": "open",
+          "ok": true,
+          "error_type": null,
+          "url": "http://127.0.0.1:8080/",
+          "error_count": 0,
+          "errors": [],
+          "error": "",
+          "truncated": false,
+          "viewport": {
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false
+          },
+          "screenshot_path": null
+        }
+      ],
+      "recent_failures": [
+        {
+          "event_id": 1225,
+          "task_id": "verification",
+          "at": "2026-09-19T12:42:31.353006+00:00",
+          "action": "screenshot",
+          "ok": true,
+          "error_type": null,
+          "url": "http://127.0.0.1:8080/",
+          "error_count": 2,
+          "errors": [
+            "HTTP 404: http://127.0.0.1:8080/favicon.ico",
+            "Failed to load resource: the server responded with a status of 404 (Not Found)"
+          ],
+          "error": "",
+          "truncated": false,
+          "viewport": {
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false
+          },
+          "screenshot_path": "/home/ubuntu/releases/audit-r2-0b39155/live-20260918-115212/verification-evidence/88256a6c708843318c58a850938701ac/93fe5859f515476aaddfa7453ef16690.png"
+        },
+        {
+          "event_id": 1218,
+          "task_id": "verification",
+          "at": "2026-09-19T12:42:28.492092+00:00",
+          "action": "snapshot",
+          "ok": true,
+          "error_type": null,
+          "url": "http://127.0.0.1:8080/",
+          "error_count": 2,
+          "errors": [
+            "HTTP 404: http://127.0.0.1:8080/favicon.ico",
+            "Failed to load resource: the server responded with a status of 404 (Not Found)"
+          ],
+          "error": "",
+          "truncated": false,
+          "viewport": {
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false
+          },
+          "screenshot_path": null
+        },
+        {
+          "event_id": 1212,
+          "task_id": "verification",
+          "at": "2026-09-19T12:42:25.141706+00:00",
+          "action": "click",
+          "ok": true,
+          "error_type": null,
+          "url": "http://127.0.0.1:8080/",
+          "error_count": 2,
+          "errors": [
+            "HTTP 404: http://127.0.0.1:8080/favicon.ico",
+            "Failed to load resource: the server responded with a status of 404 (Not Found)"
+          ],
+          "error": "",
+          "truncated": false,
+          "viewport": {
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false
+          },
+          "screenshot_path": null
+        }
+      ],
+      "omitted_task_observations": 0,
+      "observations_sampled": 58,
+      "sample_limit": 100
+    },
+    "total_known_cost_usd": 28.563523999999997
+  },
+  "ledger": {
+    "total": 34,
+    "counts": {
+      "pass": 33,
+      "fail": 1,
+      "unverified": 0
+    },
+    "complete": false,
+    "accounted": true
+  },
+  "scope_failure": {
+    "id": "scope:reconciliation",
+    "text": "执行范围声明与实际改动对账",
+    "status": "fail",
+    "error_type": "undeclared_changes",
+    "undeclared_changes": [
+      ".webuddy/browser/preview-75ad3b44-e111-4505-85a2-901ab502a7d4.png",
+      ".webuddy/browser/preview-c2214ac0-05b1-4b8c-85d0-dd64d38a2958.png"
+    ],
+    "baseline": "e7ff8e982b50e84e9473f9e7dd004a543eee9bba",
+    "commit": "75b89f3da9a014e5476a23cc3a4c2a605e86d212",
+    "actual_changes": [
+      ".dockerignore",
+      ".gitignore",
+      ".webuddy/browser/preview-75ad3b44-e111-4505-85a2-901ab502a7d4.png",
+      ".webuddy/browser/preview-c2214ac0-05b1-4b8c-85d0-dd64d38a2958.png",
+      ".webuddy/coding-progress.md",
+      "Dockerfile",
+      "README.md",
+      "app.py",
+      "test_app.py"
+    ],
+    "declared_files": [
+      ".dockerignore",
+      ".gitignore",
+      ".webuddy/coding-progress.md",
+      "Dockerfile",
+      "README.md",
+      "app.py",
+      "test_app.py"
+    ],
+    "exempt_files": [
+      ".webuddy/coding-progress.md",
+      "test_app.py"
+    ],
+    "declaration_event_ids": [
+      538
+    ],
+    "evidence": "未事前声明的改动：.webuddy/browser/preview-75ad3b44-e111-4505-85a2-901ab502a7d4.png、.webuddy/browser/preview-c2214ac0-05b1-4b8c-85d0-dd64d38a2958.png"
+  }
+}
