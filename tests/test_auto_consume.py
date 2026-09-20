@@ -456,6 +456,28 @@ def test_service_restart_does_not_resume_requirement_analysis_interrupted(app_en
 
 # ---------- Scenario 12: spec_confirmation run with requirement workspace ----------
 
+def _stub_scope_analyst(svc):
+    """A semantic stub for the tools-free change analyst (labelled as a stub).
+
+    These scenarios are about the baseline and the auto-resume guards, not about
+    scope semantics: the supplement here asks for nothing the specification does
+    not already say, so the honest reading is an analysis with no changes and no
+    open questions. The run keeps revision 1 and the supplement is genuinely read
+    rather than waved through.
+    """
+    real = svc.runner.run
+
+    def run(request, emit, cancel=None):
+        if request.tools_disabled and request.read_only:
+            from factory.control.providers import ProviderResult
+            return ProviderResult(json.dumps({'superseded_non_goals': [],
+                'superseded_plan_acceptance': [], 'added_requirements': [],
+                'unresolved': []}), cost_usd=0.01)
+        return real(request, emit, cancel)
+
+    svc.runner.run = run
+
+
 def _setup_requirement_workspace_run(client, store, svc, repo, headers, *, followup_content='补充要求'):
     """Create a spec_confirmation run whose artifacts.base_sha comes from
     a requirement branch (different from project main), simulating the
@@ -465,6 +487,7 @@ def _setup_requirement_workspace_run(client, store, svc, repo, headers, *, follo
     Uses FakeSDK runner (fake).
     """
     import uuid as _uuid
+    _stub_scope_analyst(svc)
     p = project(client, repo, headers)
     rid = client.post('/api/v2/runs', json={
         'operation': 'general', 'project_id': p['id'], 'request': '做工具'
@@ -490,9 +513,16 @@ def _setup_requirement_workspace_run(client, store, svc, repo, headers, *, follo
                               capture_output=True, text=True).stdout.strip()
     assert req_sha != main_sha, 'requirement branch must differ from main'
 
+    # A confirmed specification means every supplement is read against it before
+    # it can reach coding, so this run needs a configured tools-free analysis
+    # channel. Configuring it here is the fix; letting the product apply unread
+    # words because the default runner has no such channel is not.
+    configuration = {**svc.runtime_settings.get(),
+                     'agent_verification_profile': {'provider': 'claude', 'model': 'review'}}
     # Set up run with spec_confirmation and requirement workspace
     store.update(rid, {
         'status': 'running',
+        'runtime_configuration': configuration,
         'spec_confirmation': {'actor': 'project-policy', 'at': '2026-01-01', 'automatic': True},
         'requirement_workspace': str(repo),
         'requirement_branch': req_branch,

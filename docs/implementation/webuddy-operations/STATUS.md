@@ -14,8 +14,8 @@
 
 | 里程碑 | 状态 | 提交 |
 | --- | --- | --- |
-| M0 费用候选验收边界收口 | 完成 | 见下 |
-| M1 长任务有效修订 / 原子干预回执 / 同快照验收 | 完成 | 见下 |
+| M0 费用候选验收边界收口 | 独立定向通过 | 见下 |
+| M1 长任务有效修订 / 原子干预回执 / 同快照验收 | 两条边界已转绿，待 Codex 复核 | 见下 |
 | M2 断点恢复、证据适用性、外部动作意图 | 未开始 | — |
 | M3 人工 Issue 纵向流程 | 未开始 | — |
 | M4 三个主 Skill + 三个骨架 + 最小运营 UI | 未开始 | — |
@@ -247,7 +247,66 @@ run 真的推进到 `queued`，于是第二次 `/continue` 撞到状态闸门—
 `contract_prompt` 里新增字段对真实编码/验收提示的实际影响；上表环境类失败在 CI 解释器
 下的行为。
 
+## M1 收口（对 `REVIEW-CURRENT.md` 的两条已复现边界）
+
+Codex 在 `8fe3495` 上：原相关集合 `48 passed`，新探针
+`tests/test_codex_operations_final_boundaries.py` **2 failed / 1.42s**。探针原样复制进
+`tests/`，安全断言未改一字，本机复现一致（`2 failed / 1.39s`）。
+
+**R2-A 无分析通道不能标记已应用。** 我上一轮给 `error_type='provider'` 开的退路，正是
+上一单禁止的静默降级：Codex verification profile 下真实 `analyse` 拒绝，`continue` 仍
+200/queued，约定仍是 1，而新增的 square 进了 history 并开出 `followup.applied`。理由
+（"否则已确认规格的 run 永久不可恢复"）不成立——那是配置状态，不是放行未读需求的依据。
+
+删掉这条退路：`provider` 现在进 `waiting`，`reason='analysis_unconfigured'`，
+`_waiting_conflict` 给出一个可操作的独立裁决
+`error_type='contract_analysis_unconfigured'`（与瞬时故障的 `contract_analysis_unavailable`
+分开，因为重试在配置好之前不会有任何变化）。补充持久保留，配置正确后重试即生效。没有
+自动切换未配置的付费提供商，也没有扩大 Codex 工具权限。空输入 / 无待处理补充 /
+无已确认契约三条兼容路径不受影响（`contract is None or not collected` 仍直接返回）。
+
+`test_auto_consume` 里 3 个用 spec_confirmation 的场景因此需要分析通道。按文档要求修
+测试而非放行产品：给那个 run 配 `agent_verification_profile.provider='claude'`，并加一个
+**语义** stub `_stub_scope_analyst`——该补充（`补充要求`）对规格确实无改动，所以诚实的
+读法就是"无变更、无未决"，修订仍为 1，补充是真被读过而不是被放行。没有用"旧假 runner
+不支持"当理由。
+
+**R2-B 最终检查与落地之间的真实竞态。** `_refuse_stale_landing` 在内部释放
+`svc.lock` 之后 `_run` 才写 `ready_for_review`。探针在这个窗口用真实 HTTP 提交
+follow-up：拿到 200/queued，随后旧成果成功落地，`_expire_unconsumed_followups` 把这条
+标成 `run_completed`——用户的新增要求正好在产品宣布成功的那一刻被吞掉。确定性复现。
+
+修法：`_refuse_stale_landing` + `store.update(ready_for_review)` + 过期处理合成一个
+`_land_verified`，三者在同一个 `self.lock` 持有期内完成，过期事件通过
+`store.update(..., events=)` 与状态转换共享同一个 `BEGIN IMMEDIATE` 事务。这与
+follow-up 路由登记输入前取的是同一道边界，于是补充只有两种结局：赶在检查之前 → 被闸门
+拒绝进入本次交付；赶在结案之后 → 路由回"任务已结束，请开始新一轮"。不再有"先收下再
+静默丢掉"。付费调用与外部 I/O（collect / publish / capability 采集）仍在边界之外。
+有效结果不靠改 artifact 修订号蒙混——那个数字仍然不被覆盖。边界就是单进程的
+RLock + 一次事务，没有扩成跨主机锁重构。
+
+同时改掉我自己那条接线测试：它原来断言 `_run` 源码里三个字符串的先后顺序，认不出代码
+到底有没有跑。现在跑真实 `_run`，只 stub 付费执行与裁决，在验收过程中真的把协议推到
+修订 2，断言判定修订 1 的通过不能结案。
+
+测试范围与结果（`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons/.venv/bin/
+python -m pytest -q -p no:randomly`）：
+
+- 新探针 `test_codex_operations_final_boundaries.py`：修前 `2 failed`，修后 `2 passed`。
+- 新探针 + 原三个复现 + 直接相关 contract/follow-up/format 集（effective_contract、
+  run_followup、auto_consume、app_route_contract、verification_format_repair）：`83 passed`。
+- 落地转换本体被改动，执行相邻集跑了一次（continuous_execution、continuous_service、
+  active_verification、verification_evidence、verification_browser_receipt、
+  delivery_type_non_general）：`98 passed, 2 skipped`。
+- 本轮**没有**全量、变异轮次、压力轮次，前端未动。唯一一次定位性重跑是
+  `test_auto_consume.py` 单独跑，用来确认 R2-A 影响到哪几个用例。
+
+未验证 / 交给 Codex：真实模型现场（`analyse` 判定质量仍只被 stub 覆盖）；后端全量；
+`contract_analysis_unconfigured` 在真实前端的呈现；上一轮记录的
+`test_run_followup.py::test_pending_applied_exactly_once_after_conflict_then_correct_retry`
+偶发 409 原始证据保留在上一节，本轮未再触发也未改动，不主张它是环境问题。
+
 ## 下一步
 
-M0/M1 补修候选已交，本会话停止写入等 Codex 复核。M2（断点恢复、证据适用性、
-外部动作意图）未开始。
+M0 独立定向通过。M1 的两条边界已转绿，等 Codex 复核后才算完成——总表暂不改成全完成。
+M2（断点恢复、证据适用性、外部动作意图）未开始，本轮不做。

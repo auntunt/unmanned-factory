@@ -16,7 +16,6 @@ from factory.control.mounts import agent_guidance, compile_mounts, manifest_summ
 from factory.control.planning import build_prompt, continuous_plan, parse_plan, triage
 from factory.control.providers import ProviderRequest
 from factory.control.run_billing import _verification_reserve_usd
-from factory.control.run_lifecycle import _expire_unconsumed_followups
 from factory.control.store import Conflict, now
 from factory.control.verification import verify_spec_only
 from factory.control.spec_tree import enrich_tasks
@@ -24,8 +23,8 @@ from factory.control.spec_refs import render as render_spec_refs, focus as spec_
 from factory.control import skill_ingestion_runs, requirement_analysis
 
 
-def _refuse_stale_landing(self, rid, artifacts):
-    """Refuse to land a verdict that judged an agreement the run has since left.
+def _land_verified(self, rid, artifacts, tasks):
+    """Check the agreement and land the delivery inside one atomic boundary.
 
     The verdict pins the revision it judged (`verification_effective_revision`).
     What it was never checked against is the revision the run holds *now*: a
@@ -34,27 +33,52 @@ def _refuse_stale_landing(self, rid, artifacts):
     nobody delivered or reviewed. An unconsumed supplement is the same story one
     step earlier -- it is a requirement this delivery does not contain.
 
-    The number is not overwritten to make the shapes agree; that would only hide
-    which agreement the evidence is actually about. The round is failed instead,
-    which returns the run to needs_human where the safe-node path reads the
-    supplement, revises the agreement and resumes with it bound.
+    Checking and landing in two steps is not enough, and this was a real race,
+    not a theoretical one: between a passing check and the `ready_for_review`
+    write, a supplement arriving over HTTP was accepted with 200/queued and then
+    expired as `run_completed` by the very transition it should have blocked. So
+    the check, the state transition and the expiry of anything left over all
+    happen while `self.lock` is held, which is the same boundary the follow-up
+    route takes before it registers input. A supplement therefore either lands
+    before the check -- and is refused entry -- or arrives to find the run
+    already finished and is refused with "this task has ended", which the
+    customer can act on. It cannot be accepted and then silently dropped.
+
+    Only the local CAS write happens inside the boundary. Paid calls and external
+    I/O (collection, publishing, capability capture) stay outside it, as before.
+    The boundary is a single process: an RLock plus one `BEGIN IMMEDIATE`
+    transaction. That is the actual deployment; it is deliberately not widened
+    into a cross-host lock here.
+
+    The revision number is not overwritten to make the shapes agree; that would
+    only hide which agreement the evidence is actually about. The round is failed
+    instead, which returns the run to needs_human where the safe-node path reads
+    the supplement, revises the agreement and resumes with it bound.
     """
+    from factory.control.run_lifecycle import _collect_pending_followups
     judged = artifacts.get('verification_effective_revision')
-    if judged is None:
-        return  # No contract to be stale against (legacy or unconfirmed run).
     with self.lock:
-        run = self.store.get(rid)
-        held = effective_contract.revision_of(run)
-        if held != judged:
-            raise Conflict(f'验收判定的是修订 {judged}，当前有效修订已是 {held}；'
-                           '需要按新约定重新执行与验收',
-                           error_type='contract_revision')
-        from factory.control.run_lifecycle import _collect_pending_followups
-        pending = _collect_pending_followups(self, rid)
-        if pending:
-            raise Conflict(f'还有 {len(pending)} 条补充要求未并入本次交付，'
-                           '不能按已完成结案；将在安全节点读入后继续',
-                           error_type='contract_pending')
+        if judged is not None:  # None: legacy or unconfirmed run, nothing to be stale against.
+            run = self.store.get(rid)
+            held = effective_contract.revision_of(run)
+            if held != judged:
+                raise Conflict(f'验收判定的是修订 {judged}，当前有效修订已是 {held}；'
+                               '需要按新约定重新执行与验收',
+                               error_type='contract_revision')
+            pending = _collect_pending_followups(self, rid)
+            if pending:
+                raise Conflict(f'还有 {len(pending)} 条补充要求未并入本次交付，'
+                               '不能按已完成结案；将在安全节点读入后继续',
+                               error_type='contract_pending')
+        # A run with no contract can still hold supplements nobody merged. They are
+        # expired by the same transaction that finishes the run, so no reader ever
+        # sees one as live against a finished run, or as dropped without a reason.
+        expiry = [('followup.expired', {'pending_id': p['id'], 'reason': 'run_completed'})
+                  for p in _collect_pending_followups(self, rid)]
+        return self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts,
+                                       'tasks': tasks},
+                                 expected=('running', 'verifying'),
+                                 event=('run.verified', artifacts), events=expiry)
 
 
 def _plan(self, rid):
@@ -413,10 +437,7 @@ def _run(self, rid):
         except Exception:
             artifacts['collection_error'] = '成果未能自动保存，请在成果区重新保存并查看具体原因。'
         tasks = artifacts.get('tasks') or [{**t, 'status': 'completed'} for t in run['tasks']]
-        _refuse_stale_landing(self, rid, artifacts)
-        self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts, 'tasks': tasks},
-            expected=('running', 'verifying'), event=('run.verified', artifacts))
-        _expire_unconsumed_followups(self, rid)
+        _land_verified(self, rid, artifacts, tasks)
         if run.get('source', {}).get('operation') == 'release':
             self.remote.collect(rid, artifacts)
             self.store.update(rid, {'artifacts': artifacts})

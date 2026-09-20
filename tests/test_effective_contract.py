@@ -544,11 +544,13 @@ def test_an_analysis_that_cannot_run_leaves_the_agreement_alone(app_env):
 
 
 def _landing(svc, rid, artifacts):
-    """Run the real landing boundary the verified round goes through."""
-    from factory.control.run_execution import _refuse_stale_landing
-    _refuse_stale_landing(svc, rid, artifacts)
-    svc.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts},
-                     expected=('running', 'verifying'), event=('run.verified', artifacts))
+    """Run the real landing boundary the verified round goes through.
+
+    Check, transition and expiry are one call because they are one atomic
+    boundary: splitting them here would test a shape the product no longer has.
+    """
+    from factory.control.run_execution import _land_verified
+    return _land_verified(svc, rid, artifacts, artifacts.get('tasks') or [])
 
 
 def test_a_verdict_cannot_land_as_complete_over_an_agreement_the_run_has_left(app_env):
@@ -613,23 +615,41 @@ def test_an_unconsumed_supplement_cannot_be_closed_as_a_finished_task(app_env):
     assert not list(store.export_events(rid, kind='followup.expired'))
 
 
-def test_the_landing_boundary_is_actually_on_the_verified_path(app_env):
-    """The guard must sit before the transition, not merely exist.
+def test_the_landing_boundary_is_actually_on_the_verified_path(app_env, monkeypatch):
+    """The boundary must sit on the real path, not merely exist.
 
-    The two tests above call `_refuse_stale_landing` themselves, so they stay
-    green even if `_run` never reaches it -- an unwired gate and a wired one look
-    identical from behaviour alone. This pins the order at the one place the
-    verified round lands: the check, then `ready_for_review`, then expiry.
+    The two tests above call `_land_verified` themselves, so they stay green even
+    if `_run` never reaches it -- an unwired gate and a wired one look identical
+    from behaviour alone. This drives the real `_run`, stubbing only the paid
+    execution and verdict, and moves the agreement while the review is in
+    progress. An earlier version of this test asserted the order of source
+    strings instead; that could not tell whether the code ran.
     """
-    import inspect
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers, status='queued')
+    svc.cancels[rid] = threading.Event()
+    monkeypatch.setattr(svc, 'execute', lambda **kw: {
+        'base_sha': 'test-base', 'tasks': [{'id': 't1', 'status': 'completed'}]})
+
+    def verify(run_id, run, project, config, artifacts):
+        # The verdict judges revision 1; the owner's authorized change lands in
+        # the agreement while this review is still running.
+        artifacts.update(verification_effective_revision=1,
+                         verification={'verdict': 'pass', 'criteria': []})
+        revised = ec.revise(ec.current(store.get(run_id)),
+                            ec.validate_analysis(_lifts_square(), ec.current(store.get(run_id))),
+                            message={'content': '我确认要加 square 功能'})
+        store.update(run_id, {'effective_contract': revised})
+
+    monkeypatch.setattr(svc, '_independent_verify', verify)
+    monkeypatch.setattr(svc, '_capture_capability', lambda *a: None)
     from factory.control import run_execution
-    body = inspect.getsource(run_execution._run)
-    guard = body.find('_refuse_stale_landing(')
-    landing = body.find("'status': 'ready_for_review'")
-    expiry = body.find('_expire_unconsumed_followups(')
-    assert guard != -1, '验收落地前没有调用契约闸门'
-    assert landing != -1 and expiry != -1
-    assert guard < landing < expiry, (guard, landing, expiry)
+    run_execution._run(svc, rid)
+    run = store.get(rid)
+    assert ec.revision_of(run) == 2, '前提：评审期间协议真的动了'
+    assert run['status'] != 'ready_for_review', \
+        '判定修订 1 的通过不能在协议已到修订 2 时结案'
 
 
 def test_an_overturned_plan_constraint_leaves_acceptance_while_the_rest_stands(app_env):

@@ -235,7 +235,8 @@ def router(store, svc, operations):
                                           run.get('resume_count', 0), actor)
             except Conflict as exc:
                 if getattr(exc, 'error_type', None) not in (
-                        'contract_unresolved', 'contract_analysis_unavailable'):
+                        'contract_unresolved', 'contract_analysis_unavailable',
+                        'contract_analysis_unconfigured'):
                     raise
                 response = {'recorded': True, 'applied': False, 'queued': True,
                     'run_id': rid, 'status': store.get(rid)['status'], 'message': str(exc)}

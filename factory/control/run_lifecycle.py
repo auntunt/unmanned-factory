@@ -114,15 +114,18 @@ def _revise_for_followups(svc, rid, run, collected):
                                                   pending['content'], deadline=deadline)
         except Exception as exc:
             if getattr(exc, 'error_type', None) == 'provider':
-                # This deployment has no tools-free channel at all, so no supplement
-                # here can ever be read against an agreement. Waiting would leave
-                # every confirmed-spec run permanently unresumable, which is not a
-                # safety property -- so the pre-contract behaviour stands: the words
-                # reach the round as text and the agreement stays where it was signed.
-                log.info('scope_change(%s): scope analysis unsupported: %s', rid, exc)
+                # A deployment with no tools-free channel cannot read any supplement
+                # against any agreement. That is a configuration state, not a reason
+                # to build unread words: the supplement stays pending and the resume
+                # is refused with something the operator can act on, so it succeeds
+                # once the channel is configured. Marking it applied here was the
+                # silent degradation this module exists to prevent -- it looked like
+                # a working run while the agreement had not moved at all.
+                log.info('scope_change(%s): no tools-free analysis channel: %s', rid, exc)
                 svc.store.append(rid, 'contract.analysis_unsupported', {
                     'pending_id': pending['id'], 'error': str(exc)[:500]})
-                applied.append(pending)
+                waiting.append({'pending_id': pending['id'], 'reason': 'analysis_unconfigured',
+                                'detail': str(exc)[:500]})
                 continue
             # Nobody read this supplement against the agreement, so nothing about it
             # is decided -- least of all that it is safe to build.
@@ -158,6 +161,13 @@ def _waiting_conflict(waiting):
         return Conflict('这条补充的业务范围还需要您确认，暂不能据此继续开发：'
                         + unresolved[0]['detail'] + '\n回答后请使用重新规划，或取消该补充。',
                         error_type='contract_unresolved')
+    if any(w['reason'] == 'analysis_unconfigured' for w in waiting):
+        # Distinct from a transient failure: retrying changes nothing until an
+        # administrator configures a tools-free analysis channel. The supplement is
+        # kept, so the retry after that configuration lands applies it.
+        return Conflict('本部署尚未配置无工具的范围变更分析通道，补充已保留但暂不能进入开发；'
+                        '请管理员配置该通道后重试。',
+                        error_type='contract_analysis_unconfigured')
     return Conflict('范围变更分析暂不可用，未读懂的补充不会进入开发，请稍后重试。',
                     error_type='contract_analysis_unavailable')
 
