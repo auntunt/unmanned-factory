@@ -38,8 +38,10 @@ export interface Resolved {
   activeTab?: string
   /** whether the group's in-page tab strip should show (hidden on focused detail/chat views). */
   showTabs?: boolean
-  /** breadcrumb trail; the last item is the current page. */
-  breadcrumb: { label: string; to?: string }[]
+  /** breadcrumb trail; the last item is the current page.
+   *  `live: true` means the label comes from the live work title (e.g. the
+   *  agent's own name), which nav-config cannot know from the path alone. */
+  breadcrumb: { label: string; to?: string; live?: boolean }[]
 }
 
 /** Ordered, explicit matching — never startsWith. `/runs/:id` is a task (history);
@@ -51,7 +53,7 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/runs/:runId')) return { activeKey: 'history', title: '任务', usesWorkTitle: true, breadcrumb: [{ label: '历史作品', to: '/history' }, { label: '任务' }] }
   if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体' }] }
   if (is('/agents/:agentId/chat')) return { activeKey: 'agents', title: '对话', usesWorkTitle: true, group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '对话' }] }
-  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '管理职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '管理' }] }
+  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '管理职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '职能体', live: true }, { label: '管理' }] }
   // 旧能力链接保留可用。它们没有自己的顶层页签了，选中态回到「职能体」，
   // 面包屑也回到职能体目录——不重定向，查询参数与来源上下文原样保留。
   if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '职能包' }] }

@@ -129,7 +129,14 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
           <nav className="as-crumbs" aria-label="面包屑">
             {resolved.breadcrumb.map((c, i) => <span className="as-crumb" key={`${c.label}-${i}`}>
               {i > 0 && <span className="as-crumb-sep" aria-hidden="true"><Icon name="arrow" width={13} height={13} /></span>}
-              {c.to && i < resolved.breadcrumb.length - 1 ? <Link to={c.to}>{i === resolved.breadcrumb.length - 1 ? title : c.label}</Link> : <span aria-current={i === resolved.breadcrumb.length - 1 ? 'page' : undefined}>{i === resolved.breadcrumb.length - 1 ? title : c.label}</span>}
+              {(() => {
+                const last = i === resolved.breadcrumb.length - 1
+                // `live` segments carry a name only the page knows (the agent's own
+                // name); fall back to the static label until it has loaded.
+                const text = last ? title : c.live ? (workTitle || c.label) : c.label
+                return c.to && !last ? <Link to={c.to}>{text}</Link>
+                  : <span aria-current={last ? 'page' : undefined}>{text}</span>
+              })()}
             </span>)}
           </nav>
           <div className="as-topbar-right">

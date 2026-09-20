@@ -1,4 +1,5 @@
 import Icon, { CategoryBadge, packMark } from './Icon'
+import { useWorkTitle } from '../conversation/title-context'
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -270,6 +271,11 @@ function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
 
 function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; props: PageProps }) {
   const [agent, setAgent] = useState(initialAgent)
+  // This component holds the live agent, so the shell breadcrumb
+  // (职能体 > 当前名称 > 管理) is fed from here: a rename shows up at once
+  // instead of only after a reload.
+  const setWorkTitle = useWorkTitle()
+  useEffect(() => { setWorkTitle(agent.name); return () => setWorkTitle(null) }, [agent.name, setWorkTitle])
   const [editingMeta, setEditingMeta] = useState(false)
   const [manifestEpoch, setManifestEpoch] = useState(0)
   const isAdmin = props.user?.role !== 'member'
@@ -359,6 +365,8 @@ function NewAgent({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps 
 export default function AgentsPage(props: PageProps) {
   const [locationQuery] = useSearchParams()
   const params = useParams()
+  // The shell's breadcrumb shows 职能体 > 当前名称 > 管理; only this page knows the name.
+  const setWorkTitle = useWorkTitle()
   const navigate = useNavigate()
   const [agents, setAgents] = useState<Agent[]>([])
   const [selected, setSelected] = useState<Agent | null>(null)
@@ -366,6 +374,10 @@ export default function AgentsPage(props: PageProps) {
   const [creating, setCreating] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // The management page owns the live name; here we only make sure the catalog
+  // view never keeps a stale one.
+  useEffect(() => { if (!params.agentId) setWorkTitle(null) }, [params.agentId, setWorkTitle])
 
   const load = useCallback(() => {
     setLoading(true)
