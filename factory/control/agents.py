@@ -326,6 +326,18 @@ class AgentStore:
             CREATE TRIGGER IF NOT EXISTS no_agent_version_delete BEFORE DELETE ON agent_versions BEGIN SELECT RAISE(ABORT,'agent versions are immutable'); END;
             CREATE TRIGGER IF NOT EXISTS no_skill_update BEFORE UPDATE ON skill_assets BEGIN SELECT RAISE(ABORT,'skill assets are immutable'); END;
             CREATE TRIGGER IF NOT EXISTS no_skill_delete BEFORE DELETE ON skill_assets BEGIN SELECT RAISE(ABORT,'skill assets are immutable'); END;
+            CREATE TABLE IF NOT EXISTS agent_metadata_audit(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS no_agent_metadata_audit_update BEFORE UPDATE ON agent_metadata_audit
+                BEGIN SELECT RAISE(ABORT,'agent metadata audit is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS no_agent_metadata_audit_delete BEFORE DELETE ON agent_metadata_audit
+                BEGIN SELECT RAISE(ABORT,'agent metadata audit is append-only'); END;
             """)
 
     @staticmethod
@@ -349,6 +361,58 @@ class AgentStore:
         from factory.control.agent_manifests import ManifestStore
         ManifestStore(self.store).get(aid)
         return {**agent, "version": version}
+
+    def update_metadata(self, aid, *, name=None, purpose=None, expected_updated_at, actor):
+        """Atomic update of display-only metadata (name, purpose).
+
+        Never touches versions, drafts, manifest, skills or conversations.
+        Uses expected_updated_at for optimistic concurrency (409 on mismatch).
+        """
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("操作者不能为空")
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("职能体名称不能为空")
+            if len(name) > 120:
+                raise ValueError("职能体名称不能超过 120 个字符")
+        if purpose is not None and len(purpose) > 4000:
+            raise ValueError("职能体用途不能超过 4000 个字符")
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM agents WHERE id=?", (aid,)).fetchone()
+            if not row:
+                raise KeyError(aid)
+            agent = json.loads(row[0])
+            if agent["updated_at"] != expected_updated_at:
+                raise Conflict("职能体元信息已被他人更新，请刷新后重试")
+            before = {"name": agent["name"], "purpose": agent.get("purpose", "")}
+            if name is not None:
+                agent["name"] = name
+            if purpose is not None:
+                agent["purpose"] = purpose
+            after = {"name": agent["name"], "purpose": agent.get("purpose", "")}
+            at = now()
+            agent["updated_at"] = at
+            db.execute("UPDATE agents SET data=? WHERE id=?", (_json(agent), aid))
+            db.execute(
+                "INSERT INTO agent_metadata_audit(agent_id, actor, action, data, created_at) VALUES (?,?,?,?,?)",
+                (aid, actor, "metadata.updated",
+                 json.dumps({"before": before, "after": after}, ensure_ascii=False), at),
+            )
+        return agent
+
+    def metadata_audit(self, aid):
+        """Return metadata change history for an agent."""
+        with self.store.connect() as db:
+            return [
+                {"actor": r["actor"], "action": r["action"],
+                 "data": json.loads(r["data"]), "created_at": r["created_at"]}
+                for r in db.execute(
+                    "SELECT actor, action, data, created_at FROM agent_metadata_audit WHERE agent_id=? ORDER BY id",
+                    (aid,),
+                )
+            ]
 
     def versions(self, aid):
         self.get(aid)

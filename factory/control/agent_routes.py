@@ -36,6 +36,10 @@ class ExportDoc(Body):
     title:str=Field(default='',max_length=200)
     format:str=Field(pattern='^(md|txt|csv)$')
     content:str=Field(min_length=1,max_length=200000)
+class MetadataUpdate(Body):
+    name:str|None=Field(default=None,min_length=1,max_length=120)
+    purpose:str|None=Field(default=None,max_length=4000)
+    expected_updated_at:str=Field(min_length=1)
 class DraftPatch(Body): expected_revision:int=Field(ge=0); patch:dict
 class Apply(Body): expected_revision:int=Field(ge=0); idempotency_key:str|None=None
 class Rollback(Body): version:int=Field(ge=1)
@@ -224,6 +228,14 @@ def router(store, service):
         a=guarded(agents.get,aid); return {**a,'version':agents.version(aid),'versions':agents.versions(aid),'draft':agents.draft(aid)}
     @api.get('/agents/{aid}/versions')
     def versions(aid:str): return {'versions':guarded(agents.versions,aid)}
+    @api.patch('/agents/{aid}/metadata')
+    def update_metadata(aid:str,body:MetadataUpdate,request:Request):
+        if actor(request).get('role')!='admin':
+            raise HTTPException(403,'此操作需要管理员权限')
+        return guarded(agents.update_metadata,
+                       aid,name=body.name,purpose=body.purpose,
+                       expected_updated_at=body.expected_updated_at,
+                       actor=str(actor(request)['id']))
     @api.post('/agents/{aid}/conversations',status_code=201)
     def conversation(aid:str,body:ConversationCreate,request:Request):
         # Members get the daily-chat entry only: mode 'do' with no project. A
