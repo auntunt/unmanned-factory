@@ -98,3 +98,50 @@ Codex 的复现 `CodexAgentUxReview.test.tsx` 原样入库 `frontend/src/workben
 
 ## 未验证
 真实模型下的管理页操作、正式站数据上的表现、Linux 复跑、发布。均归 Codex。
+
+---
+
+# 针对 Codex 第二轮复核 8428b04 的补修（候选见推送）
+
+你的 `CodexAgentUxFollowup.test.tsx` 原样入库，**断言一字未改**，修复前 **4 failed** → 现在 **4 passed**；连同上一轮 5 条，`CodexAgentUx*` 合计 **9 passed**。
+
+按用户行为写，不按代码量：
+
+## 1. 切到乙之后，甲的迟到响应不会再把页面抢回去
+**用户看到的变化**：在列表还没返回时点进另一个职能体，先前那次请求晚一步回来，页面不会闪回上一个职能体，编辑对象也不会变回它。
+**做法**：`AgentsPage.load` 加请求代际（`generation` ref）——过期响应既不 `setSelected`、也不清 loading、也不报错。另外加载期间若 `selected.id` 与路由不一致，管理页不渲染（显示读取中），**切页加载期间旧对象无法继续被编辑**。`key` 只解决内层复用，这里补的是外层竞态。
+
+## 2. 挂靠成功后，上方「已挂靠工具」立刻就有
+**用户看到的变化**：点「挂靠到本职能体」后，不用刷新整页，上方列表立即出现这个工具。
+**做法**：`AttachedTools` 接 `refreshKey`，挂靠/变更后由管理页推进 `toolEpoch` 触发真实重读 bindings。
+
+## 3. 从管理页进职能包详情，不用再选一次角色，也能走回来
+**用户看到的变化**：从某个职能体点进职能包详情，目标职能体已经是它；挂靠按钮可直接提交；页面上有「返回职能体管理」回到原管理页。没有 `agent_id` 的旧链接照旧手选，行为不变。
+**做法**：`PackDetail` 读取 `agent_id`，把返回按钮指回该角色，并作为 `defaultTarget` 传给 `PackBind`；`PackBind` 以此初始化目标。服务端权限完全未动——无权的 id 仍由后端拒绝，前端不代为放行。
+`AttachedTools` 自己的「管理 / 可升级」链接也补上了 `agent_id`。
+
+## 4. 方法模块现在是「可操作」，不是一句指引
+**用户看到的变化**：「团队已有能力」里每个方法模块旁有「加入岗位清单」，点了就真加到当前职能体；重复加入会明确提示已在清单里。
+**做法**：复用既有 `PUT /api/v4/agents/{id}/manifest`（带 `revision`），**没有新增任何后台接口**。
+
+## 真实操作证据（不是空目录截图）
+在可丢弃实例里造了一个**合成**已发布工具包（`合成演示工具`，回显用途，无任何客户资料），真机走完整链路：
+- `06-before-attach.png` 挂靠前「可用工具」列出它；
+- `07-after-attach-list-updated.png` 点击后**未刷新页面**，上方「已挂靠工具」出现「合成演示工具 v1 · 尚未检查」；
+- `08-pack-detail-with-context.png` 带 `?agent_id=` 的详情页目标已预选、带返回链接。
+
+同步用真实 HTTP / 真实 DOM 核对（不靠截图推断）：
+- `GET /capability-packs/bindings/{agent}` → `合成演示工具 v1`，`environment.status=unchecked`（挂靠确实落库，且没被误报成就绪）；
+- 详情页 `select.value` = 该职能体 id、选中项「会议纪要助手」、存在 `/agents/{id}` 返回链接；
+- 管理页「已挂靠工具」区文本 `合成演示工具 v1 尚未检查 管理`。
+
+## 一处我没有改测试而是改回产品代码
+我一度把 `PackBind` 成功后的链接文案从「打开职能体使用工具」改掉，导致仓库既有 `PackBind.test.tsx` 变红。正确做法是保留原有文案契约、只**新增**返回入口，已照此改回——没有去动那条既有断言。
+
+## 验证
+- `CodexAgentUxFollowup` 4 passed（修复前 4 failed）、`CodexAgentUxReview` 5 passed。
+- 前端全量 `./node_modules/.bin/vitest run`：**425 passed / 57 files**；`npx tsc --noEmit` 0；`npm run build` 0。
+- 后端未改动，未跑后端全量。
+
+## 未验证
+真实模型下的管理页操作、正式站数据表现、Linux 复跑、发布。均归 Codex。
