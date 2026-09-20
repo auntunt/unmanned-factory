@@ -43,6 +43,9 @@ export default function PackDetail({ csrfToken, onUnauthorized }: PageProps) {
   const { packId } = useParams()
   const [params, setParams] = useSearchParams()
   const tab = (TABS.find(([key]) => key === params.get('tab'))?.[0] ?? 'overview') as Tab
+  // Where the user came from. Arriving from a role's management page means the
+  // target is already decided and the way back is that page, not the catalogue.
+  const fromAgent = params.get('agent_id') || ''
   const id = packId ? encodeURIComponent(packId) : ''
   const [detail, setDetail] = useState<Detail | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -113,7 +116,9 @@ export default function PackDetail({ csrfToken, onUnauthorized }: PageProps) {
       {published && <span className={`pk-pill ${environment?.status === 'ready' ? 'is-published' : environment?.status === 'unavailable' ? 'is-warn' : 'is-draft'}`}>
         {ENV_LABEL[environment?.status ?? 'unchecked']}</span>}
       <span style={{ marginLeft: 'auto' }} />
-      <Link className="pk-button pk-button-secondary" to="/ability-center?tab=packs">返回能力库</Link>
+      <Link className="pk-button pk-button-secondary"
+        to={fromAgent ? `/agents/${encodeURIComponent(fromAgent)}` : '/ability-center?tab=packs'}>
+        {fromAgent ? '返回职能体管理' : '返回能力库'}</Link>
     </div>
     <p className="pk-muted">{detail.purpose}</p>
 
@@ -154,7 +159,7 @@ export default function PackDetail({ csrfToken, onUnauthorized }: PageProps) {
           <strong>环境检查已过期</strong>
           <p>{environment.stale_reason}；发布状态不变，重新检查后再调用更稳妥。</p>
         </div>}
-        {detail.can_maintain && published && <PackBind key={`${id}:${published.id}`} packId={id} versionId={published.id} version={published.version} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onChanged={() => void load()} />}
+        {detail.can_maintain && published && <PackBind key={`${id}:${published.id}:${fromAgent}`} packId={id} versionId={published.id} version={published.version} defaultTarget={fromAgent} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onChanged={() => void load()} />}
         {detail.bindings.length > 0 && <div className="pk-section"><h2>已挂靠的职能体</h2>
           <ul className="pk-list">{detail.bindings.map(binding => <li key={binding.id} className="pk-row">
             <Link className="pk-link" to={`/agents/${encodeURIComponent(binding.agent_id)}`}>{binding.agent_id.slice(0, 8)}</Link>

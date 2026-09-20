@@ -3,12 +3,15 @@ import { Link } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { packsBase, type PackBinding } from './pack-types'
 
-export default function PackBind({ packId, versionId, version, csrfToken, onUnauthorized, onChanged }: {
-  packId: string; versionId: string; version: number; csrfToken: string;
+export default function PackBind({ packId, versionId, version, defaultTarget = '', csrfToken, onUnauthorized, onChanged }: {
+  packId: string; versionId: string; version: number; defaultTarget?: string; csrfToken: string;
   onUnauthorized: () => void; onChanged: () => void
 }) {
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([])
-  const [target, setTarget] = useState('')
+  // Preselected when the user arrived from a role's management page: they already
+  // chose the target there and should not have to pick it again. Server-side
+  // permissions are unchanged; an id the user may not use is still refused.
+  const [target, setTarget] = useState(defaultTarget)
   const [bound, setBound] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -38,6 +41,8 @@ export default function PackBind({ packId, versionId, version, csrfToken, onUnau
     </select></label>
     <button className="pk-button" disabled={!target || busy} onClick={() => void bind()}>{busy ? '挂靠中…' : `挂靠 v${version}`}</button>
     {error && <p role="alert">{error}</p>}
-    {bound && <p role="status">已挂靠。<Link to={`/agents/${encodeURIComponent(bound)}/chat`}>打开职能体使用工具</Link></p>}
+    {bound && <p role="status">已挂靠。
+      <Link to={`/agents/${encodeURIComponent(bound)}`}>返回职能体管理</Link>
+      <Link to={`/agents/${encodeURIComponent(bound)}/chat`} style={{ marginLeft: 10 }}>打开职能体使用工具</Link></p>}
   </section>
 }

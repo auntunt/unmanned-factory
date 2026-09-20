@@ -13,9 +13,21 @@
 | `04-add-ability-team.png` | 添加能力 →「团队已有能力」：方法模块、沉淀能力、可用工具/准备中工具分列 |
 | `05-catalog-mobile.png` | 375×812 窄屏目录页 |
 
-`04` 中「可用工具」显示「没有可直接挂靠的工具」，是因为这个全新实例里**没有已发布的职能包**——
-属于正确且诚实的空态。有可挂靠工具时的渲染与就地挂靠按钮，由 Codex 的复现用例
-`CodexAgentUxReview.test.tsx › team add flow exposes an available unbound tool` 覆盖（已绿）。
+`04` 拍摄时实例里没有已发布职能包，所以「可用工具」是空态。
+**`06`–`08` 是补拍的真实操作链**：先在实例里造了一个**合成**已发布工具包
+（`合成演示工具`，回显用途，不含任何客户资料），然后真机走完整条链路。
+
+| 文件 | 内容 |
+|---|---|
+| `06-before-attach.png` | 挂靠前：「可用工具」列出「合成演示工具 v1」与「挂靠到本职能体」按钮 |
+| `07-after-attach-list-updated.png` | 点击挂靠后**未刷新页面**，上方「已挂靠工具」立即出现「合成演示工具 v1 · 尚未检查」 |
+| `08-pack-detail-with-context.png` | 带 `?agent_id=` 进入职能包详情：目标已预选「会议纪要助手」，并有「返回职能体管理」 |
+
+同步核验（真实 HTTP / 真实 DOM，非截图推断）：
+- 服务端 `GET /capability-packs/bindings/{agent}` 返回 `合成演示工具 v1`，`environment.status=unchecked` ——
+  挂靠确实落库，且未被误报成「环境就绪」。
+- 详情页 `select.value` = 该职能体 id，选中项文本「会议纪要助手」；页面含 `/agents/{id}` 返回链接。
+- 管理页「已挂靠工具」区文本：`合成演示工具 v1 尚未检查 管理`。
 
 浏览器内另行核实（非截图，JS 读真实 DOM）：
 - 「⋯」菜单 Esc 关闭、焦点归还触发按钮、`aria-expanded=false`。

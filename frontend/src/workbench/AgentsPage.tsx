@@ -1,6 +1,6 @@
 import Icon, { CategoryBadge, packMark } from './Icon'
 import { useWorkTitle } from '../conversation/title-context'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
@@ -238,6 +238,26 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
   /** Attach a published pack to THIS agent, using the existing detail and
    *  bindings endpoints. The role is fixed by the page, so nothing has to be
    *  re-picked, and the attached list refreshes in place. */
+  /** Add a method module to THIS role's manifest, using the same manifest
+   *  endpoint the 岗位清单 editor uses. Selecting here is the action; the user
+   *  no longer has to go find the editor and repeat the choice. */
+  const addModule = async (moduleId: string, moduleVersion: number) => {
+    if (binding) return
+    setBinding(moduleId); setBindError('')
+    const manifestPath = `/api/v4/agents/${encodeURIComponent(agentId)}/manifest`
+    try {
+      const current = await request<{ revision: number; identity: string; skills: Array<{ id: string; version: number }>; assertions: string[] }>(manifestPath, { onUnauthorized: props.onUnauthorized })
+      if ((current.skills || []).some(sk => sk.id === moduleId)) { setBindError('这个方法已经在岗位清单里了'); return }
+      await request(manifestPath, {
+        method: 'PUT', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized,
+        body: { revision: current.revision, identity: current.identity,
+                skills: [...(current.skills || []), { id: moduleId, version: moduleVersion }],
+                assertions: current.assertions || [] },
+      })
+      setEpoch(v => v + 1); onChanged()
+    } catch (cause) { setBindError(errorText(cause)) } finally { setBinding('') }
+  }
+
   const attachPack = async (packId: string) => {
     if (binding) return
     setBinding(packId); setBindError('')
@@ -311,11 +331,15 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
                     <li key={m.id}>
                       <Link to={`${capabilityHref('modules', m.id)}&agent_id=${encodeURIComponent(agentId)}`}>{m.name}</Link>
                       <small> v{m.version} · {m.description?.slice(0, 60) || m.category}</small>
+                      <button type="button" className="cv-btn cv-btn-secondary agent-attach-btn"
+                        disabled={Boolean(binding)} onClick={() => void addModule(m.id, m.version)}>
+                        {binding === m.id ? '加入中…' : '加入岗位清单'}
+                      </button>
                     </li>
                   ))}
                 </ul>
               ) : <p>团队还没有方法模块。</p>}
-              <p style={{ marginTop: 12 }}>选好后展开「编辑工作规范」在岗位清单里加载。</p>
+              <p style={{ marginTop: 12 }}>加入后可在「编辑工作规范」里调整版本或移除。</p>
 
               <h3 style={{ marginTop: 16 }}>沉淀能力 · {capabilities.length} 个</h3>
               {capabilities.length > 0 ? (
@@ -405,14 +429,16 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
 
 // ---- Attached tools section ----
 
-function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
+function AttachedTools({ agentId, refreshKey = 0, ...props }: PageProps & { agentId: string; refreshKey?: number }) {
   const [bindings, setBindings] = useState<PackBinding[] | null>(null)
   const [error, setError] = useState('')
   const load = useCallback((signal?: AbortSignal) => {
     return request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { signal, onUnauthorized: props.onUnauthorized })
       .then(r => setBindings(r.bindings || []))
       .catch(e => { if (!signal?.aborted) setError(errorText(e)) })
-  }, [agentId, props.onUnauthorized])
+    // refreshKey changes after an attach/upgrade/detach so this list re-reads the
+    // real bindings instead of waiting for a full page reload.
+  }, [agentId, refreshKey, props.onUnauthorized])
   useEffect(() => { const c = new AbortController(); void load(c.signal); return () => c.abort() }, [load])
 
   return (
@@ -429,7 +455,7 @@ function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
               <div className="agent-tool-info">
                 <strong>{b.pack_name}</strong>
                 <span className="agent-tool-version">v{b.version}</span>
-                {b.upgrade_available && <Link className="agent-tool-upgrade" to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}?tab=versions`}>可升级到 v{b.latest_version}</Link>}
+                {b.upgrade_available && <Link className="agent-tool-upgrade" to={packHref(b.pack_id, agentId, 'versions')}>可升级到 v{b.latest_version}</Link>}
               </div>
               <div className="agent-tool-status">
                 {/* Only an explicit `ready` may read as usable. unchecked (which the
@@ -443,7 +469,7 @@ function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
                 {(b.environment as { stale?: boolean; stale_reason?: string } | undefined)?.stale && <span className="agent-tool-stale">{(b.environment as { stale_reason?: string }).stale_reason || '上次检查结果已过期'}</span>}
               </div>
               <Link className="cv-btn cv-btn-secondary" style={{ fontSize: 13, padding: '6px 10px' }}
-                to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}`}>管理</Link>
+                to={packHref(b.pack_id, agentId)}>管理</Link>
             </div>
           ))}
         </div>
@@ -478,6 +504,8 @@ function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; pro
   useEffect(() => { setWorkTitle(agent.name); return () => setWorkTitle(null) }, [agent.name, setWorkTitle])
   const [editingMeta, setEditingMeta] = useState(false)
   const [manifestEpoch, setManifestEpoch] = useState(0)
+  // Bumped whenever the set of attached tools actually changed.
+  const [toolEpoch, setToolEpoch] = useState(0)
   const [showCreateProject, setShowCreateProject] = useState(false)
   const [projectNotice, setProjectNotice] = useState('')
   const isAdmin = props.user?.role !== 'member'
@@ -567,10 +595,10 @@ function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; pro
       </section>
 
       {/* ---- Section 3: Attached Tools ---- */}
-      <AttachedTools agentId={agent.id} {...props} />
+      <AttachedTools agentId={agent.id} refreshKey={toolEpoch} {...props} />
 
       {/* ---- Add Ability ---- */}
-      {isAdmin && <AddAbilityPanel agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); void refreshAgent() }} />}
+      {isAdmin && <AddAbilityPanel agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); setToolEpoch(v => v + 1); void refreshAgent() }} />}
 
       {/* ---- Advanced / Maintenance (collapsed by default) ---- */}
       {isAdmin && (
@@ -613,22 +641,35 @@ export default function AgentsPage(props: PageProps) {
   // view never keeps a stale one.
   useEffect(() => { if (!params.agentId) setWorkTitle(null) }, [params.agentId, setWorkTitle])
 
+  // One generation per requested agent. A response that arrives after the user
+  // has moved on belongs to a page that is no longer shown, so it must not set
+  // `selected` (which would bring the previous agent back as the editable one)
+  // nor clear the loading flag for the request that is still in flight.
+  const generation = useRef(0)
   const load = useCallback(() => {
+    const mine = ++generation.current
     setLoading(true)
     void request<unknown>(`${base}/agents`, { onUnauthorized: props.onUnauthorized })
       .then((value) => {
+        if (generation.current !== mine) return
         const list = asList<Agent>(value, 'agents')
         setAgents(list)
         const wanted = params.agentId ? list.find((item) => item.id === params.agentId) : undefined
         setSelected(wanted || null)
       })
       .catch((cause) => {
+        if (generation.current !== mine) return
         if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause))
       })
-      .finally(() => setLoading(false))
+      .finally(() => { if (generation.current === mine) setLoading(false) })
   }, [params.agentId, props.onUnauthorized])
 
   useEffect(() => { load() }, [load])
+
+  // While a different agent is being fetched, the previously selected one is no
+  // longer the page's subject: showing its editor would let a save land on the
+  // agent the user just navigated away from.
+  const stale = Boolean(params.agentId && selected && selected.id !== params.agentId)
 
   const choose = (id: string) => navigate(`/agents/${encodeURIComponent(id)}`)
 
@@ -636,13 +677,13 @@ export default function AgentsPage(props: PageProps) {
   if (params.agentId) {
     return (
       <div className="wb-page agent-page">
-        {loading && !selected && <div className="wb-card agent-loading">正在读取职能体…</div>}
+        {(loading || stale) && (!selected || stale) && <div className="wb-card agent-loading">正在读取职能体…</div>}
         {!loading && !selected && !error && <ErrorNotice message="未找到这个职能体，请返回列表选择。" />}
         {error && <ErrorNotice message={error} />}
         {/* Keyed by id: navigating a1 -> a2 inside one route tree must rebuild the
             management state, otherwise edits and bindings keep writing to the
             agent that was mounted first. */}
-        {selected && <AgentManagementPage key={selected.id} agent={selected} props={props} />}
+        {selected && !stale && <AgentManagementPage key={selected.id} agent={selected} props={props} />}
       </div>
     )
   }
