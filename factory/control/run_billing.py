@@ -116,9 +116,14 @@ def _warn_budget_threshold(self, rid, budget):
 
     Monitoring-only runs have no ceiling and therefore no threshold; they must
     never be told a budget is running out. The reminder lives in the durable
-    event log keyed by the ceiling it refers to, so reloading the page or
-    restarting the service does not produce a second one, while a renewed
+    event log keyed by the run and the ceiling it refers to, so reloading the
+    page or restarting the service does not produce a second one, while a renewed
     (larger) ceiling legitimately earns a new reminder.
+
+    "At most one" is decided by the same serialized transaction that writes it
+    (`Store.append_once`), not by a prior read: two billing checks running at the
+    same time would both see "none yet" and both append. The scan below is only a
+    cheap early exit for the common already-warned case; it is never the boundary.
     """
     limit = budget.limit_usd
     if limit is None or limit <= 0 or budget.exhausted:
@@ -126,18 +131,24 @@ def _warn_budget_threshold(self, rid, budget):
     if budget.known_cost_usd < limit * BUDGET_WARNING_RATIO:
         return
     key = round(float(limit), 4)
+
+    def already_warned(payload):
+        return (valid_cost(payload.get('limit_usd')) is not None
+                and round(float(payload['limit_usd']), 4) == key)
+
     for event in all_events(self.store, rid):
         if event['type'] != 'budget.threshold_warning':
             continue
         payload = event['payload'] if isinstance(event.get('payload'), dict) else {}
-        if valid_cost(payload.get('limit_usd')) is not None and round(float(payload['limit_usd']), 4) == key:
+        if already_warned(payload):
             return
-    self._emit(rid, 'budget.threshold_warning', {
+    self.store.append_once(rid, 'budget.threshold_warning', {
         'limit_usd': float(limit), 'committed_usd': float(budget.known_cost_usd),
         'ratio': BUDGET_WARNING_RATIO, 'blocking': False,
         'message': (f'本次任务已占用预算的 {budget.known_cost_usd / limit:.0%}'
                     f'（已计 ${budget.known_cost_usd:.4f}，上限 ${limit:.4f}）；'
-                    '任务继续进行，达到上限后会停止新的模型调用。')})
+                    '任务继续进行，达到上限后会停止新的模型调用。')},
+        duplicate=already_warned)
 
 
 def _remaining_dollar_budget(self, rid, project):

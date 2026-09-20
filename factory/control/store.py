@@ -332,6 +332,30 @@ class Store:
         with self.connect() as db:
             return self._event(db, rid, kind, payload, task_id)
 
+    def append_once(self, rid, kind, payload, *, duplicate, task_id=None):
+        """Append one event of this kind unless a stored one is already a duplicate.
+
+        The read and the write are one serialized transaction, so two concurrent
+        callers cannot both conclude "none yet". The decision lives in the stored
+        events rather than in process memory, so it also survives a restart.
+
+        `duplicate(payload)` is called on each existing payload of this kind and
+        must be pure: it runs while the write lock is held, so it must not touch
+        the store. Returns the new event id, or None when nothing was written.
+        """
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT payload FROM events WHERE run_id=? AND type=?',
+                              (rid, kind)).fetchall()
+            for row in rows:
+                try:
+                    existing = json.loads(row['payload'])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if isinstance(existing, dict) and duplicate(existing):
+                    return None
+            return self._event(db, rid, kind, payload, task_id)
+
     def events(self, rid, after=0, limit=500):
         with self.connect() as db:
             rows = db.execute('SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?',
@@ -379,6 +403,11 @@ class Store:
                     content = '\n'.join(p.get('reasons', []) + p.get('questions', []))
                 elif e['type'] in ('run.failed', 'run.recovered', 'run.cancelled', 'github.published'):
                     content = p.get('message') or p.get('pr_url')
+                elif e['type'] == 'budget.threshold_warning':
+                    # The 80% reminder is part of the conversation the user reads,
+                    # not a separate surface. It is emitted once per ceiling, so it
+                    # appears once here too, and it never blocks the run.
+                    content = p.get('message')
                 if content:
                     followup_extra = {}
                     if p.get('followup'):

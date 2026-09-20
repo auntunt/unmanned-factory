@@ -114,22 +114,36 @@ def _extract_verdict_json(text: str) -> dict:
     return candidates[0]
 
 
-_VERDICT_TOKEN_RE = re.compile(r'(?<![A-Za-z])(pass|fail|unverified)(?![A-Za-z])', re.IGNORECASE)
+# The repair boundary is structural, not lexical. Only the JSON field form of a
+# verdict counts as something the report *stated*; prose that merely contains the
+# word "pass" (including "I cannot pass this") carries no recoverable structure
+# and is never handed to the reformatter.
+_VERDICT_FIELD_RE = re.compile(r'"verdict"\s*:\s*"(pass|fail|unverified)"')
+_BRACE_BODY_RE = re.compile(r'\{([^{}]*)\}')
+_ROW_ID_RE = re.compile(r'"id"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_ROW_STATUS_RE = re.compile(r'"status"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_ROW_EVIDENCE_RE = re.compile(r'"evidence"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_ROW_KEYS = ('"id"', '"status"', '"evidence"')
 
 _FORMAT_REPAIR_PROMPT = Template('''You are a text reformatter. You are NOT a reviewer.
 
-The text between the markers below is one verification report that failed to
-parse as the required structured result. Reproduce the SAME conclusion it
-already states, as exactly one JSON object and nothing else.
+The text between the markers below is one verification report whose JSON
+envelope is syntactically damaged. Emit the SAME content as exactly one valid
+JSON object and nothing else.
 
 Rules:
 - Do not judge anything. Do not add, remove, soften or strengthen any finding.
-- "verdict" must be the verdict the text already states, verbatim, one of
-  "pass", "fail", "unverified". If the text states no single clear verdict, or
-  states more than one, reply with exactly: CANNOT_REFORMAT
-- "reason" must be the text's own stated reason, shortened if needed.
-- Copy any per-criterion entries the text contains into "criteria" unchanged.
+- "verdict" must be copied byte for byte from the report's own "verdict" field.
+- Copy every per-criterion entry the report contains into "criteria" with its
+  "id", "status" and "evidence" byte for byte. Do not add an entry the report
+  does not contain. Do not drop one. Do not write evidence of your own.
+- "reason" must be the report's own stated reason, shortened if needed.
+- If you cannot do this without inventing or dropping content, reply with
+  exactly: CANNOT_REFORMAT
 - Output a single ```json fenced object. No commentary before or after.
+
+Your output is compared field by field against the damaged report. Any verdict
+or per-criterion difference is rejected.
 
 --- BEGIN REPORT ($sentinel) ---
 $body
@@ -137,9 +151,72 @@ $body
 ''')
 
 
-def _stated_verdicts(text: str) -> set:
-    """Verdict words the original report actually contains."""
-    return {match.group(1).lower() for match in _VERDICT_TOKEN_RE.finditer(text or '')}
+def _unquote(raw: str):
+    """Decode one JSON string body, or None when it is not decodable."""
+    try:
+        value = json.loads('"' + raw + '"')
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _stated_structure(text: str):
+    """What a damaged report structurally states, or None when it is not repairable.
+
+    Returns {'verdict': str, 'rows': {id: (status, evidence)}} only when the text
+    contains exactly one `"verdict": "..."` field, at least one well-formed
+    per-criterion object carrying a non-empty evidence string, and no criterion
+    object that is missing or duplicating those fields. Everything else -- prose
+    with no envelope, an envelope with no evidence, two envelopes, conflicting
+    verdicts -- is not repairable, so the reformatter never sees it and cannot be
+    asked to invent the missing half.
+    """
+    body = text or ''
+    verdicts = {match.group(1) for match in _VERDICT_FIELD_RE.finditer(body)}
+    if len(verdicts) != 1 or len(_VERDICT_FIELD_RE.findall(body)) != 1:
+        return None  # No stated verdict field, several of them, or conflicting.
+    rows = {}
+    for match in _BRACE_BODY_RE.finditer(body):
+        inner = match.group(1)
+        if not all(key in inner for key in _ROW_KEYS):
+            continue  # Not a criterion object; the envelope itself lands here.
+        ids = _ROW_ID_RE.findall(inner)
+        statuses = _ROW_STATUS_RE.findall(inner)
+        evidences = _ROW_EVIDENCE_RE.findall(inner)
+        if len(ids) != 1 or len(statuses) != 1 or len(evidences) != 1:
+            return None  # Ambiguous row: refuse rather than guess which one wins.
+        row_id, status, evidence = (_unquote(ids[0]), _unquote(statuses[0]),
+                                    _unquote(evidences[0]))
+        if row_id is None or status is None or evidence is None:
+            return None
+        if status not in ('pass', 'fail', 'unverified') or not evidence.strip():
+            return None  # A row without real evidence is not a row to preserve.
+        if row_id in rows:
+            return None  # Duplicate criterion id: the original is self-conflicting.
+        rows[row_id] = (status, evidence)
+    if not rows:
+        return None  # A conclusion with no per-criterion evidence at all.
+    return {'verdict': verdicts.pop(), 'rows': rows}
+
+
+def _repaired_matches_original(stated: dict, verdict: dict) -> bool:
+    """The reformat must reproduce the original's verdict and every row exactly."""
+    if verdict.get('verdict') != stated['verdict']:
+        return False
+    rows = verdict.get('criteria', verdict.get('acceptance_coverage'))
+    if not isinstance(rows, list) or len(rows) != len(stated['rows']):
+        return False
+    seen = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        row_id, status, evidence = row.get('id'), row.get('status'), row.get('evidence')
+        if not isinstance(row_id, str) or row_id in seen:
+            return False
+        if not isinstance(status, str) or not isinstance(evidence, str):
+            return False
+        seen[row_id] = (status, evidence)
+    return seen == stated['rows']
 
 
 def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspace,
@@ -149,8 +226,9 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
     This buys back the cost of a whole re-review when the reviewer's conclusion
     was clear but its envelope was not. It is deliberately not a second review:
     no tools, no session, no browser, no checks, the same snapshot commit and the
-    same contract version, and the repaired verdict must already be stated in the
-    original text. The call is billed and bound by the same hard cap.
+    same contract version, and both the conclusion and every per-criterion row of
+    the repaired object must match, byte for byte, what the damaged report already
+    contained. The call is billed and bound by the same hard cap.
 
     Returns the parsed verdict, or None when repair is not available or refused.
     """
@@ -160,9 +238,11 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
         # A tools-free channel exists only here; other providers would have to
         # run the repair with execution tools attached, which is not acceptable.
         return None
-    stated = _stated_verdicts(original_text)
-    if len(stated) != 1:
-        # No single stated conclusion, or conflicting ones. Nothing to reformat.
+    stated = _stated_structure(original_text)
+    if stated is None:
+        # Nothing structurally determinable: no verdict field, several of them, or
+        # a conclusion with no per-criterion evidence. Reformatting such a report
+        # would require inventing the missing content, so there is no repair.
         return None
     remaining_s = review_deadline - time.monotonic()
     if remaining_s < 5 or self.cancels[rid].is_set():
@@ -174,7 +254,8 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
     artifacts['verification_format_repair'] = {
         'attempted': True, 'commit': artifacts.get('verification_commit'),
         'template_version': artifacts.get('verification_template_version'),
-        'stated_verdict': sorted(stated)[0], 'tools_executed': 0}
+        'stated_verdict': stated['verdict'], 'stated_criteria': len(stated['rows']),
+        'tools_executed': 0}
     sentinel = uuid.uuid4().hex
     prompt = _FORMAT_REPAIR_PROMPT.substitute(sentinel=sentinel,
         body=(original_text or '')[:_VERIFIER_CONTRACT_MAX_CHARS])
@@ -204,8 +285,9 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
         artifacts['verification_format_repair']['accepted'] = False
         artifacts['verification_format_repair']['refused'] = '重排后仍不是有效结构化结果'
         return None
-    if verdict['verdict'] != sorted(stated)[0]:
-        # The reformat must never change the conclusion, in either direction.
+    if not _repaired_matches_original(stated, verdict):
+        # The reformat must reproduce the conclusion and every per-criterion
+        # id/status/evidence triple exactly; anything else is a new judgement.
         artifacts['verification_format_repair']['accepted'] = False
         artifacts['verification_format_repair']['refused'] = '重排改变了原结论'
         return None
@@ -498,7 +580,12 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         verdict = {**verdict, 'verdict': 'unverified', 'error_type': 'unverified', 'reason': unavailable[0]['error']}
     if verdict['verdict'] == 'pass' and not ledger['complete']:
         remaining = review_deadline - time.monotonic()
-        if not ledger['accounted'] and not coverage_retry and remaining > 5 and not self.cancels[rid].is_set():
+        # A format-only repair must never open a tool-equipped evidence-completion
+        # loop: this verdict came from a reformatter that was forbidden to judge,
+        # so missing coverage here is a fail, not something to go collect.
+        repaired_format = bool((artifacts.get('verification_format_repair') or {}).get('accepted'))
+        if (not ledger['accounted'] and not coverage_retry and not repaired_format
+                and remaining > 5 and not self.cancels[rid].is_set()):
             self._emit(rid, 'verification.coverage_retry', {'message': '验收证据缺项，继续当前验收补齐；不重跑开发'}, 'verification')
             bounded = {**configuration, 'limits': {**configuration['limits'], 'timeout_s': int(remaining)}}
             # Carry the browser-receipt budget through: a coverage top-up must not

@@ -7,7 +7,8 @@ import pytest
 
 from factory.control.execution import ExecutionError
 from factory.control.providers import ProviderResult
-from factory.control.verification import _repair_verdict_format, _stated_verdicts
+from factory.control.verification import (_repaired_matches_original, _repair_verdict_format,
+                                          _stated_structure)
 from tests.review_helpers import passing_review
 from tests.test_control_app import app_env, login, project
 
@@ -27,18 +28,36 @@ def _repairs(store, rid):
     return [e for e in store.events(rid) if e['type'] == 'verification.format_repaired']
 
 
+def _rows(request, status='fail', evidence='greeting 未更新'):
+    """Per-criterion rows the reviewer really wrote, for the criteria it was given."""
+    criteria = json.loads(request.prompt.split('CRITERIA JSON:\n', 1)[1].split('\nEND CRITERIA', 1)[0])
+    return [{'id': item['id'], 'status': status, 'evidence': evidence} for item in criteria]
+
+
+def _damaged(verdict, rows, reason):
+    """A report whose content is complete but whose JSON envelope is broken."""
+    body = json.dumps({'verdict': verdict, 'reason': reason, 'criteria': rows}, ensure_ascii=False)
+    assert body.endswith('}')
+    return body[:-1] + ',,'  # Unparseable, and nothing was removed.
+
+
+# Same shape, for the guards that must stop a repair that would otherwise happen.
+_REPAIRABLE = _damaged('fail', [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}],
+                       'greeting 未更新')
+
+
 def test_one_reformat_recovers_a_clear_verdict_without_reviewing_again(app_env):
     client, store, service, repo, p, run, cfg = _review(app_env)
-    calls = []
+    calls, rows = [], []
 
     def respond(request, emit, cancel=None):
         calls.append(request)
         if len(calls) == 1:
-            return ProviderResult('I reviewed the change. The greeting is wrong, so this is a '
-                                  'fail. (No JSON envelope here.)', cost_usd=0.03)
+            rows.extend(_rows(request))
+            return ProviderResult(_damaged('fail', rows, 'greeting 未更新'), cost_usd=0.03)
         assert 'reformatter' in request.prompt and 'NOT a reviewer' in request.prompt
-        return ProviderResult(json.dumps({'verdict': 'fail', 'reason': 'greeting 未更新'}),
-                              cost_usd=0.01)
+        return ProviderResult(json.dumps({'verdict': 'fail', 'reason': 'greeting 未更新',
+                                          'criteria': rows}, ensure_ascii=False), cost_usd=0.01)
 
     service.runner.run = respond
     artifacts = {'worktree': str(repo), 'checks': [{'name': 'check', 'exit': 0}]}
@@ -66,13 +85,16 @@ def test_one_reformat_recovers_a_clear_verdict_without_reviewing_again(app_env):
 
 def test_a_reformat_that_changes_the_conclusion_is_refused(app_env):
     client, store, service, repo, p, run, cfg = _review(app_env)
-    calls = []
+    calls, rows = [], []
 
     def respond(request, emit, cancel=None):
         calls.append(request)
         if len(calls) == 1:
-            return ProviderResult('Evidence is missing for two criteria, so: fail.', cost_usd=0.03)
-        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': '看起来没问题'}), cost_usd=0.01)
+            rows.extend(_rows(request))
+            return ProviderResult(_damaged('fail', rows, '两项缺证据'), cost_usd=0.03)
+        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': '看起来没问题',
+                                          'criteria': [{**row, 'status': 'pass'} for row in rows]},
+                                         ensure_ascii=False), cost_usd=0.01)
 
     service.runner.run = respond
     artifacts = {'worktree': str(repo)}
@@ -85,13 +107,95 @@ def test_a_reformat_that_changes_the_conclusion_is_refused(app_env):
     assert _repairs(store, run['id']) == []
 
 
-def test_unverified_and_fail_survive_a_reformat_and_are_never_upgraded(app_env):
-    for stated in ('unverified', 'fail'):
-        assert _stated_verdicts(f'The outcome is {stated} for now.') == {stated}
-    # A pass claim that the original never made cannot be introduced.
-    assert _stated_verdicts('I could not verify anything: unverified.') == {'unverified'}
-    assert _stated_verdicts('passed the tests but the verdict is fail') == {'fail'}
-    assert _stated_verdicts('bypassed, unverifiable, failing') == set()
+def test_a_reformat_that_rewrites_the_evidence_is_refused(app_env):
+    """Same conclusion, invented evidence: still a new judgement, not a reformat."""
+    client, store, service, repo, p, run, cfg = _review(app_env)
+    calls, rows = [], []
+
+    def respond(request, emit, cancel=None):
+        calls.append(request)
+        if len(calls) == 1:
+            rows.extend(_rows(request))
+            return ProviderResult(_damaged('fail', rows, 'greeting 未更新'), cost_usd=0.03)
+        rewritten = [{**row, 'evidence': 'INVENTED evidence absent from original'} for row in rows]
+        return ProviderResult(json.dumps({'verdict': 'fail', 'reason': 'greeting 未更新',
+                                          'criteria': rewritten}, ensure_ascii=False), cost_usd=0.01)
+
+    service.runner.run = respond
+    artifacts = {'worktree': str(repo)}
+    with pytest.raises(ExecutionError, match='未返回有效结构化结果'):
+        service._independent_verify(run['id'], run, p, cfg, artifacts)
+    assert artifacts['verification']['error_type'] == 'invalid_response'
+    assert artifacts['verification_format_repair']['accepted'] is False
+    assert artifacts['verification_format_repair']['refused'] == '重排改变了原结论'
+    assert _repairs(store, run['id']) == []
+
+
+def test_a_repaired_pass_never_enters_the_tool_equipped_coverage_loop(app_env):
+    """A format-only repair must not be followed by a fresh evidence-gathering call."""
+    client, store, service, repo, p, run, cfg = _review(app_env)
+    run['agent_snapshot'] = {'acceptance': ['第一条验收', '第二条验收']}
+    calls, rows = [], []
+
+    def respond(request, emit, cancel=None):
+        calls.append(request)
+        if len(calls) == 1:
+            # One real row out of two criteria: a pass here is under-covered.
+            rows.append(_rows(request, status='pass', evidence='看过了')[0])
+            return ProviderResult(_damaged('pass', rows, '看过了'), cost_usd=0.03)
+        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': '看过了',
+                                          'criteria': rows}, ensure_ascii=False), cost_usd=0.01)
+
+    service.runner.run = respond
+    artifacts = {'worktree': str(repo), 'checks': [{'name': 'check', 'exit': 0}]}
+    with pytest.raises(ExecutionError, match='独立验证未通过'):
+        service._independent_verify(run['id'], run, p, cfg, artifacts)
+    assert artifacts['verification']['verdict'] == 'fail'
+    assert artifacts['verification']['error_type'] == 'incomplete_coverage'
+    # The review call, the reformat, and nothing else: no coverage top-up round.
+    assert len(calls) == 2
+    assert [e for e in store.events(run['id']) if e['type'] == 'verification.coverage_retry'] == []
+
+
+def test_only_a_structurally_complete_report_is_repairable():
+    rows = [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}]
+    stated = _stated_structure(_damaged('fail', rows, 'greeting 未更新'))
+    assert stated == {'verdict': 'fail', 'rows': {'request:1': ('fail', 'greeting 未更新')}}
+    # Prose is not structure: no verdict field, whatever words it contains.
+    assert _stated_structure('I cannot pass this change. Required evidence is unavailable.') is None
+    assert _stated_structure('Overall: pass. No per-criterion evidence has been collected.') is None
+    # A conclusion with no per-criterion evidence cannot be completed for it.
+    assert _stated_structure(_damaged('pass', [], 'all good')) is None
+    assert _stated_structure(_damaged('pass', [{'id': 'request:1', 'status': 'pass',
+                                                'evidence': '   '}], 'all good')) is None
+    # Two objects, or two verdict fields, are conflicting rather than damaged.
+    a = json.dumps({'verdict': 'pass', 'reason': 'first', 'criteria': rows})
+    b = json.dumps({'verdict': 'pass', 'reason': 'second', 'criteria': rows})
+    assert _stated_structure(f'```json\n{a}\n```\n```json\n{b}\n```') is None
+    # A duplicated criterion id is self-conflicting; an unknown status is not a row.
+    assert _stated_structure(_damaged('fail', rows + rows, 'twice')) is None
+    assert _stated_structure(_damaged('fail', [{'id': 'request:1', 'status': 'ok',
+                                               'evidence': 'x'}], 'bad status')) is None
+
+
+def test_a_repair_must_reproduce_every_row_byte_for_byte():
+    stated = {'verdict': 'fail', 'rows': {'request:1': ('fail', 'greeting 未更新')}}
+    assert _repaired_matches_original(stated, {
+        'verdict': 'fail', 'reason': 'x',
+        'criteria': [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}]})
+    # Upgraded status, rewritten evidence, an invented row, or a dropped row.
+    for rows in ([{'id': 'request:1', 'status': 'pass', 'evidence': 'greeting 未更新'}],
+                 [{'id': 'request:1', 'status': 'fail', 'evidence': 'INVENTED evidence'}],
+                 [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'},
+                  {'id': 'agent:1', 'status': 'pass', 'evidence': 'INVENTED'}],
+                 []):
+        assert not _repaired_matches_original(stated, {'verdict': 'fail', 'reason': 'x',
+                                                      'criteria': rows})
+    # A different conclusion, and a missing criteria list.
+    assert not _repaired_matches_original(stated, {
+        'verdict': 'pass', 'reason': 'x',
+        'criteria': [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}]})
+    assert not _repaired_matches_original(stated, {'verdict': 'fail', 'reason': 'x'})
 
 
 def test_conflicting_or_absent_conclusions_are_not_reformatted(app_env):
@@ -119,7 +223,8 @@ def test_a_provider_without_a_tools_free_channel_is_not_asked_to_reformat(app_en
 
     def respond(request, emit, cancel=None):
         calls.append(request)
-        return ProviderResult('Clearly a fail, but no JSON.', cost_usd=0.03)
+        # Repairable content: only the provider channel stops this one.
+        return ProviderResult(_damaged('fail', _rows(request), 'greeting 未更新'), cost_usd=0.03)
 
     service.runner.run = respond
     artifacts = {'worktree': str(repo)}
@@ -141,7 +246,7 @@ def test_repair_happens_at_most_once_per_verification(app_env):
     deadline = time.monotonic() + 600
     assert _repair_verdict_format(service, run['id'], run, p, artifacts,
                                   cfg['agent_verification_profile'], str(repo),
-                                  'Clearly a fail.', deadline) is None
+                                  _REPAIRABLE, deadline) is None
     assert artifacts['verification_format_repair'] == {'attempted': True, 'accepted': False}
 
 
@@ -157,7 +262,7 @@ def test_no_reformat_call_once_the_money_is_gone(app_env):
     artifacts = {'worktree': str(repo), 'verification_commit': 'snapshot'}
     assert _repair_verdict_format(service, run['id'], run, p, artifacts,
                                   cfg['agent_verification_profile'], str(repo),
-                                  'Clearly a fail.', time.monotonic() + 600) is None
+                                  _REPAIRABLE, time.monotonic() + 600) is None
     assert 'verification_format_repair' not in artifacts
     assert service._usage(run['id'], profile='verification_format_repair')['calls'] == 0
 
@@ -173,12 +278,12 @@ def test_a_cancelled_or_expired_review_does_not_reformat(app_env):
     # Out of time.
     assert _repair_verdict_format(service, run['id'], run, p, artifacts,
                                   cfg['agent_verification_profile'], str(repo),
-                                  'Clearly a fail.', time.monotonic() + 1) is None
+                                  _REPAIRABLE, time.monotonic() + 1) is None
     # Cancelled.
     service.cancels[run['id']].set()
     assert _repair_verdict_format(service, run['id'], run, p, artifacts,
                                   cfg['agent_verification_profile'], str(repo),
-                                  'Clearly a fail.', time.monotonic() + 600) is None
+                                  _REPAIRABLE, time.monotonic() + 600) is None
     assert 'verification_format_repair' not in artifacts
 
 
