@@ -85,7 +85,12 @@ Codex 的复现 `CodexAgentUxReview.test.tsx` 原样入库 `frontend/src/workben
 
 ## 呈现收尾
 管理页默认只给**已加载规范摘要**（身份段节选 + skill/断言/revision 计数），编辑正文与进化提案折进「编辑工作规范」，模型配置与维护折进「高级设置 / 维护」。
-面向产品用户的实施说明式文案已清理（含「这是入口收拢，不是新增绑定能力」「当前没有…初始导入接口」等共 10 处）。「导入职能体」入口在列表页 `PageHeader` 实际可达。
+面向产品用户的实施说明式文案已清理（含「这是入口收拢，不是新增绑定能力」「当前没有…初始导入接口」等共 10 处）。
+
+> **更正（Codex 第三轮复核指出，属实）**：这里原写「『导入职能体』入口在列表页 `PageHeader` 实际可达」——**不成立**。
+> 当时按钮加在 `AgentsPage.tsx` 的 list 分支上，而 `/agents` 实际渲染的是 `AgentCatalog.tsx`，
+> 那条分支不是活路由，用户按管理页的提示回列表根本找不到按钮。已在最终收尾中真正接入 `AgentCatalog`。
+> 相应地，上一轮截图说明里对导入入口的描述也不准确，已一并更正。
 
 ## 验证
 - Codex 复现：`./node_modules/.bin/vitest run src/workbench/CodexAgentUxReview.test.tsx` → **5 passed**（修复前 5 failed）。
@@ -145,3 +150,28 @@ Codex 的复现 `CodexAgentUxReview.test.tsx` 原样入库 `frontend/src/workben
 
 ## 未验证
 真实模型下的管理页操作、正式站数据表现、Linux 复跑、发布。均归 Codex。
+
+---
+
+# 最终两项收尾（Codex 第三轮复核，候选见推送）
+
+## 1. 真实目录页现在真的有导入入口
+**此前是错的**：按钮加在 `AgentsPage.tsx` 的 list 分支，但 `/agents` 渲染的是 `AgentCatalog.tsx`，那条分支不是活路由。管理页又提示用户「回列表用导入职能体按钮」，用户照做找不到。我上一份交接称「实际可达」，**说法不成立**，已在原文标注更正。
+
+**现在**：既有 `NativePackImport` 接进 `AgentCatalog`，admin-only（与「新建职能体」同一条件），导入成功后跳到新角色的管理页。后台 API 未换。
+**真实浏览器证据**：在真实 `/agents` 上点「导入职能体」，`section[aria-label=恢复职能包]` 出现，标题「恢复 webuddy 导出的职能包（v1/v2）」，含文件输入。截图 `09-catalog-import-entry.png`。不是孤立渲染 `AgentsPage` 的测试。
+
+## 2. 加方法之后摘要和编辑区不再各说各话
+**问题**：摘要只在挂载时读一次，`AgentManifest` 内部保存也不通知任何人，于是编辑区已是 revision 2 / 2 项，上方摘要还停在 revision 1 / 1 项。
+
+**现在**：`ManifestSummary` 接 `refreshKey`；新增 `specEpoch` 由三类既有动作推进——「团队已有能力→加入岗位清单」、`AgentManifest` 自身保存/恢复历史（给它加了 `onChanged`）、`AgentEvolution` 的变更回调。没有轮询，没有整页刷新，也没有重构框架。`specEpoch` 与 `manifestEpoch` 分开，避免编辑器在自己保存时被重挂。
+另外按要求给了简短成功反馈（「已加入岗位清单，上方摘要已更新。」「已挂靠，上方…已更新。」），失败时保持原值并显示错误，不假更新数量。
+
+**真实浏览器证据**：加入前摘要 `1 个 Skill · revision 1` → 加入后 `2 个 Skill · revision 2`，`performance.getEntriesByType('navigation').length === 1`（**页面未重新加载**），并出现成功反馈。截图 `10-summary-refreshed-after-add.png`。
+
+## 验证
+前端全量 `./node_modules/.bin/vitest run`：**425 passed / 57 files**；`npx tsc --noEmit` 0；`npm run build` 0。
+后端未改动，未跑后端全量。
+
+## 状态说明
+生产仍是 `50c4e20`；`c0a221c` 的源码与构建包只是预传到服务器 `/tmp`，**不等于部署**。本轮未碰服务器、凭据、集成分支与标签。

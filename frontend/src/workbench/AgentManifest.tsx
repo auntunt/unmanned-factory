@@ -8,7 +8,7 @@ export type SkillRef = { id: string; version: number }
 import { skillLabel, type Skill } from './skill-label'
 export { skillLabel } from './skill-label'
 export type Manifest = { revision: number; identity: string; skills: SkillRef[]; assertions: string[]; compiler?: string; created_at?: string; resolved_skills?: Skill[]; history?: Manifest[] }
-export default function AgentManifest({agentId,...props}:PageProps & {agentId:string}) {
+export default function AgentManifest({agentId,onChanged,...props}:PageProps & {agentId:string;onChanged?:()=>void}) {
   const [value,setValue]=useState<Manifest|null>(null),[skills,setSkills]=useState<Skill[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false)
   const [identity,setIdentity]=useState(''),[assertions,setAssertions]=useState(''),[refs,setRefs]=useState<SkillRef[]>([])
   const base=`/api/v4/agents/${encodeURIComponent(agentId)}/manifest`
@@ -19,7 +19,9 @@ export default function AgentManifest({agentId,...props}:PageProps & {agentId:st
     setValue(m);setSkills(library.modules);setIdentity(m.identity);setAssertions(m.assertions.join('\n'));setRefs(m.skills)
   },[base,props.onUnauthorized])
   useEffect(()=>{const c=new AbortController();void load(c.signal).catch(e=>{if(!c.signal.aborted)setError(errorText(e))});return()=>c.abort()},[load])
-  const mutate=async(path:string,body:unknown,method:'PUT'|'POST')=>{setBusy(true);setError('');try{await request(path,{method,body,csrfToken:props.csrfToken,onUnauthorized:props.onUnauthorized});await load()}catch(e){setError(errorText(e))}finally{setBusy(false)}}
+  // Saving here also changes what the summary above shows (skill count, revision),
+  // so tell the page rather than leaving the two views disagreeing.
+  const mutate=async(path:string,body:unknown,method:'PUT'|'POST')=>{setBusy(true);setError('');try{await request(path,{method,body,csrfToken:props.csrfToken,onUnauthorized:props.onUnauthorized});await load();onChanged?.()}catch(e){setError(errorText(e))}finally{setBusy(false)}}
   return <section className="wb-card agent-manifest" aria-label="职能体清单">
     <h2>岗位清单{value && <small> · revision {value.revision}</small>}</h2>
     <p>skill 是方法与知识，职能体是岗位，运行是任务。身份段只由人编辑。</p>

@@ -184,6 +184,7 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
   const [teamLoaded, setTeamLoaded] = useState(false)
   const [binding, setBinding] = useState('')
   const [bindError, setBindError] = useState('')
+  const [bindNotice, setBindNotice] = useState('')
 
   // Dev results: real candidates this user maintains, not what is already attached.
   const [candidates, setCandidates] = useState<PackSummary[]>([])
@@ -243,7 +244,7 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
    *  no longer has to go find the editor and repeat the choice. */
   const addModule = async (moduleId: string, moduleVersion: number) => {
     if (binding) return
-    setBinding(moduleId); setBindError('')
+    setBinding(moduleId); setBindError(''); setBindNotice('')
     const manifestPath = `/api/v4/agents/${encodeURIComponent(agentId)}/manifest`
     try {
       const current = await request<{ revision: number; identity: string; skills: Array<{ id: string; version: number }>; assertions: string[] }>(manifestPath, { onUnauthorized: props.onUnauthorized })
@@ -254,13 +255,14 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
                 skills: [...(current.skills || []), { id: moduleId, version: moduleVersion }],
                 assertions: current.assertions || [] },
       })
+      setBindNotice('已加入岗位清单，上方摘要已更新。')
       setEpoch(v => v + 1); onChanged()
     } catch (cause) { setBindError(errorText(cause)) } finally { setBinding('') }
   }
 
   const attachPack = async (packId: string) => {
     if (binding) return
-    setBinding(packId); setBindError('')
+    setBinding(packId); setBindError(''); setBindNotice('')
     try {
       const detail = await request<PackDetail>(`${packsBase}/${encodeURIComponent(packId)}`, { onUnauthorized: props.onUnauthorized })
       const latest = (detail.versions || [])[0]
@@ -271,6 +273,7 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
         method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized,
         body: { agent_id: agentId, version_id: latest.id, expected_revision: existing?.revision ?? 0 },
       })
+      setBindNotice('已挂靠，上方「已挂靠工具」已更新。')
       setEpoch(v => v + 1); onChanged()
     } catch (cause) { setBindError(errorText(cause)) } finally { setBinding('') }
   }
@@ -356,6 +359,7 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
 
               <h3 style={{ marginTop: 16 }}>可用工具</h3>
               {bindError && <ErrorNotice message={bindError} />}
+              {bindNotice && <p role="status" className="agent-section-note">{bindNotice}</p>}
               {(() => {
                 const available = catalog.filter(pk => pk.published_version && !boundIds.includes(pk.id))
                 const pending = catalog.filter(pk => !pk.published_version)
@@ -480,7 +484,7 @@ function AttachedTools({ agentId, refreshKey = 0, ...props }: PageProps & { agen
 
 // ---- Management page (detail view) ----
 
-function ManifestSummary({ agentId, onUnauthorized }: { agentId: string; onUnauthorized: () => void }) {
+function ManifestSummary({ agentId, refreshKey = 0, onUnauthorized }: { agentId: string; refreshKey?: number; onUnauthorized: () => void }) {
   const [summary, setSummary] = useState<{ identity: string; skillCount: number; assertionCount: number; revision: number } | null>(null)
   useEffect(() => {
     const c = new AbortController()
@@ -488,7 +492,10 @@ function ManifestSummary({ agentId, onUnauthorized }: { agentId: string; onUnaut
       .then(m => { if (!c.signal.aborted) setSummary({ identity: m.identity, skillCount: m.skills.length, assertionCount: m.assertions.length, revision: m.revision }) })
       .catch(() => undefined)
     return () => c.abort()
-  }, [agentId, onUnauthorized])
+    // refreshKey advances after any action that changes the manifest -- adding a
+    // method, saving the roster, restoring a version -- so the summary and the
+    // editor never show different revisions.
+  }, [agentId, refreshKey, onUnauthorized])
   if (!summary) return <p>正在读取规范…</p>
   return (
     <div className="agent-spec-summary">
@@ -506,6 +513,9 @@ function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; pro
   const [manifestEpoch, setManifestEpoch] = useState(0)
   // Bumped whenever the set of attached tools actually changed.
   const [toolEpoch, setToolEpoch] = useState(0)
+  // Drives the work-spec summary. Separate from manifestEpoch so the editor is
+  // not remounted while the user is typing in it.
+  const [specEpoch, setSpecEpoch] = useState(0)
   const [showCreateProject, setShowCreateProject] = useState(false)
   const [projectNotice, setProjectNotice] = useState('')
   const isAdmin = props.user?.role !== 'member'
@@ -586,11 +596,11 @@ function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; pro
       {/* ---- Section 2: Work Specs (default: summary; editing folded) ---- */}
       <section className="agent-section" aria-label="工作规范">
         <h2>工作规范</h2>
-        <ManifestSummary agentId={agent.id} onUnauthorized={props.onUnauthorized} />
+        <ManifestSummary agentId={agent.id} refreshKey={specEpoch} onUnauthorized={props.onUnauthorized} />
         <details>
           <summary><Icon name="triangle" className="wb-disclosure-icon" />编辑工作规范</summary>
-          <AgentManifest key={`${agent.id}:${manifestEpoch}`} agentId={agent.id} {...props} />
-          <AgentEvolution key={agent.id} agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); void refreshAgent() }} />
+          <AgentManifest key={`${agent.id}:${manifestEpoch}`} agentId={agent.id} {...props} onChanged={() => setSpecEpoch(v => v + 1)} />
+          <AgentEvolution key={agent.id} agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); setSpecEpoch(v => v + 1); void refreshAgent() }} />
         </details>
       </section>
 
@@ -598,7 +608,7 @@ function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; pro
       <AttachedTools agentId={agent.id} refreshKey={toolEpoch} {...props} />
 
       {/* ---- Add Ability ---- */}
-      {isAdmin && <AddAbilityPanel agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); setToolEpoch(v => v + 1); void refreshAgent() }} />}
+      {isAdmin && <AddAbilityPanel agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); setToolEpoch(v => v + 1); setSpecEpoch(v => v + 1); void refreshAgent() }} />}
 
       {/* ---- Advanced / Maintenance (collapsed by default) ---- */}
       {isAdmin && (

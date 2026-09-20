@@ -34,3 +34,15 @@
 - 改名保存后区块标题与面包屑**同时**更新（未刷新）。
 - `/ability-center?tab=packs`、`/modules?selected=abc` 旧链接可达，查询参数保留，选中态归「职能体」。
 - `/agents/:id?mode=maintain` 深链接仍进管理页。
+
+## 最终两项收尾（`09`–`10`，真实 `/agents` 路由）
+
+| 文件 | 内容 |
+|---|---|
+| `09-catalog-import-entry.png` | 真实 `/agents`（渲染的是 `AgentCatalog`）右上「导入职能体」，点击后展开既有 `NativePackImport` 原表单 |
+| `10-summary-refreshed-after-add.png` | 加入方法后「工作规范」摘要变为 `2 个 Skill · revision 2`，并显示成功反馈 |
+
+真实 DOM 核对（非截图推断）：
+- `/agents` 上 `section[aria-label=恢复职能包]` 存在，标题「恢复 webuddy 导出的职能包（v1/v2）」，含 `input[type=file]`。
+- 加入方法前摘要 `1 个 Skill · 0 项验收断言 · revision 1`，加入后 `2 个 Skill · 0 项验收断言 · revision 2`；
+  `performance.getEntriesByType('navigation').length === 1`，**页面没有重新加载**；提示语「已加入岗位清单，上方摘要已更新。」

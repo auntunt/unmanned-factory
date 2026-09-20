@@ -4,6 +4,7 @@ import { request } from '../workspace/api'
 import { errorText, type PageProps } from '../workbench/ui'
 import Icon, { CategoryBadge, packMark } from '../workbench/Icon'
 import AgentMetadataEditor from '../workbench/AgentMetadataEditor'
+import NativePackImport from '../workbench/NativePackImport'
 import './conversation.css'
 
 type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number; updated_at?: string }
@@ -115,6 +116,7 @@ export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PagePr
   const [agents, setAgents] = useState<Agent[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState('')
   const [busy, setBusy] = useState(false)
@@ -151,8 +153,19 @@ export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PagePr
     <div className="cv-page">
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16 }}>
         <div style={{ flex: 1 }}><h1>职能体</h1><p className="cv-page-sub">长期沉淀的专业角色。可以直接开始对话，或管理它的方法与能力。</p></div>
-        {isAdmin && <button className="cv-btn cv-btn-primary" onClick={() => setCreating(v => !v)}><Icon name="plus" width={15} height={15} /> 新建职能体</button>}
+        {isAdmin && <div style={{ display: 'flex', gap: 8 }}>
+          {/* Whole-pack import lives on the page users actually see. It was
+              previously only on an unrouted list branch, so the instruction to
+              "use the import button on the list" could not be followed. */}
+          <button className="cv-btn cv-btn-secondary" aria-expanded={importing}
+            onClick={() => { setImporting(v => !v); setCreating(false) }}>导入职能体</button>
+          <button className="cv-btn cv-btn-primary" onClick={() => { setCreating(v => !v); setImporting(false) }}><Icon name="plus" width={15} height={15} /> 新建职能体</button>
+        </div>}
       </div>
+      {isAdmin && importing && <div className="cv-settings-section" style={{ padding: 16 }}>
+        <NativePackImport csrfToken={csrfToken} onUnauthorized={onUnauthorized} user={user}
+          onImported={(id) => { setImporting(false); navigate(`/agents/${encodeURIComponent(id)}`) }} />
+      </div>}
       {creating && <form className="cv-settings-section" onSubmit={create} style={{ padding: 16 }}>
         <h2>新建职能体</h2>
         <label style={{ display: 'grid', gap: 6, margin: '8px 0' }}>名称<input required maxLength={80} value={name} onChange={e => setName(e.target.value)} placeholder="例如：报价助手" style={{ padding: '9px 12px', border: '1px solid var(--cv-border)', borderRadius: 8, background: 'var(--cv-surface)', color: 'var(--cv-ink)' }} /></label>
