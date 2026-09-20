@@ -14,8 +14,13 @@ from tests.review_helpers import passing_review
 
 def test_new_project_models_default_to_monitoring():
     assert Project(name='Example', repository='owner/repo', workspace='/tmp/repo').budget_usd is None
-    assert NewWorkspace(name='Example', idempotency_key='abcdefgh').budget_usd is None
-    assert ConnectProject(candidate_id='a' * 64).budget_usd is None
+    # Ordinary creation paths no longer carry a dollar field at all.
+    assert 'budget_usd' not in NewWorkspace.model_fields
+    assert 'budget_usd' not in ConnectProject.model_fields
+    with pytest.raises(ValueError):
+        NewWorkspace(name='Example', idempotency_key='abcdefgh', budget_usd=10)
+    with pytest.raises(ValueError):
+        ConnectProject(candidate_id='a' * 64, budget_usd=10)
     for invalid in (-1, 0, float('inf'), float('nan')):
         with pytest.raises(ValueError):
             ProjectUpdate(name='Example', base_branch='main', revision=1, budget_usd=invalid)
@@ -103,8 +108,10 @@ def test_zip_default_monitoring_and_mode_changes_conflict_on_reused_key(app_env)
     result = post(client, headers, payload)
     assert result.status_code == 201, result.text
     assert result.json()['project']['budget_usd'] is None
+    assert result.json()['project']['budget_source'] == 'inherit'
     assert post(client, headers, payload).json()['project']['id'] == result.json()['project']['id']
-    assert post(client, headers, payload, budget_usd='100').status_code == 409
+    # The zip form has no budget field; an unknown form field is rejected outright.
+    assert post(client, headers, payload, name='别的名字').status_code == 409
 
 
 def test_noop_settings_save_during_execution_keeps_revision_and_audit(app_env):

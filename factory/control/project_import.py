@@ -127,7 +127,8 @@ def _extract(archive, target, filename, digest):
             'warnings': warnings, 'baseline_status': 'not_run', 'report_path': '.webuddy/import-report.json'}
 
 
-def import_project(store, root: Path, upload, *, filename, name, budget_usd, actor_id, idempotency_key, agent_id=None):
+def import_project(store, root: Path, upload, *, filename, name, actor_id, idempotency_key, agent_id=None):
+    """Import a ZIP project; the dollar ceiling comes from the admin policy."""
     upload.seek(0, 2)
     if upload.tell() > MAX_ARCHIVE:
         raise ImportError('ZIP 文件不能超过 1 GB')
@@ -137,7 +138,7 @@ def import_project(store, root: Path, upload, *, filename, name, budget_usd, act
         digest.update(chunk)
     sha = digest.hexdigest()
     upload.seek(0)
-    fingerprint = hashlib.sha256(json.dumps([name, budget_usd, sha, agent_id], ensure_ascii=False).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([name, sha, agent_id], ensure_ascii=False).encode()).hexdigest()
     owned = evidence = None
     try:
         with store.connect() as db:
@@ -179,7 +180,7 @@ def import_project(store, root: Path, upload, *, filename, name, budget_usd, act
             (evidence / 'original.zip').chmod(0o600)
             (evidence / 'report.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
             project = store._insert_project(db, {'name': name, 'repository': 'local/workspace-' + key,
-                'workspace': str(owned), 'base_branch': 'main', 'budget_usd': budget_usd,
+                'workspace': str(owned), 'base_branch': 'main', 'budget_usd': None, 'budget_source': 'inherit',
                 'checks': {'workspace-integrity': ['git', 'diff', '--check', 'HEAD']},
                 'auto_issues': False, 'auto_publish': False, 'managed_workspace': True,
                 'actor': str(actor_id), 'import_summary': summary, 'import_evidence': str(evidence), 'imported_at': now()})

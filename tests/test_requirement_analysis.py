@@ -396,7 +396,9 @@ def test_new_actions_preserve_ownership_project_grants_and_csrf(env, action):
         env.store.update(rid,{'source':{**env.run['source'],'actor_id':member['id']}})
         assert client.post(url,json={},headers={'Origin':'http://testserver'}).status_code==403
         # Authorized requests reach body validation; no new blanket write access.
-        assert client.post(url,json={},headers=headers).status_code==422
+        # resume-budget is the exception: raising a ceiling is an admin decision,
+        # so project ownership never buys a member past the role check.
+        assert client.post(url,json={},headers=headers).status_code==(403 if action=='resume-budget' else 422)
         env.svc.governance.assign(member['id'],[],'owner')
         assert client.post(url,json={},headers=headers).status_code==403
 

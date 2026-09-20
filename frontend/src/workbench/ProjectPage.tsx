@@ -22,7 +22,7 @@ import type { PageProps } from './ui'
 import ProjectAutomation from './ProjectAutomation'
 import ProjectMode from './ProjectMode'
 import type { ProjectRecord } from './ProjectsPage'
-import type { OverviewData } from './v3-types'
+import type { CostPolicy, OverviewData } from './v3-types'
 import ProjectLifecycle from './ProjectLifecycle'
 import AttentionList from './AttentionList'
 import { projectStage } from './project-stages'
@@ -46,6 +46,11 @@ function errorText(error: unknown): string {
 }
 
 
+export function budgetModeOf(project: Pick<ProjectRecord, 'budget_source' | 'budget_usd'>): 'inherit' | 'monitor' | 'enforce' {
+  if (project.budget_source === 'inherit') return 'inherit'
+  return project.budget_usd == null ? 'monitor' : 'enforce'
+}
+
 function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps & { project: ProjectRecord; onSaved: (project: ProjectRecord) => void }) {
   const [name, setName] = useState(project.name)
   const [branch, setBranch] = useState(project.base_branch)
@@ -55,7 +60,11 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const [autoSpecConfirm, setAutoSpecConfirm] = useState(Boolean(project.auto_spec_confirm))
   const [analysisBudget, setAnalysisBudget] = useState(project.requirement_analysis_budget_usd == null ? '' : String(project.requirement_analysis_budget_usd))
   const [budget, setBudget] = useState(String(project.budget_usd ?? 100))
-  const [enforceBudget, setEnforceBudget] = useState(project.budget_usd != null)
+  // Three distinct states, not two: follow the platform policy, explicitly
+  // monitor only, or explicitly stop at an amount this project owns.
+  const [budgetMode, setBudgetMode] = useState<'inherit' | 'monitor' | 'enforce'>(budgetModeOf(project))
+  const enforceBudget = budgetMode === 'enforce'
+  const [policy, setPolicy] = useState<CostPolicy | null>(null)
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [search] = useSearchParams()
@@ -68,7 +77,11 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
-  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoSpecConfirm(Boolean(project.auto_spec_confirm)); setAnalysisBudget(project.requirement_analysis_budget_usd == null ? '' : String(project.requirement_analysis_budget_usd)); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setEnforceBudget(project.budget_usd != null); setBaseRevision(project.revision ?? 1) }, [project])
+  useEffect(() => { if (dirtyRef.current) return; setName(project.name); setBranch(project.base_branch); setChecks(project.checks ?? {}); setAutoSpecConfirm(Boolean(project.auto_spec_confirm)); setAnalysisBudget(project.requirement_analysis_budget_usd == null ? '' : String(project.requirement_analysis_budget_usd)); setAutoIssues(Boolean(project.auto_issues)); setAutoPublish(Boolean(project.auto_publish)); setBudget(String(project.budget_usd ?? 100)); setBudgetMode(budgetModeOf(project)); setBaseRevision(project.revision ?? 1) }, [project])
+
+  // Read-only: showing what "follow the platform policy" currently resolves to.
+  // Members never reach this form, and it never writes the policy.
+  useEffect(() => { const controller = new AbortController(); void request<CostPolicy>('/api/v2/runtime/cost-policy', { onUnauthorized, signal: controller.signal }).then((value) => { if (!controller.signal.aborted) setPolicy(value) }).catch(() => undefined); return () => controller.abort() }, [onUnauthorized])
 
   const save = async (event: FormEvent) => {
     event.preventDefault(); setError(null); setConflict(null); setSaved(false)
@@ -78,7 +91,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
     if (enforceBudget && (!Number.isFinite(budgetValue) || budgetValue <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     setBusy(true); controllerRef.current?.abort(); const controller = new AbortController(); controllerRef.current = controller
     try {
-      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_usd: enforceBudget ? budgetValue : null, auto_spec_confirm: autoSpecConfirm, requirement_analysis_budget_usd: analysisBudget.trim() ? Number(analysisBudget) : null } })
+      const next = await request<ProjectRecord>(`/api/v2/projects/${encodeURIComponent(String(project.id))}`, { method: 'PUT', csrfToken, onUnauthorized, signal: controller.signal, body: { revision: baseRevision, name: name.trim(), base_branch: branch.trim() || 'main', checks, auto_issues: autoIssues, auto_publish: autoPublish, budget_source: budgetMode === 'inherit' ? 'inherit' : 'explicit', ...(budgetMode === 'inherit' ? {} : { budget_usd: enforceBudget ? budgetValue : null }), auto_spec_confirm: autoSpecConfirm, requirement_analysis_budget_usd: analysisBudget.trim() ? Number(analysisBudget) : null } })
       if (!controller.signal.aborted) { dirtyRef.current = false; setBaseRevision(next.revision ?? baseRevision); onSaved(next); setSaved(true) }
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -104,9 +117,9 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
     <form className="wb-card wb-form" onSubmit={save}>
       <div className="wb-card-head"><div><span className="wb-eyebrow">{project.name} · 项目设置</span><h2>预算与执行边界</h2><p>以下设置只属于这个项目。保存后用于后续规划和重试，不会自动继续已经暂停的运行。</p></div>{project.revision !== undefined && <span className="wb-revision">修订 {project.revision}</span>}</div>
       <section className="pw-budget-field" id="project-budget" aria-label="费用控制">
-        <label>费用控制<select value={enforceBudget ? 'enforce' : 'monitor'} onChange={event => { dirtyRef.current = true; setEnforceBudget(event.target.value === 'enforce'); if (event.target.value === 'monitor') setAnalysisBudget(''); setSaved(false) }}><option value="monitor">仅监测（推荐，不因美元额度暂停）</option><option value="enforce">达到额度停止</option></select></label>
+        <label>费用控制<select value={budgetMode} onChange={event => { const next = event.target.value as typeof budgetMode; dirtyRef.current = true; setBudgetMode(next); if (next !== 'enforce') setAnalysisBudget(''); setSaved(false) }}><option value="inherit">跟随平台费用策略</option><option value="monitor">本项目仅监测（不因美元额度暂停）</option><option value="enforce">本项目达到额度停止</option></select></label>
         {enforceBudget && <label htmlFor="project-budget-input">单次运行预算（美元）<input id="project-budget-input" type="number" min="0.01" max="1000000" step="0.01" required value={budget} onChange={event => { dirtyRef.current = true; setBudget(event.target.value); setSaved(false) }} /></label>}
-        <small>{enforceBudget ? '每条需求独立累计费用，到达停止线后不再派发模型调用；它不是供应商充值余额。' : '默认所有阶段只记录费用和 token，不按美元金额暂停。需求分析若另设停止线，会在下方明确显示；费用缺失不当作免费。'}</small>
+        <small>{budgetMode === 'inherit' ? `当前平台策略：${policy == null ? '读取中…' : policy.default_project_budget_usd == null ? '仅监测，不设美元停止线' : `每次运行 $${policy.default_project_budget_usd} 后停止`}。策略调整后本项目自动跟随；改成后两项即由本项目单独指定，不再受策略影响。` : enforceBudget ? '每条需求独立累计费用，到达停止线后不再派发模型调用；它不是供应商充值余额。' : '本项目所有阶段只记录费用和 token，不按美元金额暂停，也不跟随平台策略。需求分析若另设停止线，会在下方明确显示；费用缺失不当作免费。'}</small>
         <small>超时、并发和重试限制仍生效。团队单独配置的月度 token 额度仍可暂停任务。</small>
         <div><Link to="/costs">查看用量与预算</Link> · <Link to="/team">查看团队 token 额度</Link></div>
       </section>
@@ -114,7 +127,7 @@ function EditSettings({ project, csrfToken, onUnauthorized, onSaved }: PageProps
       <fieldset className="wb-analysis-settings"><legend>需求分析</legend><label className="wb-checkbox"><input type="checkbox" checked={autoSpecConfirm} onChange={e => { dirtyRef.current = true; setAutoSpecConfirm(e.target.checked) }} />自动确认规格（默认关闭）</label><p>通用任务先分析需求。关闭时一次确认后开工；开启时自动确认并留审计记录。</p><label>需求分析独立预算（美元）<input type="number" placeholder="留空仅监测" min="0.01" step="0.01" value={analysisBudget} onChange={e => { dirtyRef.current = true; setAnalysisBudget(e.target.value) }} /></label><small>{analysisBudget.trim() ? `需求分析达到 $${analysisBudget} 会暂停，与编码预算独立；清空此项即可仅监测。` : '需求分析仅监测，不设美元停止线。'}</small></fieldset>
       <details className="wb-advanced" id="project-checks"><summary><Icon name="triangle" className="wb-disclosure-icon" />验收检查与自动发布</summary><div className="wb-advanced-body"><ChecksEditor value={checks} onChange={(value) => { dirtyRef.current = true; setChecks(value) }} /><div className="wb-check-options"><label className="wb-checkbox"><input type="checkbox" checked={autoIssues} onChange={(event) => { dirtyRef.current = true; setAutoIssues(event.target.checked) }} />允许带 factory-ready 标签的问题自动执行</label><label className="wb-checkbox"><input type="checkbox" checked={autoPublish} onChange={(event) => { dirtyRef.current = true; setAutoPublish(event.target.checked) }} />允许通过验证后自动交付</label></div></div></details>
       {error && <ErrorNotice message={error} />}
-      {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'} · 费用控制 {conflict.budget_usd == null ? '仅监测' : `每次 $${conflict.budget_usd} 后停止`}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
+      {conflict && <div className="wb-notice" role="alert"><p>最新服务器版本：修订 {conflict.revision ?? '—'} · 名称“{conflict.name}” · 分支 {conflict.base_branch} · 自动执行 {conflict.auto_issues ? '开' : '关'} · 自动交付 {conflict.auto_publish ? '开' : '关'} · 费用控制 {budgetModeOf(conflict) === 'inherit' ? '跟随平台策略' : conflict.budget_usd == null ? '本项目仅监测' : `本项目每次 $${conflict.budget_usd} 后停止`}。</p><strong>最新验收检查</strong>{Object.entries(conflict.checks ?? {}).length ? <ul>{Object.entries(conflict.checks ?? {}).map(([checkName, argv]) => <li key={checkName}><code>{checkName}</code>：{argv.join(' ')}</li>)}</ul> : <p>没有配置验收检查。</p>}<button type="button" className="wb-button wb-button-secondary" onClick={() => { setBaseRevision(conflict.revision ?? baseRevision); setConflict(null); setError('已采用最新版本作为提交基线；页面保留你的修改，请确认后再次保存。') }}>我已审阅，保留我的修改并重试</button></div>}
       {saved && <div className="wb-notice" role="status">项目设置已保存。{returnRun ? '返回该运行后，可按新设置继续或重试。' : '后续规划和重试将使用新设置。'}</div>}
       <div className="wb-form-actions"><button className="wb-button wb-button-primary" disabled={busy || Boolean(conflict)}>{busy ? '保存中…' : conflict ? '请先审阅最新版本' : '保存项目设置'}</button>{returnRun && <Link className="wb-button wb-button-secondary" to={`/runs/${encodeURIComponent(returnRun)}?view=execution`}>{saved ? '返回该运行继续或重试' : '返回刚才的运行'}</Link>}</div>
     </form>

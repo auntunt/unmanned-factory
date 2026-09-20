@@ -31,6 +31,14 @@ class OperationsBody(StrictBody):
     webhook: str | None = Field(default=None, max_length=1000)
 
 
+class CostPolicyBody(StrictBody):
+    revision: int = Field(ge=0, strict=True)
+    # None keeps the platform default at monitoring only; an unset policy must
+    # never introduce a hidden hard stop.
+    default_project_budget_usd: float | None = Field(default=None, gt=0, le=1000000,
+                                                     allow_inf_nan=False)
+
+
 class RuntimeProbeBody(StrictBody):
     profile: str = Field(min_length=1, max_length=20)
     configuration_revision: int = Field(ge=1, strict=True)
@@ -62,6 +70,23 @@ def router(store, service, workspace_root=None, static_dir=None):
             raise HTTPException(403, '此操作需要管理员权限')
         try:
             return service.operations_automation.configure(**body.model_dump())
+        except Conflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @api.get("/runtime/cost-policy")
+    def cost_policy_config(request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        return service.cost_policy.config()
+
+    @api.put("/runtime/cost-policy")
+    def cost_policy_update(body: CostPolicyBody, request: Request):
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '此操作需要管理员权限')
+        try:
+            return service.cost_policy.configure(**body.model_dump())
         except Conflict as exc:
             raise HTTPException(409, str(exc)) from None
         except ValueError as exc:

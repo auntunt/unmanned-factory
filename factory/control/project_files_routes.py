@@ -23,7 +23,7 @@ def router(service, root):
                     helpers.agents.get(agent_id)
                 except KeyError:
                     raise HTTPException(404, '所选职能体不存在') from None
-            result = import_files(service.store, root, files, name=name.strip(), budget_usd=None,
+            result = import_files(service.store, root, files, name=name.strip(),
                 actor_id=request.state.user['id'], idempotency_key=idempotency_key, agent_id=agent_id)
             if agent_id and helpers.binding(result['project']['id'])['revision'] == 0:
                 helpers.bind(result['project']['id'], agent_id, 0, request.state.user['id'])

@@ -136,9 +136,11 @@ class Store:
             raise ValueError('项目 revision 必须是正整数')
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError('项目设置修改人不能为空')
-        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd', 'spec_tree_enabled', 'auto_spec_confirm', 'requirement_analysis_budget_usd'}
+        allowed = {'name', 'base_branch', 'checks', 'auto_issues', 'auto_publish', 'budget_usd', 'spec_tree_enabled', 'auto_spec_confirm', 'requirement_analysis_budget_usd', 'budget_source'}
         if not isinstance(changes, dict) or set(changes) - allowed:
             raise ValueError('项目设置包含不可修改字段')
+        if 'budget_source' in changes and changes['budget_source'] not in ('explicit', 'inherit'):
+            raise ValueError('预算来源只能是 explicit 或 inherit')
         if 'auto_spec_confirm' in changes and type(changes['auto_spec_confirm']) is not bool:
             raise ValueError('auto_spec_confirm must be boolean')
         if 'requirement_analysis_budget_usd' in changes:
@@ -167,8 +169,10 @@ class Store:
             current = int(project.get('revision', 1))
             if current != expected_revision:
                 raise Conflict('项目设置已更新，请重新加载后再保存')
+            defaults = {'auto_spec_confirm': False, 'auto_issues': False, 'auto_publish': False,
+                        'spec_tree_enabled': False, 'budget_source': 'explicit'}
             effective = {key: value for key, value in changes.items()
-                         if project.get(key, False if key in {'auto_spec_confirm', 'auto_issues', 'auto_publish', 'spec_tree_enabled'} else None) != value}
+                         if project.get(key, defaults.get(key)) != value}
             if not effective:
                 return self._project_view(project)
             budget_fields = {'budget_usd', 'requirement_analysis_budget_usd'}
@@ -182,7 +186,11 @@ class Store:
                 and type(new_budget) in (int, float)
                 and math.isfinite(float(old_budget))
                 and math.isfinite(float(new_budget)))
-            if ('budget_usd' in effective and new_budget is not None
+            if 'budget_source' in effective:
+                # The store cannot see the platform policy, so switching where the
+                # ceiling comes from is treated as a possible decrease.
+                blocking_statuses = PROJECT_BUDGET_DECREASE_BLOCKING
+            elif ('budget_usd' in effective and new_budget is not None
                     and (old_budget is None or (numeric_budget_change and new_budget < old_budget))):
                 # A paused run may be relying on its current ceiling. Apply this
                 # protection even when the request edits other settings too.

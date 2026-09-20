@@ -9,6 +9,7 @@ import { STAGES, HEAD_LABEL, TERMINAL_DONE, isTerminal, headState, stageIndex, c
 import { DELIVERY_TYPE_LABEL, type DeliveryType } from './delivery-constants'
 import OperationResults from '../workbench/OperationResults'
 import RequirementConfirmation from '../workbench/RequirementConfirmation'
+import { BudgetResume } from '../workbench/RequirementConfirmation'
 import PackFromDeliverables from '../workbench/PackFromDeliverables'
 import './conversation.css'
 
@@ -149,6 +150,9 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
   const current = stageIndex(run.status)
   const title = run.plan?.title || `需求 #${run.id}`
   const ledger = (run.artifacts?.acceptance_ledger ?? null) as Ledger | null
+  // Raising a ceiling is admin-only on the server, so a member who owns this run
+  // gets the real handling path instead of a button that can only ever 403.
+  const budgetStopped = run.status === 'needs_human' && Boolean(run.artifacts?.budget_exhausted || run.artifacts?.budget_stop)
   const failure = typeof run.error === 'string' ? run.error : typeof run.artifacts?.failure_reason === 'string' ? run.artifacts.failure_reason as string
     : head === 'fail' ? '本轮未能完成，已保留现有成果。' : null
 
@@ -193,6 +197,9 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
                   </div>
                 </div>
                 <VerificationDrawer run={run} ledger={ledger} />
+                {budgetStopped && (user?.role !== 'member'
+                  ? <BudgetResume run={run} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onChanged={next => { seq.current += 1; setRun(next); void load() }} />
+                  : <p className="cv-dock-note">本轮预算已用尽，任务、日志与已有成果都保留着。提高额度是管理员的操作，请联系管理员在本任务上继续；你可以继续查看本任务的用量与记录。<Link to="/costs">查看本任务用量</Link></p>)}
               </div></div>}
 
             {run.source?.operation && run.source.operation !== 'general' ? <OperationResults run={run} /> : null}

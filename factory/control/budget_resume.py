@@ -9,7 +9,7 @@ def resume(self, rid, revision, resume_count, actor):
         if (run['status'] != 'needs_human' or run['revision'] != revision
                 or run.get('resume_count', 0) != resume_count or rid in self.active_jobs):
             raise Conflict('运行已变化或仍在保存，请刷新后续跑')
-        project = self.store.project(run['project_id'])
+        project = self._enforced_project(run['project_id'])
         if required(run) and not run.get('plan'):
             limit = project.get('requirement_analysis_budget_usd')
             self.store.update(rid, {'requirement_analysis_credit_usd': run.get('requirement_analysis_credit_usd', 0) + (limit or 0),

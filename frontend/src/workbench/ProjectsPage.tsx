@@ -13,6 +13,9 @@ import type { PageProps } from './ui'
 export interface ProjectRecord extends Project {
   revision?: number
   budget_usd?: number | null
+  // Where the enforced ceiling comes from. Absent on rows created before the
+  // cost policy existed, which keep their stored amount (or unlimited).
+  budget_source?: 'explicit' | 'inherit'
   managed_workspace?: boolean
 }
 
@@ -49,10 +52,11 @@ export function projectImportNotice(summary: ProjectImportSummary): string {
 interface ProjectDraft {
   name: string
   candidate_id: string
-  budget_usd: string
 }
 
-const blankDraft: ProjectDraft = { name: '', candidate_id: '', budget_usd: '' }
+// No dollar field on any ordinary start path: new projects follow the platform
+// cost policy, and an explicit ceiling is an admin decision in project settings.
+const blankDraft: ProjectDraft = { name: '', candidate_id: '' }
 
 function errorText(error: unknown): string {
   if (error instanceof WorkspaceApiError) return error.detail
@@ -84,22 +88,20 @@ export function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel, ag
     if (busy) return
     if (mode !== 'connect' && !draft.name.trim()) { setError('请填写项目名称。'); return }
     if (mode === 'zip') { const problem = uploadProblem; if (problem) { setError(problem); return } }
-    const budget = draft.budget_usd.trim() ? Number(draft.budget_usd) : null
-    if (budget !== null && (!Number.isFinite(budget) || budget <= 0)) { setError('预算需要是大于 0 的数字。'); return }
     if (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered)) { setError('请从最新列表中选择工程。'); return }
     setBusy(true)
     controllerRef.current?.abort()
     const controller = new AbortController(); controllerRef.current = controller
     try {
       if (mode === 'zip') {
-        const body = new FormData(); if (archive) body.append('file', archive); else files.forEach(file => body.append('files', file)); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); if (budget !== null) body.append('budget_usd', String(budget)); if (helperId) body.append('agent_id', helperId)
+        const body = new FormData(); if (archive) body.append('file', archive); else files.forEach(file => body.append('files', file)); body.append('name', draft.name.trim()); body.append('idempotency_key', idempotencyKey); if (helperId) body.append('agent_id', helperId)
         const result = await request<{ project: ProjectRecord; import_summary: ProjectImportSummary }>(archive ? '/api/v2/projects/import-zip' : '/api/v2/projects/import-files', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body })
         if (!controller.signal.aborted) onCreated(result.project, projectImportNotice(result.import_summary))
         return
       }
       const project = mode === 'workspace'
-        ? await request<ProjectRecord>('/api/v2/projects/create-workspace', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { name: draft.name.trim(), budget_usd: budget, idempotency_key: idempotencyKey, agent_id: helperId || null } })
-        : await request<ProjectRecord>('/api/v2/projects/connect', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { candidate_id: draft.candidate_id, name: draft.name.trim() || undefined, budget_usd: budget, agent_id: helperId || null } })
+        ? await request<ProjectRecord>('/api/v2/projects/create-workspace', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { name: draft.name.trim(), idempotency_key: idempotencyKey, agent_id: helperId || null } })
+        : await request<ProjectRecord>('/api/v2/projects/connect', { method: 'POST', csrfToken, onUnauthorized, signal: controller.signal, body: { candidate_id: draft.candidate_id, name: draft.name.trim() || undefined, agent_id: helperId || null } })
       if (controller.signal.aborted) return
       onCreated(project); setDraft(blankDraft)
     } catch (cause) { if (!controller.signal.aborted) setError(errorText(cause)) } finally { if (controllerRef.current === controller && !controller.signal.aborted) setBusy(false) }
@@ -114,7 +116,7 @@ export function ProjectForm({ csrfToken, onUnauthorized, onCreated, onCancel, ag
       <div className="wb-form-grid wb-form-grid-two">
         {mode === 'connect' && <label className="wb-span-two">选择工程，系统自动连接<select required value={draft.candidate_id} onChange={(event) => { const candidate = candidates?.find((item) => item.id === event.target.value); update('candidate_id', event.target.value); if (candidate) update('name', candidate.name) }} disabled={!candidates || availableProjectCandidates(candidates).length === 0}><option value="">{candidates ? availableProjectCandidates(candidates).length ? '请选择工程' : '没有发现可登记的工程' : '正在发现工程…'}</option>{candidates && availableProjectCandidates(candidates).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select><small>{rootAvailable ? '工程位置由服务器维护。' : '服务器工程目录当前不可用，请稍后刷新。'}</small></label>}
         <label>项目名称<input required={mode !== 'connect'} maxLength={120} value={draft.name} onChange={(event) => update('name', event.target.value)} placeholder={mode !== 'connect' ? '例如：我的转换器项目' : '留空使用工程名称'} /></label>
-        <p>项目只归集用量，默认不设美元停止线。管理员可在团队页面按成员设置月度 token 额度。</p>
+        <p>项目费用按平台费用策略执行：默认只归集用量、不设美元停止线。需要停止线时由管理员在费用页设置默认值，或在项目设置里为单个项目指定。</p>
       </div>
       {mode === 'connect' && <><button type="button" className="wb-button wb-button-secondary" onClick={() => setRefresh((value) => value + 1)} disabled={!candidates && !candidateError}>刷新工程列表</button>{candidateError && <ErrorNotice message={`${candidateError} 可重试发现工程。`} />}</>}{error && <ErrorNotice message={error} />}
       <div className="wb-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy || (mode === 'zip' && Boolean(uploadProblem)) || (mode !== 'connect' && !draft.name.trim()) || (mode === 'connect' && !candidates?.some((item) => item.id === draft.candidate_id && !item.registered))}>{busy ? mode === 'zip' ? '正在上传并识别项目…' : '准备中…' : mode === 'workspace' ? '创建工作区' : mode === 'zip' ? '导入项目' : '连接工程'}</button></div>

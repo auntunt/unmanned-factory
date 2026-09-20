@@ -19,6 +19,7 @@ from factory.control.skill_ingestion_runs import IngestionStore
 from factory.control.agents import AgentStore
 from factory.control.autonomy import DurableQueue, PolicyStore, policy_decision
 from factory.control.codegraph import baseline_sha
+from factory.control.cost_policy import CostPolicy
 from factory.control.execution import execute_plan
 from factory.control.deploy_targets import TargetStore
 from factory.control.remote_targets import RemoteTargets
@@ -90,6 +91,7 @@ class Service:
         self.operations = OperationStore(store)
         self._inspection_tick_at = 0
         self.operations_automation = OperationsAutomation(store)
+        self.cost_policy = CostPolicy(store)
         self.evolution = EvolutionStore(store, self.agent_manifests)
         self.operations_automation.evolution = self.evolution
         self.targets = TargetStore(store)
@@ -213,13 +215,21 @@ class Service:
         return {**plan, 'tasks': [{**task, 'prompt': task['prompt'].replace(compiled, original)}
                                  for task in plan['tasks']]}
 
+    def _enforced_project(self, pid):
+        """Load a project with its inherited ceiling already resolved.
+
+        Every enforcement path must read the same effective limit, so the policy
+        lookup happens here instead of inside the accounting code.
+        """
+        return self.cost_policy.resolved(self.store.project(pid))
+
     def _project_for_run(self, run):
         """Use the verified predecessor checkout without changing project refs."""
         if run.get('project_id') is None and run.get('source', {}).get('type') == 'skill_ingestion':
             record = self.skill_ingestions.get(run['source']['skill_ingestion_id'])
             agent = self.agents.get(record['target_agent_id'])
             return {'id': None, 'name': agent['name'], 'budget_usd': None, 'checks': {}}
-        project = self.store.project(run['project_id'])
+        project = self._enforced_project(run['project_id'])
         if run.get('spec_confirmation') and run.get('requirement_workspace'):
             if self.governance is not None:
                 self.governance.require_project(run.get('source', {}).get('actor_id'), run['project_id'])
@@ -530,6 +540,10 @@ class Service:
 
     def _remaining_dollar_budget(self, rid, project):
         return run_billing._remaining_dollar_budget(self, rid, project)
+
+    def _warn_budget_threshold(self, rid, budget):
+        'Emit one non-blocking reminder per ceiling once 80% is committed.'
+        return run_billing._warn_budget_threshold(self, rid, budget)
 
     def _budget_stop_artifacts(self, rid, project, reason, artifacts=None):
         'Persist a structured, user-visible reason for every service budget stop.'

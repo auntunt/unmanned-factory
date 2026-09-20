@@ -144,6 +144,10 @@ def router(store, svc, operations):
 
     @api.post('/api/v2/runs/{rid}/resume-budget')
     def resume_budget(rid: str, body: BudgetContinuation, request: Request):
+        # Defence in depth: the middleware already withholds this path from
+        # members, and granting more money stays an admin decision here too.
+        if request.state.user['role'] != 'admin':
+            raise HTTPException(403, '提高预算需要管理员权限')
         return budget_resume.resume(svc, rid, body.revision, body.resume_count, request.state.user['username'])
 
     @api.post('/api/v2/runs/{rid}/confirm-spec')

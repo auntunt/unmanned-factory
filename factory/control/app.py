@@ -10,6 +10,7 @@ import shutil
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
@@ -50,22 +51,24 @@ class ProjectUpdate(Body):
     auto_issues: bool = False
     auto_publish: bool = False
     budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
+    # 'inherit' defers to the admin cost policy; 'explicit' uses budget_usd as
+    # given, including null for monitoring only.
+    budget_source: Literal['explicit', 'inherit'] | None = Field(default=None)
 
 
 class ConnectProject(Body):
+    """Ordinary connect path: no dollar ceiling field; the policy decides."""
     agent_id: str | None = None
     candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
     name: str | None = Field(default=None, min_length=1, max_length=120)
     checks: dict[str, list[str]] = Field(default_factory=dict)
     auto_issues: bool = False
     auto_publish: bool = False
-    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
 
 
 class NewWorkspace(Body):
     agent_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
-    budget_usd: float | None = Field(default=None, gt=0, le=1000000, allow_inf_nan=False)
     idempotency_key: str = Field(min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
 
 class InspectionSettings(Body):
@@ -234,7 +237,10 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     # assigned projects and act on their own runs. New write
                     # endpoints are admin-only unless explicitly listed here.
                     own_account = path in ('/api/auth/logout', '/api/auth/password') and request.method == 'POST'
-                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget|follow-up)', path)
+                    # resume-budget is deliberately absent: renewing a ceiling is
+                    # an admin decision, not something a member may do on a run
+                    # they happen to own.
+                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|follow-up)', path)
                     creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
                     # 窄授权：member 对自己会话的 Skill 增/删/读，
                     # 归属验证由路由处理器执行，中间件只放行路径。
@@ -294,7 +300,10 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             raise HTTPException(400, '服务器上的仓库目录不存在')
         validate_check_definitions(body.checks)
         validate_project_git(root, body.base_branch)
-        return store.add_project({**body.model_dump(), 'workspace': str(root)})
+        # An admin who states an amount owns it explicitly; omitting the field
+        # follows the platform policy instead of silently meaning "unlimited".
+        source = 'explicit' if 'budget_usd' in body.model_fields_set else 'inherit'
+        return store.add_project({**body.model_dump(), 'workspace': str(root), 'budget_source': source})
 
     @app.post('/api/v2/projects/create-workspace', status_code=201)
     def new_workspace(body: NewWorkspace, request: Request):
@@ -305,7 +314,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             if body.agent_id:
                 try: helpers.agents.get(body.agent_id)
                 except KeyError: raise HTTPException(404, '所选职能体不存在') from None
-            project = create_workspace(store, allowed_root, name=body.name, budget_usd=body.budget_usd,
+            project = create_workspace(store, allowed_root, name=body.name,
                 actor_id=request.state.user['id'], idempotency_key=body.idempotency_key)
             if body.agent_id and helpers.binding(project['id'])['revision'] == 0:
                 helpers.bind(project['id'], body.agent_id, 0, request.state.user['id'])
@@ -317,20 +326,19 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     def import_workspace(request: Request, file: UploadFile = File(...),
                          name: str = Form(..., min_length=1, max_length=120),
                          idempotency_key: str = Form(..., min_length=8, max_length=100, pattern=r'^[A-Za-z0-9_-]+$'),
-                         budget_usd: float | None = Form(None, gt=0, le=1000000), agent_id: str | None = Form(None)):
+                         agent_id: str | None = Form(None)):
         from factory.control.project_import import import_project, ImportError
         from factory.control.workspaces import WorkspaceError
         from factory.control.project_assistants import ProjectAssistants
-        import math
-        if not name.strip() or (budget_usd is not None and not math.isfinite(budget_usd)):
-            raise HTTPException(422, '请填写有效的项目名称和预算')
+        if not name.strip():
+            raise HTTPException(422, '请填写有效的项目名称')
         helpers = ProjectAssistants(store)
         if agent_id:
             try: helpers.agents.get(agent_id)
             except KeyError: raise HTTPException(404, '所选职能体不存在') from None
         try:
             result = import_project(store, allowed_root, file.file, filename=file.filename,
-                name=name.strip(), budget_usd=budget_usd, actor_id=request.state.user['id'],
+                name=name.strip(), actor_id=request.state.user['id'],
                 idempotency_key=idempotency_key, agent_id=agent_id)
             if agent_id and helpers.binding(result['project']['id'])['revision'] == 0:
                 helpers.bind(result['project']['id'], agent_id, 0, request.state.user['id'])
@@ -370,7 +378,7 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
             project = create_project(Project(name=body.name or candidate['name'][:120],
                 repository=candidate['repository'], workspace=candidate['workspace'],
                 base_branch=candidate['base_branch'], checks=body.checks,
-                auto_issues=body.auto_issues, auto_publish=body.auto_publish, budget_usd=body.budget_usd))
+                auto_issues=body.auto_issues, auto_publish=body.auto_publish))
             if body.agent_id:
                 helpers.bind(project['id'], body.agent_id, 0, request.state.user['id'])
             return project
@@ -405,9 +413,17 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         validate_project_git(root, body.base_branch)
         try:
             changes = body.model_dump(exclude={'revision'})
-            for field in ('budget_usd', 'auto_spec_confirm', 'requirement_analysis_budget_usd'):
+            for field in ('budget_usd', 'auto_spec_confirm', 'requirement_analysis_budget_usd', 'budget_source'):
                 if field not in body.model_fields_set:
                     changes.pop(field, None)
+            # Naming an amount is an explicit override; without this an inherited
+            # project would keep following the policy and silently ignore it.
+            if 'budget_usd' in changes and 'budget_source' not in changes:
+                changes['budget_source'] = 'explicit'
+            if changes.get('budget_source') == 'inherit':
+                # Inheritance owns the amount; keeping a stale number would make
+                # the stored row disagree with what is enforced.
+                changes['budget_usd'] = None
             return store.update_project(pid, changes, body.revision,
                                         request.state.user['username'])
         except Conflict:

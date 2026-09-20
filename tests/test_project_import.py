@@ -204,7 +204,7 @@ def test_concurrent_import_retry_creates_single_baseline(app_env):
     payload = archive([('main.py', 'pass')])
     def create(_):
         return project_import.import_project(store, repo.parent, io.BytesIO(payload), filename='project.zip',
-            name='并发导入', budget_usd=10, actor_id=1, idempotency_key='concurrent-import')
+            name='并发导入', actor_id=1, idempotency_key='concurrent-import')
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(create, range(2)))
     assert results[0]['project']['id'] == results[1]['project']['id']
@@ -276,7 +276,7 @@ def test_project_archive_one_gib_boundary_rejects_before_reading():
         def read(self, *args): raise AssertionError('oversized body must not be read')
     with pytest.raises(project_import.ImportError, match='1 GB'):
         project_import.import_project(None, None, OversizedUpload(), filename='large.zip',
-            name='large', budget_usd=None, actor_id=1, idempotency_key='oversized')
+            name='large', actor_id=1, idempotency_key='oversized')
 
 
 def test_expanded_limit_allows_large_projects_but_stays_bounded():

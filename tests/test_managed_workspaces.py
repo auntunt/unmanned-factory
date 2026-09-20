@@ -9,17 +9,20 @@ from tests.test_workbench_app import app_env
 from tests.test_control_app import login
 
 
-def test_name_and_budget_create_workspace_without_requirements(app_env):
+def test_name_alone_creates_workspace_and_budget_field_is_rejected(app_env):
     client, store, service, repo = app_env
     headers = login(client)
-    body = {'name': '我的设计工作区', 'budget_usd': 12, 'idempotency_key': 'create-workspace-1'}
+    body = {'name': '我的设计工作区', 'idempotency_key': 'create-workspace-1'}
     assert client.post('/api/v2/projects/create-workspace', json=body).status_code == 403
+    # The ordinary creation path carries no dollar field at all.
+    assert client.post('/api/v2/projects/create-workspace',
+                       json={**body, 'budget_usd': 12}, headers=headers).status_code == 422
     response = client.post('/api/v2/projects/create-workspace', json=body, headers=headers)
     assert response.status_code == 201, response.text
     p = response.json()
     root = Path(p['workspace'])
     assert root.parent == repo.parent and root.name.startswith('workspace-')
-    assert p['name'] == body['name'] and p['budget_usd'] == 12
+    assert p['name'] == body['name'] and p['budget_usd'] is None and p['budget_source'] == 'inherit'
     assert p['managed_workspace'] and not p['auto_publish']
     assert subprocess.check_output(['git', 'rev-parse', '--verify', 'main'], cwd=root)
     assert not subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', 'HEAD'], cwd=root)
@@ -47,7 +50,7 @@ def test_creation_rolls_back_its_own_directory_on_git_failure(app_env, monkeypat
 def test_concurrent_retries_provision_one_workspace(app_env):
     _, store, _, repo = app_env
     def make(_):
-        return create_workspace(store, repo.parent, name='同一个工作区', budget_usd=10.0, actor_id=1, idempotency_key='parallel-request')
+        return create_workspace(store, repo.parent, name='同一个工作区', actor_id=1, idempotency_key='parallel-request')
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(make, range(2)))
     assert results[0]['id'] == results[1]['id']
@@ -60,7 +63,7 @@ def test_first_spoken_requirement_runs_in_fresh_workspace(app_env, monkeypatch):
     from tests.test_control_app import wait_state
     client, store, service, _ = app_env
     headers = login(client)
-    p = client.post('/api/v2/projects/create-workspace', json={'name': '新项目', 'budget_usd': 10, 'idempotency_key': 'first-task-workspace'}, headers=headers).json()
+    p = client.post('/api/v2/projects/create-workspace', json={'name': '新项目', 'idempotency_key': 'first-task-workspace'}, headers=headers).json()
     verified = []
     def runner(request, emit, cancel=None):
         root = Path(request.workspace)

@@ -157,6 +157,8 @@ def _attention(run, events, latest_inspections=None):
 
 def overview(store, project_id=None):
     from factory.control.capabilities import CapabilityStore
+    from factory.control.cost_policy import CostPolicy
+    policy = CostPolicy(store)
     projects = store.projects()
     project_by_id = {project['id']: project for project in projects}
     if project_id is not None and project_id not in project_by_id:
@@ -288,7 +290,10 @@ def overview(store, project_id=None):
                                 for run in project_runs)
         project_summaries.append({
             'id': project['id'], 'name': project['name'], 'repository': project.get('repository'),
-            'budget_usd': project.get('budget_usd'), 'run_count': len(project_runs),
+            'budget_usd': project.get('budget_usd'),
+            'budget_source': project.get('budget_source', 'explicit'),
+            'effective_budget_usd': policy.effective_budget_usd(project),
+            'run_count': len(project_runs),
             'next_run': next(iter(sorted(project_runs, key=lambda run: (run.get('status') not in ('awaiting_spec_confirmation', 'needs_human', 'needs_clarification', 'awaiting_approval'), run.get('status') not in ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'ready_for_review', 'publishing'), project_runs.index(run)))), None),
             'active_runs': sum(run.get('status') in ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'publishing')
                                for run in project_runs),
@@ -306,6 +311,7 @@ def overview(store, project_id=None):
         'legacy_known_cost_usd': legacy_known, 'recent_events': recent,
         'attention': attention, 'model_usage': list(usage.values()), 'activity': list(activity.values()),
         'capabilities': len(capabilities), 'engineering': engineering_for(project_id, runs),
+        'cost_policy': policy.config(),
     }
 
 

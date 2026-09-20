@@ -22,8 +22,9 @@ def initialize_repository(path: Path, *, env=None):
         subprocess.run(['git', *args], cwd=path, env=env, check=True, capture_output=True, timeout=15)
 
 
-def create_workspace(store, root: Path, *, name: str, budget_usd: float | None, actor_id: int, idempotency_key: str):
-    fingerprint = hashlib.sha256(json.dumps([name, budget_usd], ensure_ascii=False).encode()).hexdigest()
+def create_workspace(store, root: Path, *, name: str, actor_id: int, idempotency_key: str):
+    """Create a managed workspace; the dollar ceiling comes from the admin policy."""
+    fingerprint = hashlib.sha256(json.dumps([name], ensure_ascii=False).encode()).hexdigest()
     owned = None
     try:
         with store.connect() as db:
@@ -45,7 +46,7 @@ def create_workspace(store, root: Path, *, name: str, budget_usd: float | None, 
             initialize_repository(path)
             project = store._insert_project(db, {
                 'name': name, 'repository': 'local/workspace-' + key, 'workspace': str(path),
-                'base_branch': 'main', 'budget_usd': budget_usd,
+                'base_branch': 'main', 'budget_usd': None, 'budget_source': 'inherit',
                 'checks': {'workspace-integrity': ['git', 'diff', '--check', 'HEAD']},
                 'auto_issues': False, 'auto_publish': False, 'managed_workspace': True,
                 'actor': str(actor_id),

@@ -118,7 +118,7 @@ def inspect_run(service, rid):
     run = service.store.get(rid)
     artifacts = {}
     try:
-        project = service.store.project(run['project_id'])
+        project = service._enforced_project(run['project_id'])
         service._remaining_dollar_budget(rid, project)
         if service.governance is not None:
             service.governance.require_project(run['source']['actor_id'], run['project_id'])

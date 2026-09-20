@@ -108,6 +108,38 @@ def _dollar_budget(self, rid, project):
         raise Conflict(f'项目预算配置无效：{exc}', error_type='budget') from None
 
 
+BUDGET_WARNING_RATIO = 0.8
+
+
+def _warn_budget_threshold(self, rid, budget):
+    """Emit one non-blocking reminder per ceiling once 80% is committed.
+
+    Monitoring-only runs have no ceiling and therefore no threshold; they must
+    never be told a budget is running out. The reminder lives in the durable
+    event log keyed by the ceiling it refers to, so reloading the page or
+    restarting the service does not produce a second one, while a renewed
+    (larger) ceiling legitimately earns a new reminder.
+    """
+    limit = budget.limit_usd
+    if limit is None or limit <= 0 or budget.exhausted:
+        return
+    if budget.known_cost_usd < limit * BUDGET_WARNING_RATIO:
+        return
+    key = round(float(limit), 4)
+    for event in all_events(self.store, rid):
+        if event['type'] != 'budget.threshold_warning':
+            continue
+        payload = event['payload'] if isinstance(event.get('payload'), dict) else {}
+        if valid_cost(payload.get('limit_usd')) is not None and round(float(payload['limit_usd']), 4) == key:
+            return
+    self._emit(rid, 'budget.threshold_warning', {
+        'limit_usd': float(limit), 'committed_usd': float(budget.known_cost_usd),
+        'ratio': BUDGET_WARNING_RATIO, 'blocking': False,
+        'message': (f'本次任务已占用预算的 {budget.known_cost_usd / limit:.0%}'
+                    f'（已计 ${budget.known_cost_usd:.4f}，上限 ${limit:.4f}）；'
+                    '任务继续进行，达到上限后会停止新的模型调用。')})
+
+
 def _remaining_dollar_budget(self, rid, project):
     budget = self._dollar_budget(rid, project)
     if budget.exhausted:
@@ -115,6 +147,11 @@ def _remaining_dollar_budget(self, rid, project):
         hold = usage['unknown_cost_reserved_usd']
         detail = (f'，未对账调用按上限暂占 ${hold:.4f}' if hold else '')
         raise Conflict(f'本次运行预算已用尽：已记录 ${usage["known_cost_usd"]:.4f}{detail}，上限 ${budget.limit_usd:.4f}；停止新的模型调用', error_type='budget')
+    try:
+        self._warn_budget_threshold(rid, budget)
+    except Exception:
+        # A reminder must never stop work that the budget itself allows.
+        pass
     return budget
 
 
@@ -185,7 +222,7 @@ def _record_interrupted_provider_usage(self, run):
     if not latest_by_lane:
         return
     project = (self._project_for_run(run) if run.get('project_id') is None and run.get('source', {}).get('type') == 'skill_ingestion'
-               else self.store.project(run['project_id']))
+               else self._enforced_project(run['project_id']))
     fallback_ceiling = valid_cost(project.get('budget_usd'))
     for lane, started in latest_by_lane.items():
         payload = started['payload']

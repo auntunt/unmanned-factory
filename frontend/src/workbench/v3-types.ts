@@ -60,6 +60,13 @@ export interface OverviewData {
   activity: Array<{ date: string; runs: number; delivered: number }>
   capabilities: number
   engineering?: EngineeringSummary
+  cost_policy?: CostPolicy
+}
+
+// `default_project_budget_usd: null` is the platform default: monitoring only.
+export interface CostPolicy {
+  revision: number
+  default_project_budget_usd?: number | null
 }
 
 export interface ProjectSummary {
@@ -67,7 +74,12 @@ export interface ProjectSummary {
   id: string
   name: string
   repository: string
+  // `budget_usd` is the amount stored on the project; `budget_source` says where
+  // the enforced ceiling comes from, so null never has to mean both "unlimited"
+  // and "inherit". `effective_budget_usd` is what enforcement actually uses.
   budget_usd?: number | null
+  budget_source?: 'explicit' | 'inherit'
+  effective_budget_usd?: number | null
   run_count: number
   active_runs: number
   attention_runs: number

@@ -114,6 +114,108 @@ def _extract_verdict_json(text: str) -> dict:
     return candidates[0]
 
 
+_VERDICT_TOKEN_RE = re.compile(r'(?<![A-Za-z])(pass|fail|unverified)(?![A-Za-z])', re.IGNORECASE)
+
+_FORMAT_REPAIR_PROMPT = Template('''You are a text reformatter. You are NOT a reviewer.
+
+The text between the markers below is one verification report that failed to
+parse as the required structured result. Reproduce the SAME conclusion it
+already states, as exactly one JSON object and nothing else.
+
+Rules:
+- Do not judge anything. Do not add, remove, soften or strengthen any finding.
+- "verdict" must be the verdict the text already states, verbatim, one of
+  "pass", "fail", "unverified". If the text states no single clear verdict, or
+  states more than one, reply with exactly: CANNOT_REFORMAT
+- "reason" must be the text's own stated reason, shortened if needed.
+- Copy any per-criterion entries the text contains into "criteria" unchanged.
+- Output a single ```json fenced object. No commentary before or after.
+
+--- BEGIN REPORT ($sentinel) ---
+$body
+--- END REPORT ($sentinel) ---
+''')
+
+
+def _stated_verdicts(text: str) -> set:
+    """Verdict words the original report actually contains."""
+    return {match.group(1).lower() for match in _VERDICT_TOKEN_RE.finditer(text or '')}
+
+
+def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspace,
+                           original_text, review_deadline):
+    """At most one bounded reformat of a structurally invalid verification report.
+
+    This buys back the cost of a whole re-review when the reviewer's conclusion
+    was clear but its envelope was not. It is deliberately not a second review:
+    no tools, no session, no browser, no checks, the same snapshot commit and the
+    same contract version, and the repaired verdict must already be stated in the
+    original text. The call is billed and bound by the same hard cap.
+
+    Returns the parsed verdict, or None when repair is not available or refused.
+    """
+    if artifacts.get('verification_format_repair'):
+        return None  # One per independent verification.
+    if profile.get('provider') != 'claude':
+        # A tools-free channel exists only here; other providers would have to
+        # run the repair with execution tools attached, which is not acceptable.
+        return None
+    stated = _stated_verdicts(original_text)
+    if len(stated) != 1:
+        # No single stated conclusion, or conflicting ones. Nothing to reformat.
+        return None
+    remaining_s = review_deadline - time.monotonic()
+    if remaining_s < 5 or self.cancels[rid].is_set():
+        return None
+    try:
+        repair_budget = self._remaining_dollar_budget(rid, project)
+    except Conflict:
+        return None  # Money is gone; no further billable calls.
+    artifacts['verification_format_repair'] = {
+        'attempted': True, 'commit': artifacts.get('verification_commit'),
+        'template_version': artifacts.get('verification_template_version'),
+        'stated_verdict': sorted(stated)[0], 'tools_executed': 0}
+    sentinel = uuid.uuid4().hex
+    prompt = _FORMAT_REPAIR_PROMPT.substitute(sentinel=sentinel,
+        body=(original_text or '')[:_VERIFIER_CONTRACT_MAX_CHARS])
+    call_id = uuid.uuid4().hex
+    self._emit(rid, 'provider.started', {'profile': 'verification_format_repair', **profile,
+        'call_id': call_id, 'max_budget_usd': repair_budget.remaining_usd}, 'verification')
+    result = None
+    try:
+        result = self._runner_for(rid).run(ProviderRequest(
+            provider=profile['provider'], model=profile['model'], prompt=prompt,
+            workspace=workspace, timeout_s=int(min(120, remaining_s)),
+            read_only=True, tools_disabled=True,
+            max_budget_usd=repair_budget.remaining_usd),
+            lambda kind, payload: self._emit(rid, kind, payload, 'verification'),
+            self.cancels[rid])
+    except Exception:
+        return None
+    finally:
+        cost = valid_cost(getattr(result, 'cost_usd', None))
+        self._emit(rid, 'usage.recorded', {'profile': 'verification_format_repair', **profile,
+            'call_id': call_id, 'max_budget_usd': repair_budget.remaining_usd, 'cost_usd': cost,
+            'input_tokens': getattr(result, 'tokens_in', None),
+            'output_tokens': getattr(result, 'tokens_out', None)}, 'verification')
+    try:
+        verdict = _extract_verdict_json(result.text)
+    except (ValueError, TypeError):
+        artifacts['verification_format_repair']['accepted'] = False
+        artifacts['verification_format_repair']['refused'] = '重排后仍不是有效结构化结果'
+        return None
+    if verdict['verdict'] != sorted(stated)[0]:
+        # The reformat must never change the conclusion, in either direction.
+        artifacts['verification_format_repair']['accepted'] = False
+        artifacts['verification_format_repair']['refused'] = '重排改变了原结论'
+        return None
+    artifacts['verification_format_repair']['accepted'] = True
+    self._emit(rid, 'verification.format_repaired', {
+        'verdict': verdict['verdict'], 'commit': artifacts.get('verification_commit'),
+        'message': '验收结论格式已重排一次，未重跑开发、检查或浏览器'}, 'verification')
+    return verdict
+
+
 def _validate_verdict_fields(obj: dict) -> None:
     if obj.get('verdict') not in ('pass', 'fail', 'unverified'):
         raise ValueError(f"invalid verdict: {obj.get('verdict')!r}")
@@ -381,8 +483,11 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     try:
         verdict = _extract_verdict_json(result.text)
     except (ValueError, TypeError):
-        artifacts['verification'] = {'verdict': 'fail', 'reason': '独立验证模型未返回有效 verdict', 'error_type': 'invalid_response'}
-        raise ExecutionError('独立验证未返回有效结构化结果', artifacts=artifacts)
+        verdict = _repair_verdict_format(self, rid, run, project, artifacts, profile,
+                                         workspace, getattr(result, 'text', None), review_deadline)
+        if verdict is None:
+            artifacts['verification'] = {'verdict': 'fail', 'reason': '独立验证模型未返回有效 verdict', 'error_type': 'invalid_response'}
+            raise ExecutionError('独立验证未返回有效结构化结果', artifacts=artifacts)
     ledger = coverage(criteria, verdict, artifacts.get('verification_commit'), skills=(run.get('agent_snapshot') or {}).get('manifest', {}).get('skills', []))
     verdict = fidelity.enforce(self.store, rid, run, verdict, ledger)
     artifacts['acceptance_ledger'] = ledger

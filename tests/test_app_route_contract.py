@@ -22,10 +22,11 @@ def test_route_parameters_and_decorators_unchanged():
             if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)):
                 for d in n.decorator_list:
                     if isinstance(d,ast.Call) and isinstance(d.func,ast.Attribute) and d.func.attr in ('get','post','put','patch','delete','api_route'):
-                        if n.name in {'confirm_spec', 'resume_budget', 'follow_up'}:
-                            continue  # Reviewed additions have separate schema and authorization contract tests.
+                        if n.name in {'confirm_spec', 'resume_budget', 'follow_up', 'import_workspace'}:
+                            continue  # Reviewed changes have separate schema and authorization contract tests.
                         rows.append({'name':n.name,'method':d.func.attr,'args':dump(n.args),'decorator_args':[dump(a) for a in d.args],'decorator_keywords':[dump(k) for k in d.keywords],'async':isinstance(n,ast.AsyncFunctionDef)})
-    assert sorted(rows,key=lambda r:json.dumps(r,sort_keys=True))==sorted(baseline['routes'],key=lambda r:json.dumps(r,sort_keys=True))
+    frozen = [r for r in baseline['routes'] if r['name'] != 'import_workspace']
+    assert sorted(rows,key=lambda r:json.dumps(r,sort_keys=True))==sorted(frozen,key=lambda r:json.dumps(r,sort_keys=True))
 
 
 def _normalize_member_chat_whitelist(block):
@@ -53,6 +54,34 @@ def _normalize_member_chat_whitelist(block):
     return block
 
 
+def test_zip_import_form_exposes_no_dollar_field():
+    """The removal of budget_usd from import-zip is the only signature change."""
+    source = (ROOT/'factory/control/app.py').read_text()
+    routes = [n for n in ast.walk(ast.parse(source))
+              if isinstance(n, ast.FunctionDef) and n.name == 'import_workspace']
+    assert len(routes) == 1
+    args = [a.arg for a in routes[0].args.args]
+    assert args == ['request', 'file', 'name', 'idempotency_key', 'agent_id']
+    assert len(routes[0].decorator_list) == 1
+    assert dump(routes[0].decorator_list[0]) == dump(ast.parse(
+        "app.post('/api/v2/projects/import-zip', status_code=201)", mode='eval').body)
+
+
+def _normalize_resume_budget_removal(block):
+    """Undo the reviewed REMOVAL of resume-budget from the member allowlist.
+
+    Renewing a dollar ceiling became admin-only; the route handler additionally
+    checks the role. This maps the narrowed pattern back to the frozen text so the
+    byte comparison still protects everything around it.
+    """
+    return block.replace(
+        "                    # resume-budget is deliberately absent: renewing a ceiling is\n"
+        "                    # an admin decision, not something a member may do on a run\n"
+        "                    # they happen to own.\n"
+        "                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|follow-up)', path)",
+        "                    run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget|follow-up)', path)")
+
+
 def _normalize_session_skill_whitelist(block):
     """Strip the reviewed R2 narrow session-skill whitelist addition."""
     block = block.replace(
@@ -78,6 +107,7 @@ def test_middleware_remains_byte_identical_in_app():
     # authentication, CSRF, ownership and project-assignment logic stays byte-identical.
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
+    block = _normalize_resume_budget_removal(block)
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
     block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
@@ -93,6 +123,7 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     # authentication, CSRF, ownership and project-assignment logic stays byte-identical.
     block = block.replace('/(skills|abilities)', '/skills')
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
+    block = _normalize_resume_budget_removal(block)
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
     block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
@@ -114,7 +145,8 @@ def test_followup_is_an_exact_run_action_addition_not_a_broader_member_permissio
     # The byte comparison above protects the full surrounding owner/project,
     # authentication and CSRF checks; this pins the sole new member action.
     source = (ROOT/'factory/control/app.py').read_text()
-    pattern = r"/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|resume-budget|follow-up)"
+    # resume-budget was withdrawn from this allowlist: raising a ceiling is admin-only.
+    pattern = r"/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|follow-up)"
     assignments = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == 'run_action' for t in n.targets)]
     assert len(assignments) == 1
