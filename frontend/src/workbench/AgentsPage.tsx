@@ -14,7 +14,7 @@ import AgentMetadataEditor from './AgentMetadataEditor'
 import AgentAssets from './AgentAssets'
 import SkillIngestion from './SkillIngestion'
 import SkillUploadFeedback from './SkillUploadFeedback'
-import { packsBase, type PackBinding } from './pack-types'
+import { ENV_LABEL, packsBase, type PackBinding } from './pack-types'
 import { capabilityHref } from './capability-links'
 import './agents.css'
 
@@ -56,6 +56,13 @@ export function draftCanApply(draft: { revision: number; conflicts?: unknown[] }
 
 type AbilitySource = 'upload' | 'team' | 'dev'
 
+/** Pack detail link that remembers which role sent you, so the detail page can
+ *  bring you back and pre-select the target instead of asking again. */
+function packHref(packId: string, agentId: string, tab?: string) {
+  const params = new URLSearchParams({ agent_id: agentId, ...(tab ? { tab } : {}) })
+  return `/ability-center/packs/${encodeURIComponent(packId)}?${params}`
+}
+
 function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId: string; onChanged: () => void }) {
   const [source, setSource] = useState<AbilitySource | null>(null)
   const [uploadBusy, setUploadBusy] = useState(false)
@@ -68,11 +75,15 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
   // Team capabilities
   const [modules, setModules] = useState<Module[]>([])
   const [capabilities, setCaps] = useState<Capability[]>([])
+  const [catalog, setCatalog] = useState<PackSummary[]>([])
+  const [boundIds, setBoundIds] = useState<string[]>([])
   const [teamError, setTeamError] = useState('')
   const [teamLoaded, setTeamLoaded] = useState(false)
+  const [binding, setBinding] = useState('')
+  const [bindError, setBindError] = useState('')
 
-  // Dev results
-  const [packs, setPacks] = useState<PackBinding[]>([])
+  // Dev results: real candidates this user maintains, not what is already attached.
+  const [candidates, setCandidates] = useState<PackSummary[]>([])
   const [devError, setDevError] = useState('')
   const [devLoaded, setDevLoaded] = useState(false)
 
@@ -92,22 +103,54 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
     Promise.all([
       request<{ modules: Module[] }>(`/api/v4/modules?agent_id=${encodeURIComponent(agentId)}`, { signal: c.signal, onUnauthorized: props.onUnauthorized }),
       request<{ capabilities: Capability[] }>('/api/v3/capabilities', { signal: c.signal, onUnauthorized: props.onUnauthorized }),
-    ]).then(([mods, caps]) => {
-      if (!c.signal.aborted) { setModules(mods.modules || []); setCaps(caps.capabilities || []); setTeamLoaded(true) }
+      request<{ packs: PackSummary[] }>(packsBase, { signal: c.signal, onUnauthorized: props.onUnauthorized }),
+      request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { signal: c.signal, onUnauthorized: props.onUnauthorized }),
+    ]).then(([mods, caps, all, bound]) => {
+      if (c.signal.aborted) return
+      setModules(mods.modules || []); setCaps(caps.capabilities || [])
+      setCatalog(all.packs || []); setBoundIds((bound.bindings || []).map(b => b.pack_id))
+      setTeamLoaded(true)
     }).catch(e => { if (!c.signal.aborted) setTeamError(errorText(e)) })
     return () => c.abort()
-  }, [source, agentId, props.onUnauthorized])
+  }, [source, agentId, props.onUnauthorized, epoch])
 
   // Load dev packs when that source is selected
   useEffect(() => {
     if (source !== 'dev') return
     const c = new AbortController()
     setDevLoaded(false); setDevError('')
-    request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { signal: c.signal, onUnauthorized: props.onUnauthorized })
-      .then(r => { if (!c.signal.aborted) { setPacks(r.bindings || []); setDevLoaded(true) } })
+    request<{ packs: PackSummary[] }>(packsBase, { signal: c.signal, onUnauthorized: props.onUnauthorized })
+      .then(r => {
+        if (c.signal.aborted) return
+        // Development results still on their way to a published version: these are
+        // the ones you continue (validate -> publish -> attach), not the finished
+        // tools already attached to this role.
+        setCandidates((r.packs || []).filter(pk => !pk.published_version))
+        setDevLoaded(true)
+      })
       .catch(e => { if (!c.signal.aborted) setDevError(errorText(e)) })
     return () => c.abort()
-  }, [source, agentId, props.onUnauthorized])
+  }, [source, agentId, props.onUnauthorized, epoch])
+
+  /** Attach a published pack to THIS agent, using the existing detail and
+   *  bindings endpoints. The role is fixed by the page, so nothing has to be
+   *  re-picked, and the attached list refreshes in place. */
+  const attachPack = async (packId: string) => {
+    if (binding) return
+    setBinding(packId); setBindError('')
+    try {
+      const detail = await request<PackDetail>(`${packsBase}/${encodeURIComponent(packId)}`, { onUnauthorized: props.onUnauthorized })
+      const latest = (detail.versions || [])[0]
+      if (!latest) throw new Error('该职能包还没有已发布版本')
+      const current = await request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { onUnauthorized: props.onUnauthorized })
+      const existing = (current.bindings || []).find(b => b.pack_id === packId)
+      await request(`${packsBase}/bindings`, {
+        method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized,
+        body: { agent_id: agentId, version_id: latest.id, expected_revision: existing?.revision ?? 0 },
+      })
+      setEpoch(v => v + 1); onChanged()
+    } catch (cause) { setBindError(errorText(cause)) } finally { setBinding('') }
+  }
 
   const submitUpload = async (file: File) => {
     if (uploadBusy) return
@@ -138,7 +181,7 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
       {/* ---- Upload source ---- */}
       {source === 'upload' && (
         <div className="agent-source-form" data-testid="source-upload">
-          <p>上传 Skill ZIP 文件。平台导出的职能体包（会新建角色）请使用列表页的"导入职能体"入口。当前没有任意 CLI ZIP 初始导入接口。</p>
+          <p>上传 Skill ZIP 文件。平台导出的职能体包（会新建角色）请使用列表页的"导入职能体"入口。</p>
           {preflight?.ready === false && <p role="alert">{preflight.message}</p>}
           <label>Skill ZIP 文件
             <input type="file" accept=".zip" disabled={uploadBusy || preflight?.ready === false}
@@ -163,29 +206,61 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
                 <ul className="agent-team-list">
                   {modules.map(m => (
                     <li key={m.id}>
-                      <Link to={capabilityHref('modules', m.id)}>{m.name}</Link>
+                      <Link to={`${capabilityHref('modules', m.id)}&agent_id=${encodeURIComponent(agentId)}`}>{m.name}</Link>
                       <small> v{m.version} · {m.description?.slice(0, 60) || m.category}</small>
                     </li>
                   ))}
                 </ul>
               ) : <p>团队还没有方法模块。</p>}
-              <p style={{ marginTop: 12 }}>在上方"工作规范"区的岗位清单中选择并加载 Skill。</p>
+              <p style={{ marginTop: 12 }}>选好后在上方「工作规范」的岗位清单里加载它。</p>
 
               <h3 style={{ marginTop: 16 }}>沉淀能力 · {capabilities.length} 个</h3>
               {capabilities.length > 0 ? (
                 <ul className="agent-team-list">
                   {capabilities.map(c => (
                     <li key={c.id}>
-                      <Link to={capabilityHref('capabilities', c.id)}>{c.name}</Link>
+                      <Link to={`${capabilityHref('capabilities', c.id)}&agent_id=${encodeURIComponent(agentId)}`}>{c.name}</Link>
                       {c.source_run_id && <small> · <Link to={`/runs/${encodeURIComponent(c.source_run_id)}`}>来源运行</Link></small>}
                     </li>
                   ))}
                 </ul>
               ) : <p>还没有运行沉淀的能力。</p>}
-              <p className="agent-section-note">沉淀能力本身面向项目使用。要将其加入职能体，需在能力详情里"升格为 Skill"并通过进化提案流程。这是入口收拢，不是新增绑定能力。</p>
+              <p className="agent-section-note">沉淀能力本身面向项目使用。要将其加入职能体，需在能力详情里"升格为 Skill"并通过进化提案流程。</p>
 
-              <h3 style={{ marginTop: 16 }}>职能包（独立工具）</h3>
-              <p>已挂靠的工具在下方"已挂靠工具"区管理。要添加新工具，先在 <Link to="/ability-center?tab=packs">职能包目录</Link> 发布工具版本，再挂靠到当前职能体。</p>
+              <h3 style={{ marginTop: 16 }}>可用工具</h3>
+              {bindError && <ErrorNotice message={bindError} />}
+              {(() => {
+                const available = catalog.filter(pk => pk.published_version && !boundIds.includes(pk.id))
+                const pending = catalog.filter(pk => !pk.published_version)
+                return <>
+                  {available.length > 0 ? (
+                    <ul className="agent-team-list">
+                      {available.map(pk => (
+                        <li key={pk.id}>
+                          <Link to={packHref(pk.id, agentId)}>{pk.name}</Link>
+                          <small> v{pk.published_version} · {pk.purpose?.slice(0, 60) || '独立工具'}</small>
+                          <button type="button" className="cv-btn cv-btn-secondary agent-attach-btn"
+                            disabled={Boolean(binding)} onClick={() => void attachPack(pk.id)}>
+                            {binding === pk.id ? '挂靠中…' : '挂靠到本职能体'}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p>没有可直接挂靠的工具。已挂靠的在上方「已挂靠工具」区管理。</p>}
+                  {pending.length > 0 && <>
+                    <h3 style={{ marginTop: 16 }}>还在准备中的工具</h3>
+                    <p className="agent-section-note">这些还没有可用版本。打开后按原有流程验证并发布，完成后回到这里挂靠。</p>
+                    <ul className="agent-team-list">
+                      {pending.map(pk => (
+                        <li key={pk.id}>
+                          <Link to={packHref(pk.id, agentId)}>{pk.name}</Link>
+                          <small> · 待验证发布</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </>}
+                </>
+              })()}
             </>
           )}
         </div>
@@ -197,19 +272,20 @@ function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId
           <p>复用真实开发成果沉淀的工具包：从运行成果中选择 → 候选 → 验证 → 发布 → 挂靠到当前职能体。</p>
           {devError && <ErrorNotice message={devError} />}
           {!devLoaded && !devError && <p>正在加载…</p>}
-          {devLoaded && packs.length === 0 && (
+          {devLoaded && candidates.length === 0 && (
             <div className="agent-dev-empty">
-              <p>当前职能体尚无已挂靠的开发成果工具。</p>
-              <p>要添加开发成果，请先在项目中完成开发任务，将成果沉淀为职能包并发布版本，然后从 <Link to="/ability-center?tab=packs">职能包目录</Link> 挂靠到本职能体。</p>
+              <p>还没有待继续的开发成果。</p>
+              <p>先在项目里完成一次开发任务，在成果页把它沉淀为工具包；回到这里就能继续验证、发布并挂靠。
+                <Link to="/runs" style={{ marginLeft: 6 }}>打开运行记录</Link></p>
             </div>
           )}
-          {devLoaded && packs.length > 0 && (
+          {devLoaded && candidates.length > 0 && (
             <ul className="agent-team-list">
-              {packs.map(p => (
-                <li key={p.id}>
-                  <strong>{p.pack_name}</strong> v{p.version}
-                  {p.upgrade_available && <small> · 可升级到 v{p.latest_version}</small>}
-                  <Link to={`/ability-center/packs/${encodeURIComponent(p.pack_id)}?tab=versions`} style={{ marginLeft: 8 }}>查看详情</Link>
+              {candidates.map(pk => (
+                <li key={pk.id}>
+                  <Link to={packHref(pk.id, agentId)}>{pk.name}</Link>
+                  <small> · {pk.purpose?.slice(0, 60) || '待验证发布'}</small>
+                  <small> · 打开后验证并发布，完成即可挂靠回本职能体</small>
                 </li>
               ))}
             </ul>
@@ -253,9 +329,15 @@ function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
                 {b.upgrade_available && <Link className="agent-tool-upgrade" to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}?tab=versions`}>可升级到 v{b.latest_version}</Link>}
               </div>
               <div className="agent-tool-status">
-                {b.environment?.status === 'unavailable'
-                  ? <span className="agent-tool-warn">环境不可用：{b.environment.missing?.join('、') || '未知依赖'}</span>
-                  : <span className="agent-tool-ok">环境就绪</span>}
+                {/* Only an explicit `ready` may read as usable. unchecked (which the
+                    backend also returns when a check went stale or the runtime
+                    changed), checking and a missing field are NOT readiness. */}
+                {b.environment?.status === 'ready'
+                  ? <span className="agent-tool-ok">{ENV_LABEL.ready}</span>
+                  : b.environment?.status === 'unavailable'
+                    ? <span className="agent-tool-warn">{ENV_LABEL.unavailable}：{b.environment.missing?.join('、') || '未知依赖'}</span>
+                    : <span className="agent-tool-pending">{ENV_LABEL[b.environment?.status ?? 'unchecked']}</span>}
+                {b.environment?.stale && <span className="agent-tool-stale">{b.environment.stale_reason || '上次检查结果已过期'}</span>}
               </div>
               <Link className="cv-btn cv-btn-secondary" style={{ fontSize: 13, padding: '6px 10px' }}
                 to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}`}>管理</Link>
@@ -405,7 +487,10 @@ export default function AgentsPage(props: PageProps) {
         {loading && !selected && <div className="wb-card agent-loading">正在读取职能体…</div>}
         {!loading && !selected && !error && <ErrorNotice message="未找到这个职能体，请返回列表选择。" />}
         {error && <ErrorNotice message={error} />}
-        {selected && <AgentManagementPage agent={selected} props={props} />}
+        {/* Keyed by id: navigating a1 -> a2 inside one route tree must rebuild the
+            management state, otherwise edits and bindings keep writing to the
+            agent that was mounted first. */}
+        {selected && <AgentManagementPage key={selected.id} agent={selected} props={props} />}
       </div>
     )
   }
