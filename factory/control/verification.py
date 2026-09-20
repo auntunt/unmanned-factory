@@ -114,16 +114,13 @@ def _extract_verdict_json(text: str) -> dict:
     return candidates[0]
 
 
-# The repair boundary is structural, not lexical. Only the JSON field form of a
-# verdict counts as something the report *stated*; prose that merely contains the
-# word "pass" (including "I cannot pass this") carries no recoverable structure
-# and is never handed to the reformatter.
-_VERDICT_FIELD_RE = re.compile(r'"verdict"\s*:\s*"(pass|fail|unverified)"')
-_BRACE_BODY_RE = re.compile(r'\{([^{}]*)\}')
-_ROW_ID_RE = re.compile(r'"id"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_ROW_STATUS_RE = re.compile(r'"status"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_ROW_EVIDENCE_RE = re.compile(r'"evidence"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_ROW_KEYS = ('"id"', '"status"', '"evidence"')
+# The repair boundary is the whole recovered structure, not a lexical scan of it.
+# Scanning for well-formed fragments cannot see a row that is itself damaged, so a
+# reformatter could quietly drop that row and still "match" the fragments we found.
+# Instead we undo a short, closed list of purely syntactic damage and then really
+# parse the report: every row is then visible, and a damaged or conflicting one is
+# refused rather than skipped.
+_STATUSES = ('pass', 'fail', 'unverified')
 
 _FORMAT_REPAIR_PROMPT = Template('''You are a text reformatter. You are NOT a reviewer.
 
@@ -151,52 +148,113 @@ $body
 ''')
 
 
-def _unquote(raw: str):
-    """Decode one JSON string body, or None when it is not decodable."""
+def _damaged_envelope(text: str):
+    """The one stretch of text that is supposed to be the JSON envelope, or None."""
+    source = (text or '').strip()
+    fences = list(_FENCE_RE.finditer(source))
+    if len(fences) > 1:
+        return None  # Which fence is the report is not determinable.
+    if fences:
+        source = fences[0].group(1).strip()
+    start = source.find('{')
+    return None if start < 0 else source[start:]
+
+
+def _syntax_only_recover(source):
+    """Undo a closed list of purely syntactic damage and parse, or return None.
+
+    The whole list: collapse a run of commas into one, drop a comma that sits in
+    front of a closer or at the very end, and append the closers the text left
+    open. Nothing else is touched -- no key is guessed, no value is inserted, no
+    character inside a string is altered, and anything the recovered text still
+    cannot parse as one JSON object is out of scope. Recovering the structure (as
+    opposed to scraping the fragments that happen to be well formed) is what makes
+    a damaged row visible instead of invisible.
+    """
+    if not source:
+        return None
+    out, stack = [], []
+    pending_comma = in_string = escaped = False
+    for ch in source:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch.isspace():
+            if not pending_comma:
+                out.append(ch)
+            continue
+        if ch == ',':
+            pending_comma = True  # A second comma collapses into this one.
+            continue
+        if ch in '}]':
+            if not stack or (stack.pop(), ch) not in (('{', '}'), ('[', ']')):
+                return None
+            pending_comma = False  # A comma before a closer is dropped.
+            out.append(ch)
+            continue
+        if pending_comma:
+            out.append(',')
+            pending_comma = False
+        if ch in '{[':
+            stack.append(ch)
+        elif ch == '"':
+            in_string = True
+        out.append(ch)
+    if in_string:
+        return None  # An unterminated string is not bounded syntax damage.
+    while stack:
+        out.append('}' if stack.pop() == '{' else ']')
     try:
-        value = json.loads('"' + raw + '"')
+        obj = json.loads(''.join(out))
     except (json.JSONDecodeError, ValueError):
         return None
-    return value if isinstance(value, str) else None
+    return obj if isinstance(obj, dict) else None
 
 
 def _stated_structure(text: str):
     """What a damaged report structurally states, or None when it is not repairable.
 
-    Returns {'verdict': str, 'rows': {id: (status, evidence)}} only when the text
-    contains exactly one `"verdict": "..."` field, at least one well-formed
-    per-criterion object carrying a non-empty evidence string, and no criterion
-    object that is missing or duplicating those fields. Everything else -- prose
-    with no envelope, an envelope with no evidence, two envelopes, conflicting
-    verdicts -- is not repairable, so the reformatter never sees it and cannot be
-    asked to invent the missing half.
+    The damage is undone syntactically first, so the result is the report's own
+    single structure with every entry it contains -- including the broken ones.
+    Returns {'verdict': str, 'rows': {id: (status, evidence)}} only when that
+    structure is complete on its own terms: one recognised verdict and a criteria
+    list whose every entry carries a distinct id, a recognised status and real
+    evidence. An entry that is incomplete, unreadable or duplicated makes the
+    report unrepairable rather than being passed over, because passing it over is
+    exactly how a reformatter could drop a finding and still look faithful.
     """
-    body = text or ''
-    verdicts = {match.group(1) for match in _VERDICT_FIELD_RE.finditer(body)}
-    if len(verdicts) != 1 or len(_VERDICT_FIELD_RE.findall(body)) != 1:
-        return None  # No stated verdict field, several of them, or conflicting.
+    obj = _syntax_only_recover(_damaged_envelope(text))
+    if obj is None:
+        return None
+    verdict = obj.get('verdict')
+    if verdict not in _STATUSES:
+        return None
+    listed = obj.get('criteria')
+    if listed is None:
+        listed = obj.get('acceptance_coverage')
+    if not isinstance(listed, list) or not listed:
+        return None  # A conclusion with no per-criterion evidence at all.
     rows = {}
-    for match in _BRACE_BODY_RE.finditer(body):
-        inner = match.group(1)
-        if not all(key in inner for key in _ROW_KEYS):
-            continue  # Not a criterion object; the envelope itself lands here.
-        ids = _ROW_ID_RE.findall(inner)
-        statuses = _ROW_STATUS_RE.findall(inner)
-        evidences = _ROW_EVIDENCE_RE.findall(inner)
-        if len(ids) != 1 or len(statuses) != 1 or len(evidences) != 1:
-            return None  # Ambiguous row: refuse rather than guess which one wins.
-        row_id, status, evidence = (_unquote(ids[0]), _unquote(statuses[0]),
-                                    _unquote(evidences[0]))
-        if row_id is None or status is None or evidence is None:
+    for row in listed:
+        if not isinstance(row, dict):
             return None
-        if status not in ('pass', 'fail', 'unverified') or not evidence.strip():
+        row_id, status, evidence = row.get('id'), row.get('status'), row.get('evidence')
+        if not isinstance(row_id, str) or not row_id.strip():
+            return None
+        if status not in _STATUSES:
+            return None  # Missing or unrecognised status: refuse, never skip.
+        if not isinstance(evidence, str) or not evidence.strip():
             return None  # A row without real evidence is not a row to preserve.
         if row_id in rows:
-            return None  # Duplicate criterion id: the original is self-conflicting.
+            return None  # Same criterion twice: the original conflicts with itself.
         rows[row_id] = (status, evidence)
-    if not rows:
-        return None  # A conclusion with no per-criterion evidence at all.
-    return {'verdict': verdicts.pop(), 'rows': rows}
+    return {'verdict': verdict, 'rows': rows}
 
 
 def _repaired_matches_original(stated: dict, verdict: dict) -> bool:
@@ -578,12 +636,13 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     unavailable = [o for o in latest_browser.get('latest', []) if o.get('error_type') == 'browser_unavailable' and o['event_id'] > verified_browser_at]
     if unavailable and ledger['counts']['fail'] == 0 and ledger.get('accounted'):
         verdict = {**verdict, 'verdict': 'unverified', 'error_type': 'unverified', 'reason': unavailable[0]['error']}
+    # A format-only repair must never reopen a tool-equipped review. This verdict
+    # came from a reformatter that was forbidden to judge and had no tools at all,
+    # so neither a missing evidence row nor a wrong browser citation is something
+    # to go back and collect: both are a fail on the repaired report.
+    repaired_format = bool((artifacts.get('verification_format_repair') or {}).get('accepted'))
     if verdict['verdict'] == 'pass' and not ledger['complete']:
         remaining = review_deadline - time.monotonic()
-        # A format-only repair must never open a tool-equipped evidence-completion
-        # loop: this verdict came from a reformatter that was forbidden to judge,
-        # so missing coverage here is a fail, not something to go collect.
-        repaired_format = bool((artifacts.get('verification_format_repair') or {}).get('accepted'))
         if (not ledger['accounted'] and not coverage_retry and not repaired_format
                 and remaining > 5 and not self.cancels[rid].is_set()):
             self._emit(rid, 'verification.coverage_retry', {'message': '验收证据缺项，继续当前验收补齐；不重跑开发'}, 'verification')
@@ -639,7 +698,8 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         # never hand accepted business code back to coding, and never write the
         # ids into the verdict ourselves.
         remaining = review_deadline - time.monotonic()
-        if not browser_receipt_retry and remaining > 5 and not self.cancels[rid].is_set():
+        if (not browser_receipt_retry and not repaired_format
+                and remaining > 5 and not self.cancels[rid].is_set()):
             expected = [o['event_id'] for o in available_observations['latest']]
             self._emit(rid, 'verification.browser_review_retry', {
                 'message': '验收回执与最新浏览器观察不符，继续当前验收改正；不重跑开发',

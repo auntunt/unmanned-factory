@@ -178,6 +178,68 @@ def test_only_a_structurally_complete_report_is_repairable():
                                                'evidence': 'x'}], 'bad status')) is None
 
 
+def test_an_incomplete_entry_makes_the_report_unrepairable_not_shorter():
+    """A row that is itself damaged must be seen, not passed over.
+
+    Scraping well-formed fragments would find only the healthy rows, so a
+    reformatter could drop the damaged one and still reproduce everything we
+    thought the report stated. The whole recovered structure is the boundary.
+    """
+    good = {'id': 'request:1', 'status': 'pass', 'evidence': 'observed evidence'}
+    # Same id, no evidence, opposite status: the report contradicts itself.
+    assert _stated_structure(_damaged('pass', [good, {'id': 'request:1', 'status': 'fail'}],
+                                      'ok')) is None
+    # A different id with no evidence is still a row we cannot preserve.
+    assert _stated_structure(_damaged('pass', [good, {'id': 'agent:1', 'status': 'fail'}],
+                                      'ok')) is None
+    # Neither is an entry with no status, or one that is not an object at all.
+    assert _stated_structure(_damaged('pass', [good, {'id': 'agent:1', 'evidence': 'x'}],
+                                      'ok')) is None
+    assert _stated_structure(_damaged('pass', [good, 'agent:1 failed'], 'ok')) is None
+    # The bounded syntax recovery only undoes stray commas and unclosed brackets:
+    # a truncated string, or damage inside a value, stays out of scope.
+    body = json.dumps({'verdict': 'pass', 'reason': 'ok', 'criteria': [good]})
+    assert _stated_structure(body[:-1]) == {'verdict': 'pass',
+                                            'rows': {'request:1': ('pass', 'observed evidence')}}
+    assert _stated_structure(body[:body.index('observed') + 4]) is None
+
+
+def test_a_repaired_pass_never_enters_the_browser_receipt_correction(app_env):
+    """The other follow-up path a repaired verdict must not reopen.
+
+    A reformatter cannot be asked to re-cite browser observations either: it has
+    no tools, never saw the page, and is forbidden to judge. A wrong citation on
+    a repaired report is a fail, not a second bounded review.
+    """
+    client, store, service, repo, p, run, cfg = _review(app_env)
+    store.append(run['id'], 'browser.observed', {
+        'ok': True, 'action': 'open', 'url': 'http://127.0.0.1:8080/', 'errors': []}, 'coding')
+    calls, rows = [], []
+
+    def respond(request, emit, cancel=None):
+        calls.append(request)
+        if len(calls) == 1:
+            verdict = json.loads(passing_review(request, '看过了'))
+            # The live defect shape: a pass whose browser_review cites nothing.
+            verdict.pop('browser_review', None)
+            rows.extend(verdict['criteria'])
+            body = json.dumps(verdict, ensure_ascii=False)
+            return ProviderResult(body[:-1] + ',,', cost_usd=0.03)
+        return ProviderResult(json.dumps({'verdict': 'pass', 'reason': '看过了',
+                                          'criteria': rows}, ensure_ascii=False), cost_usd=0.01)
+
+    service.runner.run = respond
+    artifacts = {'worktree': str(repo), 'checks': [{'name': 'check', 'exit': 0}]}
+    with pytest.raises(ExecutionError):
+        service._independent_verify(run['id'], run, p, cfg, artifacts)
+    assert artifacts['verification_format_repair']['accepted'] is True
+    assert artifacts['verification']['verdict'] != 'pass', artifacts['verification']
+    # The review call, the reformat, and nothing else.
+    assert len(calls) == 2
+    assert [e for e in store.events(run['id'])
+            if e['type'] == 'verification.browser_review_retry'] == []
+
+
 def test_a_repair_must_reproduce_every_row_byte_for_byte():
     stated = {'verdict': 'fail', 'rows': {'request:1': ('fail', 'greeting 未更新')}}
     assert _repaired_matches_original(stated, {
