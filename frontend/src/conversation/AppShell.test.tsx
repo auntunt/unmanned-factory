@@ -59,14 +59,19 @@ it('hides admin-only group tabs from members', () => {
   expect(within(subnav).queryByText('用量与预算')).toBeNull()
 })
 
-it('marks 历史作品 with aria-current on a task page, and the parent tab on a detail page', () => {
+it('marks 历史作品 with aria-current on a task page, and the parent nav item on a detail page', () => {
   shell('/runs/abc')
   expect(screen.getByLabelText('历史作品').getAttribute('aria-current')).toBe('page')
   expect(screen.getByLabelText('开始制作').getAttribute('aria-current')).toBeNull()
   cleanup(); shell('/agents/a1')
   expect(screen.getByLabelText('职能体').getAttribute('aria-current')).toBe('page')
-  const tabs = document.querySelector('.as-subnav') as HTMLElement
-  expect(within(tabs).getByText('职能体').getAttribute('aria-current')).toBe('page')
+  // agents group now has a single tab (no 能力库); sub-nav only renders with > 1 tab
+  expect(document.querySelector('.as-subnav')).toBeNull()
+  // verify engineering still shows sub-nav with multiple tabs
+  cleanup(); shell('/projects')
+  expect(screen.getByLabelText('工程总览').getAttribute('aria-current')).toBe('page')
+  const engTabs = document.querySelector('.as-subnav') as HTMLElement
+  expect(within(engTabs).getByText('项目').getAttribute('aria-current')).toBe('page')
 })
 
 it('closes the mobile drawer and releases the scroll lock when the viewport grows to desktop', () => {

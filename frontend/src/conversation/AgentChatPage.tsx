@@ -166,7 +166,7 @@ export default function AgentChatPage({ csrfToken, onUnauthorized }: PageProps) 
         <div><h1>{agent?.name || '职能体'}</h1><p>{agent?.purpose || '日常聊天：提问、让它按已配置的能力回答。'}</p></div>
         <div className="cv-chat-actions">
           <button className="cv-btn cv-btn-secondary" onClick={startNew}><Icon name="plus" width={15} height={15} /> 新对话</button>
-          <Link className="cv-btn cv-btn-secondary" to={`/agents/${aid}?mode=maintain`}>维护方法</Link>
+          <Link className="cv-btn cv-btn-secondary" to={`/agents/${aid}`}>管理职能体</Link>
         </div>
       </div>
       {history.length > 0 && <div className="cv-chat-history">

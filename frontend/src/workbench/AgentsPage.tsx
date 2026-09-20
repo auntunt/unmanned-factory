@@ -1,34 +1,31 @@
 import Icon, { CategoryBadge, packMark } from './Icon'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import { ErrorNotice, EmptyState, formatDate, PageHeader, errorText, type PageProps } from './ui'
-import Deliverables from './Deliverables'
 import AgentManifest from './AgentManifest'
 import AgentEvolution from './AgentEvolution'
 import NativePackImport from './NativePackImport'
-import AddAgentAbility from './AddAgentAbility'
-import { ProjectForm } from './ProjectsPage'
+import AgentMetadataEditor from './AgentMetadataEditor'
+import AgentAssets from './AgentAssets'
 import SkillIngestion from './SkillIngestion'
 import SkillUploadFeedback from './SkillUploadFeedback'
+import { packsBase, type PackBinding } from './pack-types'
+import { capabilityHref } from './capability-links'
 import './agents.css'
 
-type Mode = 'do' | 'maintain'
 type Agent = { builtin_pack?: string; id: string; name: string; purpose?: string; active_version?: number; updated_at?: string; version?: AgentVersion; recent_tasks?: Array<{ id?: string; title?: string; status?: string }> }
 type AgentVersion = { id?: string; agent_id?: string; version: number; instructions?: string; model_settings?: Record<string, unknown>; tool_scope?: string[]; acceptance?: string[]; delivery?: Record<string, unknown>; skill_ids?: string[]; source?: string; created_at?: string }
 type Message = { feedback_status?: 'pending' | 'adopted'; feedback_run_id?: string; id?: string; role: string; content: string; at?: string; created_at?: string; run_id?: string; status?: string; job_id?: string; attachment?: { name?: string; id?: string }; progress?: { label?: string; status?: string }; deliverables?: Array<{ name?: string; url?: string; href?: string; kind?: string }> }
-type Conversation = { feedback_error?: string; pending_feedback_count?: number; id: string; agent_id: string; mode: Mode; project_id?: string; messages: Message[]; run_id?: string | null; updated_at?: string }
-type Project = { id: string; name: string; repository?: string }
-type RunSnapshot = Run
-type MaintenanceJob = { id: string; status: 'pending' | 'running' | 'cancel_requested' | 'completed' | 'failed' | 'cancelled' | 'interrupted'; error?: string; result?: { draft?: Draft } }
-type Draft = { id?: string; agent_id: string; base_version?: number; revision: number; patch: Record<string, unknown>; conflicts?: Array<{ title?: string; detail?: string; choice?: string } | string>; explanation?: Array<{ text?: string; source?: string } | string> }
+type Conversation = { feedback_error?: string; pending_feedback_count?: number; id: string; agent_id: string; mode: string; project_id?: string; messages: Message[]; run_id?: string | null; updated_at?: string }
+type Module = { id: string; version: number; name: string; category: string; description: string }
+type Capability = { id: string; name: string; source_run_id?: string }
 
 const base = '/api/v4'
 const pathAgent = (id: string) => `${base}/agents/${encodeURIComponent(id)}`
-const pathConversation = (id: string) => `${base}/conversations/${encodeURIComponent(id)}`
 
 function asList<T>(value: unknown, key: string): T[] {
   if (Array.isArray(value)) return value as T[]
@@ -36,7 +33,7 @@ function asList<T>(value: unknown, key: string): T[] {
   return []
 }
 
-export function unwrapAgentMessageResponse(value: { conversation?: Conversation; run?: RunSnapshot | null; draft?: Draft; needs_project?: boolean }): { conversation: Conversation | null; run: RunSnapshot | null; draft?: Draft; needsProject: boolean } {
+export function unwrapAgentMessageResponse(value: { conversation?: Conversation; run?: Run | null; draft?: unknown; needs_project?: boolean }): { conversation: Conversation | null; run: Run | null; draft?: unknown; needsProject: boolean } {
   return { conversation: value.conversation || null, run: value.run || null, draft: value.draft, needsProject: value.needs_project === true }
 }
 
@@ -52,24 +49,304 @@ export function artifactLinks(artifacts: Record<string, unknown> | null | undefi
 }
 
 export function isTerminalRun(status?: string): boolean { return ['published', 'failed', 'cancelled', 'discarded', 'ready_for_review', 'interrupted'].includes(status || '') }
-export function draftCanApply(draft: Pick<Draft, 'revision' | 'conflicts'>): boolean { return draft.revision > 0 && (draft.conflicts || []).length === 0 }
+export function draftCanApply(draft: { revision: number; conflicts?: unknown[] }): boolean { return draft.revision > 0 && (draft.conflicts || []).length === 0 }
 
-function displayChange(key: string, value: unknown): string {
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) return value.map((item) => typeof item === 'string' ? item : String(item)).join('、')
-  if (key === 'model_settings' && value && typeof value === 'object') { const settings = value as Record<string, unknown>; const defaults = settings.default as Record<string, unknown> | undefined; return defaults?.model ? `默认：${String(defaults.model)}` : '沿用平台默认模型' }
-  if (key === 'delivery' && value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).join('、') || '已更新交付约定'
-  return '已更新'
+// ---- Add Ability: three progressive-disclosure sources ----
+
+type AbilitySource = 'upload' | 'team' | 'dev'
+
+function AddAbilityPanel({ agentId, onChanged, ...props }: PageProps & { agentId: string; onChanged: () => void }) {
+  const [source, setSource] = useState<AbilitySource | null>(null)
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const [uploadMessage, setUploadMessage] = useState('')
+  const [uploadRunId, setUploadRunId] = useState('')
+  const [epoch, setEpoch] = useState(0)
+  const [preflight, setPreflight] = useState<{ ready: boolean; message: string } | null>(null)
+
+  // Team capabilities
+  const [modules, setModules] = useState<Module[]>([])
+  const [capabilities, setCaps] = useState<Capability[]>([])
+  const [teamError, setTeamError] = useState('')
+  const [teamLoaded, setTeamLoaded] = useState(false)
+
+  // Dev results
+  const [packs, setPacks] = useState<PackBinding[]>([])
+  const [devError, setDevError] = useState('')
+  const [devLoaded, setDevLoaded] = useState(false)
+
+  useEffect(() => {
+    const c = new AbortController()
+    void request<{ ready: boolean; message: string }>(`/api/v4/agents/${encodeURIComponent(agentId)}/abilities/preflight`, { signal: c.signal, onUnauthorized: props.onUnauthorized })
+      .then(r => { if (!c.signal.aborted) setPreflight(r) })
+      .catch(e => { if (!c.signal.aborted) setUploadError(errorText(e)) })
+    return () => c.abort()
+  }, [agentId, props.onUnauthorized])
+
+  // Load team data when that source is selected
+  useEffect(() => {
+    if (source !== 'team') return
+    const c = new AbortController()
+    setTeamLoaded(false); setTeamError('')
+    Promise.all([
+      request<{ modules: Module[] }>(`/api/v4/modules?agent_id=${encodeURIComponent(agentId)}`, { signal: c.signal, onUnauthorized: props.onUnauthorized }),
+      request<{ capabilities: Capability[] }>('/api/v3/capabilities', { signal: c.signal, onUnauthorized: props.onUnauthorized }),
+    ]).then(([mods, caps]) => {
+      if (!c.signal.aborted) { setModules(mods.modules || []); setCaps(caps.capabilities || []); setTeamLoaded(true) }
+    }).catch(e => { if (!c.signal.aborted) setTeamError(errorText(e)) })
+    return () => c.abort()
+  }, [source, agentId, props.onUnauthorized])
+
+  // Load dev packs when that source is selected
+  useEffect(() => {
+    if (source !== 'dev') return
+    const c = new AbortController()
+    setDevLoaded(false); setDevError('')
+    request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { signal: c.signal, onUnauthorized: props.onUnauthorized })
+      .then(r => { if (!c.signal.aborted) { setPacks(r.bindings || []); setDevLoaded(true) } })
+      .catch(e => { if (!c.signal.aborted) setDevError(errorText(e)) })
+    return () => c.abort()
+  }, [source, agentId, props.onUnauthorized])
+
+  const submitUpload = async (file: File) => {
+    if (uploadBusy) return
+    setUploadBusy(true); setUploadError(''); setUploadMessage(''); setUploadRunId('')
+    try {
+      const body = new FormData(); body.append('file', file)
+      const result = await request<{ channel: string; message: string; ingestion?: { run_id: string } }>(`/api/v4/agents/${encodeURIComponent(agentId)}/abilities`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body })
+      setUploadMessage(result.message); setUploadRunId(result.ingestion?.run_id || '')
+      setEpoch(v => v + 1); onChanged()
+    } catch (e) { setUploadError(errorText(e)) } finally { setUploadBusy(false) }
+  }
+
+  return (
+    <section className="agent-section" aria-label="添加能力">
+      <h2>添加能力</h2>
+      <p className="agent-section-desc">选择来源后展开对应表单。一次只显示一个来源。</p>
+      <div className="agent-source-tabs" role="group" aria-label="能力来源">
+        {([['upload', '上传包'], ['team', '团队已有能力'], ['dev', '开发成果']] as const).map(([key, label]) => (
+          <button key={key} type="button"
+            className={`cv-btn ${source === key ? 'cv-btn-primary' : 'cv-btn-secondary'}`}
+            aria-pressed={source === key}
+            onClick={() => setSource(source === key ? null : key)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ---- Upload source ---- */}
+      {source === 'upload' && (
+        <div className="agent-source-form" data-testid="source-upload">
+          <p>上传 Skill ZIP 文件。平台导出的职能体包（会新建角色）请使用列表页的"导入职能体"入口。当前没有任意 CLI ZIP 初始导入接口。</p>
+          {preflight?.ready === false && <p role="alert">{preflight.message}</p>}
+          <label>Skill ZIP 文件
+            <input type="file" accept=".zip" disabled={uploadBusy || preflight?.ready === false}
+              onChange={e => { const file = e.target.files?.[0]; if (file) void submitUpload(file); e.target.value = '' }} />
+          </label>
+          {uploadBusy && <p role="status">正在识别并保存素材…</p>}
+          {uploadError && <SkillUploadFeedback message={uploadError} />}
+          {uploadMessage && <p role="status">{uploadMessage} {uploadRunId ? <Link to={`/runs/${uploadRunId}`}>查看适配运行</Link> : null}</p>}
+        </div>
+      )}
+
+      {/* ---- Team existing capabilities ---- */}
+      {source === 'team' && (
+        <div className="agent-source-form" data-testid="source-team">
+          <p>从团队已有的方法模块（Skill）和沉淀能力中选择。模块直接在岗位清单中引用；沉淀能力需经升格流程成为 Skill 后加入。职能包（独立工具）通过挂靠机制绑定。</p>
+          {teamError && <ErrorNotice message={teamError} />}
+          {!teamLoaded && !teamError && <p>正在加载…</p>}
+          {teamLoaded && (
+            <>
+              <h3>方法模块（Skill） · {modules.length} 个</h3>
+              {modules.length > 0 ? (
+                <ul className="agent-team-list">
+                  {modules.map(m => (
+                    <li key={m.id}>
+                      <Link to={capabilityHref('modules', m.id)}>{m.name}</Link>
+                      <small> v{m.version} · {m.description?.slice(0, 60) || m.category}</small>
+                    </li>
+                  ))}
+                </ul>
+              ) : <p>团队还没有方法模块。</p>}
+              <p style={{ marginTop: 12 }}>在上方"工作规范"区的岗位清单中选择并加载 Skill。</p>
+
+              <h3 style={{ marginTop: 16 }}>沉淀能力 · {capabilities.length} 个</h3>
+              {capabilities.length > 0 ? (
+                <ul className="agent-team-list">
+                  {capabilities.map(c => (
+                    <li key={c.id}>
+                      <Link to={capabilityHref('capabilities', c.id)}>{c.name}</Link>
+                      {c.source_run_id && <small> · <Link to={`/runs/${encodeURIComponent(c.source_run_id)}`}>来源运行</Link></small>}
+                    </li>
+                  ))}
+                </ul>
+              ) : <p>还没有运行沉淀的能力。</p>}
+              <p className="agent-section-note">沉淀能力本身面向项目使用。要将其加入职能体，需在能力详情里"升格为 Skill"并通过进化提案流程。这是入口收拢，不是新增绑定能力。</p>
+
+              <h3 style={{ marginTop: 16 }}>职能包（独立工具）</h3>
+              <p>已挂靠的工具在下方"已挂靠工具"区管理。要添加新工具，先在 <Link to="/ability-center?tab=packs">职能包目录</Link> 发布工具版本，再挂靠到当前职能体。</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ---- Dev results ---- */}
+      {source === 'dev' && (
+        <div className="agent-source-form" data-testid="source-dev">
+          <p>复用真实开发成果沉淀的工具包：从运行成果中选择 → 候选 → 验证 → 发布 → 挂靠到当前职能体。</p>
+          {devError && <ErrorNotice message={devError} />}
+          {!devLoaded && !devError && <p>正在加载…</p>}
+          {devLoaded && packs.length === 0 && (
+            <div className="agent-dev-empty">
+              <p>当前职能体尚无已挂靠的开发成果工具。</p>
+              <p>要添加开发成果，请先在项目中完成开发任务，将成果沉淀为职能包并发布版本，然后从 <Link to="/ability-center?tab=packs">职能包目录</Link> 挂靠到本职能体。</p>
+            </div>
+          )}
+          {devLoaded && packs.length > 0 && (
+            <ul className="agent-team-list">
+              {packs.map(p => (
+                <li key={p.id}>
+                  <strong>{p.pack_name}</strong> v{p.version}
+                  {p.upgrade_available && <small> · 可升级到 v{p.latest_version}</small>}
+                  <Link to={`/ability-center/packs/${encodeURIComponent(p.pack_id)}?tab=versions`} style={{ marginLeft: 8 }}>查看详情</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Skill ingestion drafts always visible below */}
+      <AgentAssets agentId={agentId} refresh={epoch} {...props} />
+      <SkillIngestion key={`${agentId}:${epoch}`} agentId={agentId} onSigned={onChanged} {...props} />
+    </section>
+  )
 }
 
-function AgentList({ agents, selected, onSelect, onCreate }: { agents: Agent[]; selected?: string; onSelect: (id: string) => void; onCreate: () => void }) {
-  return <aside className="agent-rail" aria-label="职能体与最近任务">
-    <div className="agent-rail-head"><span className="wb-eyebrow">你的职能体</span><button className="wb-button wb-button-secondary agent-small-button" onClick={onCreate}><Icon name="plus" /> 新建</button></div>
-    <div className="agent-rail-list">{agents.map((agent) => <button key={agent.id} className={`agent-rail-item ${selected === agent.id ? 'is-selected' : ''}`} onClick={() => onSelect(agent.id)}><CategoryBadge avatar={Array.from(agent.name)[0]} mark={packMark(agent)} /><span><strong>{agent.name}</strong><small>{agent.purpose || '还没有写下用途'}</small></span><span className="agent-rail-arrow"><Icon name="arrow" /></span></button>)}</div>
-    {agents.length === 0 && <div className="agent-rail-empty">新建一个职能体，先从名字和用途开始。</div>}
-    <Link className="agent-rail-overview" to="/overview">查看工程总览</Link>
-  </aside>
+// ---- Attached tools section ----
+
+function AttachedTools({ agentId, ...props }: PageProps & { agentId: string }) {
+  const [bindings, setBindings] = useState<PackBinding[] | null>(null)
+  const [error, setError] = useState('')
+  const load = useCallback((signal?: AbortSignal) => {
+    return request<{ bindings: PackBinding[] }>(`${packsBase}/bindings/${encodeURIComponent(agentId)}`, { signal, onUnauthorized: props.onUnauthorized })
+      .then(r => setBindings(r.bindings || []))
+      .catch(e => { if (!signal?.aborted) setError(errorText(e)) })
+  }, [agentId, props.onUnauthorized])
+  useEffect(() => { const c = new AbortController(); void load(c.signal); return () => c.abort() }, [load])
+
+  return (
+    <section className="agent-section" aria-label="已挂靠工具">
+      <h2>已挂靠工具</h2>
+      <p className="agent-section-desc">通过职能包挂靠机制安装的独立工具。版本在挂靠时冻结；升级和解除挂靠沿用现有确认流程。</p>
+      {error && <ErrorNotice message={error} />}
+      {bindings === null && !error && <p>正在加载…</p>}
+      {bindings && bindings.length === 0 && <p>尚无已挂靠工具。可在"添加能力"中通过开发成果或团队已有能力挂靠。</p>}
+      {bindings && bindings.length > 0 && (
+        <div className="agent-tools-list">
+          {bindings.map(b => (
+            <div key={b.id} className="agent-tool-row">
+              <div className="agent-tool-info">
+                <strong>{b.pack_name}</strong>
+                <span className="agent-tool-version">v{b.version}</span>
+                {b.upgrade_available && <Link className="agent-tool-upgrade" to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}?tab=versions`}>可升级到 v{b.latest_version}</Link>}
+              </div>
+              <div className="agent-tool-status">
+                {b.environment?.status === 'unavailable'
+                  ? <span className="agent-tool-warn">环境不可用：{b.environment.missing?.join('、') || '未知依赖'}</span>
+                  : <span className="agent-tool-ok">环境就绪</span>}
+              </div>
+              <Link className="cv-btn cv-btn-secondary" style={{ fontSize: 13, padding: '6px 10px' }}
+                to={`/ability-center/packs/${encodeURIComponent(b.pack_id)}`}>管理</Link>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
 }
+
+// ---- Management page (detail view) ----
+
+function AgentManagementPage({ agent: initialAgent, props }: { agent: Agent; props: PageProps }) {
+  const [agent, setAgent] = useState(initialAgent)
+  const [editingMeta, setEditingMeta] = useState(false)
+  const [manifestEpoch, setManifestEpoch] = useState(0)
+  const isAdmin = props.user?.role !== 'member'
+
+  const refreshAgent = useCallback(async () => {
+    try {
+      const fresh = await request<Agent>(pathAgent(agent.id), { onUnauthorized: props.onUnauthorized })
+      setAgent(fresh)
+    } catch { /* keep current */ }
+  }, [agent.id, props.onUnauthorized])
+
+  const mark = packMark(agent)
+
+  return (
+    <div className="agent-mgmt">
+      {/* ---- Section 1: Basic Info ---- */}
+      <section className="agent-section" aria-label="基本信息">
+        <h2>基本信息</h2>
+        {editingMeta ? (
+          <AgentMetadataEditor
+            agent={agent}
+            csrfToken={props.csrfToken}
+            onUnauthorized={props.onUnauthorized}
+            onSaved={(updated) => { setAgent(prev => ({ ...prev, ...updated })); setEditingMeta(false) }}
+            onCancel={() => setEditingMeta(false)}
+          />
+        ) : (
+          <div className="agent-info-card">
+            <div className="agent-info-head">
+              <CategoryBadge avatar={Array.from(agent.name)[0]} mark={mark} />
+              <div>
+                <h3>{agent.name}</h3>
+                <p className="agent-info-purpose">{agent.purpose || '还没有用途说明。'}</p>
+              </div>
+            </div>
+            <div className="agent-info-meta">
+              <span>当前版本 <strong>v{agent.version?.version ?? agent.active_version ?? '—'}</strong></span>
+              {agent.updated_at && <span>更新于 {formatDate(agent.updated_at)}</span>}
+            </div>
+            {isAdmin && (
+              <button className="cv-btn cv-btn-secondary" style={{ marginTop: 8 }} onClick={() => setEditingMeta(true)}>
+                编辑名称与用途
+              </button>
+            )}
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <Link className="cv-btn cv-btn-primary" to={`/agents/${encodeURIComponent(agent.id)}/chat`}>
+            开始对话 <Icon name="arrow" width={15} height={15} />
+          </Link>
+          {agent.builtin_pack && (
+            <a className="cv-agent-dl" style={{ marginLeft: 12 }}
+              href={`/api/v4/builtin-packs/${encodeURIComponent(agent.builtin_pack)}/download`}>
+              <Icon name="download" width={14} height={14} /> 导出职能包
+            </a>
+          )}
+        </div>
+      </section>
+
+      {/* ---- Section 2: Work Specs ---- */}
+      <section className="agent-section" aria-label="工作规范">
+        <h2>工作规范</h2>
+        <p className="agent-section-desc">已启用的 Skill/方法，现有适配/验收/版本与维护入口。</p>
+        <AgentManifest key={`${agent.id}:${manifestEpoch}`} agentId={agent.id} {...props} />
+        <AgentEvolution key={agent.id} agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); void refreshAgent() }} />
+      </section>
+
+      {/* ---- Section 3: Attached Tools ---- */}
+      <AttachedTools agentId={agent.id} {...props} />
+
+      {/* ---- Add Ability ---- */}
+      {isAdmin && <AddAbilityPanel agentId={agent.id} {...props} onChanged={() => { setManifestEpoch(v => v + 1); void refreshAgent() }} />}
+    </div>
+  )
+}
+
+// ---- New Agent form (kept for list view) ----
 
 function NewAgent({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps & { onCreated: (agent: Agent) => void; onCancel: () => void }) {
   const [name, setName] = useState(''); const [purpose, setPurpose] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
@@ -77,111 +354,95 @@ function NewAgent({ csrfToken, onUnauthorized, onCreated, onCancel }: PageProps 
   return <div className="agent-create-card wb-card"><div className="agent-card-kicker">新建职能体</div><h2>先告诉它擅长什么</h2><p>创建岗位而非一次任务：写下长期职责，具体做法通过 skill 清单组合。</p><form onSubmit={submit}><label>名称<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：工业格式维护员" /></label><label>用途<textarea maxLength={500} rows={3} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder="它适合解决哪些问题？" /></label>{error && <ErrorNotice message={error} />}<div className="agent-form-actions"><button type="button" className="wb-button wb-button-secondary" onClick={onCancel}>取消</button><button className="wb-button wb-button-primary" disabled={busy}>{busy ? '创建中…' : '创建并开始'}</button></div></form></div>
 }
 
-function DraftCard({ draft, version, props, agentId, onChanged }: { draft: Draft; version?: AgentVersion; props: PageProps; agentId: string; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
-  const apply = async () => { setBusy(true); setError(null); try { await request(`${pathAgent(agentId)}/draft/apply`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { expected_revision: draft.revision, idempotency_key: `apply-${draft.id || agentId}-${draft.revision}` } }); onChanged() } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) } finally { setBusy(false) } }
-  const conflicts = draft.conflicts ?? []; const explanation = draft.explanation ?? []; const patchEntries = Object.entries(draft.patch ?? {}).filter(([key, value]) => ['instructions', 'acceptance', 'delivery', 'tool_scope', 'model_settings', 'purpose'].includes(key) && JSON.stringify(value) !== JSON.stringify(version?.[key as keyof AgentVersion]))
-  return <section className="agent-change-card" aria-label="待应用的维护变更"><div className="agent-change-head"><div><span className="agent-card-kicker">维护变更 · 草稿修订 {draft.revision}</span><h3>{patchEntries.length ? '这次对话整理出的具体变化' : '还没有待应用的变化'}</h3></div><span className="agent-draft-state">{conflicts.length ? '需先处理冲突' : draft.revision > 0 ? '待应用' : '已同步'}</span></div>{patchEntries.length > 0 && <div className="agent-change-list">{patchEntries.map(([key, value]) => <div className="agent-change-row" key={key}><strong>{key === 'instructions' ? '工作步骤' : key === 'acceptance' ? '验收条件' : key === 'delivery' ? '交付约定' : key === 'model_settings' ? '模型设置' : key === 'tool_scope' ? '可用工具' : key}</strong><span>{displayChange(key, value)}</span></div>)}</div>}{explanation.length > 0 && <div className="agent-change-sources"><strong>来源与范围</strong>{explanation.map((item, index) => <span key={index}>{typeof item === 'string' ? item : `${item.text || '已整理一条做法'}${item.source ? ` · 来源：${item.source}` : ''}`}</span>)}</div>}{conflicts.length > 0 && <div className="agent-conflicts"><strong>需要留意的冲突</strong>{conflicts.map((item, index) => <span key={index}>{typeof item === 'string' ? item : `${item.title || '规则冲突'}：${item.detail || item.choice || '请在下一轮对话里说明取舍'}`}</span>)}</div>}{error && <ErrorNotice message={error} />}<div className="agent-change-foot"><small>基于职能体 v{draft.base_version ?? version?.version ?? '—'} · 应用后只影响新任务</small><div><button className="wb-button wb-button-secondary" onClick={onChanged}>继续调整</button><button className="wb-button wb-button-primary" onClick={() => void apply()} disabled={busy || !draft.revision || conflicts.length > 0}>{busy ? '应用中…' : '应用更新'}</button></div></div></section>
-}
-
-function ChatMessage({ message }: { message: Message }) {
-  const files = message.deliverables ?? []
-  let visibleContent = message.content
-  if (message.role !== 'user') {
-    try { const parsed = JSON.parse(message.content) as { explanation?: unknown[] }; if (Array.isArray(parsed.explanation)) visibleContent = parsed.explanation.map((item) => typeof item === 'string' ? item : String((item as { text?: unknown }).text || '已整理一条做法')).join('\n') || '已完成整理，请查看下方变更卡。' } catch { /* normal assistant text */ }
-  }
-  if (message.status === 'failed' && /529|503|overloaded|over capacity/i.test(visibleContent)) visibleContent = '模型服务暂时繁忙，未完成整理。对话和 Skill 已保存，点击“重新整理”即可继续。'
-  return <article className={`agent-message ${message.role === 'user' ? 'is-user' : ''}`}><div className="agent-message-meta"><span>{message.role === 'user' ? '你' : '职能体'}</span><span>{formatDate(message.at || message.created_at)}</span></div><div className="agent-message-body">{visibleContent}</div>{feedbackStatusLabel(message.feedback_status) && <div className="agent-progress" role="status">{feedbackStatusLabel(message.feedback_status)}{message.feedback_run_id && <Link to={`/runs/${encodeURIComponent(message.feedback_run_id)}`}>查看接续任务</Link>}</div>}{message.progress && <div className="agent-progress"><i />{message.progress.label || '正在推进任务'}</div>}{files.length > 0 && <div className="agent-deliverables"><strong>成果</strong>{files.map((file, index) => <a key={`${file.url || file.href}-${index}`} href={file.url || file.href || '#'} target="_blank" rel="noreferrer">{file.name || '打开成果'} <span><Icon name="external" /></span></a>)}</div>}{message.run_id && <Link className="agent-run-link" to={`/runs/${encodeURIComponent(message.run_id)}`}>打开运行进展</Link>}</article>
-}
-
-function ModelSettings({ agent, version, draft, props, onChanged, editable, onMaintain }: { agent: Agent; version?: AgentVersion; draft?: Draft | null; props: PageProps; onChanged: () => void; editable: boolean; onMaintain: () => void }) {
-  const settings = (draft?.patch.model_settings || version?.model_settings || {}) as Record<string, unknown>; const fallback = settings.default as Record<string, unknown> | undefined; const [provider, setProvider] = useState(String(fallback?.provider || 'codex')); const [model, setModel] = useState(String(fallback?.model || settings.model || '')); const [stages, setStages] = useState<Record<string, string>>({ planning: '', execution: '', verification: '', maintenance: '' }); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState(''); const [versions, setVersions] = useState<AgentVersion[]>([])
-  useEffect(() => { const next = (draft?.patch.model_settings || version?.model_settings || {}) as Record<string, unknown>; const def = next.default as Record<string, unknown> | undefined; setProvider(String(def?.provider || 'codex')); setModel(String(def?.model || next.model || '')); setStages(Object.fromEntries(['planning', 'execution', 'verification', 'maintenance'].map((key) => { const value = next[key] as Record<string, unknown> | undefined; return [key, String(value?.model || '')] }))) }, [draft?.revision, version?.version])
-  useEffect(() => { void request<{ versions: AgentVersion[] }>(`${pathAgent(agent.id)}/versions`, { onUnauthorized: props.onUnauthorized }).then((value) => setVersions(value.versions || [])).catch(() => undefined) }, [agent.id, props.onUnauthorized, version?.version])
-  const save = async () => { if (!draft) { setNotice('请先打开维护模式以建立配置草稿。'); return } setBusy(true); setNotice(''); try { const modelSettings: Record<string, unknown> = { ...settings, default: { provider, model: model.trim() } }; for (const [key, value] of Object.entries(stages)) { if (value.trim()) modelSettings[key] = { provider: String((settings[key] as { provider?: string } | undefined)?.provider || provider), model: value.trim() }; else delete modelSettings[key] } await request(`${pathAgent(agent.id)}/draft`, { method: 'PATCH', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { expected_revision: draft.revision, patch: { model_settings: modelSettings } } }); setNotice('已保存到维护草稿，应用后对新任务生效。'); onChanged() } catch (cause) { setNotice(errorText(cause)) } finally { setBusy(false) } }
-  const rollback = async (target: number) => { setBusy(true); setNotice(''); try { await request(`${pathAgent(agent.id)}/rollback`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { version: target } }); setNotice(`已回滚到 v${target}，只影响后续新任务。`); onChanged() } catch (cause) { setNotice(errorText(cause)) } finally { setBusy(false) } }
-  return <details className="agent-settings"><summary><Icon name="triangle" className="wb-disclosure-icon" />模型与工具</summary><div className="agent-settings-body"><label>服务商<select disabled={!editable} value={provider} onChange={(event) => setProvider(event.target.value)}><option value="codex">平台默认</option><option value="claude">Claude</option><option value="dsh">DSH</option></select></label><label>默认模型<input disabled={!editable} value={model} onChange={(event) => setModel(event.target.value)} placeholder="留空表示使用平台实际配置" /></label>{(['planning', 'execution', 'verification', 'maintenance'] as const).map((key) => <label key={key}>{key === 'planning' ? '规划阶段' : key === 'execution' ? '执行阶段' : key === 'verification' ? '验证阶段' : '维护对话'}<input disabled={!editable} value={stages[key]} onChange={(event) => setStages((current) => ({ ...current, [key]: event.target.value }))} placeholder="沿用默认模型" /></label>)}<small>阶段覆盖留空时继承默认模型；实际 provider/model 会在运行快照中记录。</small>{editable ? <button className="wb-button wb-button-secondary" onClick={() => void save()} disabled={busy || !draft}>{busy ? '保存中…' : '保存模型设置'}</button> : <button type="button" className="wb-button wb-button-secondary" onClick={onMaintain}>进入维护修改模型</button>}{versions.length > 1 && <label>恢复历史版本<select value={version?.version || ''} onChange={(event) => void rollback(Number(event.target.value))} disabled={busy || !editable}><option value="">选择版本</option>{versions.map((item) => <option key={item.version} value={item.version}>v{item.version}{item.version === version?.version ? '（当前）' : ''}</option>)}</select></label>}{notice && <span className="agent-settings-notice">{notice}</span>}</div></details>
-}
-
-export function AgentChat({ agent, props }: { agent: Agent; props: PageProps }) {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const [mode, setMode] = useState<Mode>(searchParams.get('mode') === 'maintain' ? 'maintain' : 'do')
-  useEffect(() => { setMode(searchParams.get('mode') === 'maintain' ? 'maintain' : 'do') }, [searchParams])
-  const [conversation, setConversation] = useState<Conversation | null>(null)
-  const [history, setHistory] = useState<Conversation[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
-  const [projectId, setProjectId] = useState('')
-  const [createProject, setCreateProject] = useState(false)
-  const [projectNotice, setProjectNotice] = useState('')
-  const [draft, setDraft] = useState<Draft | null>(null)
-  const [version, setVersion] = useState<AgentVersion | undefined>(agent.version)
-  const [text, setText] = useState('')
-  const modeText = useRef<Record<Mode, string>>({ do: '', maintain: '' })
-  const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null); const [run, setRun] = useState<RunSnapshot | null>(null); const [maintenanceJob, setMaintenanceJob] = useState<MaintenanceJob | null>(null)
-  const load = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true); setError(null)
-    try {
-      const detail = await request<Agent>(pathAgent(agent.id), { signal, onUnauthorized: props.onUnauthorized }); setVersion(detail.version)
-      const rows = asList<Conversation>(await request<unknown>(`${pathAgent(agent.id)}/conversations`, { signal, onUnauthorized: props.onUnauthorized }), 'conversations').filter((item) => item.mode === mode); setHistory(rows)
-      const current = rows[0] ? await request<Conversation>(pathConversation(rows[0].id), { signal, onUnauthorized: props.onUnauthorized }) : null; setConversation(current); setProjectId(current?.project_id || '')
-      if (current?.run_id) { const snapshot = await request<RunSnapshot>(`/api/v2/runs/${encodeURIComponent(current.run_id)}`, { signal, onUnauthorized: props.onUnauthorized }).catch(() => null); setRun(snapshot) } else setRun(null)
-      setDraft(mode === 'maintain' ? await request<Draft>(`${pathAgent(agent.id)}/draft`, { signal, onUnauthorized: props.onUnauthorized }) : null)
-      const jobMessages = current?.messages?.filter((message) => message.job_id) ?? []; const latestJob = jobMessages[jobMessages.length - 1]; const terminalJob = [...jobMessages].reverse().find((message) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(message.status || '')); const activeJob = [...jobMessages].reverse().find((message) => ['pending', 'running', 'cancel_requested'].includes(message.status || '') && message.job_id === latestJob?.job_id); setMaintenanceJob(terminalJob && terminalJob.job_id === latestJob?.job_id ? { id: terminalJob.job_id as string, status: (terminalJob.status || 'completed') as MaintenanceJob['status'] } : activeJob?.job_id ? { id: activeJob.job_id, status: (activeJob.status || 'pending') as MaintenanceJob['status'] } : null)
-      if (mode === 'do') { const value = await request<unknown>('/api/v2/projects', { signal, onUnauthorized: props.onUnauthorized }).catch(() => ({ projects: [] })); setProjects(asList<Project>(value, 'projects')) }
-    } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401) && !(cause instanceof DOMException && cause.name === 'AbortError')) setError(errorText(cause)) } finally { setLoading(false) }
-  }, [agent.id, mode, props.onUnauthorized])
-  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() }, [load])
-  const pendingFeedback = conversation?.pending_feedback_count ?? conversation?.messages.filter((message) => message.feedback_status === 'pending').length ?? 0
-  useEffect(() => {
-    if (mode !== 'do' || !conversation?.id || !run?.id || busy || (isTerminalRun(run.status) && pendingFeedback === 0)) return
-    const controller = new AbortController()
-    let fetching = false
-    const timer = window.setInterval(() => {
-      if (fetching) return
-      fetching = true
-      void (async () => {
-        const current = await request<Conversation>(pathConversation(conversation.id), { signal: controller.signal, onUnauthorized: props.onUnauthorized })
-        const snapshot = current.run_id ? await request<RunSnapshot>(`/api/v2/runs/${encodeURIComponent(current.run_id)}`, { signal: controller.signal, onUnauthorized: props.onUnauthorized }) : null
-        if (!controller.signal.aborted) { setConversation(current); setRun(snapshot) }
-      })().catch(() => undefined).finally(() => { fetching = false })
-    }, 4000)
-    return () => { controller.abort(); window.clearInterval(timer) }
-  }, [mode, conversation?.id, run?.id, run?.status, pendingFeedback, busy, props.onUnauthorized])
-
-  useEffect(() => { if (!maintenanceJob || ['completed', 'failed', 'cancelled', 'interrupted'].includes(maintenanceJob.status)) return; const timer = window.setInterval(() => { void request<MaintenanceJob>(`${base}/maintenance-jobs/${encodeURIComponent(maintenanceJob.id)}`, { onUnauthorized: props.onUnauthorized }).then((next) => { setMaintenanceJob(next); if (['completed', 'failed', 'cancelled', 'interrupted'].includes(next.status)) { void request<Draft>(`${pathAgent(agent.id)}/draft`, { onUnauthorized: props.onUnauthorized }).then(setDraft).catch(() => undefined); void request<Conversation>(conversation ? pathConversation(conversation.id) : '', { onUnauthorized: props.onUnauthorized }).then(setConversation).catch(() => undefined) } }).catch((cause) => setError(errorText(cause))) }, 1500); return () => window.clearInterval(timer) }, [maintenanceJob, props.onUnauthorized, agent.id, conversation])
-  const switchMode = (next: Mode) => { if (next === mode || busy) return; modeText.current[mode] = text; setMode(next); setConversation(null); setHistory([]); setDraft(null); setRun(null); setMaintenanceJob(null); setText(modeText.current[next]); setSearchParams(next === 'maintain' ? { mode: next } : {}) }
-  const createConversation = async () => { const result = await request<Conversation>(`${pathAgent(agent.id)}/conversations`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { mode, project_id: mode === 'do' ? projectId || null : null } }); setConversation(result); return result }
-  const chooseConversation = async (id: string) => { try { const next = await request<Conversation>(pathConversation(id), { onUnauthorized: props.onUnauthorized }); setConversation(next); setProjectId(next.project_id || ''); const jobMessages = next.messages.filter((message) => message.job_id); const latestJob = jobMessages[jobMessages.length - 1]; const terminalJob = [...jobMessages].reverse().find((message) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(message.status || '')); const activeJob = [...jobMessages].reverse().find((message) => ['pending', 'running', 'cancel_requested'].includes(message.status || '') && message.job_id === latestJob?.job_id); setMaintenanceJob(terminalJob && terminalJob.job_id === latestJob?.job_id ? { id: terminalJob.job_id as string, status: (terminalJob.status || 'completed') as MaintenanceJob['status'] } : activeJob?.job_id ? { id: activeJob.job_id, status: (activeJob.status || 'pending') as MaintenanceJob['status'] } : null); setRun(next.run_id ? await request<RunSnapshot>(`/api/v2/runs/${encodeURIComponent(next.run_id)}`, { onUnauthorized: props.onUnauthorized }).catch(() => null) : null) } catch (cause) { setError(errorText(cause)) } }
-  const send = async (event: FormEvent) => { event.preventDefault(); if (!text.trim() || busy || Boolean(maintenanceJob && ['pending', 'running', 'cancel_requested'].includes(maintenanceJob.status))) return; setBusy(true); setError(null); try { let current = conversation; if (!current) current = await createConversation(); if (mode === 'do' && !current.project_id && projectId) { current = await request<Conversation>(`${pathConversation(current.id)}/project`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { project_id: projectId } }) } const raw = await request<{ conversation: Conversation; run?: RunSnapshot | null; draft?: Draft; needs_project?: boolean; job_id?: string; status?: MaintenanceJob['status'] }>(`${pathConversation(current.id)}/messages`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized, body: { content: text.trim() } }); const response = unwrapAgentMessageResponse(raw); if (!response.conversation) throw new Error('服务端没有返回会话记录，请刷新后重试。'); setConversation(response.conversation); setHistory((items) => [response.conversation as Conversation, ...items.filter((item) => item.id !== response.conversation?.id)]); setRun(response.run); if (raw.job_id) setMaintenanceJob({ id: raw.job_id, status: raw.status || 'pending' }); if (response.needsProject) setError('请选择一个项目后再开始运行。'); if (response.draft) setDraft(response.draft); setText('') } catch (cause) { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) } finally { setBusy(false) } }
-  const allMessages = conversation?.messages ?? []; const completedJobs = new Set(allMessages.filter((message) => message.job_id && ['completed', 'failed', 'cancelled', 'interrupted'].includes(message.status || '')).map((message) => message.job_id)); const messages = allMessages.filter((message) => !(message.status === 'pending' && message.job_id && completedJobs.has(message.job_id))); const terminal = run && isTerminalRun(run.status)
-  const retryMaintenance = async () => { if (!conversation || busy) return; setBusy(true); setError(null); try { const result = await request<{ conversation: Conversation; job_id: string; status: MaintenanceJob['status'] }>(`${pathConversation(conversation.id)}/retry`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized }); setConversation(result.conversation); setMaintenanceJob({ id: result.job_id, status: result.status }) } catch (cause) { setError(errorText(cause)) } finally { setBusy(false) } }
-  const cancelJob = async () => { if (!maintenanceJob) return; setBusy(true); try { const next = await request<MaintenanceJob>(`${base}/maintenance-jobs/${encodeURIComponent(maintenanceJob.id)}/cancel`, { method: 'POST', csrfToken: props.csrfToken, onUnauthorized: props.onUnauthorized }); setMaintenanceJob(next) } catch (cause) { setError(errorText(cause)) } finally { setBusy(false) } }
-  return <div className="agent-chat-layout"><section className="agent-chat-main"><div className="agent-chat-toolbar"><div><span className="agent-card-kicker">{mode === 'do' ? '做事模式' : '维护模式'}</span><h2>{mode === 'do' ? '把这件事交给它' : '一起改进它的做法'}</h2></div><div className="agent-mode-switch" role="group" aria-label="工作模式"><button aria-pressed={mode === 'do'} className={mode === 'do' ? 'is-active' : ''} onClick={() => switchMode('do')}>开始任务</button><button aria-pressed={mode === 'maintain'} className={mode === 'maintain' ? 'is-active' : ''} onClick={() => switchMode('maintain')}>维护职能体</button></div></div><div className="agent-history"><button className="wb-button wb-button-secondary" onClick={() => { setConversation(null); setRun(null); setMaintenanceJob(null) }}><Icon name="plus" /> 新对话</button>{history.slice(0, 5).map((item) => <button key={item.id} className={conversation?.id === item.id ? 'is-active' : ''} onClick={() => void chooseConversation(item.id)}>{item.messages?.find((message) => message.role === 'user')?.content?.slice(0, 30) || '空白对话'}</button>)}</div>{mode === 'do' && <label className="agent-project-select">工作项目<select value={projectId} disabled={Boolean(conversation?.project_id)} onChange={(event) => setProjectId(event.target.value)}><option value="">先选择项目（也可以稍后关联）</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>{conversation?.project_id && <small>本次对话已绑定该项目；新建对话后可重新选择。</small>}</label>}{mode === 'maintain' && <div className="agent-maintain-hint">上传 Skill、粘贴 Prompt 或直接说你的经验。整理会先保存为草稿，只有你点击“应用更新”才会成为新版本。</div>}{error && <SkillUploadFeedback message={error} />}{conversation?.feedback_error && <ErrorNotice message={`补充已保存，暂未自动接续：${conversation.feedback_error}`} />}{loading && !conversation && <div className="agent-chat-loading">正在打开这段对话…</div>}{!loading && messages.length === 0 && <div className="agent-chat-empty"><span aria-hidden="true">✦</span><strong>{mode === 'do' ? `今天想让${agent.name}完成什么？` : `告诉${agent.name}你希望它以后怎么做。`}</strong><p>{mode === 'do' ? '可以先说目标，再补充项目、资料和交付要求。' : '你说过的话和上传的资料会整理成可检查的变更卡。'}</p></div>}<div className="agent-message-list">{messages.map((message) => <ChatMessage message={message} key={message.id || `${message.role}-${message.at}`} />)}</div>{mode === 'maintain' && draft && draft.revision > 0 && <DraftCard draft={draft} version={version} props={props} agentId={agent.id} onChanged={() => void load()} />}{maintenanceJob && <div className="agent-live-run"><span className="agent-live-dot" /><span>维护整理：{maintenanceJob.status === 'completed' ? '已完成' : maintenanceJob.status === 'failed' ? '失败' : maintenanceJob.status === 'cancelled' ? '已取消' : maintenanceJob.status === 'interrupted' ? '已中断，请重试' : '处理中'}</span>{mode === 'maintain' && ['failed', 'cancelled', 'interrupted'].includes(maintenanceJob.status) && <><span>对话和 Skill 已保存</span><button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void retryMaintenance()}>重新整理</button></>}{['pending', 'running', 'cancel_requested'].includes(maintenanceJob.status) && <button className="wb-button wb-button-secondary" onClick={() => void cancelJob()} disabled={busy || maintenanceJob.status === 'cancel_requested'}>取消</button>}</div>}{run && <><div className={`agent-live-run ${terminal ? 'is-done' : ''}`}><span className="agent-live-dot" /><span>{{ requirement_analysis: '需求分析中', awaiting_spec_confirmation: '待确认规格', inspection_failed: '巡检未通过', inspection_completed: '巡检通过', received: '任务已收到', planning: '正在梳理任务', queued: '等待执行', publishing: '正在发布', running: '正在执行', verifying: '正在验证', ready_for_review: '成果已生成，可查看', published: '已发布', needs_human: '需要处理，请查看原因', needs_clarification: '需要补充信息', awaiting_approval: '等待计划确认', cancelled: '已取消', discarded: '已放弃', failed: '执行失败' }[run.status] || '正在处理'}</span><Link to={`/runs/${encodeURIComponent(run.id)}`}>查看进展与成果</Link></div>{terminal && (run.status === 'ready_for_review' || run.status === 'published') && <Deliverables run={run} csrfToken={props.csrfToken} onUnauthorized={props.onUnauthorized} isAdmin={props.user?.role === 'admin'} />}</>}{mode === 'do' && props.user?.role !== 'member' && <div className="agent-project-upload"><button type="button" className="wb-button wb-button-secondary" onClick={() => setCreateProject(value => !value)}>上传资料并建立项目</button>{createProject && conversation?.project_id && <p>将建立新项目并开始新对话，原任务与记录保留。</p>}{createProject && <ProjectForm {...props} agentId={agent.id} uploadFirst onCancel={() => setCreateProject(false)} onCreated={(project, warning) => { setProjects(items => [{...project, id: String(project.id)}, ...items.filter(item => item.id !== String(project.id))]); setProjectId(String(project.id)); setConversation(null); setRun(null); setCreateProject(false); setProjectNotice(warning || '项目已准备好，请描述要完成的工作。') }} />}{projectNotice && <p role="status">{projectNotice}</p>}</div>}{mode === 'do' && <p className="agent-material-link"><Link to={projectId ? `/projects/${encodeURIComponent(projectId)}` : '/projects?create=1'}>{projectId ? '查看工作区' : '新建工作区'}</Link></p>}<form className="agent-composer" onSubmit={send}><textarea value={text} onChange={(event) => setText(event.target.value)} rows={3} placeholder={mode === 'do' ? '描述目标、项目和交付要求…' : '例如：以后以客户当前版本为准，别升级所有依赖…'} /><div className="agent-composer-foot"><small>{mode === 'do' ? run && !terminal ? '可以继续补充，系统会保存并在当前运行成功结束后接续处理。' : '选择项目后会创建真实运行。' : 'Skill 仅作资料读取，不会执行其中脚本。'}</small><button className="wb-button wb-button-primary" disabled={busy || Boolean(maintenanceJob && ['pending', 'running', 'cancel_requested'].includes(maintenanceJob.status)) || !text.trim()}>{busy ? '处理中…' : <>发送 <Icon name="arrow" /></>}</button></div></form></section><aside className="agent-chat-aside"><section className="agent-side-card"><span className="agent-card-kicker">当前职能体</span><h3>{agent.name}</h3><p>{agent.purpose || '还没有用途说明。可以在维护对话里补充。'}</p><div className="agent-side-meta"><span>当前版本</span><strong>v{version?.version ?? agent.active_version ?? '—'}</strong></div></section>{mode === 'maintain' && <ModelSettings agent={agent} version={version} draft={draft} props={props} editable={mode === 'maintain'} onMaintain={() => switchMode('maintain')} onChanged={() => void load()} />}<section className="agent-side-card agent-side-note"><strong>运行与成果</strong><p>任务完成后，运行进展和可下载成果会直接回到这段对话。</p><Link to="/runs">打开运行看板</Link></section></aside></div>
-}
+// ---- Entry point ----
 
 export default function AgentsPage(props: PageProps) {
   const [locationQuery] = useSearchParams()
-  const params = useParams(); const navigate = useNavigate(); const [agents, setAgents] = useState<Agent[]>([]); const [selected, setSelected] = useState<Agent | null>(null); const [loading, setLoading] = useState(true); const [creating, setCreating] = useState(false); const [importing, setImporting] = useState(false); const [error, setError] = useState<string | null>(null)
-  const load = useCallback(() => { setLoading(true); void request<unknown>(`${base}/agents`, { onUnauthorized: props.onUnauthorized }).then((value) => { const list = asList<Agent>(value, 'agents'); setAgents(list); const wanted = params.agentId ? list.find((item) => item.id === params.agentId) : undefined; setSelected(wanted || null) }).catch((cause) => { if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause)) }).finally(() => setLoading(false)) }, [params.agentId, props.onUnauthorized])
+  const params = useParams()
+  const navigate = useNavigate()
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [selected, setSelected] = useState<Agent | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [creating, setCreating] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    setLoading(true)
+    void request<unknown>(`${base}/agents`, { onUnauthorized: props.onUnauthorized })
+      .then((value) => {
+        const list = asList<Agent>(value, 'agents')
+        setAgents(list)
+        const wanted = params.agentId ? list.find((item) => item.id === params.agentId) : undefined
+        setSelected(wanted || null)
+      })
+      .catch((cause) => {
+        if (!(cause instanceof WorkspaceApiError && cause.status === 401)) setError(errorText(cause))
+      })
+      .finally(() => setLoading(false))
+  }, [params.agentId, props.onUnauthorized])
+
   useEffect(() => { load() }, [load])
-  const [manifestEpoch,setManifestEpoch]=useState(0)
+
   const choose = (id: string) => navigate(`/agents/${encodeURIComponent(id)}`)
-  const detail = selected && params.agentId === selected.id ? <AgentChat key={`${selected.id}:${manifestEpoch}`} agent={selected} props={props} /> : null
-  return <div className="wb-page agent-page">
-    <PageHeader title="职能体工作台" description="让反复出现的业务，有一个持续维护的入口。" actions={!params.agentId && <><button className="wb-button wb-button-primary" onClick={() => setCreating(true)}><Icon name="plus" /> 新建职能体</button>{props.user?.role === 'admin' && <button className="wb-button wb-button-secondary" onClick={() => setImporting(v => !v)}>导入职能体</button>}</>} />
-    {!params.agentId && <section className="wb-purpose-band"><span className="wb-purpose-symbol" aria-hidden="true"><Icon name="external" /></span><div><h2>一类业务，一个长期伙伴</h2><p>上传 Skill、维护方法，再把任务交给它。</p></div><Link className="wb-text-link" to="/modules">查看能力模块</Link></section>}
-    {error && <ErrorNotice message={error} />}
-    {!params.agentId && locationQuery.get('import') === 'external' && <p>请先选择或新建职能体，再用“为职能体添加能力”上传外部包，无需项目。</p>}
-    {!params.agentId && locationQuery.get('project') && <SkillIngestion {...props} reviewOnly />}
-    {!params.agentId && importing && props.user?.role === 'admin' && <section className="wb-card" aria-label="导入整包职能体"><NativePackImport {...props} onImported={choose} /></section>}
-    {locationQuery.get('mode') === 'maintain' && params.agentId && selected && props.user?.role === 'admin' && <AddAgentAbility agentId={selected.id} {...props} onChanged={() => setManifestEpoch(v => v + 1)} />}
-    {locationQuery.get('mode') === 'maintain' && params.agentId && selected && <><AgentManifest key={`${selected.id}:${manifestEpoch}`} agentId={selected.id} {...props}/><AgentEvolution key={selected.id} agentId={selected.id} {...props} onChanged={()=>setManifestEpoch(v=>v+1)}/></>}
-    {creating && <NewAgent {...props} onCancel={() => setCreating(false)} onCreated={(agent) => { setCreating(false); setAgents((current) => [agent, ...current]); navigate(`/agents/${encodeURIComponent(agent.id)}`) }} />}
-    {loading && agents.length === 0 && <div className="wb-card agent-loading">正在读取职能体…</div>}
-    {!loading && !error && agents.length === 0 && !creating && <div className="wb-card"><EmptyState title="还没有职能体" description="从一个名字和用途开始，之后可以在维护对话里教会它。" action={<button className="wb-button wb-button-primary" onClick={() => setCreating(true)}>创建第一个职能体</button>} /></div>}
-    {params.agentId ? <><Link className="wb-text-link agent-back" to="/agents"><Icon name="back" /> 全部职能体</Link>{detail ? <div className="agent-workspace"><AgentList agents={agents} selected={selected?.id} onSelect={choose} onCreate={() => setCreating(true)} />{detail}</div> : !loading && !error && <ErrorNotice message="未找到这个职能体，请返回列表选择。" />}</> : <>
-      {agents.length > 0 && <section className="agent-catalog" aria-label="职能体目录">{agents.map(agent => <article className="agent-catalog-card" key={agent.id}><header><CategoryBadge avatar={Array.from(agent.name)[0]} mark={packMark(agent)} /><h2>{agent.name}</h2><small>v{agent.active_version ?? agent.version?.version ?? '—'}</small></header><div className="agent-catalog-purpose"><span>业务用途</span><p>{agent.purpose || '还没有用途说明，可以在维护对话里补充。'}</p></div><footer><Link className="wb-button wb-button-primary" to={`/agents/${encodeURIComponent(agent.id)}`}>开始任务</Link><Link className="wb-button wb-button-secondary" to={`/agents/${encodeURIComponent(agent.id)}?mode=maintain`}>维护方法</Link></footer>{agent.builtin_pack && <a className="agent-pack-download wb-text-link" title="下载平台原始模板，不包含团队后续维护的变更" href={`/api/v4/builtin-packs/${encodeURIComponent(agent.builtin_pack)}/download`}>下载内置职能包 ZIP <Icon name="download" /></a>}</article>)}</section>}
-      <section className="wb-purpose-band wb-purpose-plain"><span className="wb-purpose-symbol" aria-hidden="true"><Icon name="plus" /></span><div><h2>普通开发任务，直接开始就好</h2><p>不需要先创建职能体；在项目中描述你的目标即可。</p></div><Link className="wb-button wb-button-secondary" to="/projects">前往项目</Link></section>
-    </>}
-  </div>
+
+  // Detail view: management page for a specific agent (no left sidebar)
+  if (params.agentId) {
+    return (
+      <div className="wb-page agent-page">
+        {loading && !selected && <div className="wb-card agent-loading">正在读取职能体…</div>}
+        {!loading && !selected && !error && <ErrorNotice message="未找到这个职能体，请返回列表选择。" />}
+        {error && <ErrorNotice message={error} />}
+        {selected && <AgentManagementPage agent={selected} props={props} />}
+      </div>
+    )
+  }
+
+  // List view
+  return (
+    <div className="wb-page agent-page">
+      <PageHeader
+        title="职能体工作台"
+        description="让反复出现的业务，有一个持续维护的入口。"
+        actions={<>
+          <button className="wb-button wb-button-primary" onClick={() => setCreating(true)}><Icon name="plus" /> 新建职能体</button>
+          {props.user?.role === 'admin' && <button className="wb-button wb-button-secondary" onClick={() => setImporting(v => !v)}>导入职能体</button>}
+        </>}
+      />
+      {error && <ErrorNotice message={error} />}
+      {locationQuery.get('import') === 'external' && <p>请先选择或新建职能体，再用"添加能力"上传外部包。</p>}
+      {locationQuery.get('project') && <SkillIngestion {...props} reviewOnly />}
+      {importing && props.user?.role === 'admin' && <section className="wb-card" aria-label="导入整包职能体"><NativePackImport {...props} onImported={choose} /></section>}
+      {creating && <NewAgent {...props} onCancel={() => setCreating(false)} onCreated={(agent) => { setCreating(false); setAgents((current) => [agent, ...current]); navigate(`/agents/${encodeURIComponent(agent.id)}`) }} />}
+      {loading && agents.length === 0 && <div className="wb-card agent-loading">正在读取职能体…</div>}
+      {!loading && !error && agents.length === 0 && !creating && <div className="wb-card"><EmptyState title="还没有职能体" description="从一个名字和用途开始，之后可以在维护对话里教会它。" action={<button className="wb-button wb-button-primary" onClick={() => setCreating(true)}>创建第一个职能体</button>} /></div>}
+      {agents.length > 0 && (
+        <section className="agent-catalog" aria-label="职能体目录">
+          {agents.map(agent => (
+            <article className="agent-catalog-card" key={agent.id}>
+              <header>
+                <CategoryBadge avatar={Array.from(agent.name)[0]} mark={packMark(agent)} />
+                <h2>{agent.name}</h2>
+                <small>v{agent.active_version ?? agent.version?.version ?? '—'}</small>
+              </header>
+              <div className="agent-catalog-purpose">
+                <span>业务用途</span>
+                <p>{agent.purpose || '还没有用途说明，可以在管理页补充。'}</p>
+              </div>
+              <footer>
+                <Link className="wb-button wb-button-primary" to={`/agents/${encodeURIComponent(agent.id)}/chat`}>开始对话</Link>
+                <Link className="wb-button wb-button-secondary" to={`/agents/${encodeURIComponent(agent.id)}`}>管理职能体</Link>
+              </footer>
+              {agent.builtin_pack && <a className="agent-pack-download wb-text-link" title="下载平台原始模板" href={`/api/v4/builtin-packs/${encodeURIComponent(agent.builtin_pack)}/download`}>下载内置职能包 ZIP <Icon name="download" /></a>}
+            </article>
+          ))}
+        </section>
+      )}
+      <section className="wb-purpose-band wb-purpose-plain">
+        <span className="wb-purpose-symbol" aria-hidden="true"><Icon name="plus" /></span>
+        <div><h2>普通开发任务，直接开始就好</h2><p>不需要先创建职能体；在项目中描述你的目标即可。</p></div>
+        <Link className="wb-button wb-button-secondary" to="/projects">前往项目</Link>
+      </section>
+    </div>
+  )
 }

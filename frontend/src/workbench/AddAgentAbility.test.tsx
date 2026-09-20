@@ -47,22 +47,18 @@ it('reads a mounted directory in agent scope', async () => {
 })
 it.each([false, true])('native import belongs only to the list (detail=%s)', async detail => {
   const agent = { id: 'a1', name: '维护员', active_version: 1, version: { version: 1 } }
-  api.mockImplementation(async path => path === '/api/v4/agents' ? { agents: [agent] } : path === '/api/v4/agents/a1' ? agent : path.endsWith('/draft') ? { agent_id: 'a1', revision: 0, patch: {} } : { items: [], projects: [], conversations: [], versions: [] })
+  api.mockImplementation(async path => path === '/api/v4/agents' ? { agents: [agent] } : path === '/api/v4/agents/a1' ? agent : path.endsWith('/preflight') ? { ready: true, message: '' } : path.includes('/bindings/') ? { bindings: [] } : { items: [], skills: [], modules: [], projects: [], conversations: [], versions: [], proposals: [] })
   render(<MemoryRouter initialEntries={[detail ? '/agents/a1' : '/agents']}><Routes><Route path="/agents/:agentId?" element={<AgentsPage {...props} />} /></Routes></MemoryRouter>)
   if (detail) {
-    await screen.findByRole('button', { name: '维护职能体' })
-    expect(screen.queryByRole('region', { name: '为职能体加载方法或安装工具' })).toBeNull()
-    expect(screen.queryByText('模型与工具')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '维护职能体' }))
-    await screen.findByRole('region', { name: '为职能体加载方法或安装工具' })
+    // Management page shows "添加能力" section directly for admins (no mode switch)
+    await screen.findByRole('region', { name: '添加能力' })
+    // Native pack import (导入职能体) is only on the list page, not on the detail/management page
     expect(screen.queryByRole('button', { name: '导入职能体' })).toBeNull()
     expect(screen.queryByLabelText('选择 webuddy 职能包 ZIP')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '维护职能体' }))
-    expect(screen.queryByText('添加 Skill（ZIP）')).toBeNull()
   } else {
     fireEvent.click(screen.getByRole('button', { name: '导入职能体' }))
     expect(screen.getByLabelText('选择 webuddy 职能包 ZIP')).toBeTruthy()
-    expect(screen.queryByRole('region', { name: '为职能体加载方法或安装工具' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '添加能力' })).toBeNull()
   }
 })
 

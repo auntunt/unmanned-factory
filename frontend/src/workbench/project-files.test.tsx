@@ -26,25 +26,6 @@ it.each([false,true])('uploads samples or extracts a single ZIP with the selecte
   expect(body.getAll(zip?'file':'files')).toHaveLength(files.length)
 })
 
-it('creates a sample project inside the current agent and keeps it selected for the task',async()=>{
-  const {AgentChat}=await import('./AgentsPage')
-  const agent={id:'a',name:'格式转换',active_version:1}
-  vi.mocked(request).mockImplementation(async(path,options)=>{
-    if(path==='/api/v4/agents/a') return agent
-    if(path==='/api/v4/agents') return {agents:[agent]}
-    if(String(path).endsWith('/conversations')) return {conversations:[]}
-    if(path==='/api/v2/projects') return {projects:[]}
-    if(path==='/api/v2/projects/import-files') return {project:{id:'p',name:'转换样本'},import_summary:{filename:'样本',file_count:1,manifests:[],warnings:[],baseline_status:'not_run'}}
-    throw new Error(`Unexpected ${path} ${options?.method}`)
-  })
-  render(<MemoryRouter><AgentChat agent={agent} props={{csrfToken:'csrf',onUnauthorized:()=>{}}}/></MemoryRouter>)
-  await screen.findByText('今天想让格式转换完成什么？')
-  fireEvent.click(screen.getByRole('button',{name:'上传资料并建立项目'}))
-  await screen.findByText('格式转换 · v1')
-  expect((screen.getByLabelText(/选择智能体帮助/) as HTMLSelectElement).disabled).toBe(true)
-  fireEvent.change(screen.getByLabelText(/项目与样例文件/),{target:{files:[new File(['sample'],'sample.xyz')]}})
-  fireEvent.click(screen.getByRole('button',{name:'导入项目'}))
-  await waitFor(()=>expect((screen.getByLabelText('工作项目') as HTMLSelectElement).value).toBe('p'))
-  expect(screen.getByRole('status').textContent).toContain('助手可直接读取这些文件')
-  expect(vi.mocked(request).mock.calls.some(([path,options])=>String(path).endsWith('/messages') && options?.method==='POST')).toBe(false)
-})
+// AgentChat was removed from AgentsPage as part of the management UX refactor.
+// Project creation within the agent is now handled through the dedicated chat page.
+// This test covered the old dual-mode (do/maintain) layout that no longer exists on /agents/:id.

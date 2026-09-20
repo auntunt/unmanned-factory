@@ -1,14 +1,115 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { request } from '../workspace/api'
 import { errorText, type PageProps } from '../workbench/ui'
 import Icon, { CategoryBadge, packMark } from '../workbench/Icon'
+import AgentMetadataEditor from '../workbench/AgentMetadataEditor'
 import './conversation.css'
 
-type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number }
+type Agent = { id: string; name: string; purpose?: string; builtin_pack?: string; active_version?: number; updated_at?: string }
 
-/** 职能体目录：可浏览的岗位能力，直接开始对话或维护方法。
- *  就绪状态不靠 active_version 断言（有版本不等于工具就绪）；日常制作也会沿用项目已配置的能力。 */
+/** Card-level "..." menu with keyboard navigation, Esc close, and correct focus return. */
+function CardMenu({ agent, isAdmin, csrfToken, onUnauthorized, onUpdated }: {
+  agent: Agent; isAdmin: boolean
+  csrfToken: string; onUnauthorized: () => void
+  onUpdated: (a: Agent) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node) &&
+          triggerRef.current && !triggerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  // Keyboard: Esc close + arrow navigation within menu
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); triggerRef.current?.focus(); return }
+      if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return
+      e.preventDefault()
+      const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+      const idx = items.indexOf(document.activeElement as HTMLElement)
+      const next = e.key === 'ArrowDown' ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length
+      items[next]?.focus()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open])
+
+  // Focus first menu item on open
+  useEffect(() => {
+    if (open) {
+      requestAnimationFrame(() => {
+        menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+      })
+    }
+  }, [open])
+
+  // Return focus to trigger on close
+  const prevOpen = useRef(open)
+  useEffect(() => {
+    if (prevOpen.current && !open && !editing) triggerRef.current?.focus()
+    prevOpen.current = open
+  }, [open, editing])
+
+  if (editing) {
+    return (
+      <div className="cv-card-edit-wrap">
+        <AgentMetadataEditor
+          agent={agent}
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onSaved={(updated) => { setEditing(false); onUpdated(updated) }}
+          onCancel={() => { setEditing(false); triggerRef.current?.focus() }}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="cv-card-menu-wrap" style={{ position: 'relative' }}>
+      <button
+        ref={triggerRef}
+        className="cv-card-menu-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="更多操作"
+        onClick={() => setOpen(o => !o)}
+      >
+        &#x22EF;
+      </button>
+      {open && (
+        <div ref={menuRef} className="cv-card-menu" role="menu" aria-label="职能体操作">
+          {isAdmin && (
+            <button role="menuitem" tabIndex={0} onClick={() => { setOpen(false); setEditing(true) }}>
+              编辑名称与用途
+            </button>
+          )}
+          {agent.builtin_pack && (
+            <a role="menuitem" tabIndex={0}
+              href={`/api/v4/builtin-packs/${encodeURIComponent(agent.builtin_pack)}/download`}>
+              <Icon name="download" width={14} height={14} /> 下载职能包
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 职能体目录：可浏览的岗位能力，直接开始对话或管理职能体。 */
 export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PageProps) {
   const navigate = useNavigate()
   const [agents, setAgents] = useState<Agent[] | null>(null)
@@ -19,13 +120,17 @@ export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PagePr
   const [busy, setBusy] = useState(false)
   const isAdmin = user?.role !== 'member'
 
+  const loadAgents = useCallback((signal?: AbortSignal) => {
+    return request<{ agents: Agent[] }>('/api/v4/agents', { onUnauthorized, signal })
+      .then(r => setAgents(r.agents || []))
+      .catch(cause => { if (!signal?.aborted) setError(errorText(cause)) })
+  }, [onUnauthorized])
+
   useEffect(() => {
     const c = new AbortController()
-    request<{ agents: Agent[] }>('/api/v4/agents', { onUnauthorized, signal: c.signal })
-      .then(r => setAgents(r.agents || []))
-      .catch(cause => { if (!c.signal.aborted) setError(errorText(cause)) })
+    void loadAgents(c.signal)
     return () => c.abort()
-  }, [onUnauthorized])
+  }, [loadAgents])
 
   const create = async (event: FormEvent) => {
     event.preventDefault()
@@ -38,10 +143,14 @@ export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PagePr
     } catch (cause) { setError(errorText(cause)) } finally { setBusy(false) }
   }
 
+  const handleUpdated = (updated: Agent) => {
+    setAgents(prev => prev?.map(a => a.id === updated.id ? { ...a, ...updated } : a) ?? null)
+  }
+
   return (
     <div className="cv-page">
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16 }}>
-        <div style={{ flex: 1 }}><h1>职能体</h1><p className="cv-page-sub">长期沉淀的专业角色。可以直接开始对话，或维护它的方法。</p></div>
+        <div style={{ flex: 1 }}><h1>职能体</h1><p className="cv-page-sub">长期沉淀的专业角色。可以直接开始对话，或管理它的方法与能力。</p></div>
         {isAdmin && <button className="cv-btn cv-btn-primary" onClick={() => setCreating(v => !v)}><Icon name="plus" width={15} height={15} /> 新建职能体</button>}
       </div>
       {creating && <form className="cv-settings-section" onSubmit={create} style={{ padding: 16 }}>
@@ -58,13 +167,13 @@ export default function AgentCatalog({ csrfToken, onUnauthorized, user }: PagePr
           <article className="cv-agent-card" key={agent.id}>
             <header>
               <CategoryBadge avatar={Array.from(agent.name)[0]} mark={packMark(agent)} />
-              <div><strong>{agent.name}</strong><small>v{agent.active_version ?? '—'}</small></div>
+              <div style={{ flex: 1 }}><strong>{agent.name}</strong><small>v{agent.active_version ?? '—'}</small></div>
+              {isAdmin && <CardMenu agent={agent} isAdmin={isAdmin} csrfToken={csrfToken} onUnauthorized={onUnauthorized} onUpdated={handleUpdated} />}
             </header>
             <p>{agent.purpose || '还没有用途说明。'}</p>
             <footer>
               <Link className="cv-btn cv-btn-primary" to={`/agents/${encodeURIComponent(agent.id)}/chat`}>开始对话 <Icon name="arrow" width={15} height={15} /></Link>
-              <Link className="cv-agent-dl" to={`/agents/${encodeURIComponent(agent.id)}?mode=maintain`}>维护方法</Link>
-              {agent.builtin_pack && <a className="cv-agent-dl" title="下载平台原始模板" href={`/api/v4/builtin-packs/${encodeURIComponent(agent.builtin_pack)}/download`}><Icon name="download" width={14} height={14} /> 职能包</a>}
+              {isAdmin && <Link className="cv-agent-dl" to={`/agents/${encodeURIComponent(agent.id)}`}>管理职能体</Link>}
             </footer>
           </article>
         ))}

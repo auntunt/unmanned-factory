@@ -338,3 +338,13 @@
 .cv-tool-result-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .cv-tool-result-head small { color: var(--cv-faint); }
 .cv-tool-result-error { margin: 0; color: var(--cv-faint); font-size: 12px; overflow-wrap: anywhere; }
+
+/* ---- card menu ("..." dropdown) ---- */
+.cv-card-menu-wrap { position: relative; }
+.cv-card-menu-trigger { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--cv-muted); cursor: pointer; font-size: 18px; line-height: 1; letter-spacing: 2px; }
+.cv-card-menu-trigger:hover, .cv-card-menu-trigger[aria-expanded="true"] { background: var(--cv-raised); color: var(--cv-ink); border-color: var(--cv-border); }
+.cv-card-menu { position: absolute; right: 0; top: 36px; min-width: 180px; background: var(--cv-surface); border: 1px solid var(--cv-border); border-radius: 10px; box-shadow: var(--cv-shadow); padding: 4px; z-index: 20; }
+.cv-card-menu [role="menuitem"] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border-radius: 7px; border: 0; background: transparent; color: var(--cv-ink); font: inherit; font-size: 14px; text-align: left; text-decoration: none; cursor: pointer; }
+.cv-card-menu [role="menuitem"]:hover, .cv-card-menu [role="menuitem"]:focus { background: var(--cv-raised); outline: none; }
+.cv-card-edit-wrap { padding: 8px 0 0; }
+.cv-metadata-editor { display: flex; flex-direction: column; gap: 4px; }
