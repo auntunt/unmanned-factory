@@ -138,13 +138,20 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
           </div>
         </header>
 
-        {resolved.group && resolved.showTabs !== false && GROUP_TABS[resolved.group] && (
-          <nav className="as-subnav" aria-label="页内导航">
-            {GROUP_TABS[resolved.group].filter(t => !t.adminOnly || isAdmin).map(t => (
-              <Link key={t.to} to={t.to} className={`as-subnav-tab ${resolved.activeTab === t.to ? 'is-active' : ''}`} aria-current={resolved.activeTab === t.to ? 'page' : undefined}>{t.label}</Link>
-            ))}
-          </nav>
-        )}
+        {(() => {
+          // A strip with a single destination is not navigation, it is decoration:
+          // since 能力库 stopped being a sibling of 职能体, the 职能体 group has one
+          // tab and the strip would just repeat the page title.
+          const tabs = resolved.group && resolved.showTabs !== false && GROUP_TABS[resolved.group]
+            ? GROUP_TABS[resolved.group].filter(t => !t.adminOnly || isAdmin) : []
+          return tabs.length > 1 && (
+            <nav className="as-subnav" aria-label="页内导航">
+              {tabs.map(t => (
+                <Link key={t.to} to={t.to} className={`as-subnav-tab ${resolved.activeTab === t.to ? 'is-active' : ''}`} aria-current={resolved.activeTab === t.to ? 'page' : undefined}>{t.label}</Link>
+              ))}
+            </nav>
+          )
+        })()}
         <main id="as-content" className="as-content" tabIndex={-1}>
           <div className="wb-shell as-pages">
             <WorkTitleContext.Provider value={setWorkTitle}>

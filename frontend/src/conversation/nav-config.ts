@@ -21,7 +21,9 @@ export const GROUP_TABS: Record<'engineering' | 'agents' | 'settings', GroupTab[
     { to: '/overview', label: '总览', end: true }, { to: '/projects', label: '项目' },
     { to: '/runs', label: '运行记录', end: true }, { to: '/costs', label: '用量与预算', adminOnly: true }, { to: '/team', label: '团队', adminOnly: true },
   ],
-  agents: [{ to: '/agents', label: '职能体', end: true }, { to: '/ability-center', label: '能力库' }],
+  // 能力围绕某个职能体管理，不再有并列的「能力库」页签。旧能力页面仍可直达，
+  // 但作为无主导航的兼容次级页面，归属在「职能体」下。
+  agents: [{ to: '/agents', label: '职能体', end: true }],
   settings: [{ to: '/settings', label: '通用', end: true }, { to: '/settings/runtime', label: '模型与执行', adminOnly: true }],
 }
 
@@ -49,9 +51,11 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/runs/:runId')) return { activeKey: 'history', title: '任务', usesWorkTitle: true, breadcrumb: [{ label: '历史作品', to: '/history' }, { label: '任务' }] }
   if (is('/agents')) return { activeKey: 'agents', title: '职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体' }] }
   if (is('/agents/:agentId/chat')) return { activeKey: 'agents', title: '对话', usesWorkTitle: true, group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '对话' }] }
-  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '职能体详情', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '详情' }] }
-  if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库', to: '/ability-center?tab=packs' }, { label: '职能包' }] }
-  if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力库', group: 'agents', activeTab: '/ability-center', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力库' }] }
+  if (is('/agents/:agentId')) return { activeKey: 'agents', title: '管理职能体', group: 'agents', activeTab: '/agents', breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '管理' }] }
+  // 旧能力链接保留可用。它们没有自己的顶层页签了，选中态回到「职能体」，
+  // 面包屑也回到职能体目录——不重定向，查询参数与来源上下文原样保留。
+  if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '职能包' }] }
+  if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力资产', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力资产' }] }
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
   if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
   if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }
