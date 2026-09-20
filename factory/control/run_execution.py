@@ -8,6 +8,7 @@ from factory.control.acceptance_ledger import repair_guidance
 from factory.control.autonomy import capability_context, capability_prompt, policy_decision, valid_cost
 from factory.control.context import assemble_context, context_prompt, verify_planning_checkout
 from factory.control.continuous import execute_continuous
+from factory.control import effective_contract
 from factory.control.deliverables import snapshot
 from factory.control.execution import ExecutionError
 from factory.control.modules import ModuleStore, module_prompt
@@ -42,8 +43,7 @@ def _plan(self, rid):
                 run = self.store.update(rid, {'session_skill_snapshot': session_snapshot}, expected=('planning',),
                     event=('session_skills.frozen', {'skills': [{'id': s['id'], 'name': s['name']} for s in session_snapshot]}))
         project = self._project_for_run(run)
-        if run.get('spec_confirmation'):
-            run = {**run, 'request': run['request'] + requirement_analysis.contract(run)}
+        run = {**run, 'request': run['request'] + effective_contract.contract_prompt(run)}
         policy = run.get('policy') or self.policies.get(project['id'])
         snapshots = run.get('capabilities')
         if snapshots is None:
@@ -188,8 +188,10 @@ def _run(self, rid):
         project = self._project_for_run(run)
         configuration = run.get('runtime_configuration') or self.runtime_settings.get()
         limits = configuration['limits']
-        if run.get('spec_confirmation'):
-            run = {**run, 'request': run['request'] + requirement_analysis.contract(run)}
+        # The coding round reads the run's effective agreement, which is the same
+        # one acceptance will read: a forbidden zone the owner lifted at the last
+        # safe node is no longer a constraint here, and its replacement is.
+        run = {**run, 'request': run['request'] + effective_contract.contract_prompt(run)}
         continuous = run.get('execution_mode') == 'continuous'
         deadline = time.monotonic() + limits['timeout_s']
         progress = {}

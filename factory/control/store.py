@@ -310,7 +310,13 @@ class Store:
                     result.append(run)
             return result
 
-    def update(self, rid, changes, *, expected=None, revision=None, event=None):
+    def update(self, rid, changes, *, expected=None, revision=None, event=None, events=()):
+        """CAS update, optionally with events that must share this transaction.
+
+        `events` is for receipts that may not be observable without the change
+        they record, and vice versa: a follow-up marked applied while the change
+        it authorized is missing is a silent loss, so both land or neither does.
+        """
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT data FROM runs WHERE id=?', (rid,)).fetchone()
@@ -326,6 +332,8 @@ class Store:
             db.execute('UPDATE runs SET data=? WHERE id=?', (json.dumps(data, ensure_ascii=False), rid))
             if event:
                 self._event(db, rid, event[0], event[1])
+            for extra in events:
+                self._event(db, rid, extra[0], extra[1])
             return data
 
     def append(self, rid, kind, payload, task_id=None):

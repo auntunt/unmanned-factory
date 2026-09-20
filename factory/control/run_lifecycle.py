@@ -10,6 +10,7 @@ import threading
 from factory.control.autonomy import all_events
 from factory.control.capabilities import CapabilityStore
 from factory.control.codegraph import baseline_sha
+from factory.control import effective_contract
 from factory.control.github import publish_failure_message
 from factory.control.github_publication import GitHubPublication
 from factory.control.knowledge import KnowledgeStore
@@ -49,21 +50,72 @@ def _merge_followup_content(answer, pending):
     return merged, True
 
 
-def _mark_followups_applied(svc, rid, pending):
-    """Write followup.applied events for previously collected pending items.
+def _applied_events(run, pending, *, contract=None):
+    """The followup.applied receipts for one consumption, for the same transaction.
 
-    Call only after the lifecycle store.update has succeeded, still under
-    svc.lock.  Crash between update and this write is safe: the pending
-    content is already merged into the run's history, so the worst case is
-    a duplicate merge on the next safe node -- never a silent loss.
+    These belong with the change they record: a receipt that lands without the
+    revised agreement claims a supplement was honoured when it was not, and a
+    revision that lands without its receipt invites a second application of the
+    same words. `store.update(..., events=...)` writes both or neither.
+    """
+    return [('followup.applied', {'pending_id': p['id'], 'run_revision': run['revision'],
+                                  **({'effective_revision': contract['revision'],
+                                      'effective_digest': contract['digest']} if contract else {})})
+            for p in pending]
+
+
+def _mark_followups_applied(svc, rid, pending):
+    """Write followup.applied receipts for a consumption that had no contract change.
+
+    Prefer passing `_applied_events(...)` into the same `store.update`. This
+    remains for the paths whose update cannot carry them, and is still written
+    under svc.lock immediately after that update.
     """
     if not pending:
         return
     run = svc.store.get(rid)
     with svc.store.connect() as db:
-        for p in pending:
-            svc.store._event(db, rid, 'followup.applied', {
-                'pending_id': p['id'], 'run_revision': run['revision']})
+        for kind, payload in _applied_events(run, pending):
+            svc.store._event(db, rid, kind, payload)
+
+
+def _revise_for_followups(svc, rid, run, collected):
+    """The next effective agreement for these supplements, or None to keep this one.
+
+    Returns None whenever nothing determinable changes -- no confirmed contract,
+    no supplement that touches the specification, or an analysis that could not
+    decide. Staying on the current agreement is always the safe answer: the
+    supplement is still merged into the round's instructions, and an undecidable
+    business conflict waits for the customer instead of being decided for them.
+    """
+    log = logging.getLogger(__name__)
+    contract = effective_contract.current(run)
+    if contract is None or not collected:
+        return None
+    project = svc._project_for_run(run)
+    configuration = run.get('runtime_configuration') or svc.runtime_settings.get()
+    revised = contract
+    for pending in collected:
+        try:
+            analysis = effective_contract.analyse(svc, rid, run, project, configuration,
+                                                  pending['content'])
+        except Exception as exc:
+            # A failed or unaffordable analysis leaves the agreement as it is.
+            log.info('scope_change(%s): analysis unavailable: %s: %s', rid, type(exc).__name__, exc)
+            svc.store.append(rid, 'contract.analysis_skipped', {
+                'pending_id': pending['id'], 'error': f'{type(exc).__name__}: {str(exc)[:500]}'})
+            continue
+        if analysis['unresolved']:
+            svc.store.append(rid, 'contract.unresolved', {
+                'pending_id': pending['id'], 'questions': analysis['unresolved']})
+            continue
+        if not analysis['superseded_non_goals'] and not analysis['added_requirements']:
+            continue
+        revised = effective_contract.revise(revised, analysis, message={
+            'pending_id': pending['id'], 'content': pending['content'],
+            'actor_id': pending.get('actor_id'), 'actor': pending.get('actor'),
+            'fingerprint': pending.get('fingerprint')})
+    return None if revised is contract else revised
 
 
 def _expire_unconsumed_followups(svc, rid):
@@ -140,19 +192,23 @@ def _auto_resume_with_followups(svc, rid):
             'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
         resume_count = run.get('resume_count', 0)
         revision = run['revision']
+        contract = _revise_for_followups(svc, rid, run, collected)
+        changes = {'status': 'queued',
+            'runtime_configuration': configuration,
+            'resume_count': resume_count + 1,
+            'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
+            'history': [*run['history'], answer]}
+        if contract:
+            changes['effective_contract'] = contract
         try:
-            updated = svc.store.update(rid, {'status': 'queued',
-                'runtime_configuration': configuration,
-                'resume_count': resume_count + 1,
-                'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
-                'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
+            updated = svc.store.update(rid, changes, expected=('needs_human',), revision=revision,
                 event=('run.auto_resumed', {'actor': 'system/auto', 'answer': answer,
                     'revision': revision, 'resume_count': resume_count + 1,
-                    'pending_ids': pending_ids}))
+                    'pending_ids': pending_ids}),
+                events=_applied_events(run, collected, contract=contract))
         except Exception as exc:
             log.info('auto_resume(%s): store.update failed: %s', rid, exc)
             return False
-        _mark_followups_applied(svc, rid, collected)
     try:
         svc._submit(svc._run, rid)
     except Exception as exc:
@@ -324,15 +380,22 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
             artifacts, budget_stop=legacy_budget_stop)
             if continuation_only and run.get('execution_mode') == 'continuous'
             else None)
-        updated = self.store.update(rid, {'status': 'queued',
+        # A safe point is where the agreement may change: the round that follows
+        # reads the revised one, and the receipt for the supplements that revised
+        # it is written by the same transaction.
+        contract = _revise_for_followups(self, rid, run, collected)
+        changes = {'status': 'queued',
             'runtime_configuration': configuration,
             'resume_count': resume_count + 1,
             'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision,
                 'resume_stage': resume_stage},
-            'history': [*run['history'], answer]}, expected=('needs_human',), revision=revision,
+            'history': [*run['history'], answer]}
+        if contract:
+            changes['effective_contract'] = contract
+        updated = self.store.update(rid, changes, expected=('needs_human',), revision=revision,
             event=('human.continued', {'actor': actor, 'answer': answer,
-                'revision': revision, 'resume_count': resume_count + 1}))
-        _mark_followups_applied(self, rid, collected)
+                'revision': revision, 'resume_count': resume_count + 1}),
+            events=_applied_events(run, collected, contract=contract))
         try:
             self._submit(self._run, rid)
         except Exception as exc:

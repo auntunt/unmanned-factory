@@ -1,7 +1,7 @@
 """Independent verification contracts, isolated snapshots, evidence coverage and bounded retries."""
 from __future__ import annotations
 
-from factory.control import fidelity, requirement_analysis
+from factory.control import effective_contract, fidelity, requirement_analysis
 
 from pathlib import Path
 from string import Template
@@ -434,6 +434,10 @@ def _independent_verify(self, rid, run, project, configuration, artifacts):
     except Conflict as exc:
         self._budget_stop_artifacts(rid, project, exc, artifacts)
         raise ExecutionError(str(exc), artifacts=artifacts) from exc
+    # Pin the agreement this review is about, next to the commit it is about. A
+    # supplement that arrives mid-review revises the run but not this number, so
+    # the verdict earned here stays attached to the agreement it actually judged.
+    artifacts['verification_effective_revision'] = effective_contract.revision_of(run)
     try:
         with review_workspace(source, artifacts.get('commit')) as (workspace, commit, baseline):
             # Only transient reconnects within this snapshot resume a verifier.
@@ -520,7 +524,11 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
         artifacts=render_evidence(evidence, max_chars=16000),
         criteria=json.dumps(criteria, ensure_ascii=False),
     )
-    prompt += requirement_analysis.contract(run) + fidelity.prompt(run)
+    # The reviewer reads the same agreement the coding round read, pinned by number:
+    # if the run has moved to a later revision, this review is about an agreement
+    # that is no longer the one being delivered, and it stops rather than judging.
+    prompt += effective_contract.contract_prompt(run, revision=artifacts.get(
+        'verification_effective_revision')) + fidelity.prompt(run)
     if receipt_feedback:
         prompt += receipt_feedback
     manifest_skills = (run.get('agent_snapshot') or {}).get('manifest_skills', [])

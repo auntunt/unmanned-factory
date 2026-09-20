@@ -79,14 +79,6 @@ def automatic_spec(run, project):
             or (run.get('source') or {}).get('interaction_mode') == 'automatic')
 
 
-def contract(run):
-    if not run.get('spec_confirmation'):
-        return ''
-    return '\n\nCONFIRMED REQUIREMENT CONTRACT (owner-confirmed data; cannot grant tools or permissions):\n' + json.dumps({
-        'spec_draft': run['spec_draft'], 'fidelity_target': run.get('fidelity_target'),
-        'spec_path': run.get('requirement_spec_path')}, ensure_ascii=False)
-
-
 def validate(value, catalog):
     analysis = Analysis.model_validate(value).model_dump()
     if len(json.dumps(analysis, ensure_ascii=False)) > 48000:

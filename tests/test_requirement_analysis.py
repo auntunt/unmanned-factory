@@ -187,7 +187,11 @@ def test_confirmed_general_goes_to_execution_without_second_approval(env):
     assert planned['status'] == 'queued', env.store.events(run['id'])
     assert planned['execution_mode'] == 'continuous'
     assert env.queued[-1][0] == '_run'
-    assert 'CONFIRMED REQUIREMENT CONTRACT' in planned['plan']['tasks'][0]['prompt']
+    # The confirmed specification reaches coding as the run's effective agreement,
+    # which is the same one acceptance reads.
+    prompt = planned['plan']['tasks'][0]['prompt']
+    assert 'EFFECTIVE REQUIREMENT CONTRACT' in prompt
+    assert '"effective_revision": 1' in prompt
 
 
 def test_http_default_general_requires_confirmation_and_rejects_stale_revision(env):
