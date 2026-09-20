@@ -99,12 +99,13 @@ it('basic info section shows edit button for admin and can open editor', async (
   expect(screen.getByTestId('metadata-editor')).toBeTruthy()
 })
 
-it('upload source clearly states that "导入职能体" API creates a new role', async () => {
+it('upload source clearly distinguishes Skill ZIP from agent pack import', async () => {
   showDetail()
   await screen.findByRole('region', { name: '添加能力' })
   fireEvent.click(screen.getByRole('button', { name: '上传包' }))
   const form = screen.getByTestId('source-upload')
-  expect(form.textContent).toContain('会新建角色')
+  // The user must see that importing a full agent pack goes through a different entry point.
+  expect(form.textContent).toContain('导入职能体')
 })
 
 it('?mode=maintain deep link still reaches the management page', async () => {

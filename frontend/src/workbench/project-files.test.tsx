@@ -26,6 +26,24 @@ it.each([false,true])('uploads samples or extracts a single ZIP with the selecte
   expect(body.getAll(zip?'file':'files')).toHaveLength(files.length)
 })
 
-// AgentChat was removed from AgentsPage as part of the management UX refactor.
-// Project creation within the agent is now handled through the dedicated chat page.
-// This test covered the old dual-mode (do/maintain) layout that no longer exists on /agents/:id.
+it('creates a sample project within the current agent context from the management page', async () => {
+  const created = vi.fn()
+  vi.mocked(request).mockImplementation(async (path) =>
+    path === '/api/v4/agents' ? { agents: [{ id: 'agent-x', name: '测试职能体', active_version: 2 }] }
+    : { project: { id: 'proj-1', name: '样例项目' }, import_summary: { filename: '材料', file_count: 1, manifests: [], warnings: [], baseline_status: 'not_run' } }
+  )
+  // ProjectForm with agentId pre-set simulates the management page embedding:
+  // the agent_id is fixed by the caller, not re-selected in a dropdown.
+  render(<MemoryRouter><ProjectForm csrfToken="csrf" onUnauthorized={() => {}} onCreated={created} onCancel={() => {}} agentId="agent-x" uploadFirst /></MemoryRouter>)
+  // When agentId is provided, the form should still load agents for display
+  await waitFor(() => expect(vi.mocked(request)).toHaveBeenCalled())
+  fireEvent.change(screen.getByLabelText('工程来源'), { target: { value: 'zip' } })
+  const file = new File(['archive'], 'sample.zip')
+  fireEvent.change(screen.getByLabelText(/项目与样例文件/), { target: { files: [file] } })
+  fireEvent.click(screen.getByRole('button', { name: '导入项目' }))
+  await waitFor(() => expect(created).toHaveBeenCalled())
+  const call = vi.mocked(request).mock.calls.find(([url]) => String(url).includes('/import-'))!
+  expect(call[0]).toBe('/api/v2/projects/import-zip')
+  const body = call[1]!.body as FormData
+  expect(body.get('agent_id')).toBe('agent-x')
+})
