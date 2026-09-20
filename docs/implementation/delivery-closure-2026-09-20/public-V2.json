@@ -1,0 +1,89 @@
+{
+  "passed": true,
+  "at": "2026-09-20T08:53:09.760606+00:00",
+  "url": "https://harness.cloudwaveai.cn/delivery-demo/counter/",
+  "version": "V2",
+  "commit": "389b0b07abfa74419dfb9ffa7f40dabe5c79b0de",
+  "checks": [
+    {
+      "action": "increment",
+      "input": 0,
+      "status": 200,
+      "response": {
+        "value": 1
+      }
+    },
+    {
+      "action": "decrement",
+      "input": 1,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "reset",
+      "input": 9,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "invalid",
+      "input": 1,
+      "status": 400,
+      "response": {
+        "error": "action must be one of increment, decrement, reset, double, square"
+      }
+    },
+    {
+      "action": "double",
+      "input": 0,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "square",
+      "input": 0,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "double",
+      "input": 4,
+      "status": 200,
+      "response": {
+        "value": 8
+      }
+    },
+    {
+      "action": "square",
+      "input": 4,
+      "status": 200,
+      "response": {
+        "value": 16
+      }
+    },
+    {
+      "action": "double",
+      "input": -3,
+      "status": 200,
+      "response": {
+        "value": -6
+      }
+    },
+    {
+      "action": "square",
+      "input": -3,
+      "status": 200,
+      "response": {
+        "value": 9
+      }
+    }
+  ]
+}

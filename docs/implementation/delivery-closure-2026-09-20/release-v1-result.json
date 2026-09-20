@@ -1,0 +1,44 @@
+{
+  "passed": true,
+  "release_run_id": "2296fedca9c74043a8baec9c7f9fce1c",
+  "deployed_source_commit": "db196e44b4882854ed7fc8eb90c2834dbcc6b87f",
+  "release_commit": "dfe7b3af36861c8c8cb1229cea9cf2a15f8feb25",
+  "remote_results": [
+    {
+      "target_id": "b849af49c0ef45a5b8a5447d3a6e677b",
+      "target": "同机 Docker 完整交付验收",
+      "verb": "health_check",
+      "status": "pass",
+      "exit_code": 0,
+      "executed": true,
+      "attempts": 1,
+      "summary": "{\"commit\": \"db196e44b4882854ed7fc8eb90c2834dbcc6b87f\"}\n",
+      "reason": "",
+      "duration_s": 0.592
+    },
+    {
+      "target_id": "b849af49c0ef45a5b8a5447d3a6e677b",
+      "target": "同机 Docker 完整交付验收",
+      "verb": "service_status",
+      "status": "pass",
+      "exit_code": 0,
+      "executed": true,
+      "attempts": 1,
+      "summary": "{\"state\": \"running\", \"image\": \"webuddy-demo-counter:db196e44b4882854ed7fc8eb90c2834dbcc6b87f\", \"ports\": {\"8080/tcp\": [{\"HostIp\": \"0.0.0.0\", \"HostPort\": \"18081\"}, {\"HostIp\": \"::\", \"HostPort\": \"18081\"}]}}\n",
+      "reason": "",
+      "duration_s": 0.596
+    },
+    {
+      "target_id": "b849af49c0ef45a5b8a5447d3a6e677b",
+      "target": "同机 Docker 完整交付验收",
+      "verb": "deploy",
+      "status": "pass",
+      "exit_code": 0,
+      "executed": true,
+      "attempts": 1,
+      "summary": "{\"repository\": \"auntunt/webuddy-acceptance-counter-b0407128\", \"commit\": \"db196e44b4882854ed7fc8eb90c2834dbcc6b87f\", \"image\": \"webuddy-demo-counter:db196e44b4882854ed7fc8eb90c2834dbcc6b87f\", \"previous_image\": null, \"container\": \"e7c77ca6dcd034c5fd54941bf5b56024edc6de09ea219716b58475be69abb161\", \"port\": 18081, \"health\": {\"commit\": \"db196e44b4882854ed7fc8eb90c2834dbcc6b87f\"}, \"source_sha256\": \"97073fff735a2987a2cab7cba535008ff61d56cc51339cc69636309f4396fdc1\", \"at\": 1789891454.818872, \"source_run_id\": \"5b4370b3b88a4b8c8eccfdec2d035535\"}\n",
+      "reason": "",
+      "duration_s": 5.367
+    }
+  ]
+}

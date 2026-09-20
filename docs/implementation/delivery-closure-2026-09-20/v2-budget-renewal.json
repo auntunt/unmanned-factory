@@ -1,0 +1,8 @@
+{
+  "run_id": "364266fb3b6f43d3a4b39007307b5d02",
+  "from": 12,
+  "to": 20,
+  "manual_verification_resume_after_auto_consumption": true,
+  "status": "queued",
+  "stage": "verification"
+}

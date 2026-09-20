@@ -1,0 +1,7 @@
+{
+  "run_id": "d100f909d0a0424388a89ef4e419069b",
+  "status": "queued",
+  "resume_stage": "verification",
+  "budget_usd": 12,
+  "reason": "one retry of invalid verifier JSON; no implementation or budget change"
+}

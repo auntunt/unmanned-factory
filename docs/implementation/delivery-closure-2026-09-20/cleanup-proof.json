@@ -1,0 +1,8 @@
+{
+  "isolated_service_stopped": true,
+  "production_service": "active",
+  "production_code": "f0599bc",
+  "production_port": 8788,
+  "demo_container": "true webuddy-demo-counter:389b0b07abfa74419dfb9ffa7f40dabe5c79b0de",
+  "runs_terminal": true
+}

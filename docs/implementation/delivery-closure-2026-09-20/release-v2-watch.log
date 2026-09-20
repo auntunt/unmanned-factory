@@ -1,0 +1,10 @@
+release-v2 awaiting_approval
+release-v2 running
+release-v2 needs_human
+STOP release-v2 stopped: 独立验证未返回有效结构化结果
+Traceback (most recent call last):
+  File "/home/ubuntu/releases/acceptance-closure-20260920/closure-watch-release.py", line 5, in <module>
+    r=watch(label,1200);rid=r['id']
+      ^^^^^^^^^^^^^^^^^
+  File "<string>", line 13, in watch
+RuntimeError: release-v2 stopped: 独立验证未返回有效结构化结果

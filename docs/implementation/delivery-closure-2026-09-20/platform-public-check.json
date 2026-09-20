@@ -1,0 +1,5 @@
+{
+  "url": "https://harness.cloudwaveai.cn/agents",
+  "status": 200,
+  "check": "public page HTTP only; not a fresh authenticated feature acceptance"
+}

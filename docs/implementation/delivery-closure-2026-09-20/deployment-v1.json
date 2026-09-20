@@ -1,0 +1,14 @@
+{
+  "repository": "auntunt/webuddy-acceptance-counter-b0407128",
+  "commit": "db196e44b4882854ed7fc8eb90c2834dbcc6b87f",
+  "image": "webuddy-demo-counter:db196e44b4882854ed7fc8eb90c2834dbcc6b87f",
+  "previous_image": null,
+  "container": "e7c77ca6dcd034c5fd54941bf5b56024edc6de09ea219716b58475be69abb161",
+  "port": 18081,
+  "health": {
+    "commit": "db196e44b4882854ed7fc8eb90c2834dbcc6b87f"
+  },
+  "source_sha256": "97073fff735a2987a2cab7cba535008ff61d56cc51339cc69636309f4396fdc1",
+  "at": 1789891454.818872,
+  "source_run_id": "5b4370b3b88a4b8c8eccfdec2d035535"
+}

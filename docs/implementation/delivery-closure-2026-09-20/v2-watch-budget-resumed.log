@@ -1,0 +1,7 @@
+V2 running
+V2 needs_human
+Traceback (most recent call last):
+  File "/home/ubuntu/releases/acceptance-closure-20260920/closure-v2-followup.py", line 36, in <module>
+    save('followup-result',{'passed_control_flow':False,'error':rr.get('error'),'run_id':rid,'status':last,'manual_continue_calls_after_injection':1,'manual_resume_reason':'verification budget only; after automatic consumption','priming_manual_continue_calls':1});raise RuntimeError(str(rr.get('error'))[:600])
+                                                                                                                                                                                                                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: 独立验证未通过：逐项验收未完成：存在缺失、重复或未通过的验收证据

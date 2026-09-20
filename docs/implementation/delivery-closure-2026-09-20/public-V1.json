@@ -1,0 +1,41 @@
+{
+  "passed": true,
+  "at": "2026-09-20T08:09:03.478183+00:00",
+  "url": "https://harness.cloudwaveai.cn/delivery-demo/counter/",
+  "version": "V1",
+  "commit": "db196e44b4882854ed7fc8eb90c2834dbcc6b87f",
+  "checks": [
+    {
+      "action": "increment",
+      "input": 0,
+      "status": 200,
+      "response": {
+        "value": 1
+      }
+    },
+    {
+      "action": "decrement",
+      "input": 1,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "reset",
+      "input": 9,
+      "status": 200,
+      "response": {
+        "value": 0
+      }
+    },
+    {
+      "action": "invalid",
+      "input": 1,
+      "status": 400,
+      "response": {
+        "error": "action must be one of increment, decrement, reset"
+      }
+    }
+  ]
+}
