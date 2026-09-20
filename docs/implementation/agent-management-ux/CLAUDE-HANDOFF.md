@@ -54,3 +54,47 @@ B 的管理区块自己持有 `agent` 状态，与 `AgentsPage` 的 `selected` �
 
 ## 截图环境
 临时目录 + 端口 18931 的一次性实例，admin 账号 `demo`，两个演示职能体由脚本建立；用完已关停。脚本：`/tmp/agent_ux_demo.py`（不入库，内容见交接讨论）。未连接正式服务器。
+
+---
+
+# 针对 Codex 复核 85641b6 的补修（基线 `85641b6` → 候选见推送）
+
+Codex 的复现 `CodexAgentUxReview.test.tsx` 原样入库 `frontend/src/workbench/`，**断言一字未改**。
+修复前 **5 failed** → 修复后 **5 passed**。
+
+## R1 切换职能体后仍保留前一个对象
+`AgentManagementPage` 加 `key={selected.id}`：在单次挂载的路由树里 a1→a2 会整体重建管理状态，编辑与挂靠不再写到先挂载的角色。不是靠测试每次 cleanup 掩盖——复现用例在同一棵路由树内 `navigate` 后断言旧标题消失。
+提交 `d047fee`。
+
+## R2 未知/未检查环境被显示为就绪
+只有 `status === 'ready'` 才显示可用；`unavailable` 显示缺依赖；`unchecked`（含检查过期、运行环境变更）、`checking`、字段缺失一律按真实状态展示，并保留 `stale_reason` 过期说明。复用既有 `ENV_LABEL` / `EnvStatus`，没新造健康框架。
+提交 `d047fee`。
+
+## R3 添加能力未落实当前角色上下文
+- **团队来源**改为真读 `GET /api/v4/capability-packs` + 当前 `bindings`，分三类：**可挂靠**（已发布未挂靠，就地「挂靠到本职能体」按钮）、**已挂靠**（指回上方区块）、**还在准备中**（待验证发布）。
+- 挂靠动作复用既有 `GET /capability-packs/{id}` 取 `version_id` + `POST /capability-packs/bindings`，`expected_revision` 取当前绑定，**未新增任何后台接口**，挂靠后就地刷新。
+- **开发成果来源**原来请求的是当前角色 `bindings`（已挂靠），语义错误；改为真实候选（尚无已发布版本的包），空态指向运行记录而非裸目录。
+- 模块、沉淀能力、包详情链接**全部携带 `agent_id`**。
+提交 `d047fee`。
+
+## R4 整段删除旧维护功能，未提供替代
+恢复到管理页**折叠的「高级设置 / 维护」**区（不恢复双壳、不恢复 do/maintain 双模式布局）：
+模型配置、维护对话（生成草稿）、应用草稿（`DraftCard`）、版本回退。
+`project-files.test.tsx` 那条被删的行为测试：**原理由不成立**（`AgentChatPage` 是无项目日常聊天，没有该流程）。现已在管理页接入 `ProjectForm`（`agentId` 固定为当前角色，不再下拉重选），并补行为测试断言导入请求确实带上 `agent_id`。
+提交 `9de1798`。
+
+## 呈现收尾
+管理页默认只给**已加载规范摘要**（身份段节选 + skill/断言/revision 计数），编辑正文与进化提案折进「编辑工作规范」，模型配置与维护折进「高级设置 / 维护」。
+面向产品用户的实施说明式文案已清理（含「这是入口收拢，不是新增绑定能力」「当前没有…初始导入接口」等共 10 处）。「导入职能体」入口在列表页 `PageHeader` 实际可达。
+
+## 验证
+- Codex 复现：`./node_modules/.bin/vitest run src/workbench/CodexAgentUxReview.test.tsx` → **5 passed**（修复前 5 failed）。
+- 前端全量：`./node_modules/.bin/vitest run` → **421 passed / 56 files**；`npx tsc --noEmit` 0；`npm run build` 0。
+- 后端未改动，`-k "agent"` 回归 **176 passed**（含元信息 12 条）。未跑后端全量。
+- **真实浏览器截图已落盘**：`docs/implementation/agent-management-ux/screenshots/*.png` 五张，说明见该目录 README。上一轮只有文字索引，是我的疏漏。
+
+## 一处如实说明
+截图里「可用工具」显示空态，是因为那个全新演示实例**没有已发布的职能包**——不是功能没做。有可挂靠工具时的渲染与就地挂靠按钮，由 Codex 那条 `team add flow` 用例覆盖并已绿。
+
+## 未验证
+真实模型下的管理页操作、正式站数据上的表现、Linux 复跑、发布。均归 Codex。
