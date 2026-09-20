@@ -63,6 +63,24 @@ _VERIFIER_CONTRACT_MAX_CHARS = 80_000
 _FENCE_RE = re.compile(r'```(?:json)?\s*\n(.*?)\n\s*```', re.DOTALL)
 
 
+def _no_duplicate_keys(pairs):
+    """Reject an object that states the same key twice.
+
+    `json.loads` keeps the last of a duplicated pair, so a report that says
+    `"verdict":"fail"` and then `"verdict":"pass"` parses as a clean pass and the
+    failure it explicitly stated is simply gone -- with nothing for a later
+    comparison to notice, because the fail never survived parsing. A report that
+    contradicts itself is not damaged formatting; it has no single meaning to
+    preserve, so it is refused rather than resolved in either direction.
+    """
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f'duplicate key in verification report: {key}')
+        seen[key] = value
+    return seen
+
+
 def _extract_verdict_json(text: str) -> dict:
     """Extract and validate the structured verdict from a verification response.
 
@@ -81,7 +99,7 @@ def _extract_verdict_json(text: str) -> dict:
 
     # Form 1: pure JSON.
     try:
-        obj = json.loads(source)
+        obj = json.loads(source, object_pairs_hook=_no_duplicate_keys)
         if isinstance(obj, dict):
             _validate_verdict_fields(obj)
             return obj
@@ -99,10 +117,10 @@ def _extract_verdict_json(text: str) -> dict:
     for match in fences:
         body = match.group(1).strip()
         try:
-            obj = json.loads(body)
+            obj = json.loads(body, object_pairs_hook=_no_duplicate_keys)
             if isinstance(obj, dict):
                 candidates.append(obj)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             continue
 
     if len(candidates) == 0:
@@ -134,13 +152,18 @@ Rules:
 - Copy every per-criterion entry the report contains into "criteria" with its
   "id", "status" and "evidence" byte for byte. Do not add an entry the report
   does not contain. Do not drop one. Do not write evidence of your own.
-- "reason" must be the report's own stated reason, shortened if needed.
+- Copy every other field the report contains -- "reason", "browser_review",
+  per-entry "skill_refs", anything else -- byte for byte, at the same place. Do
+  not shorten, translate, summarise, reorder its meaning, add a field or omit one.
+- If the report states the same field twice with different content, or states
+  both "criteria" and "acceptance_coverage" with different content, you cannot
+  reformat it: you would have to decide which one is the finding.
 - If you cannot do this without inventing or dropping content, reply with
   exactly: CANNOT_REFORMAT
 - Output a single ```json fenced object. No commentary before or after.
 
-Your output is compared field by field against the damaged report. Any verdict
-or per-criterion difference is rejected.
+Your output is compared field by field against the damaged report, including
+every field named above. Any difference at all is rejected.
 
 --- BEGIN REPORT ($sentinel) ---
 $body
@@ -211,7 +234,7 @@ def _syntax_only_recover(source):
     while stack:
         out.append('}' if stack.pop() == '{' else ']')
     try:
-        obj = json.loads(''.join(out))
+        obj = json.loads(''.join(out), object_pairs_hook=_no_duplicate_keys)
     except (json.JSONDecodeError, ValueError):
         return None
     return obj if isinstance(obj, dict) else None
@@ -228,16 +251,35 @@ def _stated_structure(text: str):
     evidence. An entry that is incomplete, unreadable or duplicated makes the
     report unrepairable rather than being passed over, because passing it over is
     exactly how a reformatter could drop a finding and still look faithful.
+
+    This is the repairability predicate only. What the repair is compared against
+    is the whole recovered report (`_recovered_report`), not these three fields.
     """
-    obj = _syntax_only_recover(_damaged_envelope(text))
-    if obj is None:
-        return None
+    obj = _recovered_report(text)
+    return None if obj is None else _stated_rows(obj)
+
+
+def _recovered_report(text: str):
+    """The report's own single recovered structure, or None. The comparison anchor."""
+    return _syntax_only_recover(_damaged_envelope(text))
+
+
+def _stated_rows(obj: dict):
+    """The verdict and per-criterion rows `obj` states, or None when incomplete.
+
+    Both row keys are read, and a disagreement between them is refused. Choosing
+    the one we happen to look at first would let a report that says `criteria`
+    passed and `acceptance_coverage` failed come out of repair as a clean pass,
+    with the failing list simply not carried forward.
+    """
     verdict = obj.get('verdict')
     if verdict not in _STATUSES:
         return None
-    listed = obj.get('criteria')
+    listed, alias = obj.get('criteria'), obj.get('acceptance_coverage')
     if listed is None:
-        listed = obj.get('acceptance_coverage')
+        listed = alias
+    elif alias is not None and alias != listed:
+        return None  # Two disagreeing row lists: which one is the finding is a judgement.
     if not isinstance(listed, list) or not listed:
         return None  # A conclusion with no per-criterion evidence at all.
     rows = {}
@@ -257,24 +299,38 @@ def _stated_structure(text: str):
     return {'verdict': verdict, 'rows': rows}
 
 
-def _repaired_matches_original(stated: dict, verdict: dict) -> bool:
-    """The reformat must reproduce the original's verdict and every row exactly."""
-    if verdict.get('verdict') != stated['verdict']:
-        return False
-    rows = verdict.get('criteria', verdict.get('acceptance_coverage'))
-    if not isinstance(rows, list) or len(rows) != len(stated['rows']):
-        return False
-    seen = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            return False
-        row_id, status, evidence = row.get('id'), row.get('status'), row.get('evidence')
-        if not isinstance(row_id, str) or row_id in seen:
-            return False
-        if not isinstance(status, str) or not isinstance(evidence, str):
-            return False
-        seen[row_id] = (status, evidence)
-    return seen == stated['rows']
+def _canonical_report(obj):
+    """The report with the row alias folded into `criteria`, or None on a conflict.
+
+    Providers use either key for the same row schema, and the reformatter is told
+    to emit `criteria`, so the two spellings are the same report. Two *different*
+    row lists are not: deciding which is the finding is a judgement, so it is
+    refused instead.
+    """
+    if not isinstance(obj, dict):
+        return None
+    out = dict(obj)
+    alias = out.pop('acceptance_coverage', None)
+    if alias is not None:
+        if 'criteria' not in out:
+            out['criteria'] = alias
+        elif out['criteria'] != alias:
+            return None
+    return out
+
+
+def _repaired_matches_original(original: dict, verdict: dict) -> bool:
+    """The reformat must reproduce the whole original report, field for field.
+
+    The comparison is over the entire recovered report, not the id/status/evidence
+    triples alone: `reason`, `browser_review`, per-row `skill_refs` and every other
+    field a reviewer wrote carry references that downstream gates read. Comparing
+    only the fields we extracted would let a reformat quietly drop or rewrite the
+    rest and still be accepted as faithful, so any difference -- an added field, a
+    dropped one, a reworded reason -- is a new report rather than a reformat.
+    """
+    a, b = _canonical_report(original), _canonical_report(verdict)
+    return a is not None and b is not None and a == b
 
 
 def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspace,
@@ -296,7 +352,8 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
         # A tools-free channel exists only here; other providers would have to
         # run the repair with execution tools attached, which is not acceptable.
         return None
-    stated = _stated_structure(original_text)
+    original = _recovered_report(original_text)
+    stated = None if original is None else _stated_rows(original)
     if stated is None:
         # Nothing structurally determinable: no verdict field, several of them, or
         # a conclusion with no per-criterion evidence. Reformatting such a report
@@ -343,9 +400,10 @@ def _repair_verdict_format(self, rid, run, project, artifacts, profile, workspac
         artifacts['verification_format_repair']['accepted'] = False
         artifacts['verification_format_repair']['refused'] = '重排后仍不是有效结构化结果'
         return None
-    if not _repaired_matches_original(stated, verdict):
-        # The reformat must reproduce the conclusion and every per-criterion
-        # id/status/evidence triple exactly; anything else is a new judgement.
+    if not _repaired_matches_original(original, verdict):
+        # The reformat must reproduce the whole recovered report -- conclusion,
+        # every row, reason, browser_review, skill_refs and any other field the
+        # reviewer wrote; anything else is a new judgement, not a reformat.
         artifacts['verification_format_repair']['accepted'] = False
         artifacts['verification_format_repair']['refused'] = '重排改变了原结论'
         return None

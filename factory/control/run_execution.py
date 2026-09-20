@@ -24,6 +24,39 @@ from factory.control.spec_refs import render as render_spec_refs, focus as spec_
 from factory.control import skill_ingestion_runs, requirement_analysis
 
 
+def _refuse_stale_landing(self, rid, artifacts):
+    """Refuse to land a verdict that judged an agreement the run has since left.
+
+    The verdict pins the revision it judged (`verification_effective_revision`).
+    What it was never checked against is the revision the run holds *now*: a
+    supplement that arrives while the review is running revises the agreement,
+    and the old pass then lands as "this task is complete" over requirements
+    nobody delivered or reviewed. An unconsumed supplement is the same story one
+    step earlier -- it is a requirement this delivery does not contain.
+
+    The number is not overwritten to make the shapes agree; that would only hide
+    which agreement the evidence is actually about. The round is failed instead,
+    which returns the run to needs_human where the safe-node path reads the
+    supplement, revises the agreement and resumes with it bound.
+    """
+    judged = artifacts.get('verification_effective_revision')
+    if judged is None:
+        return  # No contract to be stale against (legacy or unconfirmed run).
+    with self.lock:
+        run = self.store.get(rid)
+        held = effective_contract.revision_of(run)
+        if held != judged:
+            raise Conflict(f'验收判定的是修订 {judged}，当前有效修订已是 {held}；'
+                           '需要按新约定重新执行与验收',
+                           error_type='contract_revision')
+        from factory.control.run_lifecycle import _collect_pending_followups
+        pending = _collect_pending_followups(self, rid)
+        if pending:
+            raise Conflict(f'还有 {len(pending)} 条补充要求未并入本次交付，'
+                           '不能按已完成结案；将在安全节点读入后继续',
+                           error_type='contract_pending')
+
+
 def _plan(self, rid):
     try:
         if requirement_analysis.required(self.store.get(rid)):
@@ -190,8 +223,13 @@ def _run(self, rid):
         limits = configuration['limits']
         # The coding round reads the run's effective agreement, which is the same
         # one acceptance will read: a forbidden zone the owner lifted at the last
-        # safe node is no longer a constraint here, and its replacement is.
-        run = {**run, 'request': run['request'] + effective_contract.contract_prompt(run)}
+        # safe node is no longer a constraint here, and its replacement is. The
+        # queue bound a revision when it queued this round; `contract_prompt`
+        # refuses to render a different one, so a round queued under revision 2
+        # cannot quietly start coding against revision 3.
+        queued_revision = (run.get('execution_resume') or {}).get('effective_revision')
+        run = {**run, 'request': run['request'] + effective_contract.contract_prompt(
+            run, revision=queued_revision)}
         continuous = run.get('execution_mode') == 'continuous'
         deadline = time.monotonic() + limits['timeout_s']
         progress = {}
@@ -375,6 +413,7 @@ def _run(self, rid):
         except Exception:
             artifacts['collection_error'] = '成果未能自动保存，请在成果区重新保存并查看具体原因。'
         tasks = artifacts.get('tasks') or [{**t, 'status': 'completed'} for t in run['tasks']]
+        _refuse_stale_landing(self, rid, artifacts)
         self.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts, 'tasks': tasks},
             expected=('running', 'verifying'), event=('run.verified', artifacts))
         _expire_unconsumed_followups(self, rid)

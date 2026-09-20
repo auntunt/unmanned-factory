@@ -124,10 +124,15 @@ def test_failed_maintenance_retry_reuses_saved_material(app_env, monkeypatch):
 def test_workspace_selection_and_standalone_skill_roundtrip(app_env):
     import io, zipfile
     client, store, service, headers, p, helpers, a = setup_project(app_env)
-    body = {'name': '翻新工作区', 'budget_usd': 12, 'idempotency_key': 'helper-workspace-test', 'agent_id': a['id']}
+    # No per-request dollar ceiling: a managed workspace inherits the platform
+    # policy, so stating an amount here is refused rather than silently honoured.
+    body = {'name': '翻新工作区', 'idempotency_key': 'helper-workspace-test', 'agent_id': a['id']}
+    assert client.post('/api/v2/projects/create-workspace', headers=headers,
+                       json={**body, 'budget_usd': 12}).status_code == 422
     response = client.post('/api/v2/projects/create-workspace', headers=headers, json=body)
     assert response.status_code == 201, response.text
     pid = response.json()['id']
+    assert store.project(pid)['budget_source'] == 'inherit'
     assert helpers.binding(pid)['agent_id'] == a['id']
     assert client.post('/api/v2/projects/create-workspace', headers=headers, json=body).json()['id'] == pid
     assert helpers.binding(pid)['revision'] == 1

@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from factory.control.error_types import failure_type
 
+import hashlib
 import json
 import logging
 import threading
+import time
+import uuid
 
 from factory.control.autonomy import all_events
 from factory.control.capabilities import CapabilityStore
@@ -80,42 +83,177 @@ def _mark_followups_applied(svc, rid, pending):
 
 
 def _revise_for_followups(svc, rid, run, collected):
-    """The next effective agreement for these supplements, or None to keep this one.
+    """Decide each supplement: applied into the next agreement, or still waiting.
 
-    Returns None whenever nothing determinable changes -- no confirmed contract,
-    no supplement that touches the specification, or an analysis that could not
-    decide. Staying on the current agreement is always the safe answer: the
-    supplement is still merged into the round's instructions, and an undecidable
-    business conflict waits for the customer instead of being decided for them.
+    Returns {'contract': next agreement or None, 'applied': [pending], 'waiting':
+    [{'pending_id', 'reason', 'detail'}]}. A supplement is applied only when the
+    analysis actually decided what it does to the specification -- including
+    deciding that it changes nothing. Anything else waits: an undecidable business
+    conflict belongs to the customer, and an analysis that never ran (model fault,
+    cancellation, exhausted budget) has decided nothing at all. Waiting means the
+    supplement stays pending, unconsumed and unreceipted, and the caller must not
+    hand its words to coding: text nobody has read against the agreement would be
+    implemented as if the owner had confirmed it.
+
+    Costs money, so it runs after the caller's cheap conflict checks and outside
+    svc.lock; `deadline` bounds the whole step, not each call, so a queue of
+    supplements cannot stretch a safe node past the run's own configured limit.
+    The caller re-checks the run and commits atomically after re-acquiring the lock.
     """
     log = logging.getLogger(__name__)
     contract = effective_contract.current(run)
     if contract is None or not collected:
-        return None
+        return {'contract': None, 'applied': list(collected), 'waiting': []}
     project = svc._project_for_run(run)
     configuration = run.get('runtime_configuration') or svc.runtime_settings.get()
-    revised = contract
+    deadline = time.monotonic() + max(5, configuration['limits']['timeout_s'])
+    revised, applied, waiting = contract, [], []
     for pending in collected:
         try:
             analysis = effective_contract.analyse(svc, rid, run, project, configuration,
-                                                  pending['content'])
+                                                  pending['content'], deadline=deadline)
         except Exception as exc:
-            # A failed or unaffordable analysis leaves the agreement as it is.
+            if getattr(exc, 'error_type', None) == 'provider':
+                # This deployment has no tools-free channel at all, so no supplement
+                # here can ever be read against an agreement. Waiting would leave
+                # every confirmed-spec run permanently unresumable, which is not a
+                # safety property -- so the pre-contract behaviour stands: the words
+                # reach the round as text and the agreement stays where it was signed.
+                log.info('scope_change(%s): scope analysis unsupported: %s', rid, exc)
+                svc.store.append(rid, 'contract.analysis_unsupported', {
+                    'pending_id': pending['id'], 'error': str(exc)[:500]})
+                applied.append(pending)
+                continue
+            # Nobody read this supplement against the agreement, so nothing about it
+            # is decided -- least of all that it is safe to build.
             log.info('scope_change(%s): analysis unavailable: %s: %s', rid, type(exc).__name__, exc)
+            detail = f'{type(exc).__name__}: {str(exc)[:500]}'
             svc.store.append(rid, 'contract.analysis_skipped', {
-                'pending_id': pending['id'], 'error': f'{type(exc).__name__}: {str(exc)[:500]}'})
+                'pending_id': pending['id'], 'error': detail})
+            waiting.append({'pending_id': pending['id'], 'reason': 'analysis_unavailable',
+                            'detail': detail})
             continue
         if analysis['unresolved']:
             svc.store.append(rid, 'contract.unresolved', {
                 'pending_id': pending['id'], 'questions': analysis['unresolved']})
+            waiting.append({'pending_id': pending['id'], 'reason': 'unresolved',
+                            'detail': '；'.join(analysis['unresolved'])[:500]})
             continue
-        if not analysis['superseded_non_goals'] and not analysis['added_requirements']:
-            continue
+        applied.append(pending)
+        if not any(analysis[k] for k in ('superseded_non_goals', 'superseded_plan_acceptance',
+                                        'added_requirements')):
+            continue  # Read and decided: it asks for nothing the agreement does not say.
         revised = effective_contract.revise(revised, analysis, message={
             'pending_id': pending['id'], 'content': pending['content'],
             'actor_id': pending.get('actor_id'), 'actor': pending.get('actor'),
             'fingerprint': pending.get('fingerprint')})
-    return None if revised is contract else revised
+    return {'contract': None if revised is contract else revised,
+            'applied': applied, 'waiting': waiting}
+
+
+def _waiting_conflict(waiting):
+    """Why a resume is refused while a supplement is still undecided."""
+    unresolved = [w for w in waiting if w['reason'] == 'unresolved']
+    if unresolved:
+        return Conflict('这条补充的业务范围还需要您确认，暂不能据此继续开发：'
+                        + unresolved[0]['detail'] + '\n回答后请使用重新规划，或取消该补充。',
+                        error_type='contract_unresolved')
+    return Conflict('范围变更分析暂不可用，未读懂的补充不会进入开发，请稍后重试。',
+                    error_type='contract_analysis_unavailable')
+
+
+def _immediate_supplement(svc, rid, answer, actor):
+    """Register text typed at a safe node as a durable supplement, or return None.
+
+    A supplement typed while the run waits used to take a different road from one
+    typed while it ran: straight into the resume answer, never read against the
+    agreement, never receipted -- so the owner was told `applied` while the
+    effective revision had not moved and coding got words the contract knew
+    nothing about. Registering it here puts both on the one road.
+
+    Registration is durable and happens before any dispatch, so a refusal further
+    down leaves the words pending for the customer to settle rather than losing
+    them. It is idempotent on (actor, content): a replay of the same key -- whose
+    receipt was never written, because the first attempt raised -- reuses the
+    pending it already registered instead of opening a second one to consume.
+
+    Returns None for a blank answer and for a run with no confirmed specification,
+    which keeps legacy and unconfirmed runs on their previous path exactly.
+    """
+    content = (answer or '').strip()
+    if not content or effective_contract.current(svc.store.get(rid)) is None:
+        return None
+    fingerprint = hashlib.sha256(content.encode()).hexdigest()
+    for p in _collect_pending_followups(svc, rid):
+        if p.get('fingerprint') == fingerprint and p.get('actor') == actor:
+            return p  # Already registered and still unconsumed: reuse it, do not open a second.
+    pending = {'id': uuid.uuid4().hex, 'content': content, 'actor_id': None,
+               'actor': actor, 'fingerprint': fingerprint, 'created_at': now(),
+               'origin': 'safe_node'}
+    svc.store.append(rid, 'followup.pending', pending)
+    return pending
+
+
+def _resume_preconditions(svc, rid, revision, resume_count, answer, merged):
+    """Every guard a needs_human resume must satisfy, read from the run as it is now.
+
+    Evaluated once before the paid scope analysis and again after re-acquiring the
+    lock, so a change that happens while the analyst is thinking -- a cancellation,
+    another safe node, a moved baseline, a new revision -- is refused instead of
+    being committed on top of a stale reading. The same function is used both
+    times on purpose: a re-check that only repeats some of the guards is a hole
+    exactly where the timing window is.
+
+    Raises Conflict; returns the derived inputs the commit needs.
+    """
+    run = svc.store.get(rid)
+    if run['status'] != 'needs_human' or not run.get('plan'):
+        raise Conflict('当前任务不在可继续的执行暂停状态')
+    if run['revision'] != revision or run.get('resume_count', 0) != resume_count:
+        raise Conflict('任务已更新，请刷新后再回答')
+    if rid in svc.active_jobs:
+        raise Conflict('执行现场仍在保存，请稍后继续')
+    cancel = svc.cancels.get(rid)
+    if cancel is not None and cancel.is_set():
+        raise Conflict('任务已取消')
+    answer, had_followups = _merge_followup_content(answer, merged)
+    continuation_only = not had_followups and not answer.strip()
+    artifacts = run.get('artifacts') or {}
+    if continuation_only:
+        verification = artifacts.get('verification') or {}
+        reason = verification.get('reason') if verification.get('verdict') == 'fail' else None
+        failed_checks = _check_failure_context(artifacts)
+        if reason:
+            answer = ('继续修复独立验收发现的具体问题，保留已有成果并重新运行有意义的检查：'
+                      + str(reason)[:2000])
+        elif failed_checks:
+            answer = ('继续修复已知的平台验收失败，保留当前工作区并重新运行检查。'
+                      '失败证据：' + failed_checks)
+        else:
+            answer = '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。'
+    if not artifacts.get('base_sha') or not artifacts.get('tasks'):
+        raise Conflict('没有可恢复的执行现场，请使用重新规划')
+    project = svc._project_for_run(run)
+    legacy_budget_stop = svc._legacy_claude_budget_stop(rid, artifacts, project)
+    if legacy_budget_stop:
+        artifacts = {**artifacts, 'budget_exhausted': True,
+            'autopublish_blocked': True,
+            'needs_human': ('Claude Code 已明确达到该运行的旧版调用上限；'
+                            '保留已完成源码并仅恢复平台检查与归档')}
+    if baseline_sha(project) != artifacts['base_sha']:
+        raise Conflict('项目基线已变化，不能直接接续旧计划，请重新规划')
+    if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
+        raise Conflict('验收检查已变化，请重新规划')
+    configuration = run.get('runtime_configuration') or svc.runtime_settings.get()
+    # Explicit continuation adopts a longer current deadline only;
+    # preserve the frozen models and all other execution constraints.
+    current_timeout = svc.runtime_settings.get()['limits']['timeout_s']
+    configuration = {**configuration, 'limits': {**configuration['limits'],
+        'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
+    resume_stage = (_continuous_resume_stage(artifacts, budget_stop=legacy_budget_stop)
+                    if continuation_only and run.get('execution_mode') == 'continuous' else None)
+    return {'run': run, 'artifacts': artifacts, 'answer': answer,
+            'configuration': configuration, 'resume_stage': resume_stage}
 
 
 def _expire_unconsumed_followups(svc, rid):
@@ -153,8 +291,6 @@ def _auto_resume_with_followups(svc, rid):
         collected = _collect_pending_followups(svc, rid)
         if not collected:
             return False
-        pending_ids = [p['id'] for p in collected]
-        answer, _ = _merge_followup_content('', collected)
         # Require resumable artifacts (same as continue_run)
         artifacts = run.get('artifacts') or {}
         if not artifacts.get('base_sha') or not artifacts.get('tasks'):
@@ -192,11 +328,31 @@ def _auto_resume_with_followups(svc, rid):
             'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
         resume_count = run.get('resume_count', 0)
         revision = run['revision']
-        contract = _revise_for_followups(svc, rid, run, collected)
+    # Paid scope analysis with the lock released, like the interactive resume: an
+    # automatic safe node must not hold every other lifecycle action behind it.
+    decision = _revise_for_followups(svc, rid, run, collected)
+    with svc.lock:
+        run = svc.store.get(rid)
+        if (run['status'] != 'needs_human' or run['revision'] != revision
+                or run.get('resume_count', 0) != resume_count or rid in svc.active_jobs):
+            log.info('auto_resume(%s): run changed during scope analysis, skipping', rid)
+            return False
+        if decision['waiting']:
+            # Nothing automatic may decide an open business question or build words
+            # nobody read. The supplement stays pending for the next safe node.
+            log.info('auto_resume(%s): %d supplement(s) still undecided, staying paused',
+                     rid, len(decision['waiting']))
+            return False
+        applied = decision['applied']
+        pending_ids = [p['id'] for p in applied]
+        answer, _ = _merge_followup_content('', applied)
+        contract = decision['contract']
         changes = {'status': 'queued',
             'runtime_configuration': configuration,
             'resume_count': resume_count + 1,
-            'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision},
+            'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision,
+                'effective_revision': effective_contract.revision_of(
+                    {**run, **({'effective_contract': contract} if contract else {})})},
             'history': [*run['history'], answer]}
         if contract:
             changes['effective_contract'] = contract
@@ -205,7 +361,7 @@ def _auto_resume_with_followups(svc, rid):
                 event=('run.auto_resumed', {'actor': 'system/auto', 'answer': answer,
                     'revision': revision, 'resume_count': resume_count + 1,
                     'pending_ids': pending_ids}),
-                events=_applied_events(run, collected, contract=contract))
+                events=_applied_events(run, applied, contract=contract))
         except Exception as exc:
             log.info('auto_resume(%s): store.update failed: %s', rid, exc)
             return False
@@ -329,73 +485,46 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
     if self.store.get(rid).get('source', {}).get('type') == 'inspection':
         raise Conflict('巡检只记录诊断；需要修复时请另行提交维护任务')
     """Resume the same authorized plan; optional context is not an approval requirement."""
-    continuation_only = not answer.strip()
     answer = answer.strip()
     with self.lock:
         collected = _collect_pending_followups(self, rid)
-        answer, had_followups = _merge_followup_content(answer, collected)
-        if had_followups:
-            continuation_only = False
-        run = self.store.get(rid)
-        if run['status'] != 'needs_human' or not run.get('plan'):
-            raise Conflict('当前任务不在可继续的执行暂停状态')
-        if run['revision'] != revision or run.get('resume_count', 0) != resume_count:
-            raise Conflict('任务已更新，请刷新后再回答')
-        if rid in self.active_jobs:
-            raise Conflict('执行现场仍在保存，请稍后继续')
-        artifacts = run.get('artifacts') or {}
-        if continuation_only:
-            verification = artifacts.get('verification') or {}
-            reason = verification.get('reason') if verification.get('verdict') == 'fail' else None
-            failed_checks = _check_failure_context(artifacts)
-            if reason:
-                answer = ('继续修复独立验收发现的具体问题，保留已有成果并重新运行有意义的检查：'
-                          + str(reason)[:2000])
-            elif failed_checks:
-                answer = ('继续修复已知的平台验收失败，保留当前工作区并重新运行检查。'
-                          '失败证据：' + failed_checks)
-            else:
-                answer = '继续自动处理当前工程问题，保留已有成果，自行完成必要实现和验证，不重新规划。'
-        if not artifacts.get('base_sha') or not artifacts.get('tasks'):
-            raise Conflict('没有可恢复的执行现场，请使用重新规划')
-        project = self._project_for_run(run)
-        legacy_budget_stop = self._legacy_claude_budget_stop(
-            rid, artifacts, project)
-        if legacy_budget_stop:
-            artifacts = {**artifacts, 'budget_exhausted': True,
-                'autopublish_blocked': True,
-                'needs_human': ('Claude Code 已明确达到该运行的旧版调用上限；'
-                                '保留已完成源码并仅恢复平台检查与归档')}
-        if baseline_sha(project) != artifacts['base_sha']:
-            raise Conflict('项目基线已变化，不能直接接续旧计划，请重新规划')
-        if run.get('execution_checks') is not None and run['execution_checks'] != project['checks']:
-            raise Conflict('验收检查已变化，请重新规划')
-        configuration = run.get('runtime_configuration') or self.runtime_settings.get()
-        # Explicit continuation adopts a longer current deadline only;
-        # preserve the frozen models and all other execution constraints.
-        current_timeout = self.runtime_settings.get()['limits']['timeout_s']
-        configuration = {**configuration, 'limits': {**configuration['limits'],
-            'timeout_s': max(configuration['limits']['timeout_s'], current_timeout)}}
-        resume_stage = (_continuous_resume_stage(
-            artifacts, budget_stop=legacy_budget_stop)
-            if continuation_only and run.get('execution_mode') == 'continuous'
-            else None)
-        # A safe point is where the agreement may change: the round that follows
-        # reads the revised one, and the receipt for the supplements that revised
-        # it is written by the same transaction.
-        contract = _revise_for_followups(self, rid, run, collected)
+        # Cheap guards first: a run that cannot resume at all should not be charged
+        # for a scope analysis. Registration still precedes every dispatch below.
+        state = _resume_preconditions(self, rid, revision, resume_count, answer, collected)
+        immediate = _immediate_supplement(self, rid, answer, actor)
+        supplements = list({p['id']: p for p in [*collected, *([immediate] if immediate else [])]}.values())
+        # The text is carried by its own pending now, so it is not merged twice.
+        merge_answer = '' if immediate else answer
+    # A safe point is where the agreement may change: the round that follows reads
+    # the revised one, and the receipt for the supplements that revised it is
+    # written by the same transaction. The analysis costs money and calls a model,
+    # so it runs with the lock released -- holding it would freeze cancel, follow-up
+    # and every other lifecycle action behind a call that can take minutes.
+    decision = _revise_for_followups(self, rid, state['run'], supplements)
+    with self.lock:
+        # Re-read under the lock: anything decided above is only usable if the run
+        # is still the one it was decided for.
+        state = _resume_preconditions(self, rid, revision, resume_count, merge_answer,
+                                      decision['applied'])
+        if decision['waiting']:
+            # Words nobody read against the agreement do not reach coding, and the
+            # supplement stays pending for the customer to settle.
+            raise _waiting_conflict(decision['waiting'])
+        run, artifacts, contract = state['run'], state['artifacts'], decision['contract']
         changes = {'status': 'queued',
-            'runtime_configuration': configuration,
+            'runtime_configuration': state['configuration'],
             'resume_count': resume_count + 1,
-            'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision,
-                'resume_stage': resume_stage},
-            'history': [*run['history'], answer]}
+            'execution_resume': {'artifacts': artifacts, 'answer': state['answer'],
+                'revision': revision, 'resume_stage': state['resume_stage'],
+                'effective_revision': effective_contract.revision_of(
+                    {**run, **({'effective_contract': contract} if contract else {})})},
+            'history': [*run['history'], state['answer']]}
         if contract:
             changes['effective_contract'] = contract
         updated = self.store.update(rid, changes, expected=('needs_human',), revision=revision,
-            event=('human.continued', {'actor': actor, 'answer': answer,
+            event=('human.continued', {'actor': actor, 'answer': state['answer'],
                 'revision': revision, 'resume_count': resume_count + 1}),
-            events=_applied_events(run, collected, contract=contract))
+            events=_applied_events(run, decision['applied'], contract=contract))
         try:
             self._submit(self._run, rid)
         except Exception as exc:

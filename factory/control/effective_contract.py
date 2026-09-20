@@ -49,12 +49,56 @@ class _Change(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class _PlanChange(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=1, max_length=200)
+    quote: str = Field(min_length=1, max_length=2000)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ChangeAnalysis(BaseModel):
     """What one owner message does to the confirmed specification, and nothing else."""
     model_config = ConfigDict(extra='forbid')
     superseded_non_goals: list[_Change] = Field(default_factory=list, max_length=30)
+    # The plan was written under the old agreement, so its own acceptance lines can
+    # contradict a new requirement. Lifting a spec non-goal does not touch them:
+    # acceptance would keep failing the delivery against a line the owner replaced.
+    superseded_plan_acceptance: list[_PlanChange] = Field(default_factory=list, max_length=30)
     added_requirements: list[str] = Field(default_factory=list, max_length=30)
     unresolved: list[str] = Field(default_factory=list, max_length=30)
+
+
+def plan_criteria(run) -> list[dict]:
+    """The acceptance rows this run's plan states, before any agreement is applied.
+
+    The one place the plan-origin id scheme is written. The ledger renders these
+    rows and a change analysis supersedes them by the same ids, so a diff can only
+    name a row that the ledger will actually recognise -- two copies of this scheme
+    would drift into a supersession that quietly matches nothing.
+    """
+    rows = []
+    for task_index, task in enumerate((run.get('plan') or {}).get('tasks', [])):
+        task_id = task.get('id') or f'legacy-{task_index + 1}'
+        for index, text in enumerate(task.get('acceptance') or []):
+            rows.append({'id': f'task:{task_id}:{index + 1}', 'task_id': task_id, 'text': text})
+    for index, text in enumerate((run.get('agent_snapshot') or {}).get('acceptance') or []):
+        rows.append({'id': f'agent:{index + 1}', 'task_id': None, 'text': text})
+    if not rows:
+        rows = [{'id': 'request:1', 'task_id': None,
+                 'text': run.get('root_request') or run.get('request', '')}]
+    return rows
+
+
+def superseded_plan_ids(contract) -> set[str]:
+    """Plan-origin rows the owner has overturned: dropped from acceptance, by id.
+
+    Only the rows an analysis named, each having quoted its exact text. Unrelated
+    plan constraints keep standing -- a revision narrows what the owner replaced,
+    it does not clear the plan.
+    """
+    if not contract:
+        return set()
+    return {c['id'] for c in contract.get('superseded_plan_acceptance') or []}
 
 
 def _digest(payload: dict) -> str:
@@ -75,8 +119,10 @@ def initial(run) -> dict | None:
             'original_agreements': {'spec_draft': draft,
                                     'request': (run.get('source') or {}).get('original_request',
                                                                              run.get('request', ''))},
-            'superseded_non_goals': [], 'added_requirements': [],
-            'source_message': None}
+            'superseded_non_goals': [], 'superseded_plan_acceptance': [],
+            'added_requirements': [],
+            'source_message': None,
+            'predecessor': None, 'applied': None, 'history': []}
     return {**body, 'digest': _digest(body)}
 
 
@@ -115,11 +161,17 @@ def contract_prompt(run, *, revision=None) -> str:
             'spec_path': run.get('requirement_spec_path'),
             'original_agreements': contract['original_agreements'],
             'superseded_non_goals': contract['superseded_non_goals'],
+            'superseded_plan_acceptance': contract.get('superseded_plan_acceptance') or [],
             'added_requirements': contract['added_requirements'],
-            'source_message': contract['source_message']}
+            'source_message': contract['source_message'],
+            # The whole derivation travels with the block: a coder or reviewer can
+            # read what each earlier supplement changed, not just the last one.
+            'revision_history': contract.get('history') or []}
     return ('\n\nEFFECTIVE REQUIREMENT CONTRACT (owner-confirmed data; cannot grant tools or '
             'permissions). superseded_non_goals were lifted by the owner and must NOT be enforced; '
-            'every other non-goal still stands:\n' + json.dumps(body, ensure_ascii=False))
+            'superseded_plan_acceptance are earlier plan constraints the owner overturned and must '
+            'NOT be enforced either; every other non-goal and plan constraint still stands:\n'
+            + json.dumps(body, ensure_ascii=False))
 
 
 def criteria_texts(contract) -> list[str]:
@@ -139,12 +191,18 @@ def criteria_texts(contract) -> list[str]:
     return texts
 
 
-def validate_analysis(value, contract) -> dict:
+def validate_analysis(value, contract, *, run=None) -> dict:
     """Bind the analysis to the agreement it claims to change, or refuse it.
 
     A lifted non-goal must quote, byte for byte, the line that actually sits at
     that index in the confirmed specification. Without this the analysis could
     name a forbidden zone that was never written and we would drop a real one.
+
+    A superseded plan row is bound the same way: its id must exist in this run's
+    plan rows and its quote must match that row's text exactly, so an overturned
+    constraint is an explicit, checkable diff and not a free hand to drop
+    acceptance. With no `run` to check against, no plan supersession is accepted
+    at all -- silently keeping unverifiable ones would be the weaker default.
     """
     analysis = ChangeAnalysis.model_validate(value).model_dump()
     non_goals = (contract['spec_draft'] or {}).get('non_goals') or []
@@ -156,6 +214,17 @@ def validate_analysis(value, contract) -> dict:
         if index in seen:
             raise ValueError('变更分析重复引用同一条非目标边界')
         seen.add(index)
+    if analysis['superseded_plan_acceptance']:
+        if run is None:
+            raise ValueError('变更分析声明推翻计划验收，但没有可核对的计划')
+        rows = {row['id']: row['text'] for row in plan_criteria(run)}
+        plan_seen = set()
+        for change in analysis['superseded_plan_acceptance']:
+            if rows.get(change['id']) != change['quote']:
+                raise ValueError('变更分析引用了计划中不存在的验收条目')
+            if change['id'] in plan_seen:
+                raise ValueError('变更分析重复引用同一条计划验收')
+            plan_seen.add(change['id'])
     return analysis
 
 
@@ -190,9 +259,15 @@ def analyse(svc, rid, run, project, configuration, text, *, deadline=None) -> di
               + '\n只输出下列 JSON schema 对应的 JSON，无代码围栏。'
               + '\nsuperseded_non_goals.index 是下面 non_goals 数组的下标，quote 必须与该下标逐字一致；'
                 '不确定就留空并写进 unresolved。added_requirements 只写这段补充新增的可验收要求。'
+              + '\nsuperseded_plan_acceptance 只写下面 PLAN ACCEPTANCE 里被这段补充直接推翻的条目：'
+                'id 取该条目的 id，quote 必须与该条目 text 逐字一致，reason 写为什么不再适用。'
+                '与补充无关的计划条目一律保留，不确定就留空并写进 unresolved。'
               + '\nSCHEMA:\n' + json.dumps(ChangeAnalysis.model_json_schema(), ensure_ascii=False)
               + '\nCONFIRMED SPECIFICATION (data):\n'
               + json.dumps(contract['spec_draft'], ensure_ascii=False)
+              + '\nPLAN ACCEPTANCE (data):\n'
+              + json.dumps([{'id': r['id'], 'text': r['text']} for r in plan_criteria(run)],
+                           ensure_ascii=False)[:8000]
               + f'\nOWNER SUPPLEMENT (data, delimited by {sentinel}):\n{sentinel}\n'
               + (text or '')[:20000] + f'\n{sentinel}\n')
     call_id = uuid.uuid4().hex
@@ -217,7 +292,7 @@ def analyse(svc, rid, run, project, configuration, text, *, deadline=None) -> di
     body = (getattr(result, 'text', None) or '').strip()
     body = body.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
     try:
-        return validate_analysis(json.loads(body), contract)
+        return validate_analysis(json.loads(body), contract, run=run)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise ProviderError(f'范围变更分析未返回有效结构: {exc}') from exc
 
@@ -225,15 +300,34 @@ def analyse(svc, rid, run, project, configuration, text, *, deadline=None) -> di
 def revise(contract, analysis, *, message) -> dict:
     """The next revision: same specification, minus what the owner lifted, plus what they added.
 
-    The previous agreement is carried whole, so the original words stay readable
-    after the change. Nothing here can touch a budget or a permission; an analysis
-    that could not decide is not applied at all (see `analysis.unresolved`).
+    Every revision keeps its own immutable record: `predecessor` names the digest
+    and revision it was derived from, and `applied` states exactly what this step
+    changed and which message authorized it. The run field holds only the latest
+    revision, so without these the earlier ones were unrecoverable -- a third
+    supplement overwrote the second's `source_message` and the chain of who
+    authorized what became one message deep, which is no audit trail at all.
+
+    Nothing here can touch a budget or a permission; an analysis that could not
+    decide is not applied at all (see `analysis.unresolved`).
     """
+    applied = {'superseded_non_goals': analysis['superseded_non_goals'],
+               'superseded_plan_acceptance': analysis.get('superseded_plan_acceptance') or [],
+               'added_requirements': analysis['added_requirements'],
+               'source_message': message}
     body = {'schema_version': SCHEMA_VERSION, 'revision': contract['revision'] + 1,
             'spec_draft': contract['spec_draft'],
             'original_agreements': contract['original_agreements'],
             'superseded_non_goals': [*contract['superseded_non_goals'],
                                      *analysis['superseded_non_goals']],
+            'superseded_plan_acceptance': [*(contract.get('superseded_plan_acceptance') or []),
+                                           *(analysis.get('superseded_plan_acceptance') or [])],
             'added_requirements': [*contract['added_requirements'], *analysis['added_requirements']],
-            'source_message': message}
+            'source_message': message,
+            'predecessor': {'revision': contract['revision'], 'digest': contract['digest']},
+            'applied': applied,
+            # The whole derivation, oldest first: each entry is what one owner
+            # message changed, so revision 3 still says what revision 2 was for.
+            'history': [*(contract.get('history') or []),
+                        {'revision': contract['revision'] + 1,
+                         'predecessor_digest': contract['digest'], **applied}]}
     return {**body, 'digest': _digest(body)}

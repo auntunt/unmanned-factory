@@ -6,20 +6,24 @@ import json
 
 
 def criteria_for(run):
-    result = []
-    for task_index, task in enumerate((run.get('plan') or {}).get('tasks', [])):
-        task_id = task.get('id') or f'legacy-{task_index + 1}'
-        for index, text in enumerate(task.get('acceptance') or []):
-            result.append({'id': f'task:{task_id}:{index + 1}', 'task_id': task_id, 'text': text})
-    for index, text in enumerate((run.get('agent_snapshot') or {}).get('acceptance') or []):
-        result.append({'id': f'agent:{index + 1}', 'task_id': None, 'text': text})
+    contract = effective_contract.current(run)
+    # The plan was written under the agreement in force when it was planned, so a
+    # requirement the owner has since replaced can still be contradicted by the
+    # plan's own acceptance line. Only the lines a change analysis explicitly
+    # overturned -- each quoted byte for byte -- are dropped; every other plan
+    # constraint still stands.
+    overturned = effective_contract.superseded_plan_ids(contract)
+    result = [row for row in effective_contract.plan_criteria(run)
+              if row['id'] not in overturned]
     if not result:
-        result = [{'id': 'request:1', 'task_id': None, 'text': run.get('root_request') or run.get('request', '')}]
+        # Every stated row was overturned; the agreement's own rows carry acceptance
+        # from here, and an empty ledger must never read as "nothing to verify".
+        result = [{'id': 'request:1', 'task_id': None,
+                   'text': run.get('root_request') or run.get('request', '')}]
     # The requirement rows come from the run's effective agreement, so a forbidden
     # zone the owner has since lifted is no longer a criterion to fail against and
     # an authorized addition is one to verify. A run that was never revised gets
     # exactly the confirmed specification, unchanged.
-    contract = effective_contract.current(run)
     if contract:
         result.extend({'id': f'requirement:{i}', 'task_id': None, 'class': 'requirement', 'text': text}
                       for i, text in enumerate(effective_contract.criteria_texts(contract))

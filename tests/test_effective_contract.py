@@ -13,6 +13,7 @@ of its answer is what matters here, not a model's wording.
 """
 import json
 import subprocess
+import threading
 import time
 
 import pytest
@@ -87,6 +88,14 @@ def _analyst(svc, answer, calls=None):
         from factory.control.providers import ProviderResult
         return ProviderResult(json.dumps(answer, ensure_ascii=False), cost_usd=0.02)
     svc.runner.run = run
+
+
+def _pending(store, rid):
+    """The supplements still waiting: registered, not yet receipted as applied."""
+    applied = {e['payload'].get('pending_id')
+               for e in store.export_events(rid, kind='followup.applied')}
+    return [e['payload'] for e in store.export_events(rid, kind='followup.pending')
+            if e['payload']['id'] not in applied]
 
 
 def _lifts_square(quote=FORBIDDEN, index=0):
@@ -455,11 +464,13 @@ def test_the_reviewer_is_really_handed_the_effective_agreement(app_env):
 
 
 def test_an_undecidable_business_conflict_waits_instead_of_being_decided(app_env):
-    """When the analysis cannot decide, the agreement does not move.
+    """An undecidable supplement stops the resume; it is not built on a guess.
 
-    Guessing here would mean choosing for the customer. The supplement is still
-    merged into the round's instructions and the open questions are recorded, but
-    no forbidden zone is lifted and no requirement is invented.
+    The earlier version of this test only checked that the agreement had not
+    moved -- which a run that cheerfully handed the same undecided words to
+    coding also satisfies. What waiting has to mean is that nothing was built
+    from them: no dispatch, no receipt, the supplement still pending, and the
+    run still paused for the customer to answer.
     """
     client, store, svc, repo = app_env
     headers = login(client)
@@ -471,28 +482,39 @@ def test_an_undecidable_business_conflict_waits_instead_of_being_decided(app_env
     client.post(f'/api/v2/runs/{rid}/follow-up',
                 json={'content': '也许再看看 square'}, headers=headers)
     _resumable(store, p, rid, repo)
-    assert client.post(f'/api/v2/runs/{rid}/continue',
-                       json={'answer': '', 'revision': 1, 'resume_count': 0},
-                       headers=headers).status_code == 200
+    submitted = []
+    svc._submit = lambda *a, **kw: submitted.append(a)
+    refused = client.post(f'/api/v2/runs/{rid}/continue',
+                          json={'answer': '', 'revision': 1, 'resume_count': 0},
+                          headers=headers)
+    assert refused.status_code == 409, refused.text
+    assert 'square 是替换 double 还是并存？' in refused.json()['detail']
+    assert not submitted, '未定的范围不得进入编码'
     run = store.get(rid)
+    assert run['status'] == 'needs_human'
     assert ec.revision_of(run) == 1
     assert 'effective_contract' not in run
     assert any(FORBIDDEN in c['text'] for c in criteria_for(run))
     # The forbidden zone's own wording mentions square, so the added requirement
     # is what must be absent, not the word.
     assert not any(c['text'].startswith('补充要求') for c in criteria_for(run))
-    # The open question is on the record, and the words still reached the round.
+    # Still pending and unreceipted, so the answer can settle it at the next node.
+    assert not list(store.export_events(rid, kind='followup.applied'))
+    assert len(_pending(store, rid)) == 1
     unresolved = list(store.export_events(rid, kind='contract.unresolved'))
     assert len(unresolved) == 1
     assert unresolved[0]['payload']['questions'] == ['square 是替换 double 还是并存？']
-    assert '也许再看看 square' in run['history'][-1]
+    # The undecided words were not appended to the round's instructions either.
+    assert '也许再看看 square' not in (run['history'][-1] if run['history'] else '')
 
 
 def test_an_analysis_that_cannot_run_leaves_the_agreement_alone(app_env):
-    """A failed or unaffordable analysis is not a licence to change the agreement.
+    """An analysis that never ran has decided nothing, including that this is safe.
 
-    The safe node still proceeds -- the supplement reaches the round as text --
-    but the acceptance contract stays exactly where the owner last signed it.
+    A model fault used to be treated as "no change needed": the agreement stayed
+    put, but the unread words went to coding anyway and were receipted as applied.
+    Nobody had read them against the specification, so the one honest outcome is
+    to wait and keep them pending.
     """
     client, store, svc, repo = app_env
     headers = login(client)
@@ -503,13 +525,277 @@ def test_an_analysis_that_cannot_run_leaves_the_agreement_alone(app_env):
     client.post(f'/api/v2/runs/{rid}/follow-up',
                 json={'content': '我确认要加 square 功能'}, headers=headers)
     _resumable(store, p, rid, repo)
-    assert client.post(f'/api/v2/runs/{rid}/continue',
-                       json={'answer': '', 'revision': 1, 'resume_count': 0},
-                       headers=headers).status_code == 200
+    submitted = []
+    svc._submit = lambda *a, **kw: submitted.append(a)
+    refused = client.post(f'/api/v2/runs/{rid}/continue',
+                          json={'answer': '', 'revision': 1, 'resume_count': 0},
+                          headers=headers)
+    assert refused.status_code == 409, refused.text
+    assert not submitted, '没读过的补充不得进入编码'
     run = store.get(rid)
+    assert run['status'] == 'needs_human'
     assert ec.revision_of(run) == 1
     assert any(FORBIDDEN in c['text'] for c in criteria_for(run))
     skipped = list(store.export_events(rid, kind='contract.analysis_skipped'))
     assert len(skipped) == 1 and '模型不可用' in skipped[0]['payload']['error']
-    # The supplement is consumed exactly once either way -- never left to reapply.
-    assert len(list(store.export_events(rid, kind='followup.applied'))) == 1
+    # Not receipted, so a later working analysis can still read it.
+    assert not list(store.export_events(rid, kind='followup.applied'))
+    assert len(_pending(store, rid)) == 1
+
+
+def _landing(svc, rid, artifacts):
+    """Run the real landing boundary the verified round goes through."""
+    from factory.control.run_execution import _refuse_stale_landing
+    _refuse_stale_landing(svc, rid, artifacts)
+    svc.store.update(rid, {'status': 'ready_for_review', 'artifacts': artifacts},
+                     expected=('running', 'verifying'), event=('run.verified', artifacts))
+
+
+def test_a_verdict_cannot_land_as_complete_over_an_agreement_the_run_has_left(app_env):
+    """A supplement applied mid-review stops the old pass from closing the task.
+
+    The verdict pins the revision it judged. Nothing used to compare that number
+    against the revision the run actually holds when the round lands, so a pass
+    earned under revision 1 became '已完成' for a revision 2 nobody had built or
+    reviewed. The number is not rewritten to make them agree -- that would hide
+    which agreement the evidence is about; the round is failed back to a safe
+    node where the new agreement is read and delivered.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    artifacts = {'verification_effective_revision': ec.revision_of(store.get(rid)),
+                 'verification': {'verdict': 'pass', 'criteria': []},
+                 'base_sha': 'x', 'tasks': [{'id': 't1', 'status': 'completed'}]}
+    assert artifacts['verification_effective_revision'] == 1
+    # The owner supplements, and a safe node applies it to revision 2.
+    _analyst(svc, _lifts_square())
+    client.post(f'/api/v2/runs/{rid}/follow-up',
+                json={'content': '我确认要加 square 功能'}, headers=headers)
+    _resumable(store, p, rid, repo)
+    svc._submit = lambda *a, **kw: None
+    assert client.post(f'/api/v2/runs/{rid}/continue',
+                       json={'answer': '', 'revision': 1, 'resume_count': 0},
+                       headers=headers).status_code == 200
+    assert ec.revision_of(store.get(rid)) == 2
+    store.update(rid, {'status': 'running'})
+    with pytest.raises(Conflict) as raised:
+        _landing(svc, rid, artifacts)
+    assert raised.value.error_type == 'contract_revision'
+    assert store.get(rid)['status'] != 'ready_for_review'
+    # And the evidence still says which agreement it judged.
+    assert artifacts['verification_effective_revision'] == 1
+
+
+def test_an_unconsumed_supplement_cannot_be_closed_as_a_finished_task(app_env):
+    """A requirement nobody read is a requirement this delivery does not contain.
+
+    The revision may still match -- the supplement arrived but no safe node has
+    read it yet -- and the old landing would have closed the task and then
+    expired those words as '任务已结束未并入'. That is the customer's requirement
+    being dropped at exactly the moment the product claims success.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    artifacts = {'verification_effective_revision': 1,
+                 'verification': {'verdict': 'pass', 'criteria': []},
+                 'base_sha': 'x', 'tasks': [{'id': 't1', 'status': 'completed'}]}
+    client.post(f'/api/v2/runs/{rid}/follow-up',
+                json={'content': '还要能导出 CSV'}, headers=headers)
+    assert ec.revision_of(store.get(rid)) == 1, '还没到安全节点，修订未动'
+    with pytest.raises(Conflict) as raised:
+        _landing(svc, rid, artifacts)
+    assert raised.value.error_type == 'contract_pending'
+    assert store.get(rid)['status'] != 'ready_for_review'
+    # Still pending: it was not expired as "the task already finished".
+    assert len(_pending(store, rid)) == 1
+    assert not list(store.export_events(rid, kind='followup.expired'))
+
+
+def test_the_landing_boundary_is_actually_on_the_verified_path(app_env):
+    """The guard must sit before the transition, not merely exist.
+
+    The two tests above call `_refuse_stale_landing` themselves, so they stay
+    green even if `_run` never reaches it -- an unwired gate and a wired one look
+    identical from behaviour alone. This pins the order at the one place the
+    verified round lands: the check, then `ready_for_review`, then expiry.
+    """
+    import inspect
+    from factory.control import run_execution
+    body = inspect.getsource(run_execution._run)
+    guard = body.find('_refuse_stale_landing(')
+    landing = body.find("'status': 'ready_for_review'")
+    expiry = body.find('_expire_unconsumed_followups(')
+    assert guard != -1, '验收落地前没有调用契约闸门'
+    assert landing != -1 and expiry != -1
+    assert guard < landing < expiry, (guard, landing, expiry)
+
+
+def test_an_overturned_plan_constraint_leaves_acceptance_while_the_rest_stands(app_env):
+    """Lifting a spec non-goal is not enough: the plan states its own constraints.
+
+    The plan was written under the old agreement. Dropping only `spec.non_goals`
+    left the plan's own acceptance line in the ledger, so acceptance kept failing
+    the delivery against a constraint the owner had already replaced. A
+    supersession must be an explicit, quoted diff, and it must be narrow: every
+    unrelated plan row keeps standing.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    store.update(rid, {'plan': {**store.get(rid)['plan'], 'tasks': [
+        {'id': 't1', 'title': 'a', 'prompt': 'double 计算',
+         'acceptance': ['不得出现 square 按钮', '输入非数字要提示'],
+         'paths': ['x'], 'checks': ['greeting'], 'depends_on': [],
+         'complexity': 'small', 'risk': 'low'}]}})
+    run = store.get(rid)
+    rows = {r['id']: r['text'] for r in ec.plan_criteria(run)}
+    assert rows['task:t1:1'] == '不得出现 square 按钮'
+    analysis = ec.validate_analysis(
+        {**_lifts_square(),
+         'superseded_plan_acceptance': [{'id': 'task:t1:1', 'quote': '不得出现 square 按钮',
+                                         'reason': '所有者已授权 square'}]},
+        ec.current(run), run=run)
+    revised = {**run, 'effective_contract': ec.revise(
+        ec.current(run), analysis, message={'content': '我确认要加 square 功能'})}
+    texts = [c['text'] for c in criteria_for(revised)]
+    assert '不得出现 square 按钮' not in texts, texts
+    assert '输入非数字要提示' in texts, '无关的计划约束必须继续成立'
+    assert any(t.startswith('补充要求') for t in texts)
+    # Before the revision the plan constraint was a criterion, so the diff is real.
+    assert '不得出现 square 按钮' in [c['text'] for c in criteria_for(run)]
+    # Dropping the row from the ledger is only half of it: the coder and the
+    # reviewer read the contract block, so the overturned line must be visible
+    # there as a lifted constraint, with the authorization that lifted it.
+    block = ec.contract_prompt(revised)
+    assert 'superseded_plan_acceptance' in block
+    assert '所有者已授权 square' in block
+    assert '输入非数字要提示' not in block, '只有被推翻的那一行进入解除清单'
+
+
+def test_a_plan_supersession_must_quote_a_row_that_exists(app_env):
+    """An unquotable supersession is a licence to drop acceptance, so it is refused."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    run = store.get(rid)
+    contract = ec.current(run)
+    for bad in ({'id': 'task:t1:9', 'quote': 'ok', 'reason': 'r'},           # no such row
+                {'id': 'task:t1:1', 'quote': '换个说法', 'reason': 'r'},      # text does not match
+                {'id': 'request:1', 'quote': '做一个计算工具，只加 double', 'reason': 'r'}):
+        with pytest.raises(ValueError):
+            ec.validate_analysis({**_lifts_square(), 'superseded_plan_acceptance': [bad]},
+                                 contract, run=run)
+    # Twice the same row is a duplicate, and no run at all cannot be checked.
+    good = {'id': 'task:t1:1', 'quote': 'ok', 'reason': 'r'}
+    with pytest.raises(ValueError):
+        ec.validate_analysis({**_lifts_square(), 'superseded_plan_acceptance': [good, good]},
+                             contract, run=run)
+    with pytest.raises(ValueError):
+        ec.validate_analysis({**_lifts_square(), 'superseded_plan_acceptance': [good]}, contract)
+
+
+def test_every_revision_keeps_its_own_record_of_who_authorized_what(app_env):
+    """A third supplement must not erase what the second one was for.
+
+    The run holds only the latest revision. Overwriting it kept one
+    `source_message`, so the chain of authorizations was one message deep and
+    earlier revisions were unrecoverable. Each revision now carries its
+    predecessor's digest and the full derivation.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    first = ec.current(store.get(rid))
+    assert first['revision'] == 1 and first['predecessor'] is None and first['history'] == []
+    second = ec.revise(first, ec.validate_analysis(_lifts_square(), first),
+                       message={'content': '加 square'})
+    third = ec.revise(second, ec.validate_analysis(
+        {'superseded_non_goals': [], 'added_requirements': ['支持 CSV 导出'], 'unresolved': []},
+        second), message={'content': '还要导出 CSV'})
+    assert third['predecessor'] == {'revision': 2, 'digest': second['digest']}
+    assert second['predecessor'] == {'revision': 1, 'digest': first['digest']}
+    # Revision 3 still says what revision 2 was for, and what it itself added.
+    assert [h['revision'] for h in third['history']] == [2, 3]
+    assert third['history'][0]['source_message'] == {'content': '加 square'}
+    assert third['history'][0]['superseded_non_goals'][0]['quote'] == FORBIDDEN
+    assert third['history'][1]['added_requirements'] == ['支持 CSV 导出']
+    assert third['history'][1]['predecessor_digest'] == second['digest']
+    # Each snapshot is content-addressed, so a rewritten history is a different one.
+    assert third['digest'] != second['digest'] != first['digest']
+    tampered = {**third, 'history': third['history'][1:]}
+    assert ec._digest({k: v for k, v in tampered.items() if k != 'digest'}) != third['digest']
+
+
+def test_a_queued_round_is_bound_to_the_revision_it_was_queued_under(app_env):
+    """A round queued under revision 2 must not start coding against revision 3.
+
+    Queueing and starting are separated by the scheduler, and a supplement can
+    land in between. Without a bound revision the coding prompt simply rendered
+    whatever the run held at start -- work dispatched under one agreement,
+    executed under another, with no record of the switch.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    _analyst(svc, _lifts_square())
+    client.post(f'/api/v2/runs/{rid}/follow-up',
+                json={'content': '我确认要加 square 功能'}, headers=headers)
+    _resumable(store, p, rid, repo)
+    svc._submit = lambda *a, **kw: None
+    assert client.post(f'/api/v2/runs/{rid}/continue',
+                       json={'answer': '', 'revision': 1, 'resume_count': 0},
+                       headers=headers).status_code == 200
+    run = store.get(rid)
+    assert run['execution_resume']['effective_revision'] == 2 == ec.revision_of(run)
+    # The queued round renders exactly that revision.
+    assert '"effective_revision": 2' in ec.contract_prompt(
+        run, revision=run['execution_resume']['effective_revision'])
+    # And if the agreement moves again before the round starts, it refuses.
+    moved = {**run, 'effective_contract': ec.revise(
+        ec.current(run), ec.validate_analysis(
+            {'superseded_non_goals': [], 'added_requirements': ['导出 CSV'], 'unresolved': []},
+            ec.current(run)), message={'content': '再加导出'})}
+    with pytest.raises(Conflict) as raised:
+        ec.contract_prompt(moved, revision=run['execution_resume']['effective_revision'])
+    assert raised.value.error_type == 'contract_revision'
+
+
+def test_the_scope_analyst_is_bounded_by_the_runs_own_deadline(app_env):
+    """The analyst gets the run's remaining time, not a fixed 120 seconds.
+
+    No caller passed `deadline`, so the call fell back to a constant unrelated to
+    the run's configured limit. It also runs with `svc.lock` released, so a
+    minutes-long call cannot freeze cancel and the other lifecycle routes.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p, rid = _confirmed(client, store, repo, headers)
+    calls, free = [], []
+    def run_analyst(request, emit, cancel=None):
+        calls.append(request)
+        # From another thread, because an RLock re-acquires freely on its owner:
+        # checking it here would pass even with the lock still held.
+        probe = threading.Thread(target=lambda: free.append(svc.lock.acquire(timeout=2))
+                                 or (free[-1] and svc.lock.release()))
+        probe.start()
+        probe.join(5)
+        from factory.control.providers import ProviderResult
+        return ProviderResult(json.dumps(_lifts_square(), ensure_ascii=False), cost_usd=0.02)
+    svc.runner.run = run_analyst
+    cfg = store.get(rid)['runtime_configuration']
+    store.update(rid, {'runtime_configuration': {
+        **cfg, 'limits': {**cfg['limits'], 'timeout_s': 37}}})
+    client.post(f'/api/v2/runs/{rid}/follow-up',
+                json={'content': '我确认要加 square 功能'}, headers=headers)
+    _resumable(store, p, rid, repo)
+    svc._submit = lambda *a, **kw: None
+    assert client.post(f'/api/v2/runs/{rid}/continue',
+                       json={'answer': '', 'revision': 1, 'resume_count': 0},
+                       headers=headers).status_code == 200
+    assert len(calls) == 1
+    # Bounded by the run's own 37s limit, not the old fixed 120.
+    assert 0 < calls[0].timeout_s <= 37, calls[0].timeout_s
+    # And another thread could take svc.lock while the paid call was in flight.
+    assert free == [True], 'analyse 不得持锁运行，否则取消与预算接口全被堵住'

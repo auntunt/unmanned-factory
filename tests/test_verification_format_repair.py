@@ -178,6 +178,36 @@ def test_only_a_structurally_complete_report_is_repairable():
                                                'evidence': 'x'}], 'bad status')) is None
 
 
+def test_a_report_that_states_a_field_twice_is_not_repairable():
+    """`json.loads` keeps the last of a duplicated key; the first is not a typo.
+
+    A report that says `"verdict":"fail"` and later `"verdict":"pass"` would parse
+    as a clean pass with the stated failure gone before any comparison could see
+    it, so there would be nothing left to reject. It has no single meaning, and
+    picking one is a judgement rather than a reformat.
+    """
+    row = {'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}
+    clean = json.dumps({'verdict': 'pass', 'reason': 'ok', 'criteria': [row]})
+    assert _stated_structure('{"verdict":"fail",' + clean[1:-1] + ',}') is None
+    # The same for a duplicated row list, and for a duplicate inside a row.
+    assert _stated_structure('{"criteria":[],' + clean[1:-1] + ',}') is None
+    assert _stated_structure(clean.replace('"status": "fail"', '"status": "fail", "status": "pass"')
+                             [:-1] + ',,') is None
+    # Two spellings of the row list that disagree: which one is the finding is
+    # exactly the decision a reformatter must not make on the report's behalf.
+    both = json.dumps({'verdict': 'pass', 'reason': 'ok', 'criteria': [{**row, 'status': 'pass'}],
+                       'acceptance_coverage': [row]})
+    assert _stated_structure(both[:-1] + ',,') is None
+    # Agreeing spellings are one report, and the alias alone still states its rows.
+    agree = json.dumps({'verdict': 'fail', 'reason': 'ok', 'criteria': [row],
+                        'acceptance_coverage': [row]})
+    assert _stated_structure(agree[:-1] + ',,') == {'verdict': 'fail',
+                                                    'rows': {'request:1': ('fail', 'greeting 未更新')}}
+    alias = json.dumps({'verdict': 'fail', 'reason': 'ok', 'acceptance_coverage': [row]})
+    assert _stated_structure(alias[:-1] + ',,') == {'verdict': 'fail',
+                                                    'rows': {'request:1': ('fail', 'greeting 未更新')}}
+
+
 def test_an_incomplete_entry_makes_the_report_unrepairable_not_shorter():
     """A row that is itself damaged must be seen, not passed over.
 
@@ -240,24 +270,45 @@ def test_a_repaired_pass_never_enters_the_browser_receipt_correction(app_env):
             if e['type'] == 'verification.browser_review_retry'] == []
 
 
-def test_a_repair_must_reproduce_every_row_byte_for_byte():
-    stated = {'verdict': 'fail', 'rows': {'request:1': ('fail', 'greeting 未更新')}}
-    assert _repaired_matches_original(stated, {
-        'verdict': 'fail', 'reason': 'x',
-        'criteria': [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}]})
+def test_a_repair_must_reproduce_the_whole_report_byte_for_byte():
+    """The comparison is the entire recovered report, not the extracted triples."""
+    row = {'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}
+    original = {'verdict': 'fail', 'reason': 'x', 'criteria': [row]}
+    assert _repaired_matches_original(original, {'verdict': 'fail', 'reason': 'x',
+                                                'criteria': [dict(row)]})
     # Upgraded status, rewritten evidence, an invented row, or a dropped row.
-    for rows in ([{'id': 'request:1', 'status': 'pass', 'evidence': 'greeting 未更新'}],
-                 [{'id': 'request:1', 'status': 'fail', 'evidence': 'INVENTED evidence'}],
-                 [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'},
-                  {'id': 'agent:1', 'status': 'pass', 'evidence': 'INVENTED'}],
+    for rows in ([{**row, 'status': 'pass'}],
+                 [{**row, 'evidence': 'INVENTED evidence'}],
+                 [row, {'id': 'agent:1', 'status': 'pass', 'evidence': 'INVENTED'}],
                  []):
-        assert not _repaired_matches_original(stated, {'verdict': 'fail', 'reason': 'x',
-                                                      'criteria': rows})
+        assert not _repaired_matches_original(original, {'verdict': 'fail', 'reason': 'x',
+                                                         'criteria': rows})
     # A different conclusion, and a missing criteria list.
-    assert not _repaired_matches_original(stated, {
-        'verdict': 'pass', 'reason': 'x',
-        'criteria': [{'id': 'request:1', 'status': 'fail', 'evidence': 'greeting 未更新'}]})
-    assert not _repaired_matches_original(stated, {'verdict': 'fail', 'reason': 'x'})
+    assert not _repaired_matches_original(original, {'verdict': 'pass', 'reason': 'x',
+                                                     'criteria': [row]})
+    assert not _repaired_matches_original(original, {'verdict': 'fail', 'reason': 'x'})
+    # Fields beyond the triples carry references downstream gates read: a reworded
+    # reason, a dropped browser_review, or rewritten skill_refs is a new report.
+    assert not _repaired_matches_original(original, {'verdict': 'fail', 'reason': 'rephrased',
+                                                     'criteria': [row]})
+    cited = {'verdict': 'fail', 'reason': 'x', 'criteria': [row],
+             'browser_review': {'checked': True, 'url': 'http://127.0.0.1:8080/'}}
+    assert _repaired_matches_original(cited, dict(cited))
+    assert not _repaired_matches_original(cited, {'verdict': 'fail', 'reason': 'x',
+                                                 'criteria': [row]})
+    assert not _repaired_matches_original({'verdict': 'fail', 'reason': 'x', 'criteria': [row]}, cited)
+    refs = {'verdict': 'fail', 'reason': 'x',
+            'criteria': [{**row, 'skill_refs': [{'id': 'skill-a', 'version': 1}]}]}
+    assert not _repaired_matches_original(refs, {'verdict': 'fail', 'reason': 'x',
+                                                 'criteria': [row]})
+    # The row alias is the same report under another name; two disagreeing lists
+    # are not, in either direction.
+    assert _repaired_matches_original({'verdict': 'fail', 'reason': 'x',
+                                       'acceptance_coverage': [row]},
+                                      {'verdict': 'fail', 'reason': 'x', 'criteria': [row]})
+    assert not _repaired_matches_original({'verdict': 'fail', 'reason': 'x', 'criteria': [row],
+                                           'acceptance_coverage': [{**row, 'status': 'pass'}]},
+                                          {'verdict': 'fail', 'reason': 'x', 'criteria': [row]})
 
 
 def test_conflicting_or_absent_conclusions_are_not_reformatted(app_env):

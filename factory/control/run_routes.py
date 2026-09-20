@@ -194,14 +194,8 @@ def router(store, svc, operations):
                             raise HTTPException(409, '这条补充已接收；内容变化后请重新提交')
                         return receipt['response']
             status = run['status']
-            message = None
-            if status in ('needs_clarification', 'awaiting_approval'):
-                result = svc.clarify(rid, content, actor)
-                response = {'recorded': True, 'applied': True, 'queued': False, 'run_id': rid, 'status': result['status']}
-            elif status == 'needs_human':
-                result = svc.continue_run(rid, content, run['revision'], run.get('resume_count', 0), actor)
-                response = {'recorded': True, 'applied': True, 'queued': False, 'run_id': rid, 'status': result['status']}
-            elif status in ACTIVE:
+            message = pending_event = None
+            if status in ACTIVE:
                 pending_id = uuid.uuid4().hex
                 message = {'text': content, 'followup': True, 'queued': True,
                     'applied': False, 'actor': actor, 'actor_id': actor_id,
@@ -211,18 +205,53 @@ def router(store, svc, operations):
                     'fingerprint': fingerprint, 'created_at': now()}
                 response = {'recorded': True, 'applied': False, 'queued': True,
                     'message': '补充已记录，将在下一个安全节点自动并入任务。'}
-            else:
+            elif status not in ('needs_clarification', 'awaiting_approval', 'needs_human'):
                 raise HTTPException(409, '任务已结束，请在下方开始新一轮修改。')
-            # An active note and its retry receipt are one durable transaction.
-            with store.connect() as db:
-                if message is not None:
-                    store._event(db, rid, 'user.message', message)
-                    if pending_event is not None:
+            else:
+                response = None  # Decided by the dispatch below, outside the lock.
+            if response is not None:
+                # An active note and its retry receipt are one durable transaction.
+                with store.connect() as db:
+                    if message is not None:
+                        store._event(db, rid, 'user.message', message)
                         store._event(db, rid, 'followup.pending', pending_event)
-                if body.idempotency_key:
-                    store._event(db, rid, 'followup.received', {'actor_id': actor_id, 'key': body.idempotency_key,
-                        'fingerprint': fingerprint, 'response': response})
-            return response
+                    if body.idempotency_key:
+                        store._event(db, rid, 'followup.received', {'actor_id': actor_id,
+                            'key': body.idempotency_key, 'fingerprint': fingerprint,
+                            'response': response})
+                return response
+        # A waiting-state supplement is read against the agreement by a paid model
+        # call, so it is dispatched with the lock released: cancel, budget and the
+        # other lifecycle routes must not queue behind a call that takes minutes.
+        # Both paths register the text durably before dispatching anything, and a
+        # concurrent duplicate is refused by the revision CAS, not applied twice.
+        if status == 'needs_human':
+            # continue_run registers this text as a durable supplement, reads it
+            # against the confirmed agreement and refuses the resume when it cannot
+            # be decided. A refusal leaves it pending, so the honest answer is
+            # "recorded, waiting" -- not "applied".
+            try:
+                result = svc.continue_run(rid, content, run['revision'],
+                                          run.get('resume_count', 0), actor)
+            except Conflict as exc:
+                if getattr(exc, 'error_type', None) not in (
+                        'contract_unresolved', 'contract_analysis_unavailable'):
+                    raise
+                response = {'recorded': True, 'applied': False, 'queued': True,
+                    'run_id': rid, 'status': store.get(rid)['status'], 'message': str(exc)}
+            else:
+                response = {'recorded': True, 'applied': True, 'queued': False,
+                    'run_id': rid, 'status': result['status']}
+        else:
+            result = svc.clarify(rid, content, actor)
+            response = {'recorded': True, 'applied': True, 'queued': False,
+                'run_id': rid, 'status': result['status']}
+        if body.idempotency_key:
+            with svc.lock, store.connect() as db:
+                store._event(db, rid, 'followup.received', {'actor_id': actor_id,
+                    'key': body.idempotency_key, 'fingerprint': fingerprint,
+                    'response': response})
+        return response
 
 
     @api.post('/api/v2/runs/{rid}/cancel')

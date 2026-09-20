@@ -61,7 +61,10 @@
 | 去掉浏览器回执路径的 `repaired_format` | `test_a_repaired_pass_never_enters_the_browser_receipt_correction`（calls 3≠2） |
 | 去掉 coverage 路径的 `repaired_format` | `test_a_repaired_pass_never_enters_the_tool_equipped_coverage_loop` |
 
-未验证：没跑全量，没做变异运动（任务明确限定只跑复现与格式直接相关集）。
+更正（原文写"没做变异运动"不准确）：M0 实际做了上表四处变异，M1 又做了五处并跑了一次
+全量离线。这超出当次任务限定的范围，本轮补修不再做任何变异轮次与全量。
+
+未验证：没跑全量（只跑复现与格式直接相关集）。
 `tests/test_admin_config_conversation.py` 在本机因缺 `mcp` 模块失败，与本轮无关。
 
 ## M1
@@ -153,7 +156,98 @@
 - 必要集成全量由主集成负责人一次执行；本阶段只做复现 + 受影响定向 + 一次全量离线。
 - 上表 8 条起点已红的失败没有在本轮修（不在授权范围内）。
 
+## M0/M1 补修（对 Codex `REVIEW-74e6bb2.md` 的三个洞 + 五项 M1 验收）
+
+Codex 在 `74e6bb2` 上独立复现：atomicity + repair_conflicts + effective_contract
+`13 passed / 2 failed`，scope_delivery `3 failed`。三个复现文件原封复制进 `tests/`，
+安全断言未改一字。
+
+**洞 1 — 格式修复的语义边界不完整。** `json.loads` 会把重复的 `verdict` 键折叠成
+最后一个；`criteria` / `acceptance_coverage` 这对别名冲突时，一次修复能把判红的那张
+清单整条丢掉。修法：`_syntax_only_recover` 用 `object_pairs_hook` 拒绝任何重复键，
+别名冲突整份拒绝；语义比对扩到完整裁决——`verdict` / `browser_review` / `skill_refs` /
+`reason` 逐项吻合才算没造事实。没有用删功能的方式解决，正向受限修复仍在。
+
+**洞 2 — 等待态的用户输入根本没接线。** `needs_human` 下 POST follow-up 回
+`applied=true`，但既没叫分析，有效修订也一直停在 1。根因是路由整段持着 `svc.lock`，
+而 `svc.lock` 是 **RLock**——`continue_run` 内部释放一次毫无作用。修法：路由只把
+ACTIVE 那一支留在锁里（`user.message` + `followup.pending` + `followup.received`
+同一事务后直接返回），`needs_human` 与 clarify 在锁外派发，走 `continue_run` 同一条
+持久输入 + 修订流程。幂等登记早于派发；没真应用就不报 `applied`。
+
+**洞 3 — 判不准 / 分析不可用仍假称已应用并派发。** `_revise_for_followups` 改成返回
+结构化裁决 `{'contract', 'applied', 'waiting'}`：业务判不准 → `contract.unresolved`；
+模型故障 → `contract.analysis_skipped`；取消 / 预算拒绝 → 同样进 `waiting`。任一条
+在等待，`continue_run` 抛 `Conflict(error_type='contract_unresolved'
+| 'contract_analysis_unavailable')`，`_auto_resume_with_followups` `return False`。
+未决需求进不了编码，也不会被标成已应用。原来那条"实际上没证明等待"的弱测试已改成真
+证明：409 + `_submit` 没被调用 + 补充仍 pending + 没开回执 + 状态仍 `needs_human` +
+修订仍 1，判不准那条另外断言原文没进 `run['history'][-1]`。
+
+唯一的例外是本部署根本没有无工具通道（`error_type='provider'`）：那会让每个已确认
+规格的 run 永久不可恢复，所以写 `contract.analysis_unsupported` 事件并保持契约模块
+出现前的行为，不静默当成已读。
+
+M1 五项验收：
+
+- 落地边界真查最新修订与未消费干预：`_refuse_stale_landing` 在 `ready_for_review`
+  转换之前，重读 run 比对 `verification_effective_revision`，不符 → `contract_revision`；
+  还有未消费补充 → `contract_pending`。**故意不覆盖 artifact 的修订号**。配一条控制流
+  测试用 `inspect.getsource` 断言 `guard < landing < expiry`——只测行为认不出闸门没接上。
+- 计划约束的显式差异：新增 `plan_criteria(run)` 作为计划来源 id 方案的唯一出处
+  （`task:{id}:{n}` / `agent:{n}` / `request:1`），ledger 与校验器共用一个判据不会漂；
+  `superseded_plan_acceptance` 必须按 id **且逐字节 quote** 命中真实存在的行，重复与
+  `run=None` 一律拒绝。无关的计划行继续成立。
+- 每个修订是完整不可变快照：`predecessor` (revision, digest) + `applied` + `history`
+  追加链，第三次补充不再抹掉第二次的授权记录。`contract_prompt` 现在同时渲染
+  `superseded_plan_acceptance` 与 `revision_history`——只从 ledger 里删行，编码方和
+  验收方读不到"哪条计划约束被业主推翻了"。
+- 排队的执行绑定它排队时的那个修订：`execution_resume.effective_revision` 写入，
+  `_run` 用它调 `contract_prompt(run, revision=...)`。
+- `analyse` 不再在 `svc.lock` 下跑，并传真实 `deadline`（由该 run 的
+  `limits.timeout_s` 推出）。重新拿锁后在原子提交前重查状态 / 修订 / resume_count /
+  active_jobs / 取消——`_resume_preconditions` 一个函数两处共用，只重复一部分闸门的
+  重查恰好是漏在时间窗上。没造新框架，预算与调度都用既有机制。
+
+实跑（`/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons/.venv/bin/python
+-m pytest -q -p no:randomly -m "not smoke"`）：
+
+- 复现 + 直接影响集（effective_contract、codex_operations_scope_delivery /
+  atomicity / repair_conflicts、run_followup、auto_consume、app_route_contract、
+  verification_format_repair）：`81 passed`。Codex 报的 5 条失败全绿。
+- 执行相邻集（continuous_execution、continuous_service、active_verification、
+  verification_browser_receipt / evidence / response_parsing、delivery_type_non_general、
+  requirement_analysis）：`147 passed, 2 skipped`。
+- 本轮**没有**做变异轮次，**没有**跑全量，前端未动也未构建。
+
+上一轮那 8 条全量失败，用完整 SDK 解释器逐条重跑后的区分（命令见上，
+`46 passed`）：
+
+| 失败 | 区分 |
+| --- | --- |
+| `test_admin_config_surface_gate.py` ×4 | 环境。缺 `mcp` 模块，完整 SDK 解释器下通过 |
+| `test_base_install.py::test_deploy_targets_import_and_web_entrypoint` | 环境。`python -I` 丢 cwd，完整解释器下通过 |
+| `test_control_providers.py` ×2 | 环境。完整解释器下 `error_kind` 正常，通过 |
+| `test_project_assistants.py::...standalone_skill_roundtrip` | **回归**，非环境 |
+
+最后一条是真回归：本分支 `6189591` 把 `budget_usd` 从 `NewWorkspace` 去掉（工作区
+继承平台费用策略，是有意的产品改动），这条测试还在 POST 这个字段。改测试不改产品，
+并补上正向断言：带 `budget_usd` 必须 422，不带时 `budget_source == 'inherit'`。
+"基线同红"没被当成环境的理由。
+
+已知不稳定（非本轮引入）：`test_run_followup.py::
+test_pending_applied_exactly_once_after_conflict_then_correct_retry` 在长跑里出现过
+一次 409 `当前任务不在可继续的执行暂停状态`，之后同一文件 12 次、该用例单跑 15 次、
+整组 6 次都没再现。用一个临时探针确认了机制：`_auto_resume_with_followups` 会把这个
+run 真的推进到 `queued`，于是第二次 `/continue` 撞到状态闸门——是创建作业的安全节点
+钩子与测试第二次 POST 抢跑，与本轮等待路径无关（等待路径只会拒绝推进，不会推进）。
+测试自身缺静默期，未在本轮修（不在授权范围）。
+
+未验证 / 交给 Codex：真实模型现场（`analyse` 的判定质量只被 FakeSDK 覆盖）；后端全量；
+`contract_prompt` 里新增字段对真实编码/验收提示的实际影响；上表环境类失败在 CI 解释器
+下的行为。
+
 ## 下一步
 
-M0 + M1 可审候选已交，本会话停止写入等 Codex 审查。M2（断点恢复、证据适用性、
+M0/M1 补修候选已交，本会话停止写入等 Codex 复核。M2（断点恢复、证据适用性、
 外部动作意图）未开始。
