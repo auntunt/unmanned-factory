@@ -249,6 +249,88 @@ tsc 干净、生产构建跑了一次。
 **本批次检查**：相关后端 180 passed（含每处的定向复现）、场景页面 74 passed、
 tsc 干净、生产构建一次、两条真实服务闭环如上。按初审要求未做变异测试、未重复全量。
 
+## 批次七：目标绑定、环境结论更正、真实模型链尝试（`67a0a02`）
+
+### P1：关系查询真正绑定到选定的定义
+
+初审复现属实：选了 `a.py/save`，执行的仍是 `callers save`，拿回了 `b.py` 的调用方。
+
+后端确实有绑定查询：`codegraph node <symbol> --file <path>`。同一 fixture 上
+`callers save` 返回两个调用方，`node save --file a/store.py` 只返回 `calls_a`、
+`--file b/store.py` 只返回 `calls_b`。关系查询已改走这条路，并且：
+
+- `--file` 没匹配上时后端退化成列出全部同名定义 —— 这种输出被识别为**未绑定**，
+  判 `ambiguous`，绝不当作已消歧的结果解析
+- 返回的 `**Location:**` 必须就是目标那一个，否则 `malformed_output`
+- 认得出 `Called by ←` 却解析不出条目，也判 `malformed_output`，不返回空
+- **候选集完整性未知时，即使只剩一个候选也拒绝给精确关系** —— 没看见的那个
+  可能才是真正的被调用方
+- `target_path` 只用来定位源码；消歧是后端那条绑定查询做的，不是「选择」这个动作
+
+定向证据只补了一个：同语言同名、各有独立调用方，两个目标的答案互不相交。
+没有扩语言矩阵。副作用：跨语言同名污染现在在源头就不会发生。
+
+### 环境结论更正（我上一轮错了）
+
+上一轮我用默认的 `python3`（`/opt/miniconda3/bin/python3`）检查，得出「本机三个
+provider SDK 都没有」——**这个结论是错的**。实测：
+
+| 解释器 | claude_agent_sdk | openai_codex | deepseek_harness |
+|---|---|---|---|
+| `/opt/miniconda3/bin/python3` | 否 | 否 | 否 |
+| `.factory-worktrees/v3-skills-icons/.venv/bin/python` | **是** | **是** | **是** |
+
+后者能直接 import 本工作树的 `create_app`/`Service`；版本 `openai-codex 0.147.0`、
+`claude-agent-sdk 0.2.152`，满足 pyproject 的 `[project.optional-dependencies]`
+里 `codex`/`claude`/`dsh` 三个 extras 的下限。operations 工作树自己没有 `.venv`。
+
+平台模型配置来源是**控制库的 `runtime_settings` 表**（首次启动时用
+`FACTORY_<ROLE>_PROVIDER/MODEL` 播种，默认 provider `codex`、model 空），
+不是只看环境变量——上一轮拿「两个环境变量为空」推「所有配置来源都不可用」也是错的。
+凭据存在性（只报存在，不读内容）：`~/.codex/auth.json` 存在；
+`~/.claude/.credentials.json` 不存在；`DSH_HOME` 未设置。
+
+### 真实模型链：尝试了，卡在平台自己的隔离校验上（没有产生花费）
+
+用上述解释器 + `provider=codex, model=gpt-5.6-sol`（取自 `~/.codex/config.toml`
+声明的 model）+ `SDKRunner`（生产路径）+ `budget_usd=1.0`，真的发起了派发。
+两次尝试都走到 `provider.started`，都在**模型调用之前**被平台自己的
+Codex 隔离校验拦下，`usage.recorded` 的 `cost_usd` 均为 `null`——**没有花钱**。
+
+两个精确缺项：
+
+1. `Codex isolation verification found active hooks`
+   —— 宿主 `~/.codex/config.toml` 里有 `[hooks.state]` 表。平台的隔离覆盖会把
+   `hooks.<EVENT>` 逐个清成 `[]`，但 `hooks.state` 不是事件列表、不在覆盖范围内；
+   而校验是「`hooks` 下任何一个值为真就拒绝」。
+   把 `CODEX_HOME` 指向一个干净 profile 后这一条消失。
+
+2. `Codex isolation verification found active skills`
+   —— `~/.agents/skills` 下有 47 个 skill，这是 `CODEX_HOME` 之外的宿主路径。
+   平台会枚举它们并下发 `skills.config=[{path=…,enabled=false}]`，但校验用
+   `skills/list` 读回来仍然是 enabled，覆盖没有生效。**这一条没有绕过。**
+
+要在本机跑通真实 Codex 链，三选一：(a) 在没有 `~/.agents/skills` 环境
+（或另一台宿主）上跑；(b) 修平台的隔离覆盖让 ambient skills 真的被禁用——
+这是平台改动，不在本轮范围；(c) 换 `claude` provider，但本机没有该 provider
+自己的凭据文件，而宿主 Claude 的 OAuth 按设计被 worker 剥离、也不在授权范围内。
+
+过程中我建过一个隔离 profile（`config.toml` 只写 model，`auth.json` 用**软链**
+指向用户自己的凭据，全程没有读取或复制凭据内容），验证完已删除；
+用户自己的 `~/.codex` 全程未改动。
+
+### 记忆消费口径收窄
+
+`refine_memory_for_plan` 只写 `source` 与事件，**执行器没有消费它**。规划上下文在
+`run_execution._plan` 里组装，那是批准之前，所以批准之后没有任何点还能把正文送进
+模型；按初审「不为此重写生命周期」，改为收窄描述：字段改名
+`memory_refs_for_review`，事件带 `consumed_by_executor=False`，并加断言——
+refine 之后 run 的 `request` 逐字节不变。这条边界之所以安全，是因为必遵要求
+从不延后：要么派发时整条带上，要么直接拒绝派发。
+
+**本批次检查**：相关后端 88 passed（含 P1 定向证据）。没有重跑脚本演练，
+没有重跑全量，没有变异测试，没有新增可选语言。
+
 ## 模型事实
 
 - 集成者（本会话）：请求的是 Claude Code 默认会话模型，实际为 **Opus 5（`claude-opus-5`）**，
@@ -277,7 +359,8 @@ tsc 干净、生产构建一次、两条真实服务闭环如上。按初审要�
 - 没有任何一条记忆条目被提升为 `active`（除测试内的合成数据），
   因为没有真实客户确认人。
 - 两条页面闭环已在真实服务上跑通并在浏览器里看过（见批次六），但**编码这一步
-  是脚本不是模型**；真实模型条件缺失，原因与补齐方式见上。
+  是脚本不是模型**。真实模型链已在批次七里真的尝试过，卡在平台自己的 Codex
+  隔离校验（ambient skills）上，精确缺项见批次七；两次尝试都没有产生花费。
 - 代码图的语言能力仍只在最小样例上验证；本轮没有扩展可选语言。
 - C#/.NET 的构建与改造层在本机无法验证：没有 dotnet，.NET Framework 还需要
   Windows。索引与关系层与框架无关，已验证；改造层标待验证。
