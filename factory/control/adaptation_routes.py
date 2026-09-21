@@ -7,9 +7,17 @@ codes, exactly the way ``maintenance_routes.py`` does for the maintenance port.
 
 Availability: the port handed out by ``tasks_for`` is wrapped by the plugin
 gate (``factory.control.plugins.gated``), so every call below is checked on
-the service side. Nothing here reaches the run lifecycle directly the way
-``maintenance_routes.approve`` does, so there is no method here that needs to
-call ``tasks.gate.require`` by hand.
+the service side. ``approve`` is the exception -- it hands its decision to the
+run lifecycle rather than to the port -- and therefore calls
+``tasks.gate.require('continue')`` by hand, exactly as ``maintenance_routes``
+does.
+
+``approve`` exists because a run defaults to ``dag`` execution and stops at
+``awaiting_approval`` until a human accepts the plan. Without it an adaptation
+task created from the page sat at that gate forever: the port's own methods
+never touch approval, so nothing in this module could move it. That was found
+by driving the real service, not by the unit tests -- those injected a
+dispatcher that skipped the approval gate entirely.
 
 Exception mapping reuses the handlers already registered in ``app.py``:
 
@@ -29,6 +37,34 @@ from fastapi.responses import Response
 
 from factory.control.api_adaptation import PLUGIN_ID, SCHEMA_VERSION
 from factory.control.store import Conflict
+
+
+def _pending_plan(store, execution_id) -> dict | None:
+    """The plan awaiting a human decision, or nothing.
+
+    Same shape ``maintenance_routes`` renders, so one page pattern covers both
+    surfaces: titles, the files each task touches and the checks it will run.
+    """
+    if not execution_id:
+        return None
+    try:
+        run = store.get(execution_id)
+    except KeyError:
+        return None
+    plan = run.get('plan')
+    if run.get('status') != 'awaiting_approval' or not plan:
+        return None
+    return {
+        'revision': run['revision'],
+        'title': plan.get('title') or '',
+        'summary': plan.get('summary') or '',
+        'questions': list(plan.get('questions') or []),
+        'tasks': [{'id': t.get('id'), 'title': t.get('title') or '',
+                   'paths': list(t.get('paths') or []),
+                   'checks': list(t.get('checks') or []),
+                   'risk': t.get('risk') or ''}
+                  for t in (plan.get('tasks') or [])],
+    }
 
 
 def router(store, svc):
@@ -121,12 +157,41 @@ def router(store, svc):
 
     @api.get('/tasks/{task_id}')
     def get_task(task_id: str, request: Request):
-        return tasks.get(task_id, actor=_actor(request))
+        view = tasks.get(task_id, actor=_actor(request))
+        # The plan a human is being asked to accept travels with the task:
+        # approving something the page cannot show is not a decision.
+        view['pending_plan'] = _pending_plan(store, view['execution_id'])
+        if view['pending_plan'] and not (view.get('blocking_reason') or {}).get('kind'):
+            view['blocking_reason'] = {
+                'kind': 'approval.required',
+                'message': '计划已就绪，等待人工批准后才会开始改动',
+                'event': None}
+        return view
 
     @api.get('/tasks/{task_id}/events')
     def task_events(task_id: str, request: Request, after: int = 0):
         events = tasks.events(task_id, actor=_actor(request), after=after)
         return {'events': events}
+
+    @api.post('/tasks/{task_id}/approve')
+    def approve(task_id: str, request: Request):
+        """Accept the plan this task is waiting on, through the existing gate.
+
+        The decision belongs to the run lifecycle, so this only carries it
+        there -- after the same plugin-availability check and the same project
+        authorization every other call goes through. Approving is what makes
+        the executor start changing files, so a stopped plugin that still
+        accepted approvals would be stopped in name only.
+        """
+        actor = _actor(request)
+        tasks.gate.require('continue')
+        view = tasks.get(task_id, actor=actor)
+        execution_id = view['execution_id']
+        if not execution_id:
+            raise HTTPException(409, '这个适配任务还没有绑定执行，无法批准计划')
+        run = store.get(execution_id)
+        svc.approve(execution_id, run['revision'], actor['username'])
+        return get_task(task_id, request)
 
     # -- lifecycle ------------------------------------------------------
 

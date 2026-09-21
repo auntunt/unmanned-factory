@@ -26,6 +26,7 @@ frontend/node_modules/
 
 # Local v3 rehearsal, including isolated sample repositories and browser evidence.
 .factory-preview/
+.factory-preview-scenarios/
 *.worker.lock
 
 # Platform browser dependencies are installed from their lockfile.

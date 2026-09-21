@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import AdaptationTaskDetail from './AdaptationTaskDetail'
@@ -218,5 +218,42 @@ describe('接口适配任务详情页', () => {
     renderDetail('ad-task-nonexistent')
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
     expect(screen.getByText(/任务不存在/)).toBeTruthy()
+  })
+})
+
+describe('等待批准的计划', () => {
+  it('有待批准计划时展示它并提供批准按钮', async () => {
+    const withPlan = {
+      ...baseTask,
+      status: 'waiting',
+      pending_plan: {
+        revision: 1, title: '上报报文：补上鉴权头', summary: '适配器缺少 Authorization 头',
+        questions: [],
+        tasks: [{ id: 'auth', title: '补鉴权头并联调一次', paths: ['adapter.py'], checks: ['contract'], risk: 'low' }],
+      },
+    }
+    api.mockImplementation(async (path, options) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      if (options?.method === 'POST') return { ...withPlan, status: 'running', pending_plan: null }
+      return withPlan
+    })
+    renderDetail(baseTask.task_id)
+    await waitFor(() => expect(screen.getByTestId('pending-plan')).toBeTruthy())
+    expect(screen.getByTestId('pending-plan').textContent).toContain('adapter.py')
+    const approve = screen.getByRole('button', { name: /批准计划/ })
+    await act(async () => { fireEvent.click(approve) })
+    await waitFor(() => expect(
+      api.mock.calls.some(c => String(c[0]).endsWith('/approve') && c[1]?.method === 'POST')
+    ).toBe(true))
+  })
+
+  it('没有待批准计划时不摆批准按钮', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return { ...baseTask, pending_plan: null }
+    })
+    renderDetail(baseTask.task_id)
+    await waitFor(() => expect(screen.getByText(/接口适配/)).toBeTruthy())
+    expect(screen.queryByRole('button', { name: /批准计划/ })).toBeNull()
   })
 })

@@ -318,6 +318,22 @@ export default function AdaptationTaskDetail({ csrfToken, onUnauthorized }: Page
     }
   }
 
+  const doApprove = async () => {
+    if (!taskId || actionBusy) return
+    setActionError(null)
+    setActionBusy(true)
+    try {
+      const updated = await request<AdaptationTaskView>(
+        `${API_PREFIX}/${encodeURIComponent(taskId)}/approve`,
+        { method: 'POST', csrfToken, onUnauthorized })
+      setTask(updated)
+    } catch (cause) {
+      setActionError(errorText(cause))
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const doExport = async () => {
     if (!taskId) return
     setExportError(null)
@@ -352,6 +368,15 @@ export default function AdaptationTaskDetail({ csrfToken, onUnauthorized }: Page
                 导入下一版契约
               </Link>
             )}
+            {task && task.pending_plan && (
+              <button
+                className="wb-button wb-button-primary"
+                disabled={actionBusy}
+                onClick={() => void doApprove()}
+              >
+                {actionBusy ? '操作中…' : '批准计划'}
+              </button>
+            )}
             {task && task.status === 'delivered' && (
               <button className="wb-button wb-button-secondary" onClick={() => void doExport()}>导出回执</button>
             )}
@@ -371,6 +396,23 @@ export default function AdaptationTaskDetail({ csrfToken, onUnauthorized }: Page
 
       {error && <ErrorNotice message={error} />}
       {actionError && <ErrorNotice message={actionError} />}
+
+      {task?.pending_plan && (
+        <section className="wb-card" data-testid="pending-plan">
+          <h3>等待批准的计划：{task.pending_plan.title}</h3>
+          {task.pending_plan.summary && <p className="wb-muted">{task.pending_plan.summary}</p>}
+          <ul className="wb-plain-list">
+            {task.pending_plan.tasks.map((t, i) => (
+              <li key={t.id ?? i}>
+                {t.title}
+                {t.paths.length > 0 && <> · 文件 {t.paths.join('、')}</>}
+                {t.checks.length > 0 && <> · 检查 {t.checks.join('、')}</>}
+              </li>
+            ))}
+          </ul>
+          <p className="wb-muted">批准之后执行器才会开始改动文件。</p>
+        </section>
+      )}
       {loading && !task && <LoadingCard label="正在读取任务详情" />}
 
       {task && (

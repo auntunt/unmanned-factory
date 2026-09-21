@@ -138,7 +138,18 @@ export interface AdaptationReceiptRecord {
   [key: string]: unknown
 }
 
+/** 等待人工批准的计划。批准是真正让执行器开始改文件的那一步，
+ *  所以页面必须能把它展示出来——批准一个看不见的东西不叫决定。 */
+export interface AdaptationPendingPlan {
+  revision: number
+  title: string
+  summary: string
+  questions: string[]
+  tasks: { id: string | null; title: string; paths: string[]; checks: string[]; risk: string }[]
+}
+
 export interface AdaptationTaskView {
+  pending_plan?: AdaptationPendingPlan | null
   schema_version: number
   task_id: string
   revision: number
