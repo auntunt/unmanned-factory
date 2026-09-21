@@ -94,6 +94,33 @@ export interface BlockingReason {
   event?: string
 }
 
+/** 已知阻塞原因的中文标题。键是服务端的事件种类，原文保留在事件日志里。 */
+const BLOCKING_TITLES: Record<string, string> = {
+  'approval.required': '等待批准执行计划',
+  'approval.requested': '等待人工批准',
+  'run.failed': '执行失败，停下等人处理',
+  'run.blocked': '执行被拦下',
+  'run.recovered': '服务重启后接回，等待确认',
+  'clarification.requested': '需要补充信息才能继续',
+  'budget.exhausted': '预算用完，已停止',
+  'requirement_analysis.interrupted': '需求梳理被中断',
+  unknown: '停下了，但没有留下可引用的原因',
+}
+
+/**
+ * 面向使用者的中文标题；不认识的种类原样显示，不编一个。
+ *
+ * 原始种类码不会被这层替换掉：详情里仍然带着它，事件日志里也有对应的那条事件。
+ */
+export function blockingTitle(kind: string): string {
+  return BLOCKING_TITLES[kind] ?? kind
+}
+
+/** 这个种类有没有中文说法——没有的话界面不该假装它有。 */
+export function isKnownBlocking(kind: string): boolean {
+  return kind in BLOCKING_TITLES
+}
+
 export interface MaintenanceReceipt {
   [key: string]: unknown
 }

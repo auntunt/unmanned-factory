@@ -22,6 +22,11 @@ from factory.control.providers import ProviderResult
 from factory.control.service import Service
 from factory.control.store import Store
 
+#: 演练里 welcome.txt 的两种内容。第一次写不达标的那个，让项目自己的检查真的失败；
+#: 修复轮写达标的那个。验收条件本身没有放宽——检查仍然只认后者。
+PENDING = "演练：等待修复"
+DELIVERED = "工单服务已就绪"
+
 
 class RehearsalRunner:
     def available(self):
@@ -45,13 +50,24 @@ class RehearsalRunner:
             }
             emit("assistant.message", {"text": "演练规划脚本已生成结构化需求与验收条件。"})
             return ProviderResult(json.dumps(plan, ensure_ascii=False), cost_usd=0.0, tokens_in=0, tokens_out=0)
-        # Deliberately fail the economic role's first check to exercise the real
-        # repair/escalation path. These names are explicitly preview profiles.
-        content = "演练：等待修复" if request.model.endswith("cheap") else "工单服务已就绪"
-        Path(request.workspace, "welcome.txt").write_text(content, encoding="utf-8")
+        # 第一次交付不达标的内容，让真实检查失败一次，再在修复轮写达标内容。
+        #
+        # 判断依据是工作区里此刻的实际内容，不是模型名。修复轮沿用同一个工作区（失败的
+        # 那一轮只被复制成证据快照），run 级续跑也会把改动带进新工作区，所以无论调度
+        # 选中哪个 profile、升不升级，演练都必然是"先失败一次、后修复成功"。
+        welcome = Path(request.workspace, "welcome.txt")
+        try:
+            current = welcome.read_text(encoding="utf-8")
+        except OSError:
+            current = ""
+        repairing = current == PENDING
+        welcome.write_text(DELIVERED if repairing else PENDING, encoding="utf-8")
         emit("tool.completed", {"tool": "rehearsal.write", "path": "welcome.txt",
-                                "message": "演练脚本修改了独立工作区中的文件"})
-        return ProviderResult("演练脚本执行完毕；最终结果由项目检查确认。", cost_usd=0.0, tokens_in=0, tokens_out=0)
+                                "message": ("演练脚本按失败证据修复了欢迎提示" if repairing
+                                            else "演练脚本先写入不达标内容，等项目检查判定")})
+        return ProviderResult(
+            "演练脚本已修复上一轮的失败。" if repairing else "演练脚本执行完毕；最终结果由项目检查确认。",
+            cost_usd=0.0, tokens_in=0, tokens_out=0)
 
 
 def rehearsal_app(port=8790):
@@ -83,11 +99,16 @@ def rehearsal_app(port=8790):
             "workspace": str(repo), "base_branch": "main", "auto_issues": False,
             "auto_publish": False, "budget_usd": 2.0,
             "checks": {"welcome": [sys.executable, "-c",
-                "from pathlib import Path; assert Path('welcome.txt').read_text() == '工单服务已就绪', '欢迎提示未达到验收条件'"]}})
+                "from pathlib import Path; assert Path('welcome.txt').read_text() == "
+                f"'{DELIVERED}', '欢迎提示未达到验收条件'"]}})
         PolicyStore(store).update(project['id'], {**DEFAULT_POLICY, 'mode': 'autonomous'}, 0, 'rehearsal')
         # The normal startup recovery discovers and durably dispatches these.
         store.create_run(project['id'], "请完善工单服务的欢迎提示，并验证交付结果。", source={'type': 'web', 'actor': 'rehearsal'})
         store.create_run(project['id'], "模糊需求：希望工单欢迎提示更合适。", source={'type': 'web', 'actor': 'rehearsal'})
+    # 维护任务的表单要填完整 40 位基线 SHA，这里直接印出来，省得操作者去仓库里翻。
+    base_sha = subprocess.run(["git", "rev-parse", "main"], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    print(f"维护任务基线：preview/ticket-service @ main = {base_sha}", flush=True)
     return app
 
 

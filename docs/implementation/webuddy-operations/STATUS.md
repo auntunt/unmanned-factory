@@ -787,3 +787,44 @@ M3 补修已落地，候选分支 `codex/operations-20260921` 交 Codex 复核�
 - 两个新方法包 `validation_status` 仍是 `template-unbenchmarked`，缺客户资料的部分在包内
   写明缺什么、阻塞什么，不宣称客户业务已验证。
 - 其余广泛测试工程记入 `TEST-FOLLOWUP.md`。
+
+## REVIEW-FUNCTION-FIRST 两项补修
+
+只改了演练脚本、维护任务详情组件及其直接测试（外加这份 STATUS）。没有动生产调度、
+验收规则或任何检查强度。
+
+### 一、仓库自带的演练确定性地先失败一次再修复
+
+`scripts/preview_v3.py` 的 `RehearsalRunner` 原本按模型名判断写什么内容——凡是
+`*cheap` 就写不达标内容。调度连着两轮都选 `preview-cheap`，于是两次检查都失败，任务停在
+等待态，永远到不了交付。
+
+改成按**工作区里此刻的实际内容**判断：读到"演练：等待修复"就写达标内容，否则写不达标的。
+修复轮沿用同一个工作区（失败那轮只被复制成证据快照），run 级续跑也会把改动带进新工作区，
+所以无论调度选中哪个 profile、升不升级，都必然是"先失败一次、后修复成功"。
+
+验收条件没有放宽：项目的 `welcome` 检查仍然只认"工单服务已就绪"，第一轮是真的失败。
+
+顺带在启动时打印维护任务要填的基线 SHA，省得操作者去仓库里翻。
+
+实测（`.factory-preview` 全新初始化，端口 8791）：
+`task welcome attempts: [('cheap','failed','verification failed: welcome'), ('cheap','verified','')]`
+——同一个 profile 上先失败后修复，不再依赖升级到别的模型。
+
+### 二、阻塞原因显示中文
+
+详情页原来直接把 `approval.required`、`run.failed` 这些事件种类码印在页面上。现在映射成
+中文标题（等待批准执行计划／执行失败，停下等人处理／需要补充信息才能继续／预算用完，
+已停止 等），**原始种类码仍然在详情里留一份**（`原始代码 approval.required`），事件日志里
+也有对应的那条事件。不认识的种类原样显示，不编一个中文说法——有直接测试钉住这条。
+
+执行层自己产生的英文错误正文（例如 `task welcome failed`）作为原始证据保留，没有在前端做
+逐句翻译：那是执行现场的实际输出，改写它等于改写证据。
+
+### 本轮跑过的
+
+- `npx vitest run src/workbench/MaintenanceTaskDetail.test.tsx src/workbench/MaintenanceTasksPage.test.tsx`：26 passed
+- 一次 `npm run build` 成功
+- 用仓库自带的 `scripts/preview_v3.py` 从网页完整走一遍：创建 → 计划批准 → 执行（失败一次
+  后修复）→ 已交付 → 导出回执 → 下载 450 字节真实 patch（含 welcome.txt 的 diff）
+- 没跑全量，没继续 CI 工程，没进并发/分页/大文件/M5，没部署

@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import MaintenanceTaskDetail from './MaintenanceTaskDetail'
 import { request } from '../workspace/api'
 import type { MaintenanceTaskView } from './maintenance-types'
+import { blockingTitle, isKnownBlocking } from './maintenance-types'
 
 vi.mock('../workspace/api', async original => ({
   ...await original<typeof import('../workspace/api')>(),
@@ -111,6 +112,29 @@ describe('维护任务详情页', () => {
     await waitFor(() => expect(screen.getByTestId('blocking-reason')).toBeTruthy())
     expect(screen.queryByText('继续执行')).toBeNull()
     expect(screen.getByText('取消任务')).toBeTruthy()
+  })
+
+  it('已知阻塞原因显示中文标题，原始代码仍然留在详情里', async () => {
+    api.mockImplementation(async (path) => {
+      if (typeof path === 'string' && path.includes('/events')) return { events: [] }
+      return {
+        ...waiting,
+        blocking_reason: { kind: 'approval.required', message: '计划已就绪，等待人工批准后才会开始改动' },
+      }
+    })
+    renderDetail('mt-waiting-5678')
+    await waitFor(() => expect(screen.getByTestId('blocking-reason')).toBeTruthy())
+    const block = screen.getByTestId('blocking-reason').textContent ?? ''
+    expect(block).toContain('等待批准执行计划')
+    // 中文标题是加上去的，不是把原始代码换掉：它仍然可被引用。
+    expect(screen.getByTestId('blocking-kind').textContent).toContain('approval.required')
+    expect(block).not.toMatch(/阻塞原因：approval\.required/)
+  })
+
+  it('不认识的阻塞种类原样显示，不编一个中文说法', () => {
+    expect(blockingTitle('run.failed')).toBe('执行失败，停下等人处理')
+    expect(blockingTitle('never.seen.this')).toBe('never.seen.this')
+    expect(isKnownBlocking('never.seen.this')).toBe(false)
   })
 
   it('执行阶段显示 SOP 步骤名和中文状态，不回显服务端的键', async () => {

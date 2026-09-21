@@ -17,6 +17,7 @@ import {
   maintenanceStatusLabel,
   maintenanceStatusTone,
   canCancel,
+  blockingTitle,
   canResume,
   stepLabel,
   stepStateLabel,
@@ -374,8 +375,14 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
             </div>
             {task.blocking_reason && (
               <div className="wb-error" role="status" data-testid="blocking-reason">
-                <strong>阻塞原因：{task.blocking_reason.kind}</strong>
-                <span>{task.blocking_reason.message}</span>
+                <strong>{blockingTitle(task.blocking_reason.kind)}</strong>
+                {task.blocking_reason.message && (
+                  <span data-testid="blocking-message">{task.blocking_reason.message}</span>
+                )}
+                {/* 原始种类码仍然可引用：事件日志里有对应的那条，这里也留一份。 */}
+                <span className="wb-muted" data-testid="blocking-kind">
+                  原始代码 <code>{task.blocking_reason.kind}</code>
+                </span>
               </div>
             )}
             <div className="wb-form-grid wb-form-grid-two" style={{ padding: '0 20px 20px' }}>
