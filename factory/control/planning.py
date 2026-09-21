@@ -99,6 +99,27 @@ def _parse_json(text: str) -> Any:
     fence = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\s*```", source, re.IGNORECASE | re.DOTALL)
     if fence:
         source = fence.group(1).strip()
+    elif not source.startswith(("{", "[")):
+        # A model that explains itself before the plan. Measured against a real
+        # Claude call through the configured relay: the plan was correct and
+        # complete, inside a ```json fence, preceded by a paragraph of prose --
+        # and ``fullmatch`` rejected the whole message.
+        #
+        # Deliberately narrow. Exactly one fenced block that parses as a JSON
+        # object is a plan; two candidates means guessing which one is the plan,
+        # and zero means there is none, so both keep the original refusal. Prose
+        # alone is still not a plan.
+        candidates = []
+        for block in re.findall(r"```(?:json)?\s*\n(.*?)```", source,
+                                re.IGNORECASE | re.DOTALL):
+            try:
+                parsed = json.loads(block.strip())
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                candidates.append(block.strip())
+        if len(candidates) == 1:
+            source = candidates[0]
     if not source:
         raise PlanError("plan is empty")
 

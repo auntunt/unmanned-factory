@@ -46,6 +46,37 @@ class _ConfirmBody(BaseModel):
     dimension: str
 
 
+def _pending_plan(store, execution_id) -> dict | None:
+    """The plan a human is being asked to approve, or nothing.
+
+    Without this the slice view reported ``blocking_reason.kind = 'unknown'``
+    while a finished plan sat in ``awaiting_approval``: the page had nothing to
+    show and no reason to offer the approve button, so the run stopped there
+    for good. Found by running a real model through the chain -- the scripted
+    rehearsal never noticed because its driver approved unconditionally.
+    """
+    if not execution_id:
+        return None
+    try:
+        run = store.get(execution_id)
+    except KeyError:
+        return None
+    plan = run.get('plan')
+    if run.get('status') != 'awaiting_approval' or not plan:
+        return None
+    return {
+        'revision': run['revision'],
+        'title': plan.get('title') or '',
+        'summary': plan.get('summary') or '',
+        'questions': list(plan.get('questions') or []),
+        'tasks': [{'id': t.get('id'), 'title': t.get('title') or '',
+                   'paths': list(t.get('paths') or []),
+                   'checks': list(t.get('checks') or []),
+                   'risk': t.get('risk') or ''}
+                  for t in (plan.get('tasks') or [])],
+    }
+
+
 def router(store, svc, *, availability=None, dispatch=None):
     """``availability``/``dispatch`` let a test substitute a fake gate or a fake
     executor dispatch without a second production code path existing -- the
@@ -163,7 +194,18 @@ def router(store, svc, *, availability=None, dispatch=None):
 
     @api.get('/slices/{slice_id}')
     def get_slice(slice_id: str, request: Request):
-        return plans.get(slice_id, actor=_actor(request))
+        view = plans.get(slice_id, actor=_actor(request))
+        view['pending_plan'] = _pending_plan(store, view['execution_id'])
+        if view['pending_plan'] and (view.get('blocking_reason') or {}).get('kind') in (None, 'unknown'):
+            # The port only cites events it already knows as blocking, and an
+            # awaiting-approval plan is not one of them. Saying "no citable
+            # reason" while the plan sits right there is what stalled the run.
+            # ``approval.requested`` is the kind the page already renders.
+            view['blocking_reason'] = {
+                'kind': 'approval.requested',
+                'message': '计划已就绪，等待人工批准后才会开始改动',
+                'event': None}
+        return view
 
     @api.get('/slices/{slice_id}/events')
     def slice_events(slice_id: str, request: Request, after: int = 0):

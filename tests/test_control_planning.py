@@ -224,3 +224,26 @@ def test_permission_reporting_does_not_exempt_sensitive_paths_or_declared_risk()
     text = "缺少权限时报告"
     assert triage(complete_plan(plan_task(paths=['auth/login.py'])), text, True)['risk'] == 'high'
     assert triage(complete_plan(plan_task(risk='high')), text, True)['risk'] == 'high'
+
+
+def test_a_plan_preceded_by_the_model_explaining_itself_is_still_a_plan():
+    """Measured against a real Claude call through the configured relay.
+
+    The plan came back correct and complete inside a ```json fence, with a
+    paragraph of prose in front of it, and the whole message was rejected --
+    ``fullmatch`` only accepted a message that was nothing but the fence. That
+    made the provider unusable for a reason that had nothing to do with the plan.
+    """
+    from factory.control.planning import PlanError, _parse_json
+
+    assert _parse_json('{"title": "x"}') == {'title': 'x'}
+    assert _parse_json('```json\n{"title": "x"}\n```') == {'title': 'x'}
+    assert _parse_json(
+        '先说明一下这次的取舍。\n\n```json\n{"title": "x"}\n```') == {'title': 'x'}
+
+    # Still narrow: prose alone is not a plan, and two candidates would mean
+    # guessing which one is the plan.
+    with pytest.raises(PlanError):
+        _parse_json('就是一段说明，没有给出计划。')
+    with pytest.raises(PlanError):
+        _parse_json('```json\n{"a": 1}\n```\n还有一个\n```json\n{"b": 2}\n```')
