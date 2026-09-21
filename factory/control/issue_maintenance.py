@@ -44,6 +44,9 @@ EXECUTION_STATES = {
     'received': 'received', 'queued': 'running', 'planning': 'running',
     'running': 'running', 'verifying': 'running',
     'needs_human': 'waiting', 'awaiting_approval': 'waiting',
+    # A real model asks questions. Leaving this state unmapped made the whole
+    # task view raise 409 the moment it did -- not "stuck", *unreadable*.
+    'needs_clarification': 'waiting',
     'ready_for_review': 'delivered', 'published': 'delivered',
     'failed': 'failed', 'cancelled': 'cancelled', 'discarded': 'cancelled',
 }

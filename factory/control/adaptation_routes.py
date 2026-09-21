@@ -67,6 +67,23 @@ def _pending_plan(store, execution_id) -> dict | None:
     }
 
 
+def _pending_questions(store, execution_id) -> list:
+    """The questions a human is being asked, or none.
+
+    A model that asks before acting is doing the right thing; a surface that
+    cannot show the question turns that into a dead end.
+    """
+    if not execution_id:
+        return []
+    try:
+        run = store.get(execution_id)
+    except KeyError:
+        return []
+    if run.get('status') != 'needs_clarification':
+        return []
+    return list((run.get('plan') or {}).get('questions') or [])
+
+
 def router(store, svc):
     from factory.control.api_adaptation import tasks_for
 
@@ -161,6 +178,12 @@ def router(store, svc):
         # The plan a human is being asked to accept travels with the task:
         # approving something the page cannot show is not a decision.
         view['pending_plan'] = _pending_plan(store, view['execution_id'])
+        view['pending_questions'] = _pending_questions(store, view['execution_id'])
+        if view['pending_questions'] and not (view.get('blocking_reason') or {}).get('kind'):
+            view['blocking_reason'] = {
+                'kind': 'clarification.requested',
+                'message': '模型在动手前提出了需要确认的问题，回答后才会继续',
+                'event': None}
         if view['pending_plan'] and not (view.get('blocking_reason') or {}).get('kind'):
             view['blocking_reason'] = {
                 'kind': 'approval.required',
@@ -172,6 +195,28 @@ def router(store, svc):
     def task_events(task_id: str, request: Request, after: int = 0):
         events = tasks.events(task_id, actor=_actor(request), after=after)
         return {'events': events}
+
+    @api.post('/tasks/{task_id}/clarify')
+    async def clarify(task_id: str, request: Request):
+        """Answer the questions this task is waiting on, through the existing gate.
+
+        Like ``approve``, this carries a human decision to the run lifecycle
+        rather than to the port, so it performs the same availability check by
+        hand. Answering is what lets the executor start, so a stopped plugin
+        must not accept one.
+        """
+        actor = _actor(request)
+        tasks.gate.require('continue')
+        body = await request.json()
+        answer = (body or {}).get('answer')
+        if not isinstance(answer, str) or not answer.strip():
+            raise HTTPException(422, '回答不能为空')
+        view = tasks.get(task_id, actor=actor)
+        execution_id = view['execution_id']
+        if not execution_id:
+            raise HTTPException(409, '这个适配任务还没有绑定执行，无法回答问题')
+        svc.clarify(execution_id, answer.strip(), actor['username'])
+        return get_task(task_id, request)
 
     @api.post('/tasks/{task_id}/approve')
     def approve(task_id: str, request: Request):

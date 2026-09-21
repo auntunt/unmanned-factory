@@ -1,0 +1,27 @@
+From 3fb4e1b75c3d618a5507488189c2017fea7af68e Mon Sep 17 00:00:00 2001
+From: Factory <factory@localhost>
+Date: Mon, 21 Sep 2026 22:56:16 +0800
+Subject: [PATCH] factory: auth_header_amount_mapping
+
+---
+ adapter.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/adapter.py b/adapter.py
+index 4261025..1e843de 100644
+--- a/adapter.py
++++ b/adapter.py
+@@ -6,6 +6,8 @@ TOKEN = "sandbox-secret-token"
+ 
+ def build_request(url, payload, headers=None):
+     body = json.dumps(payload).encode()
++    final_headers = {"Content-Type": "application/json",
++                      **(headers or {}),
++                      "Authorization": f"Bearer {TOKEN}"}
+     return urllib.request.Request(url, data=body, method="POST",
+-                                  headers={"Content-Type": "application/json",
+-                                           **(headers or {})})
++                                  headers=final_headers)
+-- 
+2.55.0
+
