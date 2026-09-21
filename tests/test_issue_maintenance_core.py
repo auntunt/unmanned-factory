@@ -10,6 +10,7 @@ The execution port here is a deliberate fake, but it is a *counting* fake: it
 records every dispatch and every workspace it was asked to create, so "no repeat
 payment, no second workspace" is a measured claim rather than a described one.
 """
+import json
 import subprocess
 
 import pytest
@@ -20,6 +21,22 @@ from factory.control.store import Conflict, Store
 
 ACTOR = {'id': 7, 'username': 'operator'}
 BASE = 'a' * 40
+
+
+def _seed_project(store, pid='p1'):
+    """A real row in the store's own ``projects`` table for ``pid``.
+
+    The fake ``_Repository`` below never touches the real store, so a task's
+    ``project_id`` here is otherwise a label nothing backs. Project-memory
+    reads and writes (``scenario_memory``, reached directly off ``store``) go
+    through the real ``projects`` table regardless of which repository port a
+    test wired in, so they need this to exist -- exactly as it always does in
+    production, where ``WebuddyRepository.resolve`` already required the
+    project to exist before a task could ever reach ``export``.
+    """
+    with store.connect() as db:
+        db.execute('INSERT OR IGNORE INTO projects VALUES (?,?)',
+                   (pid, json.dumps({'id': pid, 'revision': 1})))
 
 
 def _issue(**over):
@@ -130,6 +147,7 @@ class _Execution:
 @pytest.fixture
 def tasks(tmp_path):
     store = Store(tmp_path / 'control.db')
+    _seed_project(store)
     execution = _Execution()
     port = MaintenanceTasks(store, execution=execution,
                             repository=_Repository(), identity=_Identity())
@@ -340,8 +358,10 @@ def test_supplementing_a_running_task_is_refused_by_the_execution_port(tasks):
 def test_reopening_the_store_finds_the_same_task_with_its_evidence_intact(tmp_path):
     """A new MaintenanceTasks over the same database is the reopened-process case."""
     db = tmp_path / 'control.db'
+    store = Store(db)
+    _seed_project(store)
     execution = _Execution()
-    first = MaintenanceTasks(Store(db), execution=execution,
+    first = MaintenanceTasks(store, execution=execution,
                              repository=_Repository(), identity=_Identity())
     view = first.create(_request(), actor=ACTOR)
     execution.runs[view['execution_id']]['cost'] = 1.25

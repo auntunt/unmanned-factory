@@ -53,6 +53,17 @@
     "issue_digest": "44fee2a181eec454297873bc41caad3f2c5ac651036d308269514df690215cd8",
     "predecessor_id": null,
     "project_id": "p1",
+    "project_memory": [
+      {
+        "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "key": "9e1fc07c4f5e4e5c9e483d46b382394c",
+        "kind": "fact",
+        "paths": [],
+        "revision": 1,
+        "status": "candidate",
+        "title": "[运维] 导出报表偶发缺行"
+      }
+    ],
     "receipts": [
       {
         "agreement": {

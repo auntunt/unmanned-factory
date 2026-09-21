@@ -131,6 +131,60 @@ def content_fingerprint(normalized) -> str:
         'synthetic')})
 
 
+_DIFF_GIT_HEADER = re.compile(r'^diff --git a/(?P<a>.+) b/(?P<b>.+)$', re.MULTILINE)
+
+
+def _looks_like_a_safe_relpath(path) -> bool:
+    """A conservative filter, not the authority on path safety.
+
+    ``KnowledgeStore`` already enforces the real rule when the path is written;
+    this only keeps an odd diff header (a rename through a path with a stray
+    character, a submodule gitlink line) from turning an auxiliary "what files
+    changed" note into a reason the whole export fails.
+    """
+    if not path or path.startswith('/') or '\\' in path or '\x00' in path:
+        return False
+    parts = path.split('/')
+    return all(part not in ('', '.', '..') for part in parts)
+
+
+def paths_from_patch(artifacts) -> list[str]:
+    """The files a delivered patch actually touches, read from its own diff headers.
+
+    Derived from the exported bytes -- the same bytes the receipt's ``diff_hash``
+    covers -- rather than asked of the execution port as a second claim that
+    could disagree with what was actually handed over. Order is the order the
+    headers appear in; at most 20, matching project memory's own cap on paths
+    per entry.
+    """
+    paths, seen = [], set()
+    for artifact in artifacts or ():
+        content = artifact.get('bytes') if isinstance(artifact, dict) else None
+        if not isinstance(content, (bytes, bytearray)):
+            continue
+        text = bytes(content).decode('utf-8', errors='replace')
+        for match in _DIFF_GIT_HEADER.finditer(text):
+            path = match.group('b')
+            if path and path not in seen and _looks_like_a_safe_relpath(path):
+                seen.add(path)
+                paths.append(path)
+    return paths[:20]
+
+
+#: The scenario prefix ``scenario_memory.title_for`` adds is a few characters;
+#: staying well clear of its 200-character field cap leaves room for it without
+#: this module having to import that constant to compute the exact remainder.
+_MEMORY_TOPIC_MAX = 180
+_MEMORY_CONTENT_MAX = 4000
+
+
+def _bounded(text, limit) -> str:
+    """Truncate with a visible marker rather than let a downstream cap reject it."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + '…（已截断）'
+
+
 class MaintenanceStore:
     """Module-owned tables in the existing database.
 
@@ -247,6 +301,20 @@ class MaintenanceStore:
             db.execute('UPDATE maintenance_tasks SET data=? WHERE id=?',
                        (json.dumps(record, ensure_ascii=False), task_id))
         return record
+
+    def has_receipt(self, task_id, revision) -> bool:
+        """Whether this ``(task_id, revision)`` has ever exported successfully.
+
+        The same identity ``put_receipt`` refuses a second write for. Reading it
+        first, before the receipt-only side effects of an export, is what lets a
+        caller do something *once per delivery* -- write a project-memory fact --
+        without a second table to remember whether it already did.
+        """
+        with self.store.connect() as db:
+            row = db.execute(
+                'SELECT 1 FROM maintenance_receipts WHERE task_id=? AND revision=?',
+                (task_id, revision)).fetchone()
+        return row is not None
 
     def put_receipt(self, task_id, revision, receipt) -> dict:
         with self.store.connect() as db:
@@ -416,7 +484,37 @@ class MaintenanceTasks:
             'delivery': delivery,
             'receipts': receipts,
             'created_at': record['created_at'],
+            'project_memory': self._project_memory(record['project_id']),
         }
+
+    def _project_memory(self, project_id) -> list[dict]:
+        """What this task's project currently knows, in the data rather than only
+        in a past prompt.
+
+        This is the same cross-scenario read ``WebuddyExecution.submit`` makes
+        before dispatch (``scenario_memory.recall`` with no ``plugin_id``), so a
+        person or a later task looking at this task's view sees what the project
+        remembers without having to go re-read an old executor prompt for it.
+        It is read live, and the field is named for that: it is what the project
+        knows *now*, not the set this task's dispatch actually carried. The two
+        differ whenever a constraint is confirmed after dispatch, and calling it
+        a reference would be a claim about the past that nothing here can back.
+        The receipt deliberately does not carry this field for the same reason --
+        a frozen delivery record must not quote a value that keeps moving.
+
+        A project with no memory yet, or knowledge that failed to load, renders
+        as an empty list: reading what the project remembers must not be a way
+        to break reading the task itself.
+        """
+        from factory.control import scenario_memory
+        try:
+            entries = scenario_memory.recall(self.records.store, project_id)
+        except (KeyError, ValueError):
+            return []
+        return [{'key': entry['key'], 'title': entry['title'],
+                 'status': entry['status'], 'kind': entry['kind'],
+                 'paths': entry['paths'], 'commit_sha': entry.get('commit_sha'),
+                 'revision': entry['revision']} for entry in entries]
 
     #: Event kinds that explain a stop, sharing the vocabulary the existing
     #: attention surface already reads (``autonomy_routes`` treats ``run.recovered``
@@ -547,9 +645,58 @@ class MaintenanceTasks:
         # independently computed number that can disagree with them.
         exported = self.execution.export_artifacts(view['execution_id'])
         receipt = self.receipt(view, delivery, exported)
+        # Checked before the receipt is written, and the write that follows is
+        # the only thing gated on it: a second export of the same delivery must
+        # not write a second memory entry, and ``put_receipt``'s own append-only
+        # guarantee is what "same (task_id, revision)" already means here, so
+        # this reuses that identity instead of a second ledger of its own.
+        if not self.records.has_receipt(task_id, record['revision']):
+            self._remember_delivery(record, delivery, exported, actor=actor)
         stored = self.records.put_receipt(task_id, record['revision'], receipt)
         return {'receipt': stored, 'text': render_receipt(stored),
                 'artifacts': exported['artifacts']}
+
+    def _remember_delivery(self, record, delivery, exported, *, actor) -> None:
+        """Write back what this delivery actually did, as an unconfirmed fact.
+
+        Called once per delivery (see ``has_receipt`` above), so the next task
+        against this project -- in this session or a new one -- can read what
+        happened here without re-deriving it from a diff. ``status`` is always
+        ``candidate``: this module observed the delivery, nobody confirmed it is
+        the right long-term behaviour, and only a human review can promote it to
+        ``active``. Ordered before the receipt is committed on purpose: if this
+        raises, the receipt is not written either, so a retry of the same export
+        call tries the memory write again instead of silently never happening
+        because ``has_receipt`` now says "already done".
+        """
+        from factory.control import scenario_memory
+        issue = record['issue']
+        topic = issue['title'] or f"{issue['source']}#{issue['external_id']}"
+        checks = delivery.get('checks') or []
+        check_summary = ('、'.join(
+            f"{check.get('name')}{'通过' if check.get('passed') else '未通过'}"
+            for check in checks) or '（本次无检查记录）')
+        content = '\n'.join([
+            f"处理了 Issue {issue['source']}#{issue['external_id']} v{issue['version']}："
+            f"{issue['title']}",
+            f"期望行为：{record['expected_behaviour']}",
+            f"交付目标：{record['delivery_goal']}",
+            f"检查结果：{check_summary}",
+            '未验证项：' + ('、'.join(delivery.get('unverified') or []) or '（无）'),
+        ])
+        # Neither the issue title nor the unverified list has a length cap of its
+        # own before this point, but the knowledge store's ``title``/``content``
+        # fields do. Truncating here, rather than letting that call raise, is
+        # what keeps an unusually long issue from being the reason a *correct*
+        # delivery cannot be exported at all.
+        scenario_memory.record(
+            self.records.store, record['project_id'], plugin_id='issue-maintenance',
+            topic=_bounded(topic, _MEMORY_TOPIC_MAX),
+            content=_bounded(content, _MEMORY_CONTENT_MAX),
+            actor=(actor or {}).get('username') or 'issue-maintenance',
+            kind='fact', status=scenario_memory.UNCONFIRMED_STATUS,
+            paths=paths_from_patch(exported.get('artifacts')),
+            commit_sha=delivery.get('commit'))
 
     @staticmethod
     def receipt(view, delivery, exported) -> dict:

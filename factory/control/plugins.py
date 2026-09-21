@@ -85,6 +85,14 @@ class PluginDeclaration:
     #: is worse than a missing entry, because the refusal arrives after the
     #: customer has already committed to the workflow.
     executable: bool = False
+    #: Whether a database that has never seen this plugin starts it on.
+    #: Only ``issue-maintenance`` does, because its surface was already live
+    #: before this module existed and seeding it off would have stopped a
+    #: working feature. A newly wired scenario starts off and an administrator
+    #: turns it on per customer, which is what PLUGIN-CONTRACT.md means by
+    #: "按客户启用插件和项目配置" -- shipping it on by default would enable
+    #: it for every existing customer at upgrade time without anyone deciding to.
+    default_enabled: bool = False
 
     def compatible(self) -> bool:
         return self.contract_min <= CONTRACT_VERSION <= self.contract_max
@@ -94,6 +102,7 @@ DECLARATIONS: tuple[PluginDeclaration, ...] = (
     PluginDeclaration(
         id='issue-maintenance', name='自动化运维', version=1,
         contract_min=1, contract_max=1, skill_pack_id='issue-maintenance',
+        default_enabled=True,
         entry_points={'http': '/api/v2/maintenance',
                       'cli': 'python -m factory.control.maintenance_cli',
                       'ui': '/maintenance'},
@@ -104,13 +113,21 @@ DECLARATIONS: tuple[PluginDeclaration, ...] = (
     PluginDeclaration(
         id='legacy-modernization', name='信创化改造', version=1,
         contract_min=1, contract_max=1, skill_pack_id='legacy-modernization',
-        entry_points={}, host_capabilities=(), ui_keys=(),
-        executable=False),
+        entry_points={'http': '/api/v2/modernization'},
+        host_capabilities=('project.authorize', 'run.dispatch', 'run.events',
+                           'run.cost', 'repository.resolve', 'delivery.export',
+                           'project.memory', 'code.index'),
+        ui_keys=(),
+        executable=True),
     PluginDeclaration(
         id='api-adaptation', name='自动化三方接口适配', version=1,
         contract_min=1, contract_max=1, skill_pack_id='api-adaptation',
-        entry_points={}, host_capabilities=(), ui_keys=(),
-        executable=False),
+        entry_points={'http': '/api/v2/adaptation'},
+        host_capabilities=('project.authorize', 'run.dispatch', 'run.events',
+                           'run.cost', 'repository.resolve', 'delivery.export',
+                           'project.memory'),
+        ui_keys=(),
+        executable=True),
 )
 
 _BY_ID = {d.id: d for d in DECLARATIONS}
@@ -126,10 +143,15 @@ def declaration(plugin_id: str) -> PluginDeclaration:
 
 
 def _default_state(decl: PluginDeclaration) -> str:
-    # A plugin with a real handler starts available, which is what the
-    # maintenance surface already was before this module existed. One without a
-    # handler starts disabled and cannot be enabled at all.
-    return 'enabled' if decl.executable and decl.compatible() else 'disabled'
+    """The state a database that has never seen this plugin starts it in.
+
+    Seeded once, in ``_initialize``; an existing row is never rewritten, so a
+    plugin an administrator turned off stays off across upgrades and a newly
+    declared one does not quietly inherit someone else's decision.
+    """
+    if not (decl.executable and decl.compatible()):
+        return 'disabled'
+    return 'enabled' if decl.default_enabled else 'disabled'
 
 
 class PluginAvailability:

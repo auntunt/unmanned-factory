@@ -38,6 +38,12 @@ def _active_probe(store, plugin_id):
     if plugin_id == 'issue-maintenance':
         from factory.control.issue_maintenance_webuddy import active_task_count
         return lambda: active_task_count(store)
+    if plugin_id == 'legacy-modernization':
+        from factory.control.legacy_modernization import active_slice_count
+        return lambda: active_slice_count(store)
+    if plugin_id == 'api-adaptation':
+        from factory.control.api_adaptation import active_task_count
+        return lambda: active_task_count(store)
     decl = plugins.declaration(plugin_id)
     if decl.executable:
         raise HTTPException(500, f'{decl.name} 已声明可执行但没有活跃执行判定，拒绝在不知道是否有在跑任务的情况下停用')

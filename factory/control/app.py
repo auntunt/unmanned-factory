@@ -191,6 +191,10 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(plugin_router(store, svc))
     from factory.control.maintenance_routes import router as maintenance_router
     app.include_router(maintenance_router(store, svc))
+    from factory.control.modernization_routes import router as modernization_router
+    app.include_router(modernization_router(store, svc))
+    from factory.control.adaptation_routes import router as adaptation_router
+    app.include_router(adaptation_router(store, svc))
 
     @app.exception_handler(AuthError)
     async def auth_error(req, exc):

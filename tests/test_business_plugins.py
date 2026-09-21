@@ -9,6 +9,7 @@ race case that no reachable transition can produce.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 import subprocess
@@ -67,10 +68,40 @@ def test_three_scenarios_are_declared_with_their_existing_pack_ids():
         assert decl.compatible()
 
 
-def test_only_the_wired_scenario_declares_itself_executable():
-    assert plugins.declaration(MAINT).executable is True
-    assert plugins.declaration('legacy-modernization').executable is False
-    assert plugins.declaration('api-adaptation').executable is False
+def test_all_three_have_handlers_but_only_the_pre_existing_one_seeds_on():
+    """Declared executable is not the same as on by default.
+
+    All three now have a real handler, so all three may be enabled. Only
+    自动化运维 seeds ``enabled``: its surface was already live before the plugin
+    layer existed and seeding it off would have stopped a working feature.
+    A newly wired scenario seeds off, so upgrading an existing install does not
+    silently switch two new business surfaces on for every customer.
+    """
+    for pid in ('issue-maintenance', 'legacy-modernization', 'api-adaptation'):
+        assert plugins.declaration(pid).executable is True, pid
+    assert plugins.declaration(MAINT).default_enabled is True
+    assert plugins.declaration('legacy-modernization').default_enabled is False
+    assert plugins.declaration('api-adaptation').default_enabled is False
+
+
+def test_a_newly_wired_plugin_seeds_off_and_an_admin_turns_it_on(app_env):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    av = _availability(store)
+    assert av.view('api-adaptation')['state'] == 'disabled'
+    assert av.view('legacy-modernization')['state'] == 'disabled'
+    # Reads are reachable while off; creating is not.
+    assert client.get('/api/v2/adaptation/availability',
+                      headers=headers).json()['state'] == 'disabled'
+    turned_on = client.post('/api/v2/plugins/api-adaptation/state',
+                            json={'state': 'enabled'}, headers=headers)
+    assert turned_on.status_code == 200, turned_on.text
+    assert turned_on.json()['state'] == 'enabled'
+    assert client.get('/api/v2/adaptation/availability',
+                      headers=headers).json()['can_create'] is True
+    # Turning one on leaves the others where they were.
+    assert av.view('legacy-modernization')['state'] == 'disabled'
+    assert av.view(MAINT)['state'] == 'enabled'
 
 
 def test_unknown_plugin_id_is_refused_not_defaulted(app_env):
@@ -90,10 +121,20 @@ def test_declaration_outside_the_host_contract_range_is_incompatible():
 # ---------------------------------------------------------------------------
 # availability state machine
 # ---------------------------------------------------------------------------
-def test_unimplemented_plugin_cannot_be_enabled(app_env):
+def test_a_plugin_with_no_handler_cannot_be_enabled(app_env, monkeypatch):
+    """The rule has to stay covered even when nothing shipped is in that state.
+
+    Every declared plugin now has a handler, so this stands one of them down to
+    ``executable=False`` for the length of the test. Dropping the test instead
+    would let the rule rot until the next unimplemented plugin is declared --
+    and the failure mode it prevents (an entry that looks ready with nothing
+    behind it) only shows up after a customer has committed to the workflow.
+    """
     _, store, _, _ = app_env
     av = _availability(store)
-    assert av.view('api-adaptation')['state'] == 'disabled'
+    unwired = dataclasses.replace(plugins.declaration('api-adaptation'),
+                                  executable=False)
+    monkeypatch.setitem(plugins._BY_ID, 'api-adaptation', unwired)
     with pytest.raises(Conflict) as exc:
         av.set_state('api-adaptation', 'enabled', actor='owner')
     assert '尚未接入可执行处理器' in str(exc.value)
