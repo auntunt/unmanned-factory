@@ -309,12 +309,22 @@ def test_a_same_name_symbol_in_another_language_is_not_reported_as_a_caller(tmp_
     _git(root, 'add', '-A')
     _git(root, 'commit', '-qm', 'base')
 
+    # The unbound query is what mixes them: asked by name alone, the backend
+    # answers for both definitions.
+    indexed = ci.ensure_indexed(root)
+    assert indexed['indexed'] is True, indexed
+    unbound = ci._run(indexed['mapping']['root'],
+                      ['callers', 'format_money', '--json', '--limit', '20'])
+    mixed = {c['filePath'] for c in json.loads(unbound.stdout)['callers']}
+    assert any(p.startswith('native/') for p in mixed), mixed
+
+    # The bound query does not: it is asked about one definition, so the C++
+    # caller never arrives and there is nothing left to filter out.
     answer = ci.callers(root, 'format_money', language='python')
     assert answer['outcome'] == ci.OK, answer
+    assert answer['target']['path'] == 'acme/money.py', answer
     assert all(r['language'] == 'python' for r in answer['results']), answer
     assert not any(str(r['path']).startswith('native/') for r in answer['results'])
-    # What was dropped is reported, not silently swallowed.
-    assert any(d['language'] == 'cpp' for d in answer['dropped_other_language']), answer
 
 
 # --- tier 3 is probed, never declared -------------------------------------
@@ -569,3 +579,81 @@ public class Report {
                         target_path='src/a/Money.java')
     assert pinned['outcome'] in (ci.OK, ci.NO_MATCH), pinned
     assert pinned['target']['path'] == 'src/a/Money.java'
+
+
+def test_choosing_a_target_actually_constrains_which_edges_come_back(tmp_path):
+    """The review's probe: ``save`` in ``a/`` and ``b/``, each with its own caller.
+
+    Picking a target used to decorate the answer without changing the query --
+    ``callers save`` was still what ran, so choosing ``a/store.py`` could return
+    ``b/``'s caller. The relation query is now bound to the chosen definition,
+    and this asserts the two targets give disjoint answers.
+    """
+    root = tmp_path / 'dup'
+    root.mkdir()
+    _git(root, 'init', '-q', '-b', 'main')
+    _git(root, 'config', 'user.email', 't@example.com')
+    _git(root, 'config', 'user.name', 'T')
+    _write(root, 'a/__init__.py', '')
+    _write(root, 'b/__init__.py', '')
+    _write(root, 'a/store.py', 'def save(row):\n    return "a:" + str(row)\n')
+    _write(root, 'b/store.py', 'def save(row):\n    return "b:" + str(row)\n')
+    _write(root, 'a/caller_a.py',
+           'from a.store import save\n\n\ndef calls_a(row):\n    return save(row)\n')
+    _write(root, 'b/caller_b.py',
+           'from b.store import save\n\n\ndef calls_b(row):\n    return save(row)\n')
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-qm', 'base')
+
+    # Without a target there are two candidates, so no precise answer is given.
+    undecided = ci.callers(root, 'save', language='python')
+    assert undecided['outcome'] == ci.AMBIGUOUS, undecided
+    assert {c['path'] for c in undecided['candidates']} == {'a/store.py', 'b/store.py'}
+
+    a_side = ci.callers(root, 'save', language='python', target_path='a/store.py')
+    assert a_side['outcome'] == ci.OK, a_side
+    assert a_side['target']['path'] == 'a/store.py'
+    a_callers = {r['path'] for r in a_side['results']}
+    assert 'a/caller_a.py' in a_callers
+    assert not any(p.startswith('b/') for p in a_callers), a_side
+
+    b_side = ci.callers(root, 'save', language='python', target_path='b/store.py')
+    assert b_side['outcome'] == ci.OK, b_side
+    assert b_side['target']['path'] == 'b/store.py'
+    b_callers = {r['path'] for r in b_side['results']}
+    assert 'b/caller_b.py' in b_callers
+    assert not any(p.startswith('a/') for p in b_callers), b_side
+
+    assert a_callers.isdisjoint(b_callers)
+
+
+def test_a_candidate_set_that_cannot_be_proven_complete_is_not_a_unique_target(
+        tmp_path, monkeypatch):
+    """One candidate out of an unknown whole is not one candidate.
+
+    If the definition page filled up before filtering, the definition we did not
+    see could be the real callee -- so no precise relation is returned, even
+    though exactly one candidate came back.
+    """
+    root = _repo(tmp_path, 'python')
+    ci.ensure_indexed(root)
+    real = ci._run
+
+    def saturated(index_root, args, **kwargs):
+        if args[:1] == ['query']:
+            page = int(args[args.index('--limit') + 1])
+            node = {'kind': 'function', 'name': 'format_money',
+                    'qualifiedName': 'acme.money.format_money',
+                    'filePath': 'acme/money.py', 'language': 'python',
+                    'startLine': 1, 'id': 'function:1'}
+            filler = {**node, 'language': 'go', 'filePath': 'x/y.go'}
+            return ci._Invocation(
+                0, json.dumps([{'node': node}] + [{'node': filler}] * (page - 1)), '')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', saturated)
+    answer = ci.callers(root, 'format_money', language='python')
+    assert answer['outcome'] == ci.AMBIGUOUS, answer
+    assert answer['complete'] is False
+    assert answer['results'] == []
+    assert '无法证明目标唯一' in answer['reason']

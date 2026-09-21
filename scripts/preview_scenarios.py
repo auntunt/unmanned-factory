@@ -247,7 +247,14 @@ def _repo(root: Path, files: dict[str, str]) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
-def rehearsal_app(port=8791, data_dir=None):
+def rehearsal_app(port=8791, data_dir=None, real_model=None, budget_usd=2.0):
+    """``real_model`` swaps the scripted executor for the platform's real one.
+
+    Passing it uses ``SDKRunner`` -- the production path -- with the profile you
+    name, so the coding step is an actual model call billed to whatever that
+    provider is logged in as. Everything else is the same rehearsal. Left unset,
+    the executor is the labelled script and nothing is billed.
+    """
     data = Path(data_dir) if data_dir else ROOT / '.factory-preview-scenarios'
     workspaces = data / 'workspaces'
     legacy_sha = _repo(workspaces / 'legacy-quote',
@@ -255,11 +262,22 @@ def rehearsal_app(port=8791, data_dir=None):
     adapter_sha = _repo(workspaces / 'gp-adapter',
                         {'adapter.py': ADAPTER, 'check_adapt.py': ADAPTER_CHECK})
     store = Store(data / 'control.db')
-    profiles = {role: {"provider": "codex", "model": f"rehearsal-{role}"}
-                for role in ("planner", "cheap", "standard", "strong")}
-    service = Service(store, runner=ScenarioRehearsalRunner(), profiles=profiles,
-                      timeout_s=180)
-    service.preview_mode = True
+    if real_model:
+        provider, _, model = real_model.partition(':')
+        if not model:
+            raise SystemExit('--real-model 需要 provider:model，例如 codex:gpt-5.6-sol')
+        profiles = {role: {"provider": provider, "model": model}
+                    for role in ("planner", "cheap", "standard", "strong")}
+        # runner=None -> SDKRunner, the production provider path.
+        service = Service(store, profiles=profiles, timeout_s=900)
+        print(f"真实模型模式：provider={provider} model={model}（会真的产生调用与费用）",
+              flush=True)
+    else:
+        profiles = {role: {"provider": "codex", "model": f"rehearsal-{role}"}
+                    for role in ("planner", "cheap", "standard", "strong")}
+        service = Service(store, runner=ScenarioRehearsalRunner(), profiles=profiles,
+                          timeout_s=180)
+        service.preview_mode = True
     app = create_app(data_dir=data, workspace_root=workspaces,
                      public_origin=f"http://127.0.0.1:{port}", service=service)
     try:
@@ -273,14 +291,14 @@ def rehearsal_app(port=8791, data_dir=None):
         store.add_project({
             "name": "老报价系统 · 信创演练", "repository": "preview/legacy-quote",
             "workspace": str(workspaces / 'legacy-quote'), "base_branch": "main",
-            "auto_issues": False, "auto_publish": False, "budget_usd": 2.0,
+            "auto_issues": False, "auto_publish": False, "budget_usd": budget_usd,
             "checks": {"regression": [sys.executable, "-m", "pytest", "-q",
                                       "-p", "no:randomly", "test_db_url.py"]}})
     if 'preview/gp-adapter' not in existing:
         store.add_project({
             "name": "三方上报适配 · 演练", "repository": "preview/gp-adapter",
             "workspace": str(workspaces / 'gp-adapter'), "base_branch": "main",
-            "auto_issues": False, "auto_publish": False, "budget_usd": 2.0,
+            "auto_issues": False, "auto_publish": False, "budget_usd": budget_usd,
             "checks": {"contract": [sys.executable, "check_adapt.py"]}})
 
     # Both business plugins ship disabled; an administrator turns them on. The
@@ -300,9 +318,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8791)
     parser.add_argument('--data-dir', default=None)
+    parser.add_argument('--real-model', default=None,
+                        help='provider:model，例如 codex:gpt-5.6-sol。'
+                             '设了就走真实模型，会产生实际调用与费用')
+    parser.add_argument('--budget-usd', type=float, default=2.0)
     args = parser.parse_args()
     import uvicorn
     print(f"场景演练：http://127.0.0.1:{args.port} · 登录 preview / factory-preview-only",
           flush=True)
-    uvicorn.run(rehearsal_app(args.port, args.data_dir), host='127.0.0.1',
-                port=args.port, proxy_headers=False)
+    uvicorn.run(rehearsal_app(args.port, args.data_dir, args.real_model,
+                              args.budget_usd),
+                host='127.0.0.1', port=args.port, proxy_headers=False)

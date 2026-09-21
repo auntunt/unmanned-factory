@@ -356,14 +356,20 @@ def test_maintenance_says_its_scope_is_unknown_and_narrows_it_after_the_plan(app
                               {'id': 't1', 'title': '改导出', 'paths': ['report.py']}]}})
     from factory.control.issue_maintenance_webuddy import tasks_for
     port = tasks_for(svc)
+    prompt_before = store.get(run_id)['request']
     refined = port.port.execution.refine_memory_for_plan(run_id)
-    assert refined['refined'] is True, refined
+    assert refined['recorded'] is True, refined
     assert refined['paths'] == ['report.py']
+    # The boundary, asserted rather than assumed: this is a record for whoever
+    # reviews the result. Nothing reached the executor -- the prompt it was
+    # dispatched with is byte-for-byte unchanged.
+    assert refined['consumed_by_executor'] is False
+    assert store.get(run_id)['request'] == prompt_before
     kept = {r['title'] for r in refined['refs']}
     assert '[运维] 报表相关' in kept
     assert '[运维] 登录相关' not in kept
     # Both bases are kept: what the executor was given, and what a reviewer
     # should read the result against.
     after = store.get(run_id)['source']
-    assert len(after['memory_refs']) == 2
-    assert len(after['memory_refs_refined']) == 1
+    assert len(after['memory_refs']) == 2, '执行者当时拿到的那一组不变'
+    assert len(after['memory_refs_for_review']) == 1, '复核时该对照的那一组'

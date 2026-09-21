@@ -121,6 +121,21 @@ _NOT_INITIALIZED = re.compile(r'not initialized', re.I)
 _FILTER_OVERFETCH = 5
 _MAX_PAGE = 200
 
+#: ``codegraph node <symbol> --file <path>`` is the one query that is bound to a
+#: chosen definition rather than to a bare name. Measured on a fixture with
+#: ``save`` defined in both ``a/store.py`` and ``b/store.py``, each with its own
+#: caller: ``callers save`` returns *both* callers, while ``node save --file
+#: a/store.py`` returns only ``calls_a``. It prints Markdown, not JSON, so these
+#: patterns are the contract -- and a parse that does not match is reported as
+#: malformed output rather than as an empty relation.
+_TRAIL_MARKERS = {'callers': 'Called by ←', 'callees': 'Calls →'}
+_TRAIL_ENTRY = re.compile(r'([^(,]+?)\s*\(([^:()]+):(\d+)\)')
+_NODE_LOCATION = re.compile(r'\*\*Location:\*\*\s*(\S+?):(\d+)')
+#: ``--file`` that matches nothing does not fail -- it silently falls back to
+#: listing every definition of the name. That output must never be parsed as a
+#: bound answer.
+_NODE_MULTI = re.compile(r'definitions named "')
+
 #: Node kinds that can actually *be* the target of a call relation. An
 #: ``import`` row naming a symbol is not a second definition of it -- treating
 #: it as one made every Python lookup ambiguous with itself.
@@ -767,9 +782,69 @@ def _resolve_target(root, symbol, *, language, target_path, limit, auto_index):
     return candidates[0], None
 
 
+def _node_trail(index_root, symbol, target, verb):
+    """The caller/callee trail of **one** definition, or why there is none.
+
+    ``(entries, outcome, reason)``. This is the query that actually binds:
+    ``callers <name>`` answers for every definition sharing the name, which is
+    why picking a target and then running it was disambiguation in name only --
+    the review reproduced exactly that, choosing ``a.py/save`` and getting
+    ``b.py``'s caller back.
+
+    Three ways this refuses rather than guesses: a non-zero exit or a timeout is
+    a failure, a ``--file`` that matched nothing makes the backend list every
+    definition instead (detected, never parsed), and a location that is not the
+    target's is a bound answer about the wrong thing.
+    """
+    done = _run(index_root, ['node', symbol, '--file', target['path']])
+    if done.timed_out:
+        return None, BACKEND_TIMEOUT, done.error
+    if done.returncode is None:
+        return None, BACKEND_UNAVAILABLE, done.error
+    text = (done.stdout or '').strip()
+    noise = (done.stderr or '').strip()
+    if done.returncode != 0:
+        return None, BACKEND_ERROR, f'后端退出码 {done.returncode}：{noise or text or "没有输出"}'
+    if _NOT_FOUND.search(text):
+        return [], NO_MATCH, text
+    if _NODE_MULTI.search(text):
+        # --file did not bind; the backend fell back to listing them all.
+        return None, AMBIGUOUS, (
+            f'后端没有把 {symbol} 绑定到 {target["path"]}，而是列出了全部同名定义；'
+            '这种输出不能当作已消歧的关系结果')
+    located = _NODE_LOCATION.search(text)
+    if not located:
+        return None, MALFORMED_OUTPUT, f'无法从 node 输出里读出定义位置：{text[:200]}'
+    if located.group(1) != target['path']:
+        return None, MALFORMED_OUTPUT, (
+            f'请求的是 {target["path"]} 的 {symbol}，后端回的是 '
+            f'{located.group(1)}:{located.group(2)}')
+    marker = _TRAIL_MARKERS[verb]
+    line = next((l for l in text.splitlines() if marker in l), None)
+    if line is None:
+        # A definition with no edges in this direction. The bound query answered;
+        # the answer is "none".
+        return [], None, None
+    entries = [{'name': name.strip().lstrip('*').strip(),
+                'path': path.strip(), 'line': int(number),
+                'language': language_of(path.strip())}
+               for name, path, number in _TRAIL_ENTRY.findall(line.split(marker, 1)[1])]
+    if not entries:
+        return None, MALFORMED_OUTPUT, f'认得出 {marker} 这一行却解析不出条目：{line[:200]}'
+    return entries, None, None
+
+
 def _relation(root, verb, symbol, *, language, path_prefix, limit,
               auto_index=True, target_path=None):
-    """``callers``/``callees`` share every rule, so they share one body."""
+    """``callers``/``callees`` share every rule, so they share one body.
+
+    The relation is always asked about a *definition*, never about a name. When
+    the definition cannot be pinned to exactly one -- several candidates, or a
+    candidate set this layer cannot prove is complete -- no precise relation is
+    returned at all. ``target_path`` locates source; it is the bound backend
+    query below, not the act of choosing, that makes the edges belong to the
+    chosen target.
+    """
     if language is not None and not relations_usable(language):
         record = LANGUAGES.get(language)
         return _envelope(
@@ -782,50 +857,63 @@ def _relation(root, verb, symbol, *, language, path_prefix, limit,
         return _envelope(status['outcome'], root=root, reason=status['reason'],
                          language=language, limit=limit, status=status,
                          complete=False)
-    target, refusal = _resolve_target(root, symbol, language=language,
-                                      target_path=target_path, limit=limit,
-                                      auto_index=False)
-    if refusal is not None:
-        return refusal
+    found = definitions(root, symbol, language=language, limit=max(limit, 10),
+                        auto_index=False)
+    if found['outcome'] in FAILED_OUTCOMES:
+        return found
+    pool = [r for r in found['results']
+            if (r.get('kind') or '') in _DEFINITION_KINDS] or found['results']
+    candidates = [r for r in pool
+                  if not target_path or str(r['path'] or '') == target_path
+                  or str(r['path'] or '').endswith('/' + target_path.lstrip('/'))]
+    if not candidates:
+        return _envelope(NO_MATCH, root=root, language=language, limit=limit,
+                         status=status, complete=found['complete'],
+                         reason=(f'没有找到 {symbol} 的定义'
+                                 + (f'（限定在 {target_path}）' if target_path else '')))
+    if len(candidates) > 1:
+        return _envelope(
+            AMBIGUOUS, root=root, language=language, limit=limit, status=status,
+            candidates=candidates, complete=found['complete'],
+            reason=(f'同一语言里有 {len(candidates)} 个定义都叫 {symbol}，'
+                    '仅凭名字无法锁定调用关系的目标；请用 target_path 指定一个'))
+    if not found['complete']:
+        # One candidate out of a candidate set we cannot prove is whole is not a
+        # unique target -- the one we did not see could be the real callee.
+        return _envelope(
+            AMBIGUOUS, root=root, language=language, limit=limit, status=status,
+            candidates=candidates, complete=False,
+            reason=(f'只找到一个叫 {symbol} 的定义，但候选集本身不完整'
+                    f'（{found["reason"] or "后端一页已取满"}），'
+                    '无法证明目标唯一，因此不给精确的调用关系'))
+    target = candidates[0]
 
-    payload, outcome, reason, page = _query_backend(
-        status['mapping']['root'], [verb, symbol], limit=limit)
-    if payload is None:
+    entries, outcome, reason = _node_trail(status['mapping']['root'], symbol,
+                                           target, verb)
+    if entries is None:
         return _envelope(outcome, root=root, language=language, limit=limit,
-                         reason=reason, status=status, target=target,
+                         status=status, target=target, reason=reason,
                          complete=(outcome == NO_MATCH))
-    key = 'callers' if verb == 'callers' else 'callees'
-    raw = payload.get(key) or []
-    saturated = len(raw) >= page
-    # The backend matches on name alone, so a mixed repository will hand back a
-    # same-named symbol from another language. Filtering by the file's own
-    # language is what keeps this from inventing a cross-language edge.
-    tagged = [{**item, '_language': language_of(item.get('filePath') or '')}
-              for item in raw]
-    dropped = _drop_other_languages(
-        [{'language': t['_language']} for t in tagged], language)
-    kept = [t for t in tagged
-            if (language is None or t['_language'] == language)
-            and (not path_prefix or str(t.get('filePath') or '').startswith(path_prefix))]
+    # The trail is already bound to one definition, so filtering here is only a
+    # second line of defence; anything it drops is still reported.
+    dropped = _drop_other_languages(entries, language)
+    kept = [e for e in entries
+            if (language is None or e['language'] == language)
+            and (not path_prefix or str(e['path'] or '').startswith(path_prefix))]
     truncated = len(kept) > limit
-    results = [{'name': t.get('name'), 'kind': t.get('kind'),
-                'path': t.get('filePath'), 'line': t.get('startLine'),
-                'language': t['_language']}
-               for t in kept[:limit]]
+    results = [{'name': e['name'], 'kind': None, 'path': e['path'],
+                'line': e['line'], 'language': e['language']}
+               for e in kept[:limit]]
     if not results:
-        return _envelope(INCOMPLETE if saturated else NO_MATCH, root=root,
-                         language=language, limit=limit, dropped=dropped,
-                         status=status, target=target, complete=not saturated,
-                         reason=(f'后端一页 {page} 条已取满，过滤后本次范围内没有'
-                                 f'{key}；不能据此断定没有调用方' if saturated
-                                 else f'{symbol} 在本次范围内没有可解析的{key}'))
-    return _envelope(INCOMPLETE if (saturated and not truncated) else
-                     (TRUNCATED if truncated else OK),
-                     root=root, results=results, language=language, limit=limit,
-                     truncated=truncated, dropped=dropped, status=status,
-                     target=target, complete=not saturated,
-                     reason=('后端一页已取满，过滤后的这批可能不是全部'
-                             if saturated else None))
+        return _envelope(NO_MATCH, root=root, language=language, limit=limit,
+                         dropped=dropped, status=status, target=target,
+                         complete=True,
+                         reason=(f'{target["path"]} 里的 {symbol} 在本次范围内'
+                                 f'没有可解析的{verb}'))
+    return _envelope(TRUNCATED if truncated else OK, root=root, results=results,
+                     language=language, limit=limit, truncated=truncated,
+                     dropped=dropped, status=status, target=target,
+                     complete=not truncated)
 
 
 def callers(root, symbol, *, language=None, path_prefix=None, limit=20,

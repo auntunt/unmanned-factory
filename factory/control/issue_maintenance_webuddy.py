@@ -211,15 +211,21 @@ class WebuddyExecution:
         return self._run(execution_id)['status']
 
     def refine_memory_for_plan(self, execution_id) -> dict:
-        """Phase two: the approved plan names the files, so narrow memory to them.
+        """Record which memory the approved plan's files actually fall under.
 
-        Runs after approval, when a plan exists. Binding requirements were
-        already carried whole at dispatch, so this never has to deliver a
-        requirement late -- it records which of them the plan's files actually
-        touch, and pulls the full text of any *context* that travelled as a
-        summary. Both the original and the refined basis are kept: the first is
-        what the executor was given, the second is what a reviewer should read
-        the result against.
+        **This does not hand anything to the executor.** The prompt was built at
+        dispatch and the planning context is assembled in ``run_execution._plan``,
+        which runs before approval -- so there is no point after approval where
+        text could still reach the model without restructuring the run
+        lifecycle, and that is not worth doing for this. What this produces is a
+        *record for whoever reviews the result*: the in-scope references, written
+        to the run's source and to a durable event.
+
+        That is a safe boundary only because binding requirements are never
+        deferred: ``load_for_task`` carries every ``constraint`` whole at
+        dispatch or refuses to dispatch at all. Only non-binding context can
+        travel as a summary, so nothing the executor was required to obey is
+        waiting on this call.
         """
         run = self._run(execution_id)
         plan = run.get('plan') or {}
@@ -228,26 +234,29 @@ class WebuddyExecution:
         source = dict(run.get('source') or {})
         previous = source.get('memory_refs') or []
         if not paths:
-            return {'refined': False, 'reason': '计划没有声明要改哪些文件，范围仍未知',
+            return {'recorded': False, 'consumed_by_executor': False,
+                    'reason': '计划没有声明要改哪些文件，范围仍未知',
                     'paths': [], 'added': []}
         from factory.control import scenario_memory
         project_id = run.get('project_id')
         result = scenario_memory.refine_for_plan(
             self.store, project_id, scope_paths=paths, previous_refs=previous)
         if result.get('error') or result.get('blocked'):
-            return {'refined': False,
+            return {'recorded': False, 'consumed_by_executor': False,
                     'reason': result.get('error') or result['blocked']['message'],
                     'paths': paths, 'added': []}
         source['memory_scope_paths'] = paths
-        source['memory_refs_refined'] = result['refs']
+        # Named for what it is: a review-time record, not a second thing the
+        # executor read. ``memory_refs`` above stays the basis it was given.
+        source['memory_refs_for_review'] = result['refs']
         self.store.update(execution_id, {'source': source})
-        self.store.append(execution_id, 'maintenance.memory_refined',
-                          {'paths': paths,
+        self.store.append(execution_id, 'maintenance.memory_scope_recorded',
+                          {'paths': paths, 'consumed_by_executor': False,
                            'refs': [{'key': r['key'], 'revision': r['revision'],
                                      'role': r['role']} for r in result['refs']],
                            'added': [r['key'] for r in result['added']]})
-        return {'refined': True, 'reason': None, 'paths': paths,
-                'added': result['added'], 'refs': result['refs']}
+        return {'recorded': True, 'consumed_by_executor': False, 'reason': None,
+                'paths': paths, 'added': result['added'], 'refs': result['refs']}
 
     def loaded_memory(self, execution_id) -> list | None:
         """The memory this execution was actually dispatched with, or ``None``.
