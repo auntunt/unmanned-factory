@@ -306,7 +306,90 @@ python -m pytest -q -p no:randomly`）：
 `test_run_followup.py::test_pending_applied_exactly_once_after_conflict_then_correct_retry`
 偶发 409 原始证据保留在上一节，本轮未再触发也未改动，不主张它是环境问题。
 
+## M2（中断恢复、可信工作流证据与复用、外部动作身份）
+
+五项固定验收全部落地，都是在既有机制上加收口，没有另造恢复引擎、发布机制或多主机租约。
+
+**1. 恢复回到同一现场。** 旧的重启测试都在"刚写完检查点的那个 service 实例"上调
+`recover()`，分不清"现场被持久记下了"和"现场还在这个进程的内存里"。新
+`tests/test_restart_same_site.py` 关掉第一个协调器，对同一个 `control.db` 文件新建第二个
+`Store` + `Service` 再恢复。抓到的实洞：`recovery.recover` 造出的 `execution_resume` 完全
+没绑协议，重启后的编码调用回落到 `current(run)`；只看修订号也认不出来——这类运行的协议
+仍派生自 `spec_draft`，改草稿修订号还是 1，摘要变了。判据取 `(revision, digest, source)`。
+未对账的中断调用跨重启仍按未知成本挂账，不被静默清零。
+
+**2. 老现场不出现第二个写入方。** 复用 `provider_activity` 的进程级排他 OS 锁：进程死掉
+由内核释放，这是这里唯一站得住的"活着"证据。不靠网页断线、不靠 PID 存在或消失、不靠库里
+的状态行猜"已退出"。`tests/test_second_writer.py` 用受控本地子进程真的持锁，不调付费模型，
+不杀无关进程。
+
+**3. 最终验收输入里的工作流事实可信。** `verification_evidence.workflow_evidence` 从
+append-only `events` 里只取九类平台记录的事实（中断/恢复/待处理/已应用/复用），带 `event_id`
+可回查，`run_id` 谓词把跨运行泄漏挡住，超限从最老一端截断并如实标 `omitted_older`。
+`tests/test_workflow_evidence.py` 走真实 `service._independent_verify` 一路到实际派发的
+`ProviderRequest`，不塞全部历史，不由模型口头宣称。
+
+**4. 按适用范围复用验收结果。** 新 `factory/control/evidence_identity.py` 给每条检查结果
+记一个身份指纹：命令 argv、解析出的可执行文件字节 + `ENV_KEYS` 工具环境、被改代码的签名、
+以及本轮绑定的要求 `(revision, digest)`。旧谓词只看源码哈希且全有全无——一条检查被改就把
+其它检查仍然有效的结果连坐丢掉，而另外三个决定性输入（命令、工具环境、判据本身）根本没被
+钉住。现在逐检查判定，作废是有范围的；身份算不出来就是"未验证"，两个方向都不许读成"通过"；
+部署健康记录有时效（`HEALTH_TTL_S=900`），未来时间戳也不采信。需求改版不把旧 pass 改标新
+修订，而是重新建立覆盖。相应地 `continuous.py` 里"恢复时检查配置变了就整轮报废"改成逐检查
+重跑；不跑任何检查的 verification-only 阶段则在配置变化时明确拒绝。
+
+**5. 外部动作有可查询身份。** 复用 `remote_invocations` 行：`deploy_targets.py` 按仓库惯例
+（PRAGMA + ALTER）加 `action_id`/`intent`/`at` 三列，主键 `(run_id,target_id,verb)` 仍然决定
+身份，所以重复相同动作照旧返回原回执、不产生第二次外部写。`action_id` 是派生而非随机的
+（`sha256(run\0target\0verb)` 前 24 位），重开库后能算出同一个名字去问目标。异参同键既不复用
+回执也不重发，直接 `Conflict(error_type='remote_action_conflict')`。`actions()` 是纯只读查询
+（无 I/O、无写），`reconcile()` 只跑只读 verb，且只有目标自己报出这个 `action_id` 才关联成功；
+健康检查 200 不足以认定本次发布成功，目标答不出或连不上就维持 `unverified` +
+`unknown_target_cannot_confirm` 待人工核对，任何路径都不重发写操作。
+
+**改动文件。** 新增 `factory/control/evidence_identity.py`、`factory/control/provider_activity.py`；
+改 `factory/control/continuous.py`、`recovery.py`、`run_execution.py`、`run_lifecycle.py`、
+`service.py`、`verification.py`、`verification_evidence.py`、`remote_targets.py`、
+`deploy_targets.py`、`autonomy.py`、`effective_contract.py`、`providers.py`、`sdk_worker.py`、
+`deploy_targets.py`、`templates/verification-v1.txt`。新增测试
+`tests/test_restart_same_site.py`、`test_second_writer.py`、`test_workflow_evidence.py`、
+`test_evidence_reuse_scope.py`、`test_remote_action_identity.py`。
+
+**测试范围与退出码**（解释器 `/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons/
+.venv/bin/python -m pytest -q -p no:randomly -m "not smoke"`，全部 exit 0）：
+
+- 五个新集：`test_restart_same_site.py` + `test_second_writer.py` +
+  `test_evidence_reuse_scope.py` + `test_workflow_evidence.py` +
+  `test_verification_format_repair.py` → `30 passed`。
+- 远程/发布/运维相邻集：`test_remote_targets.py`、`test_remote_action_identity.py`、
+  `test_github_publication.py`、`test_operations_automation.py`、`test_operations_ci.py`、
+  `test_inspection_error_types.py`、四个 `test_codex_operations_*.py` → `104 passed, 1 skipped`。
+- 执行/协议/验收相邻集：`test_continuous_execution.py`、`test_continuous_service.py`、
+  `test_continuous_migration.py`、`test_control_app.py`、`test_workbench_app.py`、
+  `test_evidence_reuse_scope.py`、`test_restart_same_site.py`、`test_second_writer.py`
+  → `115 passed`。
+- 定向变异（每次一处、改完即由 `cp` 还原，不用 `git checkout`）：随机化 `action_id` →
+  身份稳定性那条红；去掉异参冲突判定 → 冲突那条红；`reconcile` 改用写 verb → 三条红；
+  健康通过即关联成功 → "目标报不出标识"那条红；verification-only 阶段忽略配置变化 → 新
+  恢复测试红。`ENV_KEYS` 清零起初存活，是因为我的 PATH 用例连解析出的可执行文件都换了；
+  补一条 argv/路径/字节全同、只改 `PYTHONPATH` 的用例后该变异必红。
+- 本轮**没有**全量、没有压力轮次、没有前端构建，也没有靠重跑碰运气。唯一的定位性重跑是
+  `test_continuous_execution.py` 单独跑一次。
+
+**修了一条既有测试的断言，不是掩盖回归。**
+`test_recovery_rejects_changed_checks_or_foreign_repository` 断言"恢复时检查配置变了就
+`checks changed` 报废整轮"，而这正是第 4 项要拆掉的全有全无行为。拆成
+`test_changed_checks_are_rerun_on_recovery_not_used_to_discard_it`（新配置被真跑、
+`execution_checks` 被刷新、verification-only 阶段明确拒绝）和
+`test_recovery_rejects_foreign_repository`（外部仓库那半段原样保留）。另把
+`test_pending_write_receipt_survives_crash_without_replay` 里的位置式 `INSERT` 改成列名式
+——那一行是迁移前的遗留行，正好也覆盖了"没有 `action_id` 的老记录"。
+
+**未覆盖 / 交给 Codex。** 真实模型现场与真实线上配置（属 M5）；真实 Nginx、真实客户试点
+——素材缺失，通用能力已具备，但不主张客户真实试点已通过；本仓库后端全量未跑；`reconcile`
+只在 fake-ssh 目标上验证过，目标端"自述已应用动作标识"的实际输出格式需要真实服务器确认；
+M1 的重启贯通属本单范围，不代表整个平台已验收。
+
 ## 下一步
 
-M0 独立定向通过。M1 的两条边界已转绿，等 Codex 复核后才算完成——总表暂不改成全完成。
-M2（断点恢复、证据适用性、外部动作意图）未开始，本轮不做。
+M2 五项完成，推候选后停写，交 Codex 独立复核并接手 M3。M3/M4 未预建，接口按需可调。
