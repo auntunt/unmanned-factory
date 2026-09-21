@@ -48,7 +48,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from factory.control import codegraph, scenario_memory
+from factory.control import code_intel, codegraph, scenario_memory
 from factory.control.issue_maintenance_webuddy import WebuddyIdentity, WebuddyRepository
 from factory.control.store import Conflict, now
 
@@ -221,15 +221,57 @@ def dimensions_view(store, project_id) -> list[dict]:
 # Dependency disposal + slice list, code-located with a source
 # ---------------------------------------------------------------------------
 
-def locate(store, project_id, query, *, limit=10) -> dict:
-    """Where this term lives, from the existing CodeGraph index -- with a source.
+def locate(store, project_id, query, *, limit=10, language=None) -> dict:
+    """Where this term lives, with the source and the freshness it came from.
 
-    Refuses to fabricate a location. No index yet is reported as exactly that,
-    per SHARED.md's "缺工具时可用符号/文本检索继续工作，不能捏造图查询结果" --
-    it is a note the caller must act on (index the project, or fall back to a
-    manual/text search), not a silent empty success.
+    Two backends, and the answer always says which one replied:
+
+    ``code_intel`` -- the shared multi-language layer (``factory/control/code_intel.py``).
+    This is the one that can answer for a Java or C# customer repository, and it
+    reads the working tree, so uncommitted code counts.
+
+    ``codegraph-legacy`` -- the small in-tree indexer, used only when the shared
+    layer cannot answer. It parses Python and JS/TS **only** and reads a fixed
+    commit, so a Java lookup that falls through to it comes back empty for a
+    reason that has nothing to do with the code. That is why the fallback's
+    empty answer carries ``covers`` and a note rather than being reported as
+    "not found" -- a language this indexer never reads must not look like a
+    language with no matches.
+
+    Neither path fabricates a location. No usable index is reported as exactly
+    that, per SHARED.md's 「缺工具时可用符号/文本检索继续工作，不能捏造图查询结果」.
     """
     project = store.project(project_id)
+    workspace = project.get('workspace')
+    fallback_reason = None
+    if workspace and Path(workspace).is_dir():
+        # A read does not build an index: that is minutes of work and a write
+        # into the customer's checkout. Indexing is the explicit code-index action.
+        answer = code_intel.definitions(workspace, query, language=language,
+                                        limit=limit, auto_index=False)
+        if answer['outcome'] in (code_intel.OK, code_intel.TRUNCATED,
+                                 code_intel.NO_MATCH):
+            return {
+                'source': 'code_intel',
+                'outcome': answer['outcome'],
+                'truncated': answer['truncated'],
+                'fresh': answer['freshness']['stale'] is False,
+                'commit_sha': answer['code_version']['commit'],
+                'dirty': answer['code_version']['dirty'],
+                'language': language,
+                'languages_indexed': answer['freshness'].get('languages') or [],
+                'backend': {k: answer['backend'].get(k)
+                            for k in ('package', 'version', 'available')},
+                'unresolved': answer['unresolved'],
+                'dropped_other_language': answer['dropped_other_language'],
+                'results': [{'path': r['path'], 'line': r['line'],
+                             'end_line': r['end_line'], 'name': r['name'],
+                             'kind': r['kind'], 'language': r['language'],
+                             'resolution': 'index'} for r in answer['results']],
+                'note': answer['reason'],
+            }
+        fallback_reason = answer['reason']
+
     try:
         snapshot = codegraph.get_snapshot(store, project_id)
     except ValueError:
@@ -238,17 +280,32 @@ def locate(store, project_id, query, *, limit=10) -> dict:
         # reader must fall back to text/manual search for, not a crash.
         snapshot = None
     if snapshot is None:
-        return {'source': 'none', 'fresh': False, 'commit_sha': None, 'results': [],
-                'note': '尚未建立代码索引（POST /api/v2/projects/{id}/code-index），'
-                        '这段时间内的代码定位只能人工核对，不能当作已验证的定位'}
+        return {'source': 'none', 'outcome': code_intel.NOT_INDEXED, 'fresh': False,
+                'truncated': False, 'commit_sha': None, 'results': [],
+                'language': language, 'languages_indexed': [],
+                'unresolved': list(code_intel.CROSS_BOUNDARY_UNRESOLVED),
+                'note': (fallback_reason or '尚未建立代码索引') +
+                        '；建立索引用 POST /api/v2/projects/{id}/code-index。'
+                        '在此之前的代码定位只能人工核对，不能当作已验证的定位'}
     try:
         fresh = snapshot['commit_sha'] == codegraph.baseline_sha(project)
     except ValueError:
         fresh = False
     results = codegraph.search_snapshot(snapshot, query, limit=limit)
-    return {'source': 'codegraph', 'fresh': fresh, 'commit_sha': snapshot['commit_sha'],
+    return {'source': 'codegraph-legacy', 'outcome':
+                code_intel.OK if results else code_intel.NO_MATCH,
+            'fresh': fresh, 'truncated': False,
+            'commit_sha': snapshot['commit_sha'], 'language': language,
+            # Said out loud, because an empty answer from here means "this
+            # indexer does not read that language", not "the symbol is absent".
+            'covers': ['python', 'javascript', 'typescript'],
+            'languages_indexed': ['python', 'javascript', 'typescript'],
+            'unresolved': list(code_intel.CROSS_BOUNDARY_UNRESOLVED),
+            'note': (fallback_reason or '共享代码查询层没有应答') +
+                    '；这里用的是仓库内的轻量索引，只解析 Python 与 JS/TS，'
+                    '且只读已提交的那个 commit。其它语言的空结果不代表代码里没有',
             'results': [{'path': r['path'], 'line': r['line'], 'end_line': r['end_line'],
-                        'name': r['name'], 'kind': r['kind'], 'snippet': r['snippet'],
+                        'name': r['name'], 'kind': r['kind'], 'language': None,
                         'resolution': r['resolution']} for r in results]}
 
 

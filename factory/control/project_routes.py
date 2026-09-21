@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from factory.control import codegraph
+from factory.control import code_intel, codegraph
 from factory.control.knowledge import KnowledgeStore
 from factory.control.store import Conflict
 
@@ -73,11 +74,37 @@ def router(store, service):
         snapshot = codegraph.get_snapshot(store, pid, commit_sha=sha)
         return snapshot, sha
 
-    def metadata(snapshot, sha):
-        if snapshot is None:
-            return {'indexed': False, 'current_sha': sha, 'warnings': ['尚未建立代码索引']}
-        return {**{k: snapshot[k] for k in ('id', 'commit_sha', 'indexed_at', 'parser_version', 'stats', 'warnings')},
-                'indexed': True, 'current_sha': sha, 'stale': snapshot['commit_sha'] != sha}
+    def shared_layer(pid):
+        """The multi-language layer's own status for this project.
+
+        Reported beside the legacy snapshot rather than merged into it: the two
+        cover different languages and different code versions (the shared layer
+        reads the working tree, the legacy snapshot a fixed commit), so one
+        combined 'indexed: true' would hide which of them actually answered.
+        """
+        workspace = (store.project(pid) or {}).get('workspace')
+        if not workspace or not Path(workspace).is_dir():
+            return {'indexed': False, 'outcome': code_intel.NOT_INDEXED,
+                    'reason': '项目没有可用的工作区目录'}
+        status = code_intel.index_status(workspace)
+        return {k: status.get(k) for k in
+                ('indexed', 'outcome', 'reason', 'last_indexed', 'languages',
+                 'file_count', 'node_count', 'edge_count', 'pending_changes',
+                 'stale', 'reindex_recommended', 'backend')}
+
+    def metadata(snapshot, sha, *, pid=None):
+        legacy = ({'indexed': False, 'current_sha': sha, 'warnings': ['尚未建立代码索引']}
+                  if snapshot is None else
+                  {**{k: snapshot[k] for k in ('id', 'commit_sha', 'indexed_at',
+                                               'parser_version', 'stats', 'warnings')},
+                   'indexed': True, 'current_sha': sha,
+                   'stale': snapshot['commit_sha'] != sha})
+        # Which languages the legacy indexer reads at all. Without this, an
+        # empty Java result reads as "no matches" instead of "never parsed".
+        legacy['covers'] = ['python', 'javascript', 'typescript']
+        if pid is None:
+            return legacy
+        return {**legacy, 'shared_layer': shared_layer(pid)}
 
     @api.get('/projects/{pid}/agent')
     def get_agent(pid: str):
@@ -117,7 +144,15 @@ def router(store, service):
         try:
             snapshot = guarded(codegraph.build_snapshot, project)
             stored = guarded(codegraph.save_snapshot, store, snapshot)
-            return metadata(stored, guarded(codegraph.baseline_sha, project))
+            # One user-visible action builds both: the legacy snapshot (Python
+            # and JS/TS, at a fixed commit) and the shared multi-language layer
+            # (Java/C#/Go/... over the working tree). Leaving the second one to
+            # a separate call would mean 信创 lookups silently fell back to an
+            # indexer that cannot read the customer's language.
+            workspace = project.get('workspace')
+            if workspace and Path(workspace).is_dir():
+                code_intel.ensure_indexed(workspace)
+            return metadata(stored, guarded(codegraph.baseline_sha, project), pid=pid)
         finally:
             with index_lock:
                 indexing.discard(pid)
@@ -126,7 +161,29 @@ def router(store, service):
     @api.get('/projects/{pid}/code-index')
     def index_status(pid: str):
         snapshot, sha = graph_data(pid)
-        return metadata(snapshot, sha)
+        return metadata(snapshot, sha, pid=pid)
+
+    @api.get('/projects/{pid}/code-conditions')
+    def code_conditions(pid: str):
+        """Which languages this project contains and whether we could build them.
+
+        The build tier is probed here, never declared in the capability table:
+        an index that reads C# says nothing about whether a .NET SDK exists on
+        this machine, and .NET Framework additionally needs Windows.
+        """
+        workspace = (store.project(pid) or {}).get('workspace')
+        if not workspace or not Path(workspace).is_dir():
+            raise HTTPException(409, '项目没有可用的工作区目录，无法探测语言与工具链')
+        return code_intel.project_conditions(workspace)
+
+    @api.get('/code-intel/capabilities')
+    def code_intel_capabilities():
+        """What the shared code-query layer claims, and on what evidence.
+
+        Read by the plugin/package display, so a package never shows a green
+        'supported' that covers indexing, relations and rebuilding at once.
+        """
+        return code_intel.capability_report()
 
     @api.get('/projects/{pid}/code-search')
     def search(pid: str, q: str = Query(default='', max_length=500), limit: int = Query(default=10, ge=1, le=30)):
