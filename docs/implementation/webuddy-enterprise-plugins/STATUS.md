@@ -331,6 +331,49 @@ refine 之后 run 的 `request` 逐字节不变。这条边界之所以安全，
 **本批次检查**：相关后端 88 passed（含 P1 定向证据）。没有重跑脚本演练，
 没有重跑全量，没有变异测试，没有新增可选语言。
 
+## 批次八：Claude 执行器接用户中转站，真实业务链跑通（`fa66612`）
+
+### 配置核查（只报状态，不输出凭据）
+
+| 项 | 状态 |
+|---|---|
+| 服务启动解释器 | `.factory-worktrees/v3-skills-icons/.venv/bin/python`，`claude-agent-sdk 0.2.152`（满足 pyproject `claude` extra 的 `>=0.2.152`） |
+| 中转站地址 | `https://zjz-ai.webtrn.cn`（来自用户自己的 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`） |
+| 认证方式 | `env.ANTHROPIC_AUTH_TOKEN`（已设置，未读取内容）。provider 走 `setting_sources=['user']`，由 SDK 自行解析 |
+| 模型映射 | OPUS→`claude-opus-5`，HAIKU→`claude-haiku-4-5-20251001`，SONNET→`claude-sonnet-5`；**注意 `ANTHROPIC_DEFAULT_SONNET_MODEL_NAME` 指向 `claude-opus-4-6`，与 `..._SONNET_MODEL` 不一致**，本轮用 `claude-sonnet-5` 实际可用 |
+| 工具调用兼容性 | 可用。真实链路里模型用了 `Read` 工具读测试文件，`Write/Edit` 完成改动 |
+| webuddy 已保存的模型配置 | 控制库 `runtime_settings` 表（首启用 `FACTORY_<ROLE>_PROVIDER/MODEL` 播种）。本轮按 `provider=claude, model=claude-sonnet-5` 配置 |
+
+**上一轮「没有 Claude OAuth 文件所以不能用」是错的。** 中转站配置一直在用户自己的
+`~/.claude/settings.json` 里，而 `_run_claude` 本来就用 `setting_sources=['user']`
+去解析它。启动服务时我把宿主会话的 `ANTHROPIC_*` 与 `CLAUDE_CODE_*` **全部剥掉**，
+凭据只能从用户自己的 settings 文件解析——没有借用宿主会话凭据，也没有改用户的全局配置。
+
+### 打通过程中修掉的两处真阻塞
+
+1. **`planning._parse_json` 只认「整条消息就是一个围栏」。** 真实模型先写了一段
+   说明再给出 json 围栏，整条被判 `plan is not valid JSON`：钱花了、计划是对的、
+   链路断在解析上。改法刻意窄——纯 JSON 与整条围栏行为不变；否则只在**恰好有一个**
+   能解析成对象的围栏时采用它。纯散文仍然拒绝，两个候选也仍然拒绝（那是在猜）。
+2. **`modernization_routes` 的切片视图没有 `pending_plan`。** 计划停在
+   `awaiting_approval` 时视图报 `blocking_reason.kind='unknown'`，页面既看不到计划
+   也没有理由给出批准按钮，运行就停在那里。已补上 `pending_plan` 与
+   `approval.requested`（页面本来就认这个 kind）。脚本演练看不见它——那个 driver
+   是无条件调 approve 的。
+
+### 真实业务链（claude provider + 中转站 + `claude-sonnet-5`）
+
+规划 `$0.563` → 页面看到待批准计划（1 个任务、文件 `db_url.py`、检查 `regression`、
+风险 low）→ 人工批准 → 模型用 `Read` 读了 `test_db_url.py`、改了 `db_url.py` →
+**项目自己的 pytest `regression` 真的跑了，exit=0** → `git commit dc60c96c` →
+`run.verified` → 已交付 → 回执 → 导出 595 字节真实补丁（`DIALECTS` 新增
+`"dm": "jdbc:dm://{host}:{port}/{db}"`）。
+
+**实际花费 `$1.441916`**（规划 0.563 + 执行 0.879），预算上限 6.0。
+规划→批准→代码修改→项目检查→补丁交付这条链在中转站上完整可用。
+
+**本批次检查**：相关后端 86 passed。没重跑全量、没做变异测试、没部署。
+
 ## 模型事实
 
 - 集成者（本会话）：请求的是 Claude Code 默认会话模型，实际为 **Opus 5（`claude-opus-5`）**，
@@ -358,9 +401,10 @@ refine 之后 run 的 `request` 逐字节不变。这条边界之所以安全，
 - 适配只跑了 `mock` 环境；`sandbox`/`production` 分支代码可用但没有被真实调用验证过。
 - 没有任何一条记忆条目被提升为 `active`（除测试内的合成数据），
   因为没有真实客户确认人。
-- 两条页面闭环已在真实服务上跑通并在浏览器里看过（见批次六），但**编码这一步
-  是脚本不是模型**。真实模型链已在批次七里真的尝试过，卡在平台自己的 Codex
-  隔离校验（ambient skills）上，精确缺项见批次七；两次尝试都没有产生花费。
+- 真实模型链已在批次八跑通（Claude provider + 用户中转站），一条信创切片走完
+  规划→批准→代码修改→项目检查→补丁交付，花费 $1.44。批次六那两条页面闭环用的
+  仍是脚本执行器；批次七的 Codex 隔离问题按用户指示不再继续扩修。
+- **适配场景还没有用真实模型跑过**；本轮只打通并验证了信创这一条。
 - 代码图的语言能力仍只在最小样例上验证；本轮没有扩展可选语言。
 - C#/.NET 的构建与改造层在本机无法验证：没有 dotnet，.NET Framework 还需要
   Windows。索引与关系层与框架无关，已验证；改造层标待验证。
