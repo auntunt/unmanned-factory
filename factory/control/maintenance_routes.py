@@ -221,6 +221,16 @@ def router(store, svc):
             raise HTTPException(409, '这个维护任务还没有绑定执行，无法批准计划')
         run = store.get(execution_id)
         svc.approve(execution_id, run['revision'], actor['username'])
+        # The plan names the files, so memory can finally be narrowed to them.
+        # Binding requirements already travelled whole at dispatch; this records
+        # which of them the plan actually touches and fills in any context that
+        # was only summarised. A failure here must not undo an approval that
+        # already happened, so it is recorded and not raised.
+        try:
+            tasks.port.execution.refine_memory_for_plan(execution_id)
+        except Exception as exc:  # noqa: BLE001
+            store.append(execution_id, 'maintenance.memory_refine_failed',
+                         {'message': str(exc)[:500]})
         return get_task(task_id, request)
 
     @api.post('/tasks/{task_id}/resume')

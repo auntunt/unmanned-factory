@@ -140,6 +140,23 @@ function AdaptationTaskForm({ csrfToken, onUnauthorized, projects, reviseTarget,
   const [idempotencyKey] = useState(() => crypto.randomUUID())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 方法版本来自服务端实际安装的方法包。表单只读地显示它；就算这里读失败，
+  // 服务端也会在创建时用真实版本覆盖请求里的值，前端填什么都不作数。
+  const [agreement, setAgreement] = useState<{ revision: string; skill_version: string } | null>(null)
+  const [agreementError, setAgreementError] = useState<string | null>(null)
+  useEffect(() => {
+    const controller = new AbortController()
+    request<{ revision: string; skill_version: string }>(`${API_PREFIX}/agreement`, {
+      onUnauthorized, signal: controller.signal,
+    })
+      .then(info => { if (!controller.signal.aborted) setAgreement(info) })
+      .catch(cause => {
+        if (controller.signal.aborted) return
+        if (cause instanceof WorkspaceApiError && cause.status === 401) return
+        setAgreementError(errorText(cause))
+      })
+    return () => controller.abort()
+  }, [onUnauthorized])
   const controllerRef = useRef<AbortController | null>(null)
   useEffect(() => () => controllerRef.current?.abort(), [])
 
@@ -199,7 +216,6 @@ function AdaptationTaskForm({ csrfToken, onUnauthorized, projects, reviseTarget,
     }
     if (!draft.expected_behaviour.trim()) { setError('请填写期望行为。'); return }
     if (!draft.delivery_goal.trim()) { setError('请填写交付目标。'); return }
-    if (!draft.agreement_revision.trim()) { setError('请填写适用的约定版本。'); return }
 
     setBusy(true)
     controllerRef.current?.abort()
@@ -232,7 +248,8 @@ function AdaptationTaskForm({ csrfToken, onUnauthorized, projects, reviseTarget,
         delivery_goal: draft.delivery_goal.trim(),
         delivery_tier: draft.delivery_tier,
         synthetic: draft.synthetic,
-        agreement: { revision: draft.agreement_revision.trim(), skill_version: draft.agreement_skill_version.trim() },
+        // 服务端会用实际安装的方法包版本覆盖这里；留空是为了不假装前端知道。
+        agreement: { revision: '', skill_version: '' },
       }
       const path = mode === 'revise' && reviseTarget
         ? `${API_PREFIX}/tasks/${encodeURIComponent(reviseTarget.task_id)}/revise`
@@ -377,10 +394,20 @@ function AdaptationTaskForm({ csrfToken, onUnauthorized, projects, reviseTarget,
         </div>
 
         <div className="wb-form-grid wb-form-grid-two">
-          <label>适用约定版本（revision）<input required value={draft.agreement_revision} onChange={e => update('agreement_revision', e.target.value)} /></label>
-          <label>Skill 版本（可选）<input value={draft.agreement_skill_version} onChange={e => update('agreement_skill_version', e.target.value)} /></label>
+          <label>适用约定版本
+            <input readOnly value={agreement ? agreement.revision : '读取中…'}
+                   data-testid="agreement-revision" />
+          </label>
+          <label>Skill 版本
+            <input readOnly value={agreement ? agreement.skill_version : '读取中…'}
+                   data-testid="agreement-skill-version" />
+          </label>
         </div>
-        <small className="wb-muted">本模块暂无独立的方法版本查询接口，约定版本需要手工填写并与实际使用的 Skill 一致。</small>
+        <small className="wb-muted">
+          方法版本由服务端按实际安装的方法包给出，不接受手工填写：回执要记录的是
+          真正生效的那个版本，不是表单里写了什么。
+          {agreementError && <> 读取失败：{agreementError}</>}
+        </small>
 
         {error && <ErrorNotice message={error} />}
         <div className="wb-form-actions">

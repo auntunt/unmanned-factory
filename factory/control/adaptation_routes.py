@@ -27,6 +27,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
+from factory.control.api_adaptation import PLUGIN_ID, SCHEMA_VERSION
 from factory.control.store import Conflict
 
 
@@ -55,9 +56,41 @@ def router(store, svc):
 
     # -- creation ---------------------------------------------------------
 
+    def _resolved_agreement():
+        """The method version a new task binds to, read from the installed pack.
+
+        Same rule the maintenance surface already follows: the version comes
+        from what is actually installed, never from the request body. A person
+        typing a version into a form is a guess, and a receipt that quotes that
+        guess is a receipt about nothing -- so whatever the client sends here is
+        replaced, not merged.
+        """
+        from factory.control import agent_packs
+        pack = next((p for p in agent_packs.catalog()
+                     if p['id'] == PLUGIN_ID), None)
+        if pack is None:
+            raise HTTPException(503, '没有安装接口适配方法包，暂时不能创建适配任务')
+        return {'revision': f'v{SCHEMA_VERSION}',
+                'skill_version': f"{pack['id']}@{pack['version']}",
+                'pack': {'id': pack['id'], 'name': pack['name'],
+                         'version': pack['version'],
+                         'validation_status': pack['validation_status']}}
+
+    @api.get('/agreement')
+    def agreement(request: Request):
+        _actor(request)
+        return _resolved_agreement()
+
+    def _with_server_agreement(body):
+        resolved = _resolved_agreement()
+        if not isinstance(body, dict):
+            raise HTTPException(422, '请求体必须是一个对象')
+        return {**body, 'agreement': {'revision': resolved['revision'],
+                                      'skill_version': resolved['skill_version']}}
+
     @api.post('/tasks', status_code=201)
     async def create_task(request: Request):
-        body = await request.json()
+        body = _with_server_agreement(await request.json())
         try:
             return tasks.create(body, actor=_actor(request))
         except Conflict:
@@ -71,7 +104,7 @@ def router(store, svc):
     @api.post('/tasks/{task_id}/revise', status_code=201)
     async def revise_task(task_id: str, request: Request):
         """Import a next contract version onto an existing task's lineage."""
-        body = await request.json()
+        body = _with_server_agreement(await request.json())
         try:
             return tasks.revise(task_id, body, actor=_actor(request))
         except Conflict:

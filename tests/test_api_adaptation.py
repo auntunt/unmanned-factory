@@ -594,3 +594,59 @@ def test_http_router_wiring_and_gated_refusal(tmp_path):
 
     missing_task = client.get('/api/v2/adaptation/tasks/does-not-exist')
     assert missing_task.status_code == 404
+
+
+def test_the_method_version_comes_from_the_installed_pack_not_the_request(tmp_path):
+    """A version typed into a form is a guess; a receipt quoting it is worthless.
+
+    The route replaces whatever the client sent with the version resolved from
+    the installed method pack, so a forged ``agreement`` cannot reach the port
+    and cannot end up in a delivery receipt.
+    """
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+
+    from factory.control import agent_packs
+    from factory.control.adaptation_routes import router
+    from factory.control.store import Conflict as _Conflict
+
+    store = Store(tmp_path / 'agreement.db')
+    store.add_project({'name': 'p', 'repository': 'r/r',
+                       'workspace': str(tmp_path), 'base_branch': 'main'})
+
+    class _Svc:
+        def __init__(self):
+            self.store = store
+            self.governance = None
+
+        def start_plan(self, rid):  # pragma: no cover - never reached
+            raise AssertionError('不该派发')
+
+    app = FastAPI()
+
+    @app.middleware('http')
+    async def inject_user(request: Request, call_next):
+        request.state.user = {'id': 1, 'username': 'tester'}
+        return await call_next(request)
+
+    @app.exception_handler(_Conflict)
+    async def conflict(req, exc):
+        return JSONResponse({'detail': str(exc)}, status_code=409)
+
+    app.include_router(router(store, _Svc()))
+    client = TestClient(app)
+
+    pack = next(p for p in agent_packs.catalog() if p['id'] == PLUGIN_ID)
+    served = client.get('/api/v2/adaptation/agreement')
+    assert served.status_code == 200, served.text
+    assert served.json()['skill_version'] == f"{pack['id']}@{pack['version']}"
+    assert served.json()['pack']['validation_status'] == pack['validation_status']
+
+    forged = {'agreement': {'revision': 'v999', 'skill_version': 'forged@42'},
+              'project_id': 'p'}
+    refused = client.post('/api/v2/adaptation/tasks', json=forged)
+    # Refused for a real reason (the plugin ships disabled), and in no case
+    # echoed back carrying the forged version.
+    assert refused.status_code in (409, 422), refused.text
+    assert 'v999' not in refused.text and 'forged@42' not in refused.text

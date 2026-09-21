@@ -256,3 +256,114 @@ def test_memory_past_the_budget_is_dropped_loudly_and_requirements_go_first(app_
     assert any(d['reason'] == 'budget' for d in loaded['dropped'])
     assert '因长度上限未加载' in loaded['block']
     assert '不要假设它们不存在' in loaded['block']
+
+
+# --- the memory defects the cb74bab review reproduced ----------------------
+def test_one_oversized_requirement_does_not_sail_past_the_budget(app_env):
+    """The review's probe: a 7000-char active decision with a 6000-char budget
+    loaded whole (7069 chars actually carried) and then pushed the *next*
+    binding requirement out. Both halves of that were wrong."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='巨大要求',
+              content='要' * 7000, actor='owner', kind='decision', status='active')
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='第二条要求',
+              content='导出保留两位小数', actor='owner', kind='decision',
+              status='active')
+
+    loaded = sm.load_for_task(store, p['id'], budget_chars=6000)
+    # Not "carried anyway": the task is blocked, with the offending entries named.
+    assert loaded['blocked'], loaded
+    assert loaded['blocked']['kind'] == 'memory.constraints_exceed_budget'
+    assert loaded['entries'] == [] and loaded['refs'] == []
+    titles = {e['title'] for e in loaded['blocked']['entries']}
+    assert titles == {'[运维] 巨大要求', '[运维] 第二条要求'}
+    assert '把任务切小' in loaded['blocked']['message']
+
+
+def test_a_binding_requirement_is_never_dropped_to_make_room(app_env):
+    """Context gives way to the budget; requirements do not."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    for i in range(6):
+        sm.record(store, p['id'], plugin_id='issue-maintenance', topic=f'要求{i}',
+                  content='必须' + 'x' * 200, actor='owner', kind='decision',
+                  status='active')
+    for i in range(6):
+        sm.record(store, p['id'], plugin_id='issue-maintenance', topic=f'背景{i}',
+                  content='y' * 400, actor='owner')
+
+    loaded = sm.load_for_task(store, p['id'], budget_chars=1800)
+    assert loaded['blocked'] is None, loaded
+    roles = [r['role'] for r in loaded['refs']]
+    assert roles.count('constraint') == 6, '六条必遵要求一条都不能少'
+    assert all(d['role'] != 'constraint' for d in loaded['dropped'])
+    assert any(d['reason'] == 'budget' for d in loaded['dropped'])
+    # And the budget really binds the rest.
+    assert loaded['chars'] <= 1800 + sum(
+        len(e['content']) for e in loaded['entries'] if sm.role_of(e) == 'constraint')
+
+
+def test_a_requirement_is_never_shortened_into_a_summary(app_env):
+    """A truncated must-obey line is a requirement nobody can actually follow."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='范围内要求',
+              content='必须' + 'x' * 600, actor='owner', kind='decision',
+              status='active', paths=['db/schema.sql'])
+    for i in range(20):
+        sm.record(store, p['id'], plugin_id='issue-maintenance', topic=f'背景{i}',
+                  content='y' * 500, actor='owner', paths=[f'web/m{i}.py'])
+
+    loaded = sm.load_for_task(store, p['id'], scope_paths=None, budget_chars=1500)
+    constraint = next(e for e in loaded['entries'] if sm.role_of(e) == 'constraint')
+    assert constraint.get('summary_only') is not True
+    assert constraint['content'].endswith('x' * 10)
+    assert any(r.get('summary_only') for r in loaded['refs']) or loaded['dropped']
+    assert '必须遵守的要求都是完整的' in loaded['block']
+
+
+def test_maintenance_says_its_scope_is_unknown_and_narrows_it_after_the_plan(app_env):
+    """An issue declares no files, so no relevance filtering happened at intake.
+
+    That is recorded rather than implied, and ``refine_memory_for_plan`` is what
+    narrows memory once an approved plan names the files.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='报表相关',
+              content='导出保留两位小数', actor='owner', kind='decision',
+              status='active', paths=['report.py'])
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='登录相关',
+              content='登录页不要改', actor='owner', kind='decision',
+              status='active', paths=['login.py'])
+
+    created = client.post('/api/v2/maintenance/tasks',
+                          json=_valid_request(p, _base_sha(repo)), headers=headers)
+    assert created.status_code == 201, created.text
+    run_id = created.json()['execution_id']
+    source = store.get(run_id)['source']
+    assert source['memory_scope_known'] is False
+    assert len(source['memory_refs']) == 2, '范围未知时不猜，两条都带上'
+
+    # A plan arrives naming one file; memory narrows to it.
+    store.update(run_id, {'status': 'awaiting_approval',
+                          'plan': {'title': '修导出', 'tasks': [
+                              {'id': 't1', 'title': '改导出', 'paths': ['report.py']}]}})
+    from factory.control.issue_maintenance_webuddy import tasks_for
+    port = tasks_for(svc)
+    refined = port.port.execution.refine_memory_for_plan(run_id)
+    assert refined['refined'] is True, refined
+    assert refined['paths'] == ['report.py']
+    kept = {r['title'] for r in refined['refs']}
+    assert '[运维] 报表相关' in kept
+    assert '[运维] 登录相关' not in kept
+    # Both bases are kept: what the executor was given, and what a reviewer
+    # should read the result against.
+    after = store.get(run_id)['source']
+    assert len(after['memory_refs']) == 2
+    assert len(after['memory_refs_refined']) == 1

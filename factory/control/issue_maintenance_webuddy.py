@@ -134,7 +134,17 @@ class WebuddyExecution:
         # execution has started the second one must stop moving. New
         # requirements arrive through the existing supplement/revision flow, not
         # by quietly changing the basis underneath a run.
-        loaded = scenario_memory.load_for_task(self.store, record['project_id'])
+        # ``scope_paths=None`` on purpose, and stated rather than implied: an
+        # issue does not declare which files it touches, so nothing here has
+        # filtered memory by relevance. Pretending otherwise would be claiming a
+        # filter that never ran.
+        loaded = scenario_memory.load_for_task(
+            self.store, record['project_id'], scope_paths=None)
+        if loaded['blocked']:
+            # Binding requirements that do not fit are not trimmed to make room.
+            # Running anyway would produce work judged against a requirement the
+            # executor never saw, which is worse than refusing to start.
+            raise Conflict(loaded['blocked']['message'])
         memory = loaded['block'] or '（本项目还没有已确认的长期约束）'
         if loaded['error']:
             # A project with no knowledge yet, or knowledge past its own size
@@ -161,6 +171,10 @@ class WebuddyExecution:
                     # a pair names one immutable version for good.
                     'memory_refs': loaded['refs'],
                     'memory_dropped': loaded['dropped'],
+                    # False: an issue declares no file scope, so no relevance
+                    # filtering happened at intake. ``refine_memory_for_plan``
+                    # is what narrows it once a plan names the files.
+                    'memory_scope_known': loaded['scope_known'],
                     'synthetic': record.get('synthetic', False)},
             delivery_id=f"maintenance:{record['id']}",
             semantic_id=f"maintenance:{record['project_id']}:{record['content_fingerprint']}")
@@ -195,6 +209,45 @@ class WebuddyExecution:
 
     def status(self, execution_id) -> str:
         return self._run(execution_id)['status']
+
+    def refine_memory_for_plan(self, execution_id) -> dict:
+        """Phase two: the approved plan names the files, so narrow memory to them.
+
+        Runs after approval, when a plan exists. Binding requirements were
+        already carried whole at dispatch, so this never has to deliver a
+        requirement late -- it records which of them the plan's files actually
+        touch, and pulls the full text of any *context* that travelled as a
+        summary. Both the original and the refined basis are kept: the first is
+        what the executor was given, the second is what a reviewer should read
+        the result against.
+        """
+        run = self._run(execution_id)
+        plan = run.get('plan') or {}
+        paths = sorted({p for task in (plan.get('tasks') or [])
+                        for p in (task.get('paths') or []) if p})
+        source = dict(run.get('source') or {})
+        previous = source.get('memory_refs') or []
+        if not paths:
+            return {'refined': False, 'reason': '计划没有声明要改哪些文件，范围仍未知',
+                    'paths': [], 'added': []}
+        from factory.control import scenario_memory
+        project_id = run.get('project_id')
+        result = scenario_memory.refine_for_plan(
+            self.store, project_id, scope_paths=paths, previous_refs=previous)
+        if result.get('error') or result.get('blocked'):
+            return {'refined': False,
+                    'reason': result.get('error') or result['blocked']['message'],
+                    'paths': paths, 'added': []}
+        source['memory_scope_paths'] = paths
+        source['memory_refs_refined'] = result['refs']
+        self.store.update(execution_id, {'source': source})
+        self.store.append(execution_id, 'maintenance.memory_refined',
+                          {'paths': paths,
+                           'refs': [{'key': r['key'], 'revision': r['revision'],
+                                     'role': r['role']} for r in result['refs']],
+                           'added': [r['key'] for r in result['added']]})
+        return {'refined': True, 'reason': None, 'paths': paths,
+                'added': result['added'], 'refs': result['refs']}
 
     def loaded_memory(self, execution_id) -> list | None:
         """The memory this execution was actually dispatched with, or ``None``.

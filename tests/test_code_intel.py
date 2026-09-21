@@ -10,7 +10,9 @@ nothing about the backend is exactly the claim this layer exists to avoid.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -170,24 +172,39 @@ def test_one_cross_file_relation_per_required_language(tmp_path, language):
 
 @pytest.mark.parametrize('language', ci.REQUIRED_LANGUAGES)
 def test_the_index_refreshes_after_a_change(tmp_path, language):
-    """A new caller added after indexing is found, and staleness was visible first."""
+    """A new caller is found once it is committed, and the gap was visible first.
+
+    The index lives in its own worktree pinned to a commit, so what it answers
+    about is a reviewed baseline rather than whatever is currently on disk. The
+    cost of that is real and is asserted here rather than hidden: between the
+    edit and the commit the mapping reports itself stale, and an uncommitted
+    caller is *not* in the index.
+    """
     root = _repo(tmp_path, language)
     before = ci.callers(root, SYMBOL[language], language=language)
     assert before['outcome'] == ci.OK
     seen_before = {r['path'] for r in before['results']}
+    assert before['index_mapping']['indexed_commit']
+    assert before['index_mapping']['mapping_stale'] is False
 
     relative, text = LATER_CALLER[language]
     _write(root, relative, text)
-    # The change is visible as pending before anything re-indexes: freshness is
-    # reported, not assumed.
-    assert ci.index_status(root)['stale'] is True
+    # Uncommitted: the execution tree has moved, the indexed baseline has not.
+    uncommitted = ci.index_status(root)
+    assert uncommitted['source_dirty'] is True
+    assert uncommitted['mapping_stale'] is False
+
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-qm', 'add caller')
+    # Now the mapping is genuinely behind the source commit.
+    assert ci.index_status(root)['mapping_stale'] is True
 
     after = ci.callers(root, SYMBOL[language], language=language)
     assert after['outcome'] == ci.OK, after
     seen_after = {r['path'] for r in after['results']}
     assert relative in seen_after, after
     assert seen_before < seen_after
-    assert after['freshness']['stale'] is False
+    assert after['index_mapping']['mapping_stale'] is False
 
 
 # --- the four distinguishable answers -------------------------------------
@@ -227,6 +244,8 @@ public class Invoice {
     public String line(long cents) { return "line=" + Money.format(cents); }
 }
 ''')
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-qm', 'more callers')
     full = ci.callers(root, 'format', language='java', limit=20)
     assert full['outcome'] == ci.OK and full['truncated'] is False
     assert len(full['results']) >= 3
@@ -337,14 +356,35 @@ def test_build_capability_is_probed_per_project_not_claimed_per_language(tmp_pat
     assert 'go.mod' in go['markers']
 
 
-def test_indexing_does_not_leave_the_project_dirty(tmp_path):
-    """A worker's ``git add -A`` must not be able to commit our index."""
+def test_the_index_never_lands_in_the_tree_an_executor_edits(tmp_path):
+    """Isolation, not concealment.
+
+    The first version wrote ``.codegraph/`` into the project and added it to
+    ``.git/info/exclude``. Hiding a directory from ``git status`` is not the
+    same as the directory not being there -- an executor could still read,
+    write or execute anything under it, and no git-shaped review would show it.
+    The index now lives in its own worktree outside the project entirely.
+    """
     root = _repo(tmp_path, 'python')
-    ci.ensure_indexed(root)
-    assert (root / '.codegraph').is_dir()
-    status = subprocess.run(['git', 'status', '--porcelain'], cwd=root,
-                            capture_output=True, text=True, timeout=30)
-    assert '.codegraph' not in status.stdout, status.stdout
+    status = ci.ensure_indexed(root)
+    assert status['indexed'] is True, status
+    assert not (root / '.codegraph').exists(), '索引不能落在执行者会改的那棵树里'
+
+    index_root = Path(status['mapping']['root'])
+    assert (index_root / '.codegraph').is_dir()
+    assert root.resolve() not in index_root.resolve().parents
+    assert index_root.resolve() != root.resolve()
+
+    # And the execution tree is clean without anything having to be hidden.
+    porcelain = subprocess.run(['git', 'status', '--porcelain'], cwd=root,
+                               capture_output=True, text=True, timeout=30)
+    assert porcelain.stdout.strip() == '', porcelain.stdout
+    exclude = root / '.git' / 'info' / 'exclude'
+    excluded = exclude.read_text(encoding='utf-8') if exclude.exists() else ''
+    assert '.codegraph' not in excluded, '不再靠 .git/info/exclude 假装隔离'
+
+    # The mapping says which commit the answer is about.
+    assert status['indexed_commit'] == status['source_commit']
 
 
 # --- wiring: the shared layer is reachable from the platform ---------------
@@ -392,3 +432,140 @@ def test_building_the_index_builds_the_shared_layer_too(app_env):
     assert shared['backend']['package'] == ci.BACKEND_PACKAGE
     assert client.get(f'/api/v2/projects/{p["id"]}/code-index',
                       headers=headers).json()['shared_layer']['indexed'] is True
+
+
+# --- the three defects the cb74bab review reproduced -----------------------
+def test_a_backend_failure_is_never_reported_as_an_empty_result(tmp_path, monkeypatch):
+    """exit 1 / timeout / unparseable output must not read as "nothing found".
+
+    The review's probe: make ``_run`` return exit 1 with ``stderr='database
+    error'`` and ``definitions`` came back ``no_match`` -- a database fault
+    presented as a fact about the code.
+    """
+    root = _repo(tmp_path, 'python')
+    ci.ensure_indexed(root)
+    real = ci._run
+
+    def failing(index_root, args, **kwargs):
+        if args[:1] in (['query'], ['callers'], ['callees']):
+            return ci._Invocation(1, '', 'database error')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', failing)
+    answer = ci.definitions(root, 'format_money', language='python')
+    assert answer['outcome'] == ci.BACKEND_ERROR, answer
+    assert answer['answered'] is False
+    assert answer['complete'] is False
+    assert 'database error' in answer['reason']
+    relation = ci.callers(root, 'format_money', language='python')
+    assert relation['answered'] is False
+
+
+def test_a_timeout_and_unparseable_output_are_each_their_own_answer(tmp_path, monkeypatch):
+    root = _repo(tmp_path, 'python')
+    ci.ensure_indexed(root)
+    real = ci._run
+
+    def timing_out(index_root, args, **kwargs):
+        if args[:1] == ['query']:
+            return ci._Invocation(None, '', '', timed_out=True, error='超时')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', timing_out)
+    assert ci.definitions(root, 'x', language='python')['outcome'] == ci.BACKEND_TIMEOUT
+
+    def garbling(index_root, args, **kwargs):
+        if args[:1] == ['query']:
+            return ci._Invocation(0, 'Segmentation fault, sorry', '')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', garbling)
+    garbled = ci.definitions(root, 'x', language='python')
+    assert garbled['outcome'] == ci.MALFORMED_OUTPUT, garbled
+    # Only the backend's own confirmed sentence may become no_match.
+    def not_found(index_root, args, **kwargs):
+        if args[:1] == ['query']:
+            return ci._Invocation(0, 'ℹ Symbol "x" not found', '')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', not_found)
+    empty = ci.definitions(root, 'x', language='python')
+    assert empty['outcome'] == ci.NO_MATCH and empty['complete'] is True
+
+
+def test_a_full_page_before_filtering_cannot_claim_no_match_or_completeness(
+        tmp_path, monkeypatch):
+    """The review's probe: limit 2, three same-name Python nodes, asking for Java.
+
+    The old code answered ``no_match`` with ``truncated=False``. It could not
+    rule out a Java node sitting in the part of the page the backend never
+    returned, so neither claim was supportable.
+    """
+    root = _repo(tmp_path, 'java')
+    ci.ensure_indexed(root)
+    real = ci._run
+
+    def saturated(index_root, args, **kwargs):
+        if args[:1] == ['query']:
+            page = int(args[args.index('--limit') + 1])
+            node = {'kind': 'function', 'name': 'format', 'qualifiedName': 'm.format',
+                    'filePath': 'py/m.py', 'language': 'python', 'startLine': 1,
+                    'id': 'function:1'}
+            return ci._Invocation(0, json.dumps([{'node': node}] * page), '')
+        return real(index_root, args, **kwargs)
+
+    monkeypatch.setattr(ci, '_run', saturated)
+    answer = ci.definitions(root, 'format', language='java', limit=2)
+    assert answer['outcome'] == ci.INCOMPLETE, answer
+    assert answer['complete'] is False
+    assert answer['results'] == []
+    # It still reports what it filtered out, and it does not say "no match".
+    assert any(d['language'] == 'python' for d in answer['dropped_other_language'])
+    assert '不能据此断定没有匹配' in answer['reason']
+
+
+def test_two_same_language_definitions_of_one_name_are_not_silently_picked(tmp_path):
+    """A name-keyed relation query does not pin the callee's identity.
+
+    Two Java classes each declaring ``format`` are two different targets. The
+    backend answers for whichever it matched; claiming that as *the* call
+    relation would be precise-looking and unfounded.
+    """
+    root = tmp_path / 'ambiguous'
+    root.mkdir()
+    _git(root, 'init', '-q', '-b', 'main')
+    _git(root, 'config', 'user.email', 't@example.com')
+    _git(root, 'config', 'user.name', 'T')
+    _write(root, 'src/a/Money.java', '''package a;
+
+public class Money {
+    public static String format(long c) { return ""; }
+}
+''')
+    _write(root, 'src/b/Money.java', '''package b;
+
+public class Money {
+    public static String format(long c) { return ""; }
+}
+''')
+    _write(root, 'src/a/Report.java', '''package a;
+
+public class Report {
+    public String render(long c) { return Money.format(c); }
+}
+''')
+    _git(root, 'add', '-A')
+    _git(root, 'commit', '-qm', 'base')
+
+    answer = ci.callers(root, 'format', language='java')
+    assert answer['outcome'] == ci.AMBIGUOUS, answer
+    assert answer['results'] == []
+    assert len(answer['candidates']) == 2
+    assert 'target_path' in answer['reason']
+
+    # Pinning the target by path resolves it, and the answer names what it
+    # resolved to rather than leaving the reader to assume.
+    pinned = ci.callers(root, 'format', language='java',
+                        target_path='src/a/Money.java')
+    assert pinned['outcome'] in (ci.OK, ci.NO_MATCH), pinned
+    assert pinned['target']['path'] == 'src/a/Money.java'

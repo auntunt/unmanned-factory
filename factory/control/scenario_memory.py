@@ -164,56 +164,163 @@ def _applies_to(entry, scope_paths) -> bool:
     return False
 
 
-def load_for_task(store, project_id, *, plugin_id=None, scope_paths=(),
-                  budget_chars=DEFAULT_BUDGET_CHARS) -> dict:
+#: How much of a scoped constraint travels when the task's scope is not known
+#: yet. Enough to recognise what it is about; the full text arrives in phase two.
+SUMMARY_CHARS = 180
+
+#: Binding requirements are never dropped to save room, and they are not
+#: allowed to quietly overrun the budget either: the limit is the limit. When
+#: they do not fit, the task is blocked rather than run against a subset or run
+#: with a budget that only applied to everything else.
+CONSTRAINT_CEILING_MULTIPLIER = 1
+
+
+def _cost(entry) -> int:
+    return len(entry.get('content') or '') + len(entry.get('title') or '') + 32
+
+
+def _summarise(entry) -> dict:
+    """A scoped *context* entry, cut down but still identifiable, and marked as cut.
+
+    Only reached while the task's scope is unknown and the full set does not
+    fit. Never applied to a binding requirement. Phase two (``refine_for_plan``)
+    brings back the full text of whatever turns out to be in scope, and it runs
+    automatically -- this never asks an executor to go and read something it has
+    no way to read.
+    """
+    content = entry.get('content') or ''
+    if len(content) <= SUMMARY_CHARS:
+        return {**entry, 'summary_only': False}
+    return {**entry, 'content': content[:SUMMARY_CHARS] + '…（背景资料，正文未完；'
+                                '本次改动范围确定后会自动补齐，不需要你去取）',
+            'summary_only': True}
+
+
+def load_for_task(store, project_id, *, plugin_id=None, scope_paths=None,
+                  budget_chars=DEFAULT_BUDGET_CHARS,
+                  constraint_ceiling_chars=None) -> dict:
     """The memory one task actually loads, with a receipt of what was loaded.
 
-    Returns the rendered block *and* ``refs`` -- the (key, revision) pairs that
-    were really used. The refs are what a dispatch persists, so that "this task
-    was run against these requirements" is a fact about the past rather than a
-    re-read of whatever the project believes today.
+    Three rules the first version got wrong:
+
+    1. **The budget really binds.** It used to let the first entry through
+       whatever its size, so a single 7000-character requirement sailed past a
+       6000-character budget and then pushed the *next* binding requirement out.
+    2. **Binding requirements are never dropped to save room.** Trimming a
+       must-obey requirement for tokens and then coding anyway is worse than not
+       starting: the work looks done and is judged against something the
+       executor never saw. If the constraints alone do not fit, this returns
+       ``blocked`` and the caller refuses to dispatch.
+    3. **Unknown scope is not empty scope.** ``scope_paths=None`` means "nobody
+       has said which files this touches yet", and a scoped requirement then
+       travels as a marked summary rather than either being dropped (silently
+       wrong) or loaded whole (guessing that it is relevant). ``refine_for_plan``
+       fills in the full text once a plan names the paths.
     """
     try:
         entries = recall(store, project_id, plugin_id=plugin_id)
     except (KeyError, ValueError) as exc:
         return {'block': '（项目记忆暂时读不到，本次没有携带已确认约束）',
-                'entries': [], 'refs': [], 'dropped': [],
-                'error': str(exc)}
-    scope_paths = tuple(scope_paths or ())
+                'entries': [], 'refs': [], 'dropped': [], 'blocked': None,
+                'scope_known': scope_paths is not None, 'error': str(exc)}
+
+    scope_known = scope_paths is not None
+    scope = tuple(scope_paths or ())
     selected, out_of_scope = [], []
     for entry in entries:
-        (selected if _applies_to(entry, scope_paths) else out_of_scope).append(entry)
+        if not scope_known or _applies_to(entry, scope):
+            # Nothing is out of scope while nothing is in scope yet.
+            selected.append(entry)
+        else:
+            out_of_scope.append(entry)
 
-    # Binding requirements first, then confirmed background, then leads: if the
-    # budget runs out, what survives is what the executor must obey.
+    # Summaries are for *context*, never for a requirement. A shortened
+    # must-obey line is a requirement the executor cannot actually follow, and
+    # deferring its full text to a later phase would mean the coding step runs
+    # without it. Binding requirements therefore travel whole or the task is
+    # blocked below; only non-binding context is ever cut down, and only when
+    # the full load does not fit.
+    if not scope_known and sum(_cost(e) for e in selected) > budget_chars:
+        selected = [e if role_of(e) == CONSTRAINT or not (e.get('paths') or [])
+                    else _summarise(e) for e in selected]
+
     order = {CONSTRAINT: 0, DECISION: 1, FACT: 2, OBSERVATION: 3, LEAD: 4}
     selected.sort(key=lambda e: (order[role_of(e)], e['title']))
+    constraints = [e for e in selected if role_of(e) == CONSTRAINT]
+    context = [e for e in selected if role_of(e) != CONSTRAINT]
 
-    kept, dropped, used = [], [], 0
-    for entry in selected:
-        cost = len(entry.get('content') or '') + len(entry['title']) + 32
-        if used + cost > budget_chars and kept:
+    ceiling = (constraint_ceiling_chars
+               or budget_chars * CONSTRAINT_CEILING_MULTIPLIER)
+    # Measured against the *full* text, because that is what will be carried.
+    constraint_cost = sum(_cost(e) for e in constraints)
+    if constraint_cost > ceiling:
+        oversized = [{'key': e['key'], 'title': e['title'], 'chars': _cost(e)}
+                     for e in constraints]
+        blocked = {
+            'kind': 'memory.constraints_exceed_budget',
+            'message': (f'本项目必须遵守的已确认要求共 {constraint_cost} 字，'
+                        f'超过单次可携带上限 {ceiling} 字。不能为了长度丢掉'
+                        '必遵要求就照常编码：请把任务切小（按文件范围拆分），'
+                        '或先合并精简这些要求。'),
+            'entries': oversized, 'total_chars': constraint_cost, 'ceiling': ceiling,
+        }
+        return {'block': blocked['message'], 'entries': [], 'refs': [],
+                'dropped': [], 'blocked': blocked, 'scope_known': scope_known,
+                'error': None}
+
+    kept, dropped = list(constraints), []
+    used = constraint_cost
+    for entry in context:
+        cost = _cost(entry)
+        if used + cost > budget_chars:
             dropped.append({'key': entry['key'], 'title': entry['title'],
-                            'role': role_of(entry), 'reason': 'budget'})
+                            'role': role_of(entry), 'reason': 'budget',
+                            'chars': cost})
             continue
         used += cost
         kept.append(entry)
     dropped += [{'key': e['key'], 'title': e['title'], 'role': role_of(e),
                  'reason': 'out_of_scope'} for e in out_of_scope]
     return {
-        'block': render_block(kept, dropped=dropped, scope_paths=scope_paths),
+        'block': render_block(kept, dropped=dropped, scope_paths=scope,
+                              scope_known=scope_known),
         'entries': kept,
         # The immutable reference: a (key, revision) pair names one frozen
         # version in ``knowledge_entry_versions``, which is append-only.
         'refs': [{'key': e['key'], 'revision': e['revision'], 'title': e['title'],
-                  'role': role_of(e), 'status': e['status'], 'kind': e['kind']}
+                  'role': role_of(e), 'status': e['status'], 'kind': e['kind'],
+                  'summary_only': bool(e.get('summary_only'))}
                  for e in kept],
         'dropped': dropped,
+        'blocked': None,
+        'scope_known': scope_known,
+        'chars': used,
         'error': None,
     }
 
 
-def render_block(entries, *, dropped=(), scope_paths=()) -> str:
+def refine_for_plan(store, project_id, *, scope_paths, previous_refs,
+                    plugin_id=None, budget_chars=DEFAULT_BUDGET_CHARS) -> dict:
+    """Phase two: the plan named the files, so re-load memory against them.
+
+    Called once a plan exists. Anything that travelled as a summary and is
+    actually in scope now arrives in full; anything scoped elsewhere is dropped
+    and said to be dropped. The result is meant to be appended to the run's
+    frozen basis, not to replace it silently -- the caller records both.
+    """
+    loaded = load_for_task(store, project_id, plugin_id=plugin_id,
+                           scope_paths=scope_paths, budget_chars=budget_chars)
+    if loaded['error'] or loaded['blocked']:
+        return {**loaded, 'added': [], 'previous_refs': list(previous_refs or [])}
+    before = {(r['key'], r.get('summary_only', False))
+              for r in (previous_refs or [])}
+    seen_keys = {r['key'] for r in (previous_refs or [])}
+    added = [r for r in loaded['refs']
+             if r['key'] not in seen_keys or (r['key'], True) in before]
+    return {**loaded, 'added': added, 'previous_refs': list(previous_refs or [])}
+
+
+def render_block(entries, *, dropped=(), scope_paths=(), scope_known=True) -> str:
     """The memory section a prompt carries, grouped by what each entry is.
 
     Confirmed requirements are the only group presented as binding. Leads carry
@@ -230,6 +337,13 @@ def render_block(entries, *, dropped=(), scope_paths=()) -> str:
     if scope_paths:
         lines.append(f"本次改动范围：{'、'.join(scope_paths)}")
         lines.append('')
+    elif not scope_known:
+        summarised = [e for e in entries if e.get('summary_only')]
+        if summarised:
+            lines.append(f'本次改动范围尚未确定，其中 {len(summarised)} 条'
+                         '「有适用范围的背景资料」先给了摘要；计划确定要动哪些'
+                         '文件之后会自动补齐正文。必须遵守的要求都是完整的。')
+            lines.append('')
     for role in (CONSTRAINT, DECISION, FACT, OBSERVATION, LEAD):
         rows = grouped.get(role)
         if not rows:
