@@ -77,6 +77,13 @@ class WebuddyRepository:
                 'workspace': str(workspace), 'base_sha': base_sha}
 
 
+def _unwired(name):
+    """Build a hook that refuses, for a caller that supplied no lifecycle call."""
+    def refuse(execution_id, actor):
+        raise Conflict(f'本进程没有接入{name}，无法对执行 {execution_id} 执行该操作')
+    return refuse
+
+
 class WebuddyExecution:
     """The Execution port over the existing run store and dispatcher.
 
@@ -93,8 +100,15 @@ class WebuddyExecution:
         # Resume and cancel are the existing lifecycle calls. They are injected
         # for the same reason dispatch is: so no test needs a second production
         # path, and so this module never owns a state transition.
-        self.resume_hook = resume or (lambda eid, actor: None)
-        self.cancel_hook = cancel or (lambda eid, actor: None)
+        #
+        # An unwired hook refuses instead of returning None. The previous default
+        # was ``lambda eid, actor: None``, which the CLI really did inherit for
+        # its resume and cancel subcommands: the caller got a successful task
+        # view back for a cancel that had reached nothing. A caller that has no
+        # lifecycle to offer must be told so, because the alternative failure
+        # direction is indistinguishable from the action having been performed.
+        self.resume_hook = resume or _unwired('resume')
+        self.cancel_hook = cancel or _unwired('cancel')
         self.timeout_s = timeout_s
 
     def submit(self, record, *, actor) -> str:
