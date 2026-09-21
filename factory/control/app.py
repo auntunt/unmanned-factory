@@ -184,6 +184,11 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(pack_router(store, svc))
     from factory.control.session_skill_routes import router as session_skill_router
     app.include_router(session_skill_router(store))
+    # Business plugins are registered explicitly, from a fixed in-tree list.
+    # Nothing here loads code from a path a request could influence; the router
+    # only exposes each plugin's declaration and its availability state.
+    from factory.control.plugin_routes import router as plugin_router
+    app.include_router(plugin_router(store, svc))
     from factory.control.maintenance_routes import router as maintenance_router
     app.include_router(maintenance_router(store, svc))
 

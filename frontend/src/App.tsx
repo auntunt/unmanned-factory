@@ -12,6 +12,7 @@ import ProjectsPage from './workbench/ProjectsPage'
 import ProjectPage from './workbench/ProjectPage'
 import RunsPage from './workbench/RunsPage'
 import MaintenanceTasksPage from './workbench/MaintenanceTasksPage'
+import PluginsSettings from './workbench/PluginsSettings'
 import CostsPage from './workbench/CostsPage'
 import TeamPage from './workbench/TeamPage'
 import AgentsPage from './workbench/AgentsPage'
@@ -116,6 +117,7 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       {isAdmin
         ? <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />
         : <Route path="settings/runtime" element={<RuntimeReadiness {...pageProps} />} />}
+      <Route path="settings/plugins" element={<PluginsSettings {...pageProps} />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Route>
   </Routes>

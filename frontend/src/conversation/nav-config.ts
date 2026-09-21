@@ -24,7 +24,7 @@ export const GROUP_TABS: Record<'engineering' | 'agents' | 'settings', GroupTab[
   // 能力围绕某个职能体管理，不再有并列的「能力库」页签。旧能力页面仍可直达，
   // 但作为无主导航的兼容次级页面，归属在「职能体」下。
   agents: [{ to: '/agents', label: '职能体', end: true }],
-  settings: [{ to: '/settings', label: '通用', end: true }, { to: '/settings/runtime', label: '模型与执行', adminOnly: true }],
+  settings: [{ to: '/settings', label: '通用', end: true }, { to: '/settings/runtime', label: '模型与执行', adminOnly: true }, { to: '/settings/plugins', label: '业务插件' }],
 }
 
 export type Group = 'engineering' | 'agents' | 'settings'
@@ -67,6 +67,7 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/costs')) return { activeKey: 'engineering', title: '用量与预算', group: 'engineering', activeTab: '/costs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '用量与预算' }] }
   if (is('/team')) return { activeKey: 'engineering', title: '团队', group: 'engineering', activeTab: '/team', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '团队' }] }
   if (is('/settings/runtime')) return { activeKey: 'settings', title: '模型与执行', group: 'settings', activeTab: '/settings/runtime', breadcrumb: [{ label: '设置', to: '/settings' }, { label: '模型与执行' }] }
+  if (is('/settings/plugins')) return { activeKey: 'settings', title: '业务插件', group: 'settings', activeTab: '/settings/plugins', breadcrumb: [{ label: '设置', to: '/settings' }, { label: '业务插件' }] }
   if (is('/settings')) return { activeKey: 'settings', title: '设置', group: 'settings', activeTab: '/settings', breadcrumb: [{ label: '设置' }] }
   return { activeKey: 'start', title: '开始制作', breadcrumb: [{ label: '开始制作' }] }
 }

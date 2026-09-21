@@ -289,3 +289,47 @@ export function canResume(status: MaintenanceStatus, resumable?: boolean): boole
   if (resumable === false) return false
   return status === 'waiting'
 }
+
+// --- 业务插件可用性 ---
+// 服务端是唯一裁决方：这里只决定界面提供什么入口，藏掉按钮从来不等于停用。
+
+export type PluginState = 'enabled' | 'draining' | 'disabled'
+
+export interface PluginAvailabilityView {
+  id: string
+  name: string
+  version: number
+  skill_pack_id: string
+  contract: { host: number; min: number; max: number; compatible: boolean }
+  entry_points: Record<string, string>
+  host_capabilities: string[]
+  ui_keys: string[]
+  executable: boolean
+  state: PluginState
+  revision: number
+  updated_at: string | null
+  actor: string
+  can_create: boolean
+  can_continue: boolean
+}
+
+const PLUGIN_STATE_LABELS: Record<PluginState, string> = {
+  enabled: '已启用',
+  draining: '排空中',
+  disabled: '已停用',
+}
+
+export function pluginStateLabel(state: PluginState): string {
+  return PLUGIN_STATE_LABELS[state]
+}
+
+/** 为什么现在不能新建。返回 null 表示可以新建。 */
+export function pluginCreateBlockedReason(
+  availability: PluginAvailabilityView | null,
+): string | null {
+  if (!availability || availability.can_create) return null
+  if (availability.state === 'draining') {
+    return `${availability.name}正在排空，暂时不接受新任务；已有任务仍可查询、导出与取消。`
+  }
+  return `${availability.name}已停用，暂时不能新建任务；历史任务与交付物仍然可以查看和下载。`
+}

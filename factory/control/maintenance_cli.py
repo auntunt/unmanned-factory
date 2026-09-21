@@ -1,9 +1,9 @@
 """Standalone CLI for issue maintenance, without starting the webuddy web app.
 
-Calls the same MaintenanceTasks contract the webuddy adapter uses, with the
-same port implementations (WebuddyExecution, WebuddyRepository) imported from
-factory.control.issue_maintenance_webuddy.  The only CLI-specific port is the
-identity boundary, which is the local OS user.
+Calls ``issue_maintenance_webuddy.tasks_for`` -- the same assembly the web
+surface calls, including the plugin availability gate -- rather than building
+its own port.  The only CLI-specific ports are the identity boundary, which is
+the local OS user, and (for read-only subcommands) a dispatcher that refuses.
 
 The identity boundary is the local OS user: only the Unix user running the
 process (or an explicit --operator that matches it) is accepted.  This is
@@ -21,10 +21,6 @@ import json
 import sys
 from pathlib import Path
 
-from factory.control.issue_maintenance import MaintenanceTasks
-from factory.control.issue_maintenance_webuddy import (
-    WebuddyExecution, WebuddyRepository,
-)
 from factory.control.store import Conflict, Store
 
 
@@ -108,8 +104,16 @@ def _make_service(store):
 # Port assembly
 # ---------------------------------------------------------------------------
 def _build_tasks(store, *, operator_username: str,
-                 needs_dispatch: bool) -> MaintenanceTasks:
+                 needs_dispatch: bool):
     """Wire the real adapter ports with the CLI's local-operator identity.
+
+    This calls the *same* assembly the web surface calls
+    (``issue_maintenance_webuddy.tasks_for``) rather than repeating it, so the
+    plugin availability gate the web surface passes is not something the CLI
+    could be built without.  Before, this file constructed ``MaintenanceTasks``
+    itself; a stop applied at the web layer would have left this door open, and
+    "the CLI still creates tasks after the plugin was disabled" is precisely
+    the failure the contract calls out.
 
     A Service is always constructed so cost accounting uses the same
     reconciliation logic the web surface uses (svc._usage).  When
@@ -117,36 +121,12 @@ def _build_tasks(store, *, operator_username: str,
     as the dispatch function.  For read-only commands, dispatch raises
     if somehow called.
     """
+    from factory.control.issue_maintenance_webuddy import tasks_for
     svc = _make_service(store)
-    if needs_dispatch:
-        dispatch = svc.start_plan
-    else:
-        dispatch = lambda rid: (_ for _ in ()).throw(
-            Conflict('此命令不需要调度器'))
-    execution = WebuddyExecution(
-        store,
-        dispatch=dispatch,
-        cost=lambda eid: svc._usage(eid)['known_cost_usd'],
-        # Always wired, never gated on the subcommand. ``WebuddyExecution``
-        # substitutes a no-op lambda for a hook passed as None, so a resume or
-        # cancel reached through an unwired path would print the task and exit 0
-        # having called nothing on the execution side. Passing None is only safe
-        # for a hook that is genuinely never reached, and that is a property of
-        # the whole command table rather than of this call -- so this side does
-        # not try to predict it. Only ``dispatch`` stays gated, because there the
-        # unwired form raises instead of succeeding quietly.
-        resume=lambda eid, actor: svc.continue_run(
-            eid, '', store.get(eid)['revision'],
-            store.get(eid).get('resume_count', 0),
-            actor['username']),
-        cancel=lambda eid, actor: svc.cancel(eid, actor['username']),
-    )
-    return MaintenanceTasks(
-        store,
-        execution=execution,
-        repository=WebuddyRepository(store),
-        identity=LocalOperatorIdentity(operator_username),
-    )
+    dispatch = None if needs_dispatch else (
+        lambda rid: (_ for _ in ()).throw(Conflict('此命令不需要调度器')))
+    return tasks_for(svc, identity=LocalOperatorIdentity(operator_username),
+                     dispatch=dispatch)
 
 
 def _actor(username: str) -> dict:
@@ -258,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             svc.close()
 
 
-def _dispatch(args, tasks: MaintenanceTasks, actor: dict) -> dict:
+def _dispatch(args, tasks, actor: dict) -> dict:
     cmd = args.command
 
     if cmd == 'create':

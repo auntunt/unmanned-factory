@@ -7,8 +7,8 @@ import { EmptyState, ErrorNotice, PageHeader, errorText } from './ui'
 import type { PageProps } from './ui'
 import { ListTime } from './presentation'
 import Icon from './Icon'
-import type { MaintenanceAgreementInfo, MaintenanceTaskView } from './maintenance-types'
-import { currentStep, maintenanceStatusLabel, maintenanceStatusTone, stepLabel } from './maintenance-types'
+import type { MaintenanceAgreementInfo, MaintenanceTaskView, PluginAvailabilityView } from './maintenance-types'
+import { currentStep, maintenanceStatusLabel, maintenanceStatusTone, pluginCreateBlockedReason, stepLabel } from './maintenance-types'
 import type { V3Project } from './v3-types'
 
 // --- Create-task form ---
@@ -266,6 +266,8 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
   const [projectsError, setProjectsError] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(() => searchParams.get('create') === '1')
   const [refreshIndex, setRefreshIndex] = useState(0)
+  // 插件可用性独立于项目读取：没有可见项目时也要知道该不该提供新建入口。
+  const [availability, setAvailability] = useState<PluginAvailabilityView | null>(null)
   const requested = searchParams.get('project_id') ?? ''
 
   // Maintenance tasks are authorized per project, so this page always reads one
@@ -290,14 +292,28 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
   }, [onUnauthorized, refreshIndex])
 
   useEffect(() => {
+    const controller = new AbortController()
+    request<PluginAvailabilityView>('/api/v2/maintenance/availability', {
+      onUnauthorized, signal: controller.signal,
+    })
+      .then(result => { if (!controller.signal.aborted) setAvailability(result) })
+      .catch(() => { /* 读不到可用性就保持当前入口，真正的拒绝在服务端 */ })
+    return () => controller.abort()
+  }, [onUnauthorized, refreshIndex])
+
+  useEffect(() => {
     if (!projectFilter) return
     const controller = new AbortController()
     setError(null)
-    request<{ tasks: MaintenanceTaskView[] }>(
+    request<{ tasks: MaintenanceTaskView[]; availability?: PluginAvailabilityView }>(
       `/api/v2/maintenance/tasks?project_id=${encodeURIComponent(projectFilter)}`,
       { onUnauthorized, signal: controller.signal },
     )
-      .then(result => { if (!controller.signal.aborted) setTasks(result.tasks) })
+      .then(result => {
+        if (controller.signal.aborted) return
+        setTasks(result.tasks)
+        if (result.availability) setAvailability(result.availability)
+      })
       .catch(cause => {
         if (controller.signal.aborted) return
         if (cause instanceof WorkspaceApiError && cause.status === 401) return
@@ -336,6 +352,9 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
     </label>
   )
 
+  // 服务端仍然会拒绝；这里只是不把一个必然失败的按钮摆在那里。
+  const createBlocked = pluginCreateBlockedReason(availability)
+
   return (
     <div className="wb-page">
       <PageHeader
@@ -350,7 +369,7 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
             >
               刷新
             </button>
-            {isAdmin && (
+            {isAdmin && !createBlocked && (
               <button
                 className="wb-button wb-button-primary"
                 onClick={() => setCreateOpen(v => !v)}
@@ -365,7 +384,13 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
         }
       />
 
-      {createOpen && isAdmin && (
+      {createBlocked && (
+        <div className="wb-notice" role="status">
+          {createBlocked}
+        </div>
+      )}
+
+      {createOpen && isAdmin && !createBlocked && (
         <MaintenanceCreateForm
           csrfToken={csrfToken}
           onUnauthorized={onUnauthorized}

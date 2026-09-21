@@ -4,6 +4,11 @@ Prefix ``/api/v2/maintenance``.  The port (``MaintenanceTasks``) is assembled by
 ``tasks_for(svc)`` and owns every state decision; this file only maps HTTP verbs
 to port calls and translates the exceptions the port raises into status codes.
 
+Availability: the port handed out by ``tasks_for`` is wrapped by the plugin
+gate, so every call below is checked on the service side.  ``approve`` is the
+exception that proves it -- it hands its decision to the run lifecycle rather
+than to the port, and therefore calls ``tasks.gate.require`` itself.
+
 Exception mapping reuses the handlers already registered in ``app.py``:
 
 * ``Conflict`` -> 409
@@ -16,6 +21,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+
+from factory.control.store import Conflict
 
 
 class _FollowUpBody(BaseModel):
@@ -123,14 +130,32 @@ def router(store, svc):
         body = await request.json()
         try:
             return tasks.create(body, actor=_actor(request))
+        except Conflict:
+            # ``Conflict`` subclasses ``ValueError``. Letting the clause below
+            # catch it would report an availability refusal -- or any other
+            # 409 the port raises -- as "malformed request", which points the
+            # caller at their own body instead of at the stopped plugin.
+            raise
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
     # -- reading ------------------------------------------------------------
 
+    @api.get('/availability')
+    def availability(request: Request):
+        """Whether this plugin currently accepts new maintenance work.
+
+        The page reads this to decide what to offer. It is not the enforcement
+        point -- every write below goes through the same service-side gate -- so
+        a client that ignores it gains nothing but a refusal.
+        """
+        _actor(request)
+        return tasks.gate.availability.view(tasks.gate.plugin_id)
+
     @api.get('/tasks')
     def list_tasks(request: Request, project_id: str):
-        return {'tasks': tasks.list(actor=_actor(request), project_id=project_id)}
+        return {'tasks': tasks.list(actor=_actor(request), project_id=project_id),
+                'availability': tasks.gate.availability.view(tasks.gate.plugin_id)}
 
     @api.get('/tasks/{task_id}')
     def get_task(task_id: str, request: Request):
@@ -184,6 +209,12 @@ def router(store, svc):
         after the same project authorization every other task call goes through.
         """
         actor = _actor(request)
+        # This is the one action that reaches the run lifecycle directly instead
+        # of through the gated port, so it performs the same check by hand.
+        # Approving a plan is what makes the executor start changing files: a
+        # stopped plugin that still accepted approvals would be stopped in name
+        # only.
+        tasks.gate.require('continue')
         view = tasks.get(task_id, actor=actor)
         execution_id = view['execution_id']
         if not execution_id:

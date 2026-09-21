@@ -259,13 +259,74 @@ class WebuddyExecution:
                                'bytes': done.stdout}]}
 
 
-def tasks_for(svc):
-    """Assemble the Task port from a live service. One wiring, web and CLI alike."""
+#: The plugin this module's business surface belongs to. Every surface that
+#: assembles the maintenance port -- HTTP, CLI, anything added later -- gets the
+#: same availability gate because they all come through ``tasks_for`` below.
+PLUGIN_ID = 'issue-maintenance'
+
+#: Task states that mean work is still live, as the existing engine counts it.
+#: ``received`` is included: the run has been handed to the durable queue and
+#: something is coming for it, so a stop that ignored it would be a stop that
+#: abandoned a dispatched task.
+ACTIVE_TASK_STATES = frozenset({'received', 'running', 'waiting', 'cancelling'})
+
+
+def active_task_count(store) -> int:
+    """How many maintenance tasks are still live, across every project.
+
+    Read from the same records and the same run states the task view derives
+    from, rather than from a counter this module would have to keep correct.
+    A task whose execution row has gone missing is counted as live: the safe
+    direction for a question whose answer decides whether a stop is allowed.
+    """
+    from factory.control.issue_maintenance import MaintenanceStore, status_of
+    live = 0
+    for record in MaintenanceStore(store).tasks():
+        execution_id = record.get('execution_id')
+        if not execution_id:
+            live += 1
+            continue
+        try:
+            run = store.get(execution_id)
+        except KeyError:
+            live += 1
+            continue
+        try:
+            status = status_of(run.get('status'))
+        except Conflict:
+            # An unmappable execution state is not evidence that the task is
+            # finished, and a stop must not be granted on a state nobody can
+            # read. It counts as live and the administrator sees the number.
+            live += 1
+            continue
+        if status in ('running', 'waiting') and record.get('cancel_requested'):
+            status = 'cancelling'
+        live += status in ACTIVE_TASK_STATES
+    return live
+
+
+def availability_for(store):
+    """The availability store over this control database."""
+    from factory.control.plugins import PluginAvailability
+    return PluginAvailability(store)
+
+
+def tasks_for(svc, *, identity=None, dispatch=None, availability=None):
+    """Assemble the Task port from a live service. One wiring, web and CLI alike.
+
+    The return value is always gated: there is no ungated form to reach, which
+    is what makes "hiding the button is not a stop" true rather than aspirational.
+    A surface that wants a different identity boundary (the CLI's local OS user)
+    or a dispatcher that refuses (the CLI's read-only subcommands) overrides
+    exactly that port and still comes through here.
+    """
     from factory.control.issue_maintenance import MaintenanceTasks
-    return MaintenanceTasks(
-        svc.store,
+    from factory.control.plugins import MAINTENANCE_ACTIONS, gated
+    store = svc.store
+    port = MaintenanceTasks(
+        store,
         execution=WebuddyExecution(
-            svc.store, dispatch=svc.start_plan,
+            store, dispatch=svc.start_plan if dispatch is None else dispatch,
             # ``known_cost_usd`` only. A task view must not present an unresolved
             # invoice as a number; ``unknown_cost_calls`` stays in the run's own
             # accounting, where the budget gate already reads it.
@@ -273,8 +334,11 @@ def tasks_for(svc):
             # Resume is the existing continuation, which consumes whatever
             # supplements are pending -- the same door the web surface uses.
             resume=lambda eid, actor: svc.continue_run(
-                eid, '', svc.store.get(eid)['revision'],
-                svc.store.get(eid).get('resume_count', 0), actor['username']),
+                eid, '', store.get(eid)['revision'],
+                store.get(eid).get('resume_count', 0), actor['username']),
             cancel=lambda eid, actor: svc.cancel(eid, actor['username'])),
-        repository=WebuddyRepository(svc.store),
-        identity=WebuddyIdentity(svc.governance))
+        repository=WebuddyRepository(store),
+        identity=WebuddyIdentity(svc.governance) if identity is None else identity)
+    return gated(port,
+                 availability if availability is not None else availability_for(store),
+                 PLUGIN_ID, MAINTENANCE_ACTIONS)
