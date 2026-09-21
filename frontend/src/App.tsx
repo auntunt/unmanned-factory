@@ -12,6 +12,7 @@ import ProjectsPage from './workbench/ProjectsPage'
 import ProjectPage from './workbench/ProjectPage'
 import RunsPage from './workbench/RunsPage'
 import MaintenanceTasksPage from './workbench/MaintenanceTasksPage'
+import ModernizationPage from './workbench/ModernizationPage'
 import PluginsSettings from './workbench/PluginsSettings'
 import CostsPage from './workbench/CostsPage'
 import TeamPage from './workbench/TeamPage'
@@ -31,6 +32,9 @@ const RuntimePage = lazy(() => import('./workbench/RuntimePage'))
 const RuntimeReadiness = lazy(() => import('./workbench/RuntimeReadiness'))
 const PackDetail = lazy(() => import('./workbench/PackDetail'))
 const MaintenanceTaskDetail = lazy(() => import('./workbench/MaintenanceTaskDetail'))
+const AdaptationPage = lazy(() => import('./workbench/AdaptationPage'))
+const AdaptationTaskDetail = lazy(() => import('./workbench/AdaptationTaskDetail'))
+const ModernizationSliceDetail = lazy(() => import('./workbench/ModernizationSliceDetail'))
 
 interface AuthResponse {
   user: User
@@ -111,6 +115,10 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="runs" element={<RunsPage {...pageProps} />} />
       <Route path="maintenance" element={<MaintenanceTasksPage {...pageProps} />} />
       <Route path="maintenance/:taskId" element={<MaintenanceTaskDetail {...pageProps} />} />
+      <Route path="adaptation" element={<AdaptationPage {...pageProps} />} />
+      <Route path="adaptation/:taskId" element={<AdaptationTaskDetail {...pageProps} />} />
+      <Route path="modernization" element={<ModernizationPage {...pageProps} />} />
+      <Route path="modernization/:sliceId" element={<ModernizationSliceDetail {...pageProps} />} />
       <Route path="costs" element={<CostsPage {...pageProps} />} />
       <Route path="team" element={<TeamPage {...pageProps} />} />
       <Route path="settings" element={<SettingsPage {...shell} />} />
