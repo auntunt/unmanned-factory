@@ -89,7 +89,7 @@ def test_two_related_tasks_share_confirmed_constraints_and_each_add_a_fact(env):
     port.export(fix['task_id'], actor=ACTOR)
 
     fix_view = port.get(fix['task_id'], actor=ACTOR)
-    refs = fix_view['project_memory']
+    refs = fix_view['project_memory']['entries']
     assert '[运维] 数据库兼容' in _entry_titles(refs), '已确认的项目约束必须能被复用'
     confirmed = next(r for r in refs if r['title'] == '[运维] 数据库兼容')
     assert confirmed['status'] == scenario_memory.CONFIRMED_STATUS
@@ -105,7 +105,7 @@ def test_two_related_tasks_share_confirmed_constraints_and_each_add_a_fact(env):
     feature = port.create(_request(idempotency_key='feature-issue-01', issue={
         'external_id': '2002', 'title': '报表增加区间筛选',
         'body': '希望能按日期区间筛选导出结果。'}), actor=ACTOR)
-    before = _entry_titles(port.get(feature['task_id'], actor=ACTOR)['project_memory'])
+    before = _entry_titles(port.get(feature['task_id'], actor=ACTOR)['project_memory']['entries'])
     assert '[运维] 数据库兼容' in before
     assert '[运维] 报表金额显示修复' in before, '相关任务应能读到前一个任务留下的事实'
 
@@ -113,7 +113,7 @@ def test_two_related_tasks_share_confirmed_constraints_and_each_add_a_fact(env):
     port.fake.deliver(feature['execution_id'], commit='c' * 40)
     port.export(feature['task_id'], actor=ACTOR)
 
-    after = port.get(feature['task_id'], actor=ACTOR)['project_memory']
+    after = port.get(feature['task_id'], actor=ACTOR)['project_memory']['entries']
     titles = _entry_titles(after)
     # A new code version is now part of what the project remembers.
     assert titles.count('[运维] 数据库兼容') == 1
@@ -143,7 +143,7 @@ def test_two_related_tasks_share_confirmed_constraints_and_each_add_a_fact(env):
     followup = reopened.create(_request(idempotency_key='followup-issue-01', issue={
         'external_id': '2003', 'title': '补充需求：导出格式对齐财务口径',
         'body': '延续前两次改动，财务希望导出格式统一。'}), actor=ACTOR)
-    seen = _entry_titles(reopened.get(followup['task_id'], actor=ACTOR)['project_memory'])
+    seen = _entry_titles(reopened.get(followup['task_id'], actor=ACTOR)['project_memory']['entries'])
     assert '[运维] 数据库兼容' in seen, '新会话仍要读到已确认要求'
     assert '[运维] 报表金额显示修复' in seen
     assert '[运维] 报表增加区间筛选' in seen
@@ -153,7 +153,7 @@ def test_a_project_with_no_memory_yet_is_an_empty_list_not_a_broken_view(env):
     """A brand-new project has nothing to recall; the view must still render."""
     _store, _db, port = env
     view = port.create(_request(idempotency_key='no-memory-yet'), actor=ACTOR)
-    assert view['project_memory'] == []
+    assert view['project_memory']['entries'] == []
 
 
 def test_an_unresolvable_project_does_not_break_reading_the_task(tmp_path):
@@ -167,7 +167,7 @@ def test_an_unresolvable_project_does_not_break_reading_the_task(tmp_path):
     port = MaintenanceTasks(store, execution=execution,
                             repository=_Repository(), identity=_Identity())
     view = port.create(_request(idempotency_key='ghost-project'), actor=ACTOR)
-    assert view['project_memory'] == []
+    assert view['project_memory']['entries'] == []
 
 
 def test_paths_from_patch_reads_the_new_side_of_each_diff_header():
@@ -196,7 +196,11 @@ def test_the_view_field_is_present_even_before_any_delivery(env):
     _store, _db, port = env
     view = port.create(_request(idempotency_key='shape-check'), actor=ACTOR)
     assert 'project_memory' in view
-    assert isinstance(view['project_memory'], list)
+    memory = view['project_memory']
+    assert isinstance(memory['entries'], list)
+    # A live re-read must never be presented as the set this task was run
+    # against; the view says which of the two it is showing.
+    assert memory['frozen'] is False and memory['reason']
 
 
 def test_an_unusually_long_issue_title_does_not_block_the_export(env):
@@ -215,5 +219,5 @@ def test_an_unusually_long_issue_title_does_not_block_the_export(env):
     port.fake.deliver(view['execution_id'])
     exported = port.export(view['task_id'], actor=ACTOR)
     assert exported['receipt']['delivery']['commit'] == 'c' * 40
-    refs = port.get(view['task_id'], actor=ACTOR)['project_memory']
+    refs = port.get(view['task_id'], actor=ACTOR)['project_memory']['entries']
     assert any(ref['title'].startswith('[运维] 报表导出') for ref in refs)

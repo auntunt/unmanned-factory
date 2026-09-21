@@ -128,10 +128,15 @@ class WebuddyExecution:
         # them at submit rather than at intake is deliberate: a constraint a
         # human confirmed after the task was filed still applies to it.
         from factory.control import scenario_memory
-        try:
-            memory = scenario_memory.constraints_block(
-                scenario_memory.recall(self.store, record['project_id']))
-        except (KeyError, ValueError):
+        # Loaded once, here, and frozen onto the run. Re-reading project memory
+        # later would answer "what does the project believe now", which is a
+        # different question from "what was this task run against" -- and once
+        # execution has started the second one must stop moving. New
+        # requirements arrive through the existing supplement/revision flow, not
+        # by quietly changing the basis underneath a run.
+        loaded = scenario_memory.load_for_task(self.store, record['project_id'])
+        memory = loaded['block'] or '（本项目还没有已确认的长期约束）'
+        if loaded['error']:
             # A project with no knowledge yet, or knowledge past its own size
             # limit, must not block a maintenance task -- but it also must not
             # look like a project that confirmed nothing, so the prompt says so.
@@ -151,6 +156,11 @@ class WebuddyExecution:
                     # is created and not only where it was written down.
                     'expected_base_sha': record['base_sha'],
                     'delivery_tier': record['delivery_tier'],
+                    # The (key, revision) pairs actually carried into this
+                    # dispatch. ``knowledge_entry_versions`` is append-only, so
+                    # a pair names one immutable version for good.
+                    'memory_refs': loaded['refs'],
+                    'memory_dropped': loaded['dropped'],
                     'synthetic': record.get('synthetic', False)},
             delivery_id=f"maintenance:{record['id']}",
             semantic_id=f"maintenance:{record['project_id']}:{record['content_fingerprint']}")
@@ -185,6 +195,17 @@ class WebuddyExecution:
 
     def status(self, execution_id) -> str:
         return self._run(execution_id)['status']
+
+    def loaded_memory(self, execution_id) -> list | None:
+        """The memory this execution was actually dispatched with, or ``None``.
+
+        ``None`` means this run predates the freeze (or was built by something
+        that never recorded it) -- not "no memory". The caller reports which of
+        the two it got rather than presenting a live re-read as the frozen set.
+        """
+        source = self._run(execution_id).get('source') or {}
+        refs = source.get('memory_refs')
+        return list(refs) if isinstance(refs, list) else None
 
     def cost_usd(self, execution_id) -> float:
         return float(self.cost(execution_id))

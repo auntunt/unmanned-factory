@@ -45,26 +45,44 @@ def test_recall_crosses_scenarios_by_default_and_can_be_narrowed(app_env):
     assert [e['title'] for e in confirmed] == ['[信创] 目标数据库']
 
 
-def test_unconfirmed_content_never_reaches_the_prompt_body(app_env):
-    """A candidate's title is visible; its content is not quotable as a requirement.
+def _binding_section(block: str) -> str:
+    """Only the text under 「本次必须遵守」, which is the one binding heading."""
+    if '本次必须遵守' not in block:
+        return ''
+    after = block.split('本次必须遵守', 1)[1]
+    # The next role heading ends the binding section.
+    for heading in ('（供参考', '（只说明存在这个问题'):
+        if heading in after:
+            after = after.split(heading, 1)[0]
+    return after
 
-    This is the whole reason the block is split. An evaluation report that says
-    "建议迁移到达梦" is not the customer approving 达梦, and an executor that
-    read the two the same way would act on the wrong one.
+
+def test_unconfirmed_material_is_readable_but_never_binding(app_env):
+    """An unconfirmed entry must be *readable* and must not be *an order*.
+
+    The first version solved this by showing only the title, which made an open
+    question permanently unreadable -- the reviewer's point. Now the content
+    travels, but under a heading that says it is not a basis for a decision, and
+    the assertion is about which section it lands in rather than about whether
+    the words appear at all. "建议迁移到达梦" is not the customer approving 达梦.
     """
     client, store, svc, repo = app_env
     headers = login(client)
     p = _project(client, repo, headers)
     sm.record(store, p['id'], plugin_id='legacy-modernization', topic='目标数据库',
-              content='客户已批准迁移到达梦 8', actor='owner', status='active',
-              paths=['db/schema.sql'], commit_sha='a' * 40)
+              content='客户已批准迁移到达梦 8', actor='owner', kind='decision',
+              status='active', paths=['db/schema.sql'], commit_sha='a' * 40)
     sm.record(store, p['id'], plugin_id='legacy-modernization', topic='评估报告的建议',
               content='报告建议顺手升级到 SpringBoot3', actor='owner')
     block = sm.constraints_block(sm.recall(store, p['id']))
-    assert '客户已批准迁移到达梦 8' in block
+    binding = _binding_section(block)
+    # The confirmed decision is binding, with its scope and code version.
+    assert '客户已批准迁移到达梦 8' in binding
     assert '适用：db/schema.sql' in block and 'aaaaaaaaaaaa' in block
-    assert '[信创] 评估报告的建议' in block
-    assert '报告建议顺手升级到 SpringBoot3' not in block
+    # The unconfirmed suggestion is present and readable...
+    assert '报告建议顺手升级到 SpringBoot3' in block
+    # ...but not under the heading that says "must obey".
+    assert '报告建议顺手升级到 SpringBoot3' not in binding
     assert '不作为依据' in block
 
 
@@ -91,9 +109,12 @@ def test_a_maintenance_task_carries_the_projects_confirmed_constraints(app_env):
     client, store, svc, repo = app_env
     headers = login(client)
     p = _project(client, repo, headers)
+    # Binding: a confirmed decision. ``status='active'`` alone is not enough --
+    # a confirmed *fact* is background, and folding the two together is what
+    # turned every confirmed row into an order in the first version.
     sm.record(store, p['id'], plugin_id='issue-maintenance', topic='数据库兼容',
               content='所有 SQL 必须同时兼容达梦 8 与 MySQL 5.7', actor='owner',
-              status='active')
+              kind='decision', status='active')
     sm.record(store, p['id'], plugin_id='issue-maintenance', topic='待确认的猜测',
               content='怀疑是连接池配置问题', actor='owner')
 
@@ -101,9 +122,14 @@ def test_a_maintenance_task_carries_the_projects_confirmed_constraints(app_env):
                           json=_valid_request(p, _base_sha(repo)), headers=headers)
     assert created.status_code == 201, created.text
     run = store.get(created.json()['execution_id'])
-    assert '所有 SQL 必须同时兼容达梦 8 与 MySQL 5.7' in run['request']
-    assert '[运维] 待确认的猜测' in run['request']
-    assert '怀疑是连接池配置问题' not in run['request']
+    binding = _binding_section(run['request'])
+    assert '所有 SQL 必须同时兼容达梦 8 与 MySQL 5.7' in binding
+    # The unconfirmed guess travels as readable context, never as a requirement.
+    assert '怀疑是连接池配置问题' in run['request']
+    assert '怀疑是连接池配置问题' not in binding
+    # And the dispatch froze exactly what it loaded.
+    refs = run['source']['memory_refs']
+    assert {r['role'] for r in refs} == {'constraint', 'observation'}
 
 
 def test_the_next_task_on_the_same_project_reuses_the_same_memory(app_env):
@@ -113,7 +139,7 @@ def test_the_next_task_on_the_same_project_reuses_the_same_memory(app_env):
     p = _project(client, repo, headers)
     sm.record(store, p['id'], plugin_id='issue-maintenance', topic='数据库兼容',
               content='所有 SQL 必须同时兼容达梦 8 与 MySQL 5.7', actor='owner',
-              status='active')
+              kind='decision', status='active')
     first = client.post('/api/v2/maintenance/tasks',
                         json=_valid_request(p, _base_sha(repo), key='first-task-key'),
                         headers=headers)
@@ -143,3 +169,90 @@ def test_a_constraint_confirmed_after_intake_still_reaches_the_task(app_env):
                           json=_valid_request(p, _base_sha(repo)), headers=headers)
     assert created.status_code == 201, created.text
     assert 'SQL 必须兼容达梦 8' in store.get(created.json()['execution_id'])['request']
+
+
+def test_what_a_running_task_was_dispatched_against_does_not_move(app_env):
+    """A confirmation made after dispatch must not rewrite the running task's basis.
+
+    New requirements are supposed to arrive through the supplement/revision
+    flow, where a human sees them land. Silently changing what an in-flight run
+    is being judged against is the opposite: the run keeps going, and the
+    record of why it did what it did becomes untrue.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='数据库兼容',
+              content='SQL 必须兼容达梦 8', actor='owner', kind='decision',
+              status='active')
+
+    created = client.post('/api/v2/maintenance/tasks',
+                          json=_valid_request(p, _base_sha(repo)), headers=headers)
+    assert created.status_code == 201, created.text
+    task_id = created.json()['task_id']
+
+    frozen = client.get(f'/api/v2/maintenance/tasks/{task_id}',
+                        headers=headers).json()['project_memory']
+    assert frozen['frozen'] is True, frozen
+    loaded_keys = {e['key'] for e in frozen['entries']}
+    assert len(loaded_keys) == 1
+
+    # A brand-new requirement is confirmed while the task is already running.
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='新要求',
+              content='导出必须保留两位小数', actor='owner', kind='decision',
+              status='active')
+
+    after = client.get(f'/api/v2/maintenance/tasks/{task_id}',
+                       headers=headers).json()['project_memory']
+    assert after['frozen'] is True
+    assert {e['key'] for e in after['entries']} == loaded_keys, \
+        '已经派发的任务不能因为项目后来确认了新要求就改变依据'
+    # The project does know the new requirement -- it is simply not this run's basis.
+    assert len(sm.recall(store, p['id'], confirmed_only=True)) == 2
+
+
+def test_an_out_of_scope_requirement_is_not_loaded_but_is_counted(app_env):
+    """Confirming something does not make it every task's problem.
+
+    A requirement scoped to ``db/`` is not a requirement about a change in
+    ``web/``. It is left out of the prompt and reported as left out, so the
+    reader can tell "not relevant here" from "the project never said this".
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='数据库兼容',
+              content='SQL 必须兼容达梦 8', actor='owner', kind='decision',
+              status='active', paths=['db/schema.sql'])
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='全局要求',
+              content='所有改动都要带回归测试', actor='owner', kind='decision',
+              status='active')
+
+    loaded = sm.load_for_task(store, p['id'], scope_paths=('web/report.py',))
+    titles = {e['title'] for e in loaded['entries']}
+    assert '[运维] 全局要求' in titles, '没有声明范围的要求对每次改动都适用'
+    assert '[运维] 数据库兼容' not in titles
+    assert any(d['reason'] == 'out_of_scope' for d in loaded['dropped'])
+    assert '适用范围与本次改动无关' in loaded['block']
+
+
+def test_memory_past_the_budget_is_dropped_loudly_and_requirements_go_first(app_env):
+    """A large project must not push the task out of the window silently."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    p = _project(client, repo, headers)
+    sm.record(store, p['id'], plugin_id='issue-maintenance', topic='关键要求',
+              content='必须保留两位小数', actor='owner', kind='decision',
+              status='active')
+    for i in range(12):
+        sm.record(store, p['id'], plugin_id='issue-maintenance',
+                  topic=f'历史观察{i}', content='x' * 400, actor='owner')
+
+    loaded = sm.load_for_task(store, p['id'], budget_chars=1200)
+    titles = [e['title'] for e in loaded['entries']]
+    # The binding requirement survives the budget; observations are what go.
+    assert '[运维] 关键要求' in titles
+    assert len(titles) < 13
+    assert any(d['reason'] == 'budget' for d in loaded['dropped'])
+    assert '因长度上限未加载' in loaded['block']
+    assert '不要假设它们不存在' in loaded['block']

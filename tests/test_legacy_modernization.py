@@ -100,7 +100,12 @@ def test_confirm_dimension_promotes_without_losing_the_others(store_project):
 
     block = scenario_memory.constraints_block(
         scenario_memory.recall(store, project['id']))
-    assert '已确认的长期约束' in block and '达梦' in block.split('不作为依据')[0]
+    # Heading text moved when the renderer learned to tell a confirmed
+    # requirement from a confirmed fact; the property is unchanged --
+    # 达梦 is binding, the unconfirmed JDK suggestion is not.
+    assert '本次必须遵守' in block
+    assert '达梦' in block.split('不作为依据')[0]
+    assert 'Java17/SpringBoot3' not in block.split('不作为依据')[0]
 
 
 def test_confirm_dimension_without_a_prior_target_is_refused(store_project):

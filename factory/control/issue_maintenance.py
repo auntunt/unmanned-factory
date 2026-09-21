@@ -484,37 +484,45 @@ class MaintenanceTasks:
             'delivery': delivery,
             'receipts': receipts,
             'created_at': record['created_at'],
-            'project_memory': self._project_memory(record['project_id']),
+            'project_memory': self._project_memory(record),
         }
 
-    def _project_memory(self, project_id) -> list[dict]:
-        """What this task's project currently knows, in the data rather than only
-        in a past prompt.
+    def _project_memory(self, record) -> dict:
+        """What this task was run against, or -- failing that -- what the project
+        knows now, labelled so the two are never confused.
 
-        This is the same cross-scenario read ``WebuddyExecution.submit`` makes
-        before dispatch (``scenario_memory.recall`` with no ``plugin_id``), so a
-        person or a later task looking at this task's view sees what the project
-        remembers without having to go re-read an old executor prompt for it.
-        It is read live, and the field is named for that: it is what the project
-        knows *now*, not the set this task's dispatch actually carried. The two
-        differ whenever a constraint is confirmed after dispatch, and calling it
-        a reference would be a claim about the past that nothing here can back.
-        The receipt deliberately does not carry this field for the same reason --
-        a frozen delivery record must not quote a value that keeps moving.
-
-        A project with no memory yet, or knowledge that failed to load, renders
-        as an empty list: reading what the project remembers must not be a way
-        to break reading the task itself.
+        ``frozen`` is the whole point. A dispatch records the (key, revision)
+        pairs it actually carried; those name append-only versions, so they are
+        a fact about the past. A live re-read answers a different question, and
+        presenting it as "what this task referenced" would be a claim nothing
+        can back. When no frozen set exists (an older run, or an execution port
+        that does not record one) the live read is returned with
+        ``frozen: False`` and a reason, rather than silently standing in for it.
         """
         from factory.control import scenario_memory
+        execution_id = record.get('execution_id')
+        getter = getattr(self.execution, 'loaded_memory', None)
+        frozen = None
+        if execution_id and callable(getter):
+            try:
+                frozen = getter(execution_id)
+            except Exception:  # noqa: BLE001 - reading memory must not break the view
+                frozen = None
+        if frozen is not None:
+            return {'frozen': True, 'reason': None, 'entries': list(frozen)}
+        reason = ('这次执行没有记录派发时装载的记忆，下面是项目当前的记忆，'
+                  '不是本任务实际依据')
         try:
-            entries = scenario_memory.recall(self.records.store, project_id)
+            entries = scenario_memory.recall(self.records.store, record['project_id'])
         except (KeyError, ValueError):
-            return []
-        return [{'key': entry['key'], 'title': entry['title'],
-                 'status': entry['status'], 'kind': entry['kind'],
-                 'paths': entry['paths'], 'commit_sha': entry.get('commit_sha'),
-                 'revision': entry['revision']} for entry in entries]
+            return {'frozen': False, 'reason': '项目记忆读不到', 'entries': []}
+        return {'frozen': False, 'reason': reason,
+                'entries': [{'key': e['key'], 'title': e['title'],
+                             'status': e['status'], 'kind': e['kind'],
+                             'role': scenario_memory.role_of(e),
+                             'paths': e['paths'],
+                             'commit_sha': e.get('commit_sha'),
+                             'revision': e['revision']} for e in entries]}
 
     #: Event kinds that explain a stop, sharing the vocabulary the existing
     #: attention surface already reads (``autonomy_routes`` treats ``run.recovered``
