@@ -130,9 +130,28 @@ class WebuddyExecution:
                     'synthetic': record.get('synthetic', False)},
             delivery_id=f"maintenance:{record['id']}",
             semantic_id=f"maintenance:{record['project_id']}:{record['content_fingerprint']}")
-        if created:
+        if created or not self._dispatched(run):
             self.dispatch(run['id'])
         return run['id']
+
+    def _dispatched(self, run) -> bool:
+        """Has this run ever been handed to the durable queue?
+
+        ``create_run`` deduplicates on the task's delivery key, so a retry after
+        an interrupted submit gets the same run back with ``created`` False. That
+        answers "does an execution exist", not "was it ever dispatched", and
+        treating the two as one left a run that was built and then never queued
+        sitting in ``received`` with nothing coming for it.
+
+        The queue's own table is the durable record of dispatch, so it is the one
+        asked -- no second scheduler, and no guess from elapsed time. A run that
+        has already left ``received`` was plainly dispatched, which also covers a
+        queue row that some other recovery path has since rewritten.
+        """
+        if run.get('status') != 'received':
+            return True
+        from factory.control.autonomy import DurableQueue
+        return bool(DurableQueue(self.store).jobs(run['id']))
 
     def _run(self, execution_id) -> dict:
         run = self.store.get(execution_id)

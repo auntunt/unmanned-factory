@@ -162,6 +162,18 @@ class DurableQueue:
         with self.store.connect() as db:
             db.execute("UPDATE control_jobs SET status='done',at=? WHERE run_id=?", (now(), rid))
 
+    def jobs(self, rid):
+        """Every queue row this run ever had, terminal ones included.
+
+        A caller reconciling an interrupted dispatch needs to know whether the
+        run was ever handed to the queue at all -- which is a different question
+        from whether it is waiting right now, and the only one that distinguishes
+        "execution built but never queued" from "already queued".
+        """
+        with self.store.connect() as db:
+            return [dict(row) for row in db.execute(
+                'SELECT run_id,phase,status,generation FROM control_jobs WHERE run_id=?', (rid,))]
+
     def pending(self):
         with self.store.connect() as db:
             return [dict(row) for row in db.execute("SELECT run_id,phase FROM control_jobs WHERE status='pending' ORDER BY at LIMIT 16")]

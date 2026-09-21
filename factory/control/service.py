@@ -80,7 +80,6 @@ class Service:
                 status TEXT NOT NULL, result TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS maintenance_jobs_conversation ON maintenance_jobs(conversation_id,status);
             """)
-            db.execute("UPDATE maintenance_jobs SET status='interrupted',error='服务重启时没有收到回执',updated_at=? WHERE status IN ('pending','running','cancel_requested')", (now(),))
         self.stopping = threading.Event()
         self.wake = threading.Event()
         self.scheduler = None
@@ -295,6 +294,23 @@ class Service:
     def _record_interrupted_provider_usage(self, run):
         'Close each in-flight provider lane with a durable unknown-cost hold.'
         return run_billing._record_interrupted_provider_usage(self, run)
+
+    def recover_maintenance_jobs(self):
+        """Startup recovery for background maintenance turns, as its own step.
+
+        This used to run inside ``__init__``, which made *building a client over
+        the database* indistinguishable from *restarting the service*: the
+        standalone CLI opening the same control.db to list tasks would mark every
+        live job ``interrupted``, killing work that was still running in the real
+        service. Construction is not a restart, so the sweep moved here, where
+        only a process that is actually taking over calls it.
+
+        Idempotent: it only touches jobs that are still non-terminal, so the
+        startup path may call it more than once without inventing a second
+        interruption.
+        """
+        with self.store.connect() as db:
+            db.execute("UPDATE maintenance_jobs SET status='interrupted',error='服务重启时没有收到回执',updated_at=? WHERE status IN ('pending','running','cancel_requested')", (now(),))
 
     def recover(self):
         'Recover unstarted work automatically; preserve ambiguous writes for reconciliation.'

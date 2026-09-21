@@ -318,16 +318,38 @@ class MaintenanceTasks:
         key = f"maintenance:{normalized['project_id']}:{normalized['idempotency_key']}"
         record, created = self.records.claim(key, normalized,
                                             content_fingerprint(normalized))
-        if not created:
-            return self.get(record['id'], actor=actor)
-        try:
-            execution_id = self.execution.submit(record, actor=actor)
-        except Exception:
-            # The key stays claimed on purpose: a retry must find this task, not
-            # dispatch a second one. The task simply has no execution yet.
-            raise
-        self.records.link(record['id'], {'execution_id': execution_id})
+        self._bind_execution(record, actor=actor)
         return self.get(record['id'], actor=actor)
+
+    def _bind_execution(self, record, *, actor) -> dict:
+        """Give a claimed task its execution, whether or not this call claimed it.
+
+        Claiming the idempotency key and dispatching the work are two writes, and
+        nothing can make them one: the execution lives outside this module. So the
+        recoverable shape is for the registration to be able to survive alone and
+        for a retry to finish it. Before, only the call that created the record
+        submitted; a dispatch failure therefore burned the key and left a task
+        that said "received" forever with no execution to resume, cancel or
+        reconcile, and every retry took the ``already claimed`` path straight back
+        to that same dead record.
+
+        Re-submitting is safe because ``submit`` is keyed on this task's own id:
+        the adapter's ``create_run`` dedup returns the execution that already
+        exists instead of buying a second one, so the three interrupted windows --
+        no execution yet, execution built but never queued, queued but never
+        linked here -- all converge on the same execution. A task that already
+        carries a reference never submits again, which is what keeps a plain
+        repeat import from dispatching twice.
+
+        The actor is the caller finishing the binding, who has just passed the
+        same identity check the original submitter passed. Only the first
+        successful submit reaches the execution side, so this cannot rewrite an
+        existing execution's recorded submitter.
+        """
+        if record.get('execution_id'):
+            return record
+        execution_id = self.execution.submit(record, actor=actor)
+        return self.records.link(record['id'], {'execution_id': execution_id})
 
     def revise(self, task_id, request, *, actor) -> dict:
         """Reopen/update: a new revision that points back, never an overwrite.
@@ -349,10 +371,7 @@ class MaintenanceTasks:
         key = f"maintenance:{normalized['project_id']}:{normalized['idempotency_key']}"
         record, created = self.records.claim(key, normalized, fingerprint,
                                             predecessor=previous)
-        if not created:
-            return self.get(record['id'], actor=actor)
-        execution_id = self.execution.submit(record, actor=actor)
-        self.records.link(record['id'], {'execution_id': execution_id})
+        self._bind_execution(record, actor=actor)
         return self.get(record['id'], actor=actor)
 
     # -- reading ----------------------------------------------------------

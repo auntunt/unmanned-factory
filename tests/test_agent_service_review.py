@@ -142,11 +142,21 @@ def test_managed_workspace_verifier_requires_functional_evidence_without_agent(a
 
 
 def test_restart_marks_unacknowledged_job_interrupted(app_env):
+    """A restart still retires an unacknowledged job -- but building a client does not.
+
+    This used to assert that constructing ``Service`` interrupted the job, because
+    the sweep lived in ``__init__``. That made every process that merely opened the
+    same control.db a restart: the standalone maintenance CLI listing tasks killed
+    jobs the real service was still running. The behaviour under test is unchanged
+    and still asserted; what changed is that a restart now has to say so.
+    """
     _, store, service, _ = app_env
     with store.connect() as db:
         db.execute("INSERT INTO maintenance_jobs VALUES('interrupted-job','conversation',1,'running',NULL,NULL,'before','before')")
     another = Service(store, runner=service.runner, profiles=service.profiles)
     try:
+        assert another.maintenance_status('interrupted-job')['status'] == 'running'
+        another.recover_maintenance_jobs()
         assert another.maintenance_status('interrupted-job')['status'] == 'interrupted'
     finally:
         another.close()

@@ -99,6 +99,16 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     governance = Governance(auth, store)
     svc.governance = governance
     svc.targets.workspace_root = allowed_root
+    # Building the web application is a service start. The maintenance-job sweep
+    # used to happen in ``Service.__init__`` and therefore already ran by this
+    # point; ``pack_router`` below reconciles pack tasks against those job states
+    # while it is being constructed, so the sweep has to stay ahead of it rather
+    # than move to ``lifespan``. ``svc.recover()`` calls it again and finds
+    # nothing left to do.
+    # ``hasattr`` for the same reason ``lifespan`` guards ``recover``: an
+    # injected test double is not required to implement the whole service.
+    if hasattr(svc, 'recover_maintenance_jobs'):
+        svc.recover_maintenance_jobs()
     # Runtime settings are persisted in the control store. Root may initialize
     # this on Service; keeping the fallback here preserves compatibility with
     # injected test services and older callers.

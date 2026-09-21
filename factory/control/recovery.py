@@ -76,6 +76,10 @@ def recover(self):
     """Recover unstarted work automatically; preserve ambiguous writes for reconciliation."""
     with self.lock:
         self.queue.acquire()
+        # Only a process that took the worker lock is the one taking over, so
+        # this is where unacknowledged maintenance turns are retired -- not in
+        # ``Service.__init__``, where merely opening the database did it.
+        self.recover_maintenance_jobs()
         if self.governance is not None:
             self.governance.recover()
         for run in self.store.all_runs():

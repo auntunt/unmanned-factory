@@ -531,9 +531,55 @@ $PY -m pytest -q -p no:randomly -m "not smoke" \
 - 未适配结构化回执的目标保持旧命令兼容；未知响应不自动重发。
   普通命令的 exit 0 与一次查询确认是两种不同证据。
 
+### M3 补修 R1（Codex 对 `52c19db` 的两条 P1）
+
+原复现 `tests/test_codex_m3_review.py` 逐字节照抄，断言未改；在 `52c19db` 上
+**2 failed / 0.64s**。
+
+**R1 建立客户端 ≠ 服务重启。** `Service.__init__` 里那条把 pending/running/
+cancel_requested 的 `maintenance_jobs` 一律改写成 `interrupted` 的 UPDATE，是服务重启
+恢复动作，却挂在构造函数上：独立 CLI 只是打开同一个 control.db 读任务列表，就把真实
+服务正在跑的作业判死。清算动作移到 `Service.recover_maintenance_jobs()`，只由真正接管
+的路径调用——`recovery.recover()` 在拿到 worker 锁之后调一次，`create_app()` 在构建
+路由之前调一次。之所以不只放在 `lifespan`：`pack_router` 是在构建期按 job 状态对账
+pack 任务的，清算必须排在它前面，否则上一进程随之而死的 pack 任务会永远停在「处理
+中」。该方法只改非终态行，重复调用不会造出第二次中断。
+
+**R2 登记与派发之间被中断，不再留下永久孤儿。** `create` 先 claim 幂等键再 submit，
+中间失败会烧掉键，留下一个永远 `received`、没有执行可恢复/取消/对账的任务，之后每次
+重试都走「已登记」分支回到同一条死记录。改为 claim 与绑定分离：`_bind_execution` 对
+任何还没有执行引用的已登记任务补派发，已有引用的绝不再 submit（普通重复导入的行为不
+变）。三个窗口靠既有机制收敛到同一次执行——`create_run` 按任务 id 去重，
+`WebuddyExecution._dispatched` 改问 `DurableQueue.jobs(rid)`（新增只读方法）而不是靠
+`created` 标志，这样「执行已建立但从没入队」与「已入队」才分得开。没有第二套调度，
+没有计时器。
+
+实跑（`v3-skills-icons/.venv/bin/python`，`-m "not smoke"`）：
+
+```
+tests/test_codex_m3_review.py                     2 passed / 0.67s   (原 2 failed)
+5 个既有 maintenance 集 + 新集 + agent_service_review + pack_api_durability
+  + capability_packs + restart_same_site                130 passed / 61.77s
+control_app + auto_consume + operation_workflows + continuous_service
+                                                       86 passed / 68.46s
+```
+
+新增 `tests/test_issue_maintenance_dispatch_recovery.py`（7 条）用真实 `Store`、真实
+`create_run` 去重、真实 `DurableQueue`，不是 fake 端口重试：三个窗口各一条，断言重试
+后维护类 run 恰好 1 条、队列条目恰好 1 条且 generation 仍为 1、派发计数不涨；另三条
+锁住 R1 的两个方向（构造客户端不清算 / `recover()` 与 `create_app()` 仍清算）。回退产品
+改动后，这 7 条中 6 条变红，仅「普通重复导入」一条本就是行为不变的守卫。
+
+`tests/test_agent_service_review.py::test_restart_marks_unacknowledged_job_interrupted`
+的行为断言保留不变，只把「重启」从「构造一个 Service」改写成显式的启动恢复调用，并加
+了构造不清算的反向断言——原写法正是把构造当重启的那条耦合。
+
+未验证项照旧：真实 SDK 进程树、Linux、真实目标脚本回执归 M5；CLI `create` 入队后由真实
+运行中的 service 领取执行仍未实测，登记入队不等于执行完成。
+
 ## 下一步
 
-M3 五条完成线已落地（`0e7f006`、`59ad7a2`），候选分支 `codex/operations-20260921` 交
-Codex 复核。真实 SDK 进程树、Linux、真实服务器与真实目标脚本回执仍归 M5，本轮未触及。
+M3 补修已落地，候选分支 `codex/operations-20260921` 交 Codex 复核，未进入 M4、未部署。
+真实 SDK 进程树、Linux、真实服务器与真实目标脚本回执仍归 M5。
 `docs/implementation/webuddy-operations/issue-maintenance.md`（使用说明，规格里标为可选）
 尚未写。
