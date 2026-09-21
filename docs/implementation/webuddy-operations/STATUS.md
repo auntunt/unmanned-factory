@@ -718,3 +718,72 @@ M3 补修已落地，候选分支 `codex/operations-20260921` 交 Codex 复核�
 真实 SDK 进程树、Linux、真实服务器与真实目标脚本回执仍归 M5。
 `docs/implementation/webuddy-operations/issue-maintenance.md`（使用说明，规格里标为可选）
 尚未写。
+
+## 功能优先一轮：维护任务可在网页跑完（F1/F2/F3）
+
+基线 `146ca26`。按 CLAUDE-FUNCTION-FIRST.md 执行，按互斥文件范围并行，主会话集成。
+
+### 分工与实际模型
+
+三个执行者按 Sonnet 请求派出，**可信元数据显示实际都是 `claude-opus-4-6`**，不是 Sonnet；
+主会话是 `claude-opus-5`。如实记录，不冒称。
+
+- A（后端）：`factory/control/maintenance_routes.py`、`app.py` 的 include_router、
+  `tests/test_maintenance_routes.py`
+- B（前端）：`frontend/src/workbench/Maintenance*.tsx` 与测试、`App.tsx`、`nav-config.ts`
+- C（内容）：`builtin_packs/packs/issue-maintenance|api-adaptation/`、
+  `builtin_packs/modules/{repository-orientation,behavior-verification,controlled-delivery}.json`
+
+### 集成时发现并修掉的真实缺陷
+
+这些只有连上真实后端才暴露，三方各自的定向测试都是绿的：
+
+1. **创建请求形状不符**：前端把基线包成 `baseline: {...}` 且不发 `agreement`，端口要求
+   扁平的 `repository`/`base_sha` 和 `agreement`，真实提交回 422。改为扁平字段；新增
+   `GET /api/v2/maintenance/agreement`，方法版本由服务端从已安装的包读出（
+   `issue-maintenance@1`），不由表单编。
+2. **补充回执是假的**：路由硬编码 `applied: true`。实际上人工节点上的补充只是
+   `followup.pending`，运行恢复后才 `followup.applied`。改为复用 `run_routes._followup_status`
+   读事件，回执与任务视图都带真实的 待应用/已应用/已过期，刷新后仍在。
+3. **列表请求缺 project_id**：后端按项目授权，前端不带参数会被拒。列表改成按项目查看，
+   加项目选择器；没有可见项目时说明原因，不去请求无授权范围。
+4. **执行阶段渲染不出来**：端口给的是 `{step, state}`，前端读 `step.name`，页面上只剩裸的
+   `pending`。改为 SOP 中文步骤名 + 中文状态；列表「阶段」列改为显示当前步骤而不是最后一步。
+5. **「继续执行」点了必然被拒**：停在没有 plan 的人工节点时 resume 一定 Conflict。视图新增
+   `resumable`，由服务端判断，按钮据此显示。
+6. **计划批准节点无处可批**：Web 建的维护任务会停在 `awaiting_approval`，维护页面没有出口。
+   新增 `POST /tasks/{id}/approve`（复用 `svc.approve`，走同一套项目授权）与
+   `pending_plan`（标题、摘要、每个任务改哪些文件、跑哪些检查），页面显示后才能批准。
+7. **阻塞原因写成 unknown**：等待批准不在端口的 `BLOCKING_EVENTS` 里，页面显示"没有可引用的
+   原因"。路由在有 `pending_plan` 时把原因改成 `approval.required` 并说明。
+8. `tests/test_builtin_agent_packs.py` 的三处 `== 6` 改为 `== 8`（确实新增两个包）。
+
+### 真实后端演示（本地，合成仓库 + 明确标注的假模型）
+
+`python demo_server.py` 起真实 uvicorn + 真实 `Service` + 真实 SQLite + `frontend/dist`：
+
+1. 合成遗留仓库基线上 `pytest` 真的失败（`BASELINE_FAILS True`）；
+2. 网页登录 → 工程总览 → 维护任务 → 新建任务，表单显示「本次适用方法：Issue 维护
+   （issue-maintenance@1，template-unbenchmarked）」；
+3. 提交 201，常驻服务真实领取，状态 已接收 → 等待中（等待批准），页面列出待批准计划：
+   改动 `report.py`、跑 `report` 检查；
+4. 批准后执行，项目自己配置的检查真实运行并通过（exit 0），产生真实 commit
+   `5589a779aa3b...`，状态 已交付；
+5. 导出回执含 issue 摘要、基线、commit、diff hash、构建物名与适用约定版本；
+6. `GET .../artifacts/maintenance-*.patch` 返回 602 字节真实 `git format-patch` 内容。
+
+模型是假的，所以这**不是** coding 质量验收；HTTP、持久化、队列领取、检查执行、界面都是真的。
+
+### 本轮跑过的检查
+
+- 后端定向 160 passed（维护路由/维护领域六套/control_app/run_followup/内置包/skill 上传/mfd）
+- 前端 `npx vitest run src/workbench/Maintenance*.test.tsx src/conversation` 131 passed
+- 一次 `npm run build` 成功
+- 未跑：全量、变异、重复十连、无关套件
+
+### 未做与已知边界
+
+- 真实模型、Linux、服务器发布仍归 Codex/M5，本轮不部署、不访问服务器。
+- 两个新方法包 `validation_status` 仍是 `template-unbenchmarked`，缺客户资料的部分在包内
+  写明缺什么、阻塞什么，不宣称客户业务已验证。
+- 其余广泛测试工程记入 `TEST-FOLLOWUP.md`。

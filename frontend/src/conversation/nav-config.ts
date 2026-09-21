@@ -19,7 +19,7 @@ export interface GroupTab { to: string; label: string; end?: boolean; adminOnly?
 export const GROUP_TABS: Record<'engineering' | 'agents' | 'settings', GroupTab[]> = {
   engineering: [
     { to: '/overview', label: '总览', end: true }, { to: '/projects', label: '项目' },
-    { to: '/runs', label: '运行记录', end: true }, { to: '/costs', label: '用量与预算', adminOnly: true }, { to: '/team', label: '团队', adminOnly: true },
+    { to: '/runs', label: '运行记录', end: true }, { to: '/maintenance', label: '维护任务', end: true }, { to: '/costs', label: '用量与预算', adminOnly: true }, { to: '/team', label: '团队', adminOnly: true },
   ],
   // 能力围绕某个职能体管理，不再有并列的「能力库」页签。旧能力页面仍可直达，
   // 但作为无主导航的兼容次级页面，归属在「职能体」下。
@@ -61,6 +61,8 @@ export function resolveRoute(pathname: string): Resolved {
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
   if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
   if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }
+  if (is('/maintenance')) return { activeKey: 'engineering', title: '维护任务', group: 'engineering', activeTab: '/maintenance', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '维护任务' }] }
+  if (is('/maintenance/:taskId')) return { activeKey: 'engineering', title: '维护任务详情', usesWorkTitle: true, group: 'engineering', activeTab: '/maintenance', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '维护任务', to: '/maintenance' }, { label: '详情' }] }
   if (is('/runs')) return { activeKey: 'engineering', title: '运行记录', group: 'engineering', activeTab: '/runs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '运行记录' }] }
   if (is('/costs')) return { activeKey: 'engineering', title: '用量与预算', group: 'engineering', activeTab: '/costs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '用量与预算' }] }
   if (is('/team')) return { activeKey: 'engineering', title: '团队', group: 'engineering', activeTab: '/team', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '团队' }] }

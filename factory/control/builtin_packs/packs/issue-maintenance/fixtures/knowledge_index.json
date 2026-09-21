@@ -1,0 +1,24 @@
+{
+  "project_id": "sample-project",
+  "modules": [
+    {
+      "name": "report-export",
+      "entry": "src/export/report_writer.py",
+      "responsibility": "报表导出，含 Excel/PDF 输出",
+      "build_command": "make build-export",
+      "test_command": "pytest tests/export/",
+      "customer_variants": ["default", "custom-header-A"]
+    },
+    {
+      "name": "billing-summary",
+      "entry": "src/billing/summary.py",
+      "responsibility": "月度/季度金额汇总计算",
+      "build_command": "make build-billing",
+      "test_command": "pytest tests/billing/"
+    }
+  ],
+  "constraints": [
+    "金额字段精度：数据库 DECIMAL(18,2)，前端显示 2 位，导出保持 2 位",
+    "导出格式：xlsx（openpyxl），单元格格式需显式设置数字格式"
+  ]
+}

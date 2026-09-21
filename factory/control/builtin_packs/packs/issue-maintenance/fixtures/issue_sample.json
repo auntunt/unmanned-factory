@@ -1,0 +1,13 @@
+{
+  "source": "manual-import",
+  "external_id": "SAMPLE-101",
+  "version": 1,
+  "title": "报表导出金额小数位截断",
+  "body": "客户反馈：月度汇总报表导出 Excel 后，合计金额列出现小数位截断（应为 2 位，实际只有整数）。影响范围：所有含小数金额的汇总行。复现条件：导出包含 0.5 元以下明细的月度汇总。",
+  "project_id": "sample-project",
+  "branch": "release/v2.3",
+  "base_sha": "abc1234",
+  "priority": "high",
+  "category": "defect",
+  "reproduction": "1. 创建含 0.01~0.99 元明细的测试数据 2. 执行月度汇总 3. 导出 Excel 4. 检查合计行金额列"
+}

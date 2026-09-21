@@ -11,6 +11,7 @@ import OverviewPage from './workbench/OverviewPage'
 import ProjectsPage from './workbench/ProjectsPage'
 import ProjectPage from './workbench/ProjectPage'
 import RunsPage from './workbench/RunsPage'
+import MaintenanceTasksPage from './workbench/MaintenanceTasksPage'
 import CostsPage from './workbench/CostsPage'
 import TeamPage from './workbench/TeamPage'
 import AgentsPage from './workbench/AgentsPage'
@@ -28,6 +29,7 @@ const RunWorkspace = lazy(() => import('./conversation/RunWorkspace'))
 const RuntimePage = lazy(() => import('./workbench/RuntimePage'))
 const RuntimeReadiness = lazy(() => import('./workbench/RuntimeReadiness'))
 const PackDetail = lazy(() => import('./workbench/PackDetail'))
+const MaintenanceTaskDetail = lazy(() => import('./workbench/MaintenanceTaskDetail'))
 
 interface AuthResponse {
   user: User
@@ -106,6 +108,8 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="projects" element={<ProjectsPage {...pageProps} />} />
       <Route path="projects/:projectId" element={<ProjectPage {...pageProps} />} />
       <Route path="runs" element={<RunsPage {...pageProps} />} />
+      <Route path="maintenance" element={<MaintenanceTasksPage {...pageProps} />} />
+      <Route path="maintenance/:taskId" element={<MaintenanceTaskDetail {...pageProps} />} />
       <Route path="costs" element={<CostsPage {...pageProps} />} />
       <Route path="team" element={<TeamPage {...pageProps} />} />
       <Route path="settings" element={<SettingsPage {...shell} />} />

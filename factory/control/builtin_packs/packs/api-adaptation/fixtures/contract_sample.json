@@ -1,0 +1,33 @@
+{
+  "source_api": {
+    "name": "Sample External API",
+    "version": "v2.1",
+    "base_url": "https://api.example.com/v2",
+    "auth": "Bearer token (OAuth2 client_credentials)",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/projects/{project_id}/items",
+        "description": "获取项目下的条目列表",
+        "params": {"page": "int", "size": "int (max 100)", "status": "enum: active|archived"},
+        "response_fields": ["id (string)", "name (string)", "amount (decimal, 2 places)", "status (enum)", "updated_at (ISO8601 UTC)"]
+      },
+      {
+        "method": "POST",
+        "path": "/projects/{project_id}/items",
+        "description": "创建条目",
+        "idempotency": "非幂等，无 idempotency-key",
+        "request_fields": ["name (required)", "amount (required, decimal)", "metadata (optional, object)"]
+      }
+    ],
+    "rate_limit": "100 req/min per token",
+    "error_codes": ["400 validation", "401 unauthorized", "404 not found", "429 rate limited", "500 internal"]
+  },
+  "target_adapter": {
+    "name": "Sample Adapter Interface",
+    "entry": "src/adapter/base.py",
+    "methods": ["list_items(project_id, filters) -> ItemList", "create_item(project_id, payload) -> Item"],
+    "notes": "现有 Adapter 接口，新 API 需映射到此契约"
+  },
+  "_note": "此为格式示例。真实接口文档（如 GP Server OpenAPI）尚未获取，需客户提供后替换。"
+}

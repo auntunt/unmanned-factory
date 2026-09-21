@@ -1,0 +1,36 @@
+{
+  "mapping_matrix": [
+    {
+      "source_field": "id",
+      "target_field": "item_id",
+      "transform": "直接映射",
+      "notes": "类型一致 (string)"
+    },
+    {
+      "source_field": "amount",
+      "target_field": "total_amount",
+      "transform": "精度对齐：源 2 位小数，目标 4 位小数，需补零",
+      "notes": "精度差异需验证不丢失"
+    },
+    {
+      "source_field": "updated_at",
+      "target_field": "last_modified",
+      "transform": "时区转换：源 UTC，目标需转 Asia/Shanghai",
+      "notes": "夏令时不适用中国时区"
+    },
+    {
+      "source_field": "status=archived",
+      "target_field": "is_active=false",
+      "transform": "枚举映射：active->true, archived->false",
+      "notes": "源有未知枚举值时目标设 null 并记录警告，不静默丢弃"
+    }
+  ],
+  "unmappable": [
+    {
+      "field": "metadata",
+      "reason": "目标 Adapter 无对应字段，需确认是否丢弃或扩展目标接口",
+      "decision": "待客户确认"
+    }
+  ],
+  "_note": "此为格式示例。真实字段映射需基于实际 GP Server OpenAPI 与 Adapter 规范。"
+}
