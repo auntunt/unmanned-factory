@@ -295,6 +295,32 @@ class Service:
         'Close each in-flight provider lane with a durable unknown-cost hold.'
         return run_billing._record_interrupted_provider_usage(self, run)
 
+    def claim_startup_recovery(self) -> bool:
+        """Take ownership of this database, then retire unacknowledged turns.
+
+        Recovery is a write only the single owner may perform, so ownership has
+        to be established first rather than assumed. ``DurableQueue`` already is
+        that single-writer boundary; this reuses it instead of adding a second
+        lock, and acquiring is idempotent, so the later ``recover()`` in the
+        application's lifespan finds the lock already held rather than fighting
+        for it.
+
+        A contender that loses simply does not recover: it returns without
+        touching a single row. The refusal is not swallowed -- it is raised where
+        the application actually starts, by the ``recover()`` that cannot proceed
+        without the lock, which is the conflict a human already knows.
+
+        Returns whether *this call* acquired the lock, so a caller that fails
+        afterwards knows whether releasing it is its business or someone else's.
+        """
+        held_before = self.queue.handle is not None
+        try:
+            self.queue.acquire()
+        except Conflict:
+            return False
+        self.recover_maintenance_jobs()
+        return not held_before
+
     def recover_maintenance_jobs(self):
         """Startup recovery for background maintenance turns, as its own step.
 

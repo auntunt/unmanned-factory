@@ -144,6 +144,113 @@ def test_building_the_web_app_retires_jobs_before_pack_reconciliation(tmp_path):
         svc.close()
 
 
+def test_a_start_that_loses_the_writer_lock_recovers_nothing(tmp_path):
+    """The second service is a contender, not a successor.
+
+    Moving the sweep out of ``Service.__init__`` into ``create_app`` only moved
+    the violation if building an app is enough to perform it: a second web
+    process racing to start would still retire the live process's jobs. Recovery
+    is a write reserved for whoever holds the durable queue's lock, so the losing
+    start has to come away having changed nothing.
+    """
+    store = Store(tmp_path / 'control.db')
+    active = _service(store)
+    contender = None
+    try:
+        active.recover()  # this process owns the database
+        with store.connect() as db:
+            db.execute(LIVE_JOB)
+        contender = Service(store, runner=_NeverRuns(), profiles=_profiles())
+        create_app(data_dir=tmp_path / 'data', workspace_root=tmp_path / 'repos',
+                   public_origin='http://testserver', service=contender,
+                   webhook_secret='test-webhook-secret')
+        assert active.maintenance_status('live-job')['status'] == 'running', (
+            '没有拿到写入锁的启动方不能执行重启恢复')
+        assert contender.queue.handle is None, '竞争失败的一方不应持有锁'
+    finally:
+        if contender is not None:
+            contender.close()
+        active.close()
+
+
+def test_the_losing_start_is_told_another_factory_owns_the_database(tmp_path):
+    """Recovering nothing must not mean starting quietly as a second writer.
+
+    Skipping the sweep is only half the answer: a contender that then served
+    requests would be the second coordinator the lock exists to prevent. The
+    refusal is the one the queue already raises, surfaced where the application
+    really starts.
+    """
+    from fastapi.testclient import TestClient
+    from factory.control.store import Conflict
+
+    store = Store(tmp_path / 'control.db')
+    active = _service(store)
+    contender = None
+    try:
+        active.recover()
+        contender = Service(store, runner=_NeverRuns(), profiles=_profiles())
+        app = create_app(data_dir=tmp_path / 'data', workspace_root=tmp_path / 'repos',
+                         public_origin='http://testserver', service=contender,
+                         webhook_secret='test-webhook-secret')
+        with pytest.raises(Conflict) as refused:
+            with TestClient(app):
+                pass  # pragma: no cover - entering means the race was allowed
+        assert '已有工厂进程' in str(refused.value), str(refused.value)
+    finally:
+        if contender is not None:
+            contender.close()
+        active.close()
+
+
+def test_the_owner_can_acquire_again_in_lifespan(tmp_path):
+    """The claim is idempotent, or the winner would refuse its own startup."""
+    store = Store(tmp_path / 'control.db')
+    svc = _service(store)
+    try:
+        with store.connect() as db:
+            db.execute(LIVE_JOB)
+        create_app(data_dir=tmp_path / 'data', workspace_root=tmp_path / 'repos',
+                   public_origin='http://testserver', service=svc,
+                   webhook_secret='test-webhook-secret')
+        assert svc.queue.handle is not None, '赢家应当持有锁'
+        assert svc.maintenance_status('live-job')['status'] == 'interrupted'
+        svc.recover()  # lifespan's path, on a lock this service already holds
+        assert svc.maintenance_status('live-job')['status'] == 'interrupted'
+    finally:
+        svc.close()
+
+
+def test_a_failed_app_build_gives_the_lock_back(tmp_path, monkeypatch):
+    """A claim that never becomes a running app must not outlive the attempt.
+
+    Otherwise the failed start leaves the database owned by a process that is not
+    serving, and the next start -- the one that would have worked -- is refused.
+    """
+    import factory.control.pack_routes as pack_routes
+
+    store = Store(tmp_path / 'control.db')
+    svc = _service(store)
+    try:
+        monkeypatch.setattr(pack_routes, 'router', _explodes)
+        with pytest.raises(RuntimeError):
+            create_app(data_dir=tmp_path / 'data', workspace_root=tmp_path / 'repos',
+                       public_origin='http://testserver', service=svc,
+                       webhook_secret='test-webhook-secret')
+        assert svc.queue.handle is None, '构建失败后必须把锁还回去'
+        successor = Service(store, runner=_NeverRuns(), profiles=_profiles())
+        try:
+            successor.recover()  # refuses if the failed start still held the lock
+        finally:
+            successor.close()
+    finally:
+        svc.close()
+
+
+def _explodes(*args, **kwargs):
+    raise RuntimeError('构建路由时失败')
+
+
 # ---------------------------------------------------------------------------
 # R2: the three interrupted windows between claim and dispatch
 # ---------------------------------------------------------------------------

@@ -577,6 +577,51 @@ control_app + auto_consume + operation_workflows + continuous_service
 未验证项照旧：真实 SDK 进程树、Linux、真实目标脚本回执归 M5；CLI `create` 入队后由真实
 运行中的 service 领取执行仍未实测，登记入队不等于执行完成。
 
+### M3 补修 R2（Codex 对 `bae8e5c` 的锁竞争 P1）
+
+原复现 `tests/test_codex_m3_startup_lock.py` 逐字节照抄，断言未改；在 `bae8e5c` 上
+**1 failed / 0.63s**。
+
+上一轮只把「构造 Service 就清算」搬成了「构造 Web App 就清算」：`create_app()` 在取得
+worker lock 之前就调 `recover_maintenance_jobs()`，于是一个**竞争失败的第二个 Web 服务**
+——还没进 lifespan、也没拿到锁——照样把活动服务的作业判成 `interrupted`，M2 已验收的
+单一写入方边界仍然被破坏。
+
+改为先认领再恢复：新增 `Service.claim_startup_recovery()`，先 `DurableQueue.acquire()`
+（沿用既有那把锁，没有另造第二把），拿到才清算，拿不到就一行不改直接返回。清算仍在
+`create_app()` 内、`pack_router` 对账之前完成，所以唯一真启动的服务顺序不变。
+
+三处配套：
+- **重复 acquire**：`acquire()` 本身在已持有时直接返回，因此赢家在 lifespan 里的
+  `recover()` 不会和自己抢锁。
+- **构建失败还锁**：`create_app` 拆成一层薄包装 + `_build_app`，只有本次调用真正取得的
+  锁才在构建异常时 `release()`；调用方原本就持有的锁不动。否则一次失败的启动会让数据库
+  被一个并没有在服务的进程占住，把下一次本可成功的启动挡掉。
+- **竞争方不是静默降级**：它不清算，但也不能悄悄当第二个写入方启动——拒绝由 lifespan 的
+  `recover()` 抛出，就是既有那句「已有工厂进程处理此数据库，不能重复启动执行器」。
+
+实跑（`v3-skills-icons/.venv/bin/python`，`-m "not smoke"`）：
+
+```
+两条 Codex 探针 + 5 个既有 maintenance 集 + dispatch_recovery
+  + agent_service_review + pack_api_durability + capability_packs
+  + restart_same_site                                   135 passed / 63.41s
+control_app + workbench_app + auto_consume + operation_workflows
+  + continuous_service                                  100 passed / 73.33s
+其余全部构建 app 的用例（admin_config_conversation / autonomous_service /
+  project_discovery / requirement_analysis / runtime_execution /
+  session_skill_auth / session_skills / session_skills_github）
+                                                        135 passed / 90.66s
+```
+
+最后一组是因为 `create_app()` 现在会取锁，所有构建 app 的用例都属于直接受影响面，跑一次
+确认没有把别的启动路径锁死。
+
+`tests/test_issue_maintenance_dispatch_recovery.py` 增至 11 条，新增四条覆盖启动所有权：
+竞争方一行不改且不持锁、竞争方明确收到「已有工厂进程」冲突、赢家可在 lifespan 再次
+acquire、构建失败后锁被归还且后继进程能接管。回退产品改动到 `bae8e5c` 后，Codex 探针与
+其中两条变红；另两条本就是新机制的守卫，如实记为守卫而非复现。
+
 ## 下一步
 
 M3 补修已落地，候选分支 `codex/operations-20260921` 交 Codex 复核，未进入 M4、未部署。

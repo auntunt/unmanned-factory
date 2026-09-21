@@ -78,8 +78,26 @@ class InspectionSettings(Body):
     revision: int = Field(ge=0, strict=True)
 
 
-def create_app(*, data_dir=None, workspace_root=None, public_origin=None, service=None,
-               webhook_secret=None, static_dir=None):
+def create_app(**kwargs):
+    """Build the application, releasing the writer lock if the build fails.
+
+    Assembling the app claims the database (see ``_build_app``), and a claim that
+    is never handed to a running application is a lock nobody will release: the
+    next start would be refused by a process that is not actually serving. Only a
+    lock this call acquired is released here -- a caller that already owned the
+    database keeps it.
+    """
+    claimed = []
+    try:
+        return _build_app(_claimed=claimed, **kwargs)
+    except BaseException:
+        for svc in claimed:
+            svc.queue.release()
+        raise
+
+
+def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, service=None,
+               webhook_secret=None, static_dir=None, _claimed=None):
     data = Path(data_dir or os.getenv('FACTORY_CONTROL_DATA', '~/.factory/control')).expanduser().resolve()
     allowed_root = Path(workspace_root or os.getenv('FACTORY_WORKSPACE_ROOT', '~/projects')).expanduser().resolve()
     origin = (public_origin or os.getenv('FACTORY_PUBLIC_ORIGIN', 'http://127.0.0.1:8788')).rstrip('/')
@@ -99,16 +117,21 @@ def create_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     governance = Governance(auth, store)
     svc.governance = governance
     svc.targets.workspace_root = allowed_root
-    # Building the web application is a service start. The maintenance-job sweep
-    # used to happen in ``Service.__init__`` and therefore already ran by this
-    # point; ``pack_router`` below reconciles pack tasks against those job states
-    # while it is being constructed, so the sweep has to stay ahead of it rather
-    # than move to ``lifespan``. ``svc.recover()`` calls it again and finds
-    # nothing left to do.
+    # Building the web application is a service start, and a start is where
+    # unacknowledged maintenance turns are retired. It happens here rather than in
+    # ``lifespan`` because ``pack_router`` below reconciles pack tasks against
+    # those job states while it is being constructed -- reconciling first would
+    # leave a pack task from the dead process stuck at "处理中" forever.
+    #
+    # But recovery belongs to whoever owns the database, not to whoever builds an
+    # app object: this is a *claim*, and a contender that does not get the lock
+    # recovers nothing. Its refusal surfaces in ``lifespan`` below, where
+    # ``recover()`` cannot proceed without the lock.
     # ``hasattr`` for the same reason ``lifespan`` guards ``recover``: an
     # injected test double is not required to implement the whole service.
-    if hasattr(svc, 'recover_maintenance_jobs'):
-        svc.recover_maintenance_jobs()
+    if hasattr(svc, 'claim_startup_recovery') and svc.claim_startup_recovery():
+        if _claimed is not None:
+            _claimed.append(svc)
     # Runtime settings are persisted in the control store. Root may initialize
     # this on Service; keeping the fallback here preserves compatibility with
     # injected test services and older callers.
