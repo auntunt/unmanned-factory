@@ -1,34 +1,108 @@
 name: CI
+
+# A feature branch with an open PR used to run this whole workflow twice -- once
+# for the push, once for the pull_request -- so every commit produced two 13
+# minute runs and two identical failure mails. Pushes are therefore limited to
+# the branches nothing opens a PR against; everything else is covered by its PR.
 on:
   push:
+    branches:
+      - main
+      - codex/autonomous-factory-v3
   pull_request:
+
 permissions:
   contents: read
+
+# Supersede, rather than queue behind, a run whose commit is already obsolete.
+# Keyed on the PR when there is one, so a push to the branch and its PR run are
+# the same group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  tests:
-    runs-on: ubuntu-latest
+  # Backend and frontend are independent jobs on purpose: they used to be steps
+  # in one job, so a backend failure meant the frontend never ran at all and the
+  # report said nothing about whether it was healthy.
+  backend:
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
+
+      # Capability packs, chat tools, MFD and the meeting tools execute through
+      # a fail-closed sandbox: on Linux that is bubblewrap, and without it they
+      # refuse to run rather than execute unisolated. That refusal is correct,
+      # so the environment has to supply the backend -- the tests are not the
+      # thing to change.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      # 22.04 permits unprivileged user namespaces; 24.04 and later restrict
+      # them through AppArmor, which is why browser-smoke already pins 22.04.
+      # These two knobs are what that restriction looks like, attempted rather
+      # than required so the runner image can move without this silently
+      # becoming the thing that fails. The canary below is the actual gate.
+      - name: Permit unprivileged user namespaces (no-op on 22.04)
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Installed is not the same as usable: AppArmor can deny the user
+      # namespace while the package sits happily on disk. This is the exact
+      # command factory/harness/sandbox_linux.available() runs.
+      - name: bwrap canary (minimal isolated command)
+        run: |
+          set -euxo pipefail
+          bwrap --version
+          /usr/bin/bwrap --unshare-user --ro-bind / / true
+
       - name: Base installation import smoke (no extras)
         run: |
           uv sync --frozen
           uv run --no-sync pytest tests/test_base_install.py
+
       - run: uv sync --frozen --all-extras
+
+      # The full gate, on the same interpreter the tests use: sandbox_linux's
+      # precondition plus the product's own canary, which builds a sandbox and
+      # checks from inside it that it cannot write out, cannot read the host and
+      # has no network. If this fails the job stops here with one clear reason,
+      # instead of sixty-eight unrelated assertions failing downstream.
+      - name: Isolation canary (product probe, must pass before any test)
+        run: uv run --no-sync python .github/scripts/isolation_canary.py
+
       - run: uv run pytest -m 'not smoke'
-      - uses: actions/setup-node@v4
+
+  frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci && npm run build && npm test
+      - run: npm ci
         working-directory: frontend
+      # Typecheck separately from build so a type error is reported as one,
+      # even though `npm run build` runs tsc again on its way to vite.
+      - run: npx tsc --noEmit
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+
   browser-smoke:
     # Ubuntu 24.04 restricts nested unprivileged user namespaces via AppArmor.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: docker build -f runtime/project-browser/Dockerfile.smoke -t webuddy-browser-smoke .
       - run: docker run --rm --privileged webuddy-browser-smoke

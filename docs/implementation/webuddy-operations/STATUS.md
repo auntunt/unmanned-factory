@@ -622,6 +622,76 @@ control_app + workbench_app + auto_consume + operation_workflows
 acquire、构建失败后锁被归还且后继进程能接管。回退产品改动到 `bae8e5c` 后，Codex 探针与
 其中两条变红；另两条本就是新机制的守卫，如实记为守卫而非复现。
 
+### CI 收敛（M3 已验收 370 passed 之后，未改 M3 产品代码）
+
+`codex/operations-20260921` 连续 9 次 workflow 全红。不是几十个独立回归：其中 68 项是
+**一个前置条件**的级联——CI 的 tests job 没有 bubblewrap，Linux 上能力包执行按设计
+fail-closed，于是能力包、聊天工具、MFD、会议工具整片失败。修法是让 CI 提供真正可用的
+隔离后端，不动这些业务断言、不放宽 fail-closed、不加非隔离 fallback。
+
+**一、bwrap 环境与金丝雀。** backend job 固定 `ubuntu-22.04`（22.04 允许非特权 userns；
+24.04 起被 AppArmor 限制，browser-smoke 早就因此钉在 22.04），`apt-get install bubblewrap`，
+另外尝试性地放开两个 userns sysctl（`|| true`，runner 镜像变动时不至于变成失败点）。
+**「装了」不等于「能用」**，所以有两层金丝雀：
+
+- 测试前最小隔离命令 `/usr/bin/bwrap --unshare-user --ro-bind / / true`，与
+  `factory/harness/sandbox_linux.available()` 跑的是同一条；
+- 新增 `.github/scripts/isolation_canary.py`，在与测试**同一个解释器**上调用
+  `sandbox_linux.available()` 与 `pack_sandbox.probe(refresh=True)`，后者真建一个沙箱并从
+  里面验证写不出去、读不到宿主、没有对外网络。任一不过就在测试开始前以一条清楚的错误
+  终止。两个函数都从仓库导入，产品改了隔离含义这道闸同步改，不会漂移。
+
+**二、follow-up 调度时序竞争。** `test_followup_while_active_is_recorded_in_conversation_not_dropped`
+原来用 API 创建 run，而创建端点会 `svc.start_plan()` 拉起真实后台调度；测试随后强写
+`running`，后台却可能先把 run 推进 `needs_human`，于是产品正确地在安全节点即时应用补充，
+测试仍要求 `applied=false`。改法：`_run` 辅助函数改为直接经 `Store.create_run` 建立受控
+run，不启动调度——文件里每个调用方本来就立刻强写状态，说明没有一个需要后台推进。
+另新增 `test_followup_at_a_human_gate_is_applied_immediately`，把 gate 语义（立即应用、
+不留 pending）也钉成确定性断言，避免「全部应用」或「全部排队」的回归两边都能过。
+没有给产品加 sleep，没有放宽成两种结果都接受，没有靠加重试掩盖。
+
+**三、workflow 结构。** 触发从「无分支限制的 push + pull_request」（有 PR 的分支每次推送
+跑两套相同 CI、发两封重复邮件，`ccf9171` 实测同时产生 push run 35565799023 与 pull_request
+run 35565804857）改为 push 只留 `main` 与 `codex/autonomous-factory-v3`，feature branch 由
+PR 触发；新增 concurrency + cancel-in-progress（按 PR 号分组）。原来 backend/frontend 是同
+一个 job 的前后步骤，后端一红前端整段不跑、报告里没有前端结论——现在拆成 backend /
+frontend / browser-smoke 三个独立 job，互不 needs。`actions/checkout`、`actions/setup-node`
+升到 v5（Node 20 deprecation 是 warning，不是本次红灯根因）。权限仍是 `contents: read`，
+未新增密钥或写权限。
+
+本地实跑：
+
+```
+tests/test_run_followup.py                       19 passed（新增 1 条）
+  连续重复 10 次（未禁随机顺序）                  10/10 全绿，无时序漂移
+capability_packs + pack_api_durability + mfd_xml_pack
+  + chat_attached_tool + pack_hardening          120 passed / 97.10s（macOS seatbelt）
+frontend: npx tsc --noEmit                        exit 0
+frontend: npm run build                           exit 0
+frontend: vitest run                              428 passed / 58 files
+workflow YAML 解析                                 OK（仓库无 actionlint，未安装外部工具）
+```
+
+真实 Linux 容器（Docker Desktop，`ubuntu:22.04`，arm64）两个方向都验过金丝雀：
+
+- 默认容器（不允许非特权 userns）：`bwrap --version` = 0.6.1，最小命令 **exit 1**
+  （"No permissions to create new namespace"），`sandbox_linux.available()` = False，
+  金丝雀脚本 **exit 1** 并打印明确原因——这正是「已安装 ≠ 可用」要拦住的情形；
+- `--privileged` 容器：最小命令 **exit 0**，`sandbox_linux.available()` = **True**。
+
+一个必须如实记录的风险：在该 `--privileged` 容器里 `pack_sandbox.probe()` 仍判不可用，
+原因是新建的 network namespace 里除 `lo` 外还有一组内核自带的隧道桩设备
+（`gre0`/`sit0`/`tunl0`/`erspan0` 等），而产品金丝雀对 bwrap 的判据是「除 lo 外不得有任何
+接口」。这些桩设备没有地址也没有路由，同次证据里 `network` 记录的连接结果是
+`OSError:101`（ENETUNREACH），隔离本身是成立的；但判据用的是接口列表这个代理信号。
+Docker Desktop 的 LinuxKit 内核把这些隧道设备编译进内核（`lsmod` 为空），GitHub 的
+ubuntu-22.04 通常是模块、默认不加载，所以未必会触发。**本轮没有改这条安全判据**——按
+单子要求不以放宽断言换绿灯；若 GitHub runner 上确实出现同样结果，作为新问题交 Codex 定夺，
+不在本轮自行放宽。
+
+未验证：GitHub runner 上的真实 canary 退出码与三个 job 的结论，以本次推送的 CI 运行为准；
+本地是 macOS/seatbelt 与 arm64 容器，不等同 x86_64 runner。
+
 ## 下一步
 
 M3 补修已落地，候选分支 `codex/operations-20260921` 交 Codex 复核，未进入 M4、未部署。

@@ -17,11 +17,28 @@ from tests.test_control_app import app_env, login, project  # noqa: F401
 
 
 def _run(client, store, repo, headers, status):
+    """A run parked in a known state, created without starting the scheduler.
+
+    Creating a run through the API also dispatches it, so the background worker
+    was free to move the run on while the test was still arranging its premise:
+    the state written here could be replaced by ``needs_human`` before the
+    request under test arrived, and a follow-up "while the run is active" would
+    then be applied immediately -- correctly, at a gate that the test did not
+    intend to be at. The state is the premise of these tests rather than
+    something they observe, so it is established directly and nothing else is
+    running that could change it.
+
+    Whether an active run and a gated run are handled differently is still
+    tested, from both sides, with the state fixed on each.
+    """
     p = project(client, repo, headers)
-    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做一个工具'},
-                      headers=headers).json()['id']
-    store.update(rid, {'status': status})
-    return rid
+    run, _ = store.create_run(
+        p['id'], '做一个工具',
+        source={'type': 'web', 'actor': 'owner',
+                'actor_id': client.get('/api/auth/me', headers=headers).json()['user']['id'],
+                'original_request': '做一个工具', 'operation': 'general'})
+    store.update(run['id'], {'status': status})
+    return run['id']
 
 
 def test_followup_while_active_is_recorded_in_conversation_not_dropped(app_env):
@@ -41,6 +58,27 @@ def test_followup_while_active_is_recorded_in_conversation_not_dropped(app_env):
     assert messages[-1]['followup'] is True and messages[-1]['applied'] is False
     # It is persisted as an immutable event, so it survives and is not lost.
     assert any(e['type'] == 'user.message' and e['payload'].get('followup') for e in store.events(rid))
+
+
+def test_followup_at_a_human_gate_is_applied_immediately(app_env):
+    """The other side of the same decision, with the state equally fixed.
+
+    ``applied`` is not a matter of timing luck: a run waiting at a gate is meant
+    to take the note now rather than queue it, and that is what distinguishes
+    this from the active case above. Asserting only the active case would let a
+    regression that applies everything -- or queues everything -- pass.
+    """
+    client, store, svc, repo = app_env
+    headers = login(client)
+    rid = _run(client, store, repo, headers, 'needs_clarification')
+    res = client.post(f'/api/v2/runs/{rid}/follow-up',
+                      json={'content': '客户名也要能搜'}, headers=headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body['applied'] is True and body['queued'] is False
+    assert body['recorded'] is True
+    # Applied means consumed at the gate, so nothing is left queued behind it.
+    assert list(store.export_events(rid, kind='followup.pending')) == []
 
 
 def test_followup_pending_event_is_persisted_with_prescribed_fields(app_env):
