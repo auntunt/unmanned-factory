@@ -31,14 +31,19 @@ def _run(client, store, repo, headers, status):
     Whether an active run and a gated run are handled differently is still
     tested, from both sides, with the state fixed on each.
     """
+    return _controlled_run(client, store, repo, headers, status)[0]
+
+
+def _controlled_run(client, store, repo, headers, status, request='做一个工具'):
+    """The same, for a test that also needs the project it belongs to."""
     p = project(client, repo, headers)
     run, _ = store.create_run(
-        p['id'], '做一个工具',
+        p['id'], request,
         source={'type': 'web', 'actor': 'owner',
                 'actor_id': client.get('/api/auth/me', headers=headers).json()['user']['id'],
-                'original_request': '做一个工具', 'operation': 'general'})
+                'original_request': request, 'operation': 'general'})
     store.update(run['id'], {'status': status})
-    return run['id']
+    return run['id'], p
 
 
 def test_followup_while_active_is_recorded_in_conversation_not_dropped(app_env):
@@ -288,9 +293,7 @@ def test_continue_run_consumes_pending_followups_at_safe_node(app_env):
     import subprocess, sys
     client, store, svc, repo = app_env
     headers = login(client)
-    p = project(client, repo, headers)
-    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做工具'},
-                      headers=headers).json()['id']
+    rid, p = _controlled_run(client, store, repo, headers, 'running', request='做工具')
     # Set up a resumable run with plan and artifacts
     store.update(rid, {
         'status': 'running',
@@ -346,9 +349,7 @@ def test_stale_revision_conflict_does_not_mark_pending_as_applied(app_env):
     import subprocess
     client, store, svc, repo = app_env
     headers = login(client)
-    p = project(client, repo, headers)
-    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做工具'},
-                      headers=headers).json()['id']
+    rid, p = _controlled_run(client, store, repo, headers, 'running', request='做工具')
     store.update(rid, {
         'status': 'running',
         'plan': {'title': 'test', 'summary': '', 'questions': [], 'tasks': [
@@ -387,9 +388,7 @@ def test_pending_applied_exactly_once_after_conflict_then_correct_retry(app_env)
     import subprocess
     client, store, svc, repo = app_env
     headers = login(client)
-    p = project(client, repo, headers)
-    rid = client.post('/api/v2/runs', json={'operation': 'general', 'project_id': p['id'], 'request': '做工具'},
-                      headers=headers).json()['id']
+    rid, p = _controlled_run(client, store, repo, headers, 'running', request='做工具')
     store.update(rid, {
         'status': 'running',
         'plan': {'title': 'test', 'summary': '', 'questions': [], 'tasks': [

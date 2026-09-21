@@ -689,8 +689,28 @@ ubuntu-22.04 通常是模块、默认不加载，所以未必会触发。**本�
 单子要求不以放宽断言换绿灯；若 GitHub runner 上确实出现同样结果，作为新问题交 Codex 定夺，
 不在本轮自行放宽。
 
-未验证：GitHub runner 上的真实 canary 退出码与三个 job 的结论，以本次推送的 CI 运行为准；
-本地是 macOS/seatbelt 与 arm64 容器，不等同 x86_64 runner。
+**GitHub 实跑结果**（run 35568898614，仅一次 pull_request run，push 不再重复触发）：
+frontend **success**、browser-smoke **success**、backend **failure**。backend 的环境步骤
+全部 success，含最小 bwrap 命令与产品金丝雀——**68 项隔离级联已消除**，本地担心的 netns
+隧道桩接口在 runner 上没有出现。结果从 40 failed / 29 errors 变为
+**3 failed / 2881 passed / 27 skipped / 864.66s**。
+
+三条剩余失败各自的性质：
+- `test_operations_ci.py::test_ci_runs_required_commands_and_separate_strict_smoke` 断言
+  workflow 里含字面量 `npm ci && npm run build && npm test`，而拆 job 后它已成三个独立步骤。
+  这条测试的意图（必需命令都跑、strict smoke 独立）保留，改为逐条断言；另加两条把新保证
+  也钉住：frontend/browser-smoke 不得 `needs` 后端，backend 必须在测试步骤之前安装 bwrap、
+  跑最小隔离命令和金丝雀。
+- `test_continue_run_consumes_pending_followups_at_safe_node`（409 当前任务不在可继续状态）
+  与 `test_pending_applied_exactly_once_after_conflict_then_correct_retry`（applied 事件已存在）
+  是同一类前提竞争：这两条不走 `_run`，各自用 API 直接建 run，于是照旧被真实调度推进。
+  隔离修好后这 68 项真正开始执行，runner 上的时序改变，它们才暴露。改法与 `_run` 相同：
+  新增 `_controlled_run` 经 Store 建立受控 run 并返回 project；同一文件里第三处同样写法的
+  `test_stale_revision_conflict_does_not_mark_pending_as_applied` 一并改（它这次侥幸通过）。
+
+`tests/test_run_followup.py` + `tests/test_operations_ci.py` 本地 24 passed。
+
+未验证：修完这三条后的 GitHub backend 结论，以下一次 CI 为准。
 
 ## 下一步
 
