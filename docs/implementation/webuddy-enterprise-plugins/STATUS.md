@@ -91,6 +91,94 @@
 新增 4 个变异全部被杀死（信创 approve 不问闸门、适配交出未包装端口、
 新插件默认自启、交付事实被写成已确认）。
 
+## 批次五：语言范围与初审四点（提交 `c60ab76`、`c504a4d`、`74fcd31`、`f9f9ab8`）
+
+### 1. 图工具真的接了（初审第 1 条）
+
+工具：**`@colbymchenry/codegraph` 1.6.0**，MIT，tree-sitter 语法 + Rust 内核，
+本地 SQLite 索引，CLI；`npm i -g` 装的（没用 `curl | sh`）。首次运行会写
+`~/.codegraph/telemetry-queue.jsonl`，已执行 `codegraph telemetry off`，
+缓冲里那一条（只有一个 `version` 命令计数，不含代码）已被删除。
+**没有**运行 `codegraph install`——那会改写全局 agent 配置。
+
+仓库内的 `codegraph.py` 保留为回退，没有改名冒充。它的空结果现在带 `covers`
+字段说明它只解析 Python 与 JS/TS 且只读已提交的 commit。
+
+### 2. 四种必需语言，分三层记录（初审第 3 条 / LANGUAGE-SUPPORT.md）
+
+| 语言 | 代码检索 | 跨文件关系 | 构建与改造 |
+|---|---|---|---|
+| Java | 已验证 | 已验证 | 按项目探测（本机有 javac 19，无 maven/gradle）|
+| Python | 已验证 | 已验证 | 按项目探测（本机 3.12.7）|
+| C#/.NET | 已验证 | 已验证 | **未验证**：本机没有 dotnet |
+| Go | 已验证 | 已验证 | 按项目探测（本机 go1.26.3）|
+| C/C++（可选）| 已验证 | 已验证（仅最小样例）| 未验证 |
+| Rust（可选）| 已验证 | **未解析** | 未验证 |
+
+「已验证」= `tests/test_code_intel.py` 用**真实后端**在最小两文件跨文件样例上
+断言过，每种必需语言各一个代表性跨文件查询 + 一次改动后的刷新验证。
+**这不等于在客户仓库上验证过。** 没有做跑分矩阵、没有变异测试。
+
+**C++/Rust 是否后置**：C++ 现成能力可用，已接入并如实标为「最小样例已验证、
+宏/条件编译/模板未验证」。**Rust 后置**——符号能索引能检索，但同样形状的
+跨文件调用边没有解析出来（callers 与 callees 都是空），所以关系层对 Rust
+**拒绝**而不是返回空列表；空列表读起来就是「没人调用」。
+
+**C# 的 .NET 区分**：索引读的是 `.cs` 语法，它不知道目标框架。
+`.NET Framework` 与现代 `.NET` 由 `.csproj` 的 `TargetFrameworkVersion` /
+`TargetFramework` 判定，读不到就是 `unknown`，不猜；前者还要求 Windows。
+「.cs 能解析」不等于 WebForms/WCF/P-Invoke/私有 DLL 已支持。
+
+### 3. 三件必须由适配层纠正的后端行为（都是实测出来的）
+
+1. **`callers`/`callees` 按符号名匹配，跨语言串味。** 混合仓库里一次
+   `callers format_money` 同时返回了 C++ 和 Python 的调用方；Rust 的查询
+   返回了 C++ 的调用方。本层按定义所在语言过滤，并把丢掉的部分报出来。
+2. **空结果路径不认 `--json`。** 「找不到符号」「项目没初始化」都是人话句子，
+   后者退出码 1。分别映射成 `no_match` 与 `not_indexed`。
+3. **截断无声。** `--limit 2` 对三个调用方只返回两个且不提示。本层多取一个
+   自己判断，报 `truncated`。
+
+结果契约：`outcome` ∈ ok / no_match / not_indexed / truncated / unsupported /
+backend_unavailable / degraded_text，每条都带 `code_version`（commit + 是否有
+未提交改动）、`freshness`、`unresolved`（反射、动态导入、P/Invoke、私有 DLL、
+接口动态分派、cgo、跨语言 RPC/FFI/数据库/配置等看不见的关系）。
+关系后端不可用时回退文本检索并标 `degraded_text`，**不标成关系分析**。
+
+入口：`POST/GET /api/v2/projects/{pid}/code-index`（一个动作建两套索引）、
+`GET /api/v2/projects/{pid}/code-conditions`、`GET /api/v2/code-intel/capabilities`。
+
+### 4. 记忆边界（初审第 2 条）
+
+按 `kind`+`status` 分出五种角色，不新增列：`constraint`（decision+active，
+唯一有约束力）、`fact`、`decision`、`observation`、`lead`。未确认的资料现在
+带正文出现在「不作为依据」标题下——先前只给标题，等于把悬而未决的问题
+永久变成不可读。声明了 `paths` 的条目只在本次改动碰得着时才装载；
+装不下的按角色优先级丢（约束最后丢），丢掉的条数在提示词里说出来。
+
+**派发时冻结**：`submit` 把真正装载的 `(key, revision)` 写进 `run.source`。
+`knowledge_entry_versions` 追加写，所以这一对永远指向同一份不可变内容。
+任务视图优先读它并标 `frozen=true`；读不到时退回实时读并标 `frozen=false`
+加原因，不让实时读冒充「本任务的依据」。执行开始后项目再确认新要求不会
+改变这条任务的依据。
+
+### 5. 业务入口（初审第 3 条）
+
+`/modernization` 与 `/adaptation` 两个页面已接入 AppShell 与既有任务现场：
+可发起、看进度与阻塞、批准/继续/取消、取回执与补丁、以修订形式继续反馈。
+适配页把技术成功／业务受理／业务完成三个状态分开呈现，mock 单独打标。
+
+集成时修掉一处我自己造成的契约错配：`locate` 的 `source` 值在图后端接入时
+改了，而页面仍按旧值判断，会把一次成功的共享层定位显示成「未建立代码索引」。
+
+### 6. 变异测试已停（初审第 4 条）
+
+本批次没有做任何变异测试。
+
+**本批次检查**：`tests/test_code_intel.py` 19 passed（真实后端驱动，
+未安装则跳过并说明原因）、相关后端 178 passed、七个场景页面 83 passed、
+tsc 干净、生产构建跑了一次。
+
 ## 模型事实
 
 - 集成者（本会话）：请求的是 Claude Code 默认会话模型，实际为 **Opus 5（`claude-opus-5`）**，
@@ -118,5 +206,13 @@
 - 适配只跑了 `mock` 环境；`sandbox`/`production` 分支代码可用但没有被真实调用验证过。
 - 没有任何一条记忆条目被提升为 `active`（除测试内的合成数据），
   因为没有真实客户确认人。
-- 前端只做了插件启停页与维护页的可用性联动；信创与适配**没有页面**，
-  本轮只有 HTTP 面。
+- 信创与适配的页面只在 vitest 的 mock `request()` 下验证过渲染与交互，
+  **没有起真实服务做端到端点击验证**。
+- C#/.NET 的构建与改造层在本机无法验证：没有 dotnet，.NET Framework 还需要
+  Windows。索引与关系层与框架无关，已验证；改造层标待验证。
+- 四种语言的关系层都只在最小两文件样例上验证过，没有在任何客户仓库上验证。
+- `.codegraph/` 自带 `.gitignore`（`*`），内容对 git 天然不可见；本层另把目录名
+  写进 `.git/info/exclude` 以免污染 worker 的 diff。代价是放在该目录下的代码
+  在任何 git 形状的评审里都看不见，而跑在真实树上的检查仍能执行它。这条**没有解决**。
+- 适配模块没有 `/api/v2/adaptation/agreement` 端点，所以页面上的方法版本是
+  人工输入，不像维护页那样自动取方法包信息。
