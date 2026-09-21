@@ -1,0 +1,25 @@
+From dc60c96cffa45eee03222814e8a33635fcacf8fe Mon Sep 17 00:00:00 2001
+From: Factory <factory@localhost>
+Date: Mon, 21 Sep 2026 22:20:57 +0800
+Subject: [PATCH] factory: add_dm_dialect
+
+---
+ db_url.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/db_url.py b/db_url.py
+index a56db1a..e1dc740 100644
+--- a/db_url.py
++++ b/db_url.py
+@@ -1,4 +1,7 @@
+-DIALECTS = {"mysql": "jdbc:mysql://{host}:{port}/{db}"}
++DIALECTS = {
++    "mysql": "jdbc:mysql://{host}:{port}/{db}",
++    "dm": "jdbc:dm://{host}:{port}/{db}",
++}
+ 
+ 
+ def build_url(dialect, host, port, db):
+-- 
+2.55.0
+

@@ -244,7 +244,10 @@ tsc 干净、生产构建跑了一次。
 凭据（`_HOST_CLAUDE_CODE_ENV_KEYS`），即宿主 agent 的凭据按设计不借给工厂。
 所以上面两条闭环里**编码这一步是带标注的脚本**，不是模型。
 真实的是：服务、HTTP 契约、控制库、插件闸门、项目自己的检查、git 与补丁。
-要跑真实模型链，需要装其中一个 provider SDK 并配置该 provider 自己的凭据与预算。
+
+> **批次八更正**：这一段关于「本机没有可用 provider」的结论是错的，已在批次七、
+> 批次八逐条更正。真实模型链在批次八跑通，见
+> [EVIDENCE-real-model.md](EVIDENCE-real-model.md)。
 
 **本批次检查**：相关后端 180 passed（含每处的定向复现）、场景页面 74 passed、
 tsc 干净、生产构建一次、两条真实服务闭环如上。按初审要求未做变异测试、未重复全量。
@@ -394,8 +397,11 @@ refine 之后 run 的 `request` 逐字节不变。这条边界之所以安全，
 - 「派发时刻的冻结记忆引用」没有做：`project_memory` 是实时读，不是这条任务
   派发那一刻真正带走的那一组。要做需要在 `WebuddyExecution.submit` 里把 recall
   到的条目随 run 一起持久化。当前命名与回执的取舍已经把话说清楚，没有假装是绑定。
-- 三场景的执行链都用注入的 dispatch 跑过（与既有维护垂直测试同一手法），
-  **真实 LLM 规划 + 人工 approve 的完整 dag 路径本轮没有跑**。
+- ~~真实 LLM 规划 + 人工 approve 的完整 dag 路径本轮没有跑~~ —— **这条已作废**。
+  批次八用 Claude provider + 用户中转站跑通了完整 dag 路径：真实模型规划 →
+  人工批准 → 模型改代码 → 项目检查 exit=0 → 提交 → 交付。
+  脱敏证据（ID、代码版本、事件、检查、补丁与校验值、费用）见
+  [EVIDENCE-real-model.md](EVIDENCE-real-model.md)。
 - 信创只验证了 `database` 一个维度的完整闭环；CA/签章、OS/CPU、浏览器、
   外部组件四个维度的命中词表没有在真实项目上验证过。
 - 适配只跑了 `mock` 环境；`sandbox`/`production` 分支代码可用但没有被真实调用验证过。
