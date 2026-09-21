@@ -361,8 +361,7 @@ def _auto_resume_with_followups(svc, rid):
             'runtime_configuration': configuration,
             'resume_count': resume_count + 1,
             'execution_resume': {'artifacts': artifacts, 'answer': answer, 'revision': revision,
-                'effective_revision': effective_contract.revision_of(
-                    {**run, **({'effective_contract': contract} if contract else {})})},
+                **effective_contract.resume_binding(run, contract=contract)},
             'history': [*run['history'], answer]}
         if contract:
             changes['effective_contract'] = contract
@@ -526,8 +525,7 @@ def continue_run(self, rid, answer, revision, resume_count, actor):
             'resume_count': resume_count + 1,
             'execution_resume': {'artifacts': artifacts, 'answer': state['answer'],
                 'revision': revision, 'resume_stage': state['resume_stage'],
-                'effective_revision': effective_contract.revision_of(
-                    {**run, **({'effective_contract': contract} if contract else {})})},
+                **effective_contract.resume_binding(run, contract=contract)},
             'history': [*run['history'], state['answer']]}
         if contract:
             changes['effective_contract'] = contract

@@ -5,6 +5,7 @@ import json
 import logging
 
 from factory.control.autonomy import all_events
+from factory.control import effective_contract
 from factory.control.execution import ExecutionError
 from factory.control.store import ACTIVE, scrub
 
@@ -118,14 +119,22 @@ def recover(self):
                 if checkpoints:
                     artifacts = checkpoints[-1]['continuous_artifacts']
                     resume_stage = _continuous_resume_stage(artifacts)
+                    # Automatic recovery returns to the same site as the two
+                    # interactive resumes, so it binds the agreement the same way.
+                    # Without this the restarted round rendered whatever agreement
+                    # was current when it started coding again: a supplement applied
+                    # by another path, or an edited draft under a re-derived
+                    # revision 1, silently became the agreement the recovered
+                    # session was judged against.
+                    binding = effective_contract.resume_binding(run)
                     resumed = self.store.update(rid, {'status': 'queued', 'artifacts': artifacts,
                         'resume_count': run.get('resume_count', 0) + 1,
                         'execution_resume': {'artifacts': artifacts, 'revision': run['revision'],
                             'answer': '服务重启后接续原有编码会话，保留工作区与已完成成果，继续验证并交付。',
-                            'resume_stage': resume_stage}},
+                            'resume_stage': resume_stage, **binding}},
                         expected=(run['status'],), event=('run.resumed',
                             {'phase': 'execute', 'execution_mode': 'continuous',
-                             'message': '已恢复持续编码检查点，正在接续原会话'}))
+                             'message': '已恢复持续编码检查点，正在接续原会话', **binding}))
                     self.queue.enqueue(rid, 'execute')
                     continue
             if ((run.get('feedback_predecessor_id') and run['status'] == 'received') or

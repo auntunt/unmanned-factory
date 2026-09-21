@@ -7,6 +7,7 @@ import traceback
 from dataclasses import asdict
 from typing import Any
 
+from . import provider_activity
 from .providers import (
     ProviderError,
     ProviderRequest,
@@ -51,6 +52,16 @@ def main() -> int:
         if not isinstance(raw, dict):
             raise ValueError("request must be a JSON object")
         request = ProviderRequest(**raw)
+        # Held for this process's lifetime: a later coordinator reads it as the
+        # only positive evidence that this worker is, or is no longer, writing.
+        # Read-only calls do not write the tree and get no lock.
+        activity = None
+        if request.activity_lock and not request.read_only:
+            try:
+                activity = provider_activity.hold(request.activity_lock)
+            except (BlockingIOError, OSError) as exc:
+                raise ProviderError(
+                    f"another provider worker is still writing this workspace: {exc}") from exc
         if request.provider == "claude":
             result = _run_claude(request, _write)
         elif request.provider == "codex":

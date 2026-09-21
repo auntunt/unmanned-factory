@@ -138,11 +138,12 @@ class Service:
                     if run['status'] != expected:
                         self.queue.reset(rid)
                         continue
-                    if not self.queue.claim(rid, phase):
+                    generation = self.queue.claim(rid, phase)
+                    if generation is None:
                         continue
                     self.active_jobs[rid] = phase
                     self.cancels[rid] = _RunCancellation()
-                    self.futures.add(self.pool.submit(self._job, rid, phase))
+                    self.futures.add(self.pool.submit(self._job, rid, phase, generation))
 
     def _drain_feedback(self):
         """Called by the lease-owning scheduler under the service lock."""
@@ -257,7 +258,7 @@ class Service:
             raise ValueError('上一轮成果分支已变化，不能自动接续')
         return result
 
-    def _job(self, rid, phase):
+    def _job(self, rid, phase, generation=None):
         try:
             if self.store.get(rid).get('source', {}).get('type') == 'inspection':
                 inspect_run(self, rid)
@@ -265,7 +266,10 @@ class Service:
                 (self._analyze if phase == 'requirement_analysis' else self._plan if phase == 'plan' else self._run)(rid)
         finally:
             with self.lock:
-                self.queue.finish(rid, phase)
+                # Only the generation this worker claimed. A newer one belongs to
+                # a round this worker never ran, and retiring it would drop that
+                # round from dispatch while leaving its run looking scheduled.
+                self.queue.finish(rid, phase, generation)
                 self.active_jobs.pop(rid, None)
                 self.wake.set()
             # Auto-consume pending followups at this safe node.  Called AFTER

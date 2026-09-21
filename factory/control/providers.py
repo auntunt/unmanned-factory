@@ -47,6 +47,10 @@ class ProviderRequest:
     verification: bool = False
     # Inert document transformations: no files, shell, MCP, web or delegation.
     tools_disabled: bool = False
+    # Path the worker holds an exclusive OS lock on while it writes. A later
+    # coordinator reads that lock to learn whether this worker is still alive,
+    # instead of inferring an exit from a pid or a durable status row.
+    activity_lock: str | None = None
 
 
 @dataclass(frozen=True)

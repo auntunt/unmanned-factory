@@ -142,18 +142,50 @@ def revision_of(run) -> int:
     return contract['revision'] if contract else 0
 
 
-def contract_prompt(run, *, revision=None) -> str:
+def resume_binding(run, *, contract=None) -> dict:
+    """What a resumed round must be handed back: which agreement, and from where.
+
+    One helper for every real resume entry point -- interactive continuation, the
+    automatic safe node, and restart recovery. The revision number alone is not the
+    site: a run whose agreement is still derived read-only from `spec_draft` stays
+    at revision 1 while that draft is edited, so two different agreements answer to
+    the same number. The digest names the snapshot itself, and `effective_source`
+    records whether it came from a durable field or was re-derived, which is the
+    difference between a binding that can drift and one that cannot.
+    """
+    resolved = contract if contract is not None else current(run)
+    if resolved is None:
+        return {'effective_revision': 0, 'effective_digest': None, 'effective_source': None}
+    held = run.get('effective_contract')
+    # A caller-supplied contract is the one its own transaction persists, so it is
+    # durable by the time the resumed round reads it. Otherwise only a stored
+    # snapshot counts: anything else was re-derived from the confirmed draft.
+    durable = contract is not None or (isinstance(held, dict)
+                                       and held.get('digest') == resolved['digest'])
+    source = 'effective_contract' if durable else 'spec_draft'
+    return {'effective_revision': resolved['revision'],
+            'effective_digest': resolved['digest'],
+            'effective_source': source}
+
+
+def contract_prompt(run, *, revision=None, digest=None) -> str:
     """The agreement block for a coding or acceptance prompt.
 
     `revision` pins the block to one snapshot, so a reader that took revision 2
-    cannot be handed revision 3 halfway through. A run with no contract renders
-    nothing, exactly as before this module existed.
+    cannot be handed revision 3 halfway through. `digest` pins the snapshot's
+    content, which a revision number cannot: a re-derived revision 1 keeps its
+    number when the confirmed draft underneath it is edited. A run with no contract
+    renders nothing, exactly as before this module existed.
     """
     contract = current(run)
     if contract is None:
         return ''
     if revision is not None and contract['revision'] != revision:
         raise Conflict(f"有效契约已更新到修订 {contract['revision']}，当前工作绑定修订 {revision}",
+                       error_type='contract_revision')
+    if digest is not None and contract['digest'] != digest:
+        raise Conflict(f"有效契约修订 {contract['revision']} 的内容已变化，"
+                       '恢复现场绑定的约定与当前约定不一致',
                        error_type='contract_revision')
     body = {'effective_revision': contract['revision'], 'effective_digest': contract['digest'],
             'spec_draft': contract['spec_draft'],

@@ -125,13 +125,38 @@ class DurableQueue:
         return True
 
     def claim(self, rid, phase):
-        with self.store.connect() as db:
-            result = db.execute("UPDATE control_jobs SET status='running',at=? WHERE run_id=? AND phase=? AND status='pending'", (now(), rid, phase))
-        return result.rowcount == 1
+        """Take the pending job and return the generation taken, or None.
 
-    def finish(self, rid, phase):
+        The generation is the caller's identity for `finish`. Without it a worker
+        could only say "this run/phase is done", which is not the same statement:
+        by the time a slow or restarted worker reaches its `finally`, `enqueue` may
+        have created the next generation, and the old worker's `finish` then
+        retired a round it never ran.
+        """
         with self.store.connect() as db:
-            db.execute("UPDATE control_jobs SET status='done',at=? WHERE run_id=? AND phase=? AND status='running'", (now(), rid, phase))
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT generation FROM control_jobs WHERE run_id=? AND phase=? AND status=?',
+                             (rid, phase, 'pending')).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE control_jobs SET status='running',at=? WHERE run_id=? AND phase=? AND status='pending'",
+                       (now(), rid, phase))
+            return row['generation']
+
+    def finish(self, rid, phase, generation=None):
+        """Retire the round this worker actually claimed. Returns whether it did.
+
+        A `generation` of None retires whatever is running, which is only correct
+        for a caller that holds no claim of its own.
+        """
+        with self.store.connect() as db:
+            if generation is None:
+                result = db.execute("UPDATE control_jobs SET status='done',at=? WHERE run_id=? AND phase=? AND status='running'",
+                                    (now(), rid, phase))
+            else:
+                result = db.execute("UPDATE control_jobs SET status='done',at=? WHERE run_id=? AND phase=? AND status='running' AND generation=?",
+                                    (now(), rid, phase, generation))
+        return result.rowcount == 1
 
     def reset(self, rid):
         with self.store.connect() as db:
