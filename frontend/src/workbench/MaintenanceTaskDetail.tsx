@@ -4,6 +4,7 @@ import { useParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import { ErrorNotice, PageHeader, errorText, formatDate } from './ui'
+import ClarificationPanel from './ClarificationPanel'
 import type { PageProps } from './ui'
 import { CopyValue, LoadingCard, ListTime } from './presentation'
 import type {
@@ -334,7 +335,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
                 {actionBusy ? '操作中…' : '批准计划'}
               </button>
             )}
-            {task && canResume(task.status, task.resumable) && (
+            {task && canResume(task.status, task.resumable, task.pending_questions) && (
               <button
                 className="wb-button wb-button-primary"
                 disabled={actionBusy}
@@ -359,6 +360,16 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
 
       {error && <ErrorNotice message={error} />}
       {actionError && <ErrorNotice message={actionError} />}
+
+      {task && (
+        <ClarificationPanel<MaintenanceTaskView>
+          questions={task.pending_questions ?? []}
+          endpoint={`/api/v2/maintenance/tasks/${encodeURIComponent(taskId ?? '')}/clarify`}
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onAnswered={updated => setTask(updated)}
+        />
+      )}
       {loading && !task && <LoadingCard label="正在读取任务详情" />}
 
       {task && (

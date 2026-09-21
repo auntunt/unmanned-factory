@@ -77,6 +77,24 @@ def _pending_plan(store, execution_id) -> dict | None:
     }
 
 
+def _pending_questions(store, execution_id) -> list:
+    """The questions a human is being asked, or none.
+
+    A model that asks before acting is doing the right thing; a surface that
+    cannot show the question turns that into a dead end. Same shape the
+    adaptation surface already renders, so one page component covers all three.
+    """
+    if not execution_id:
+        return []
+    try:
+        run = store.get(execution_id)
+    except KeyError:
+        return []
+    if run.get('status') != 'needs_clarification':
+        return []
+    return list((run.get('plan') or {}).get('questions') or [])
+
+
 def router(store, svc, *, availability=None, dispatch=None):
     """``availability``/``dispatch`` let a test substitute a fake gate or a fake
     executor dispatch without a second production code path existing -- the
@@ -196,6 +214,14 @@ def router(store, svc, *, availability=None, dispatch=None):
     def get_slice(slice_id: str, request: Request):
         view = plans.get(slice_id, actor=_actor(request))
         view['pending_plan'] = _pending_plan(store, view['execution_id'])
+        view['pending_questions'] = _pending_questions(store, view['execution_id'])
+        if view['pending_questions'] and (view.get('blocking_reason') or {}).get('kind') in (None, 'unknown'):
+            # Answering is not resuming: 「继续执行」 on a run stopped at a
+            # question only pushes it back at the same gate.
+            view['blocking_reason'] = {
+                'kind': 'clarification.requested',
+                'message': '模型在动手前提出了需要确认的问题，回答后才会继续',
+                'event': None}
         if view['pending_plan'] and (view.get('blocking_reason') or {}).get('kind') in (None, 'unknown'):
             # The port only cites events it already knows as blocking, and an
             # awaiting-approval plan is not one of them. Saying "no citable
@@ -213,6 +239,28 @@ def router(store, svc, *, availability=None, dispatch=None):
         return {'events': events}
 
     # -- intervention -------------------------------------------------------
+
+    @api.post('/slices/{slice_id}/clarify')
+    async def clarify(slice_id: str, request: Request):
+        """Answer the questions this slice is waiting on, through the existing gate.
+
+        Same shape as the maintenance and adaptation surfaces: the answer goes
+        to the run lifecycle, the plugin-availability check is performed by hand
+        because the port is not involved, and project authorization comes from
+        ``plans.get``.
+        """
+        actor = _actor(request)
+        plans.gate.require('continue')
+        body = await request.json()
+        answer = (body or {}).get('answer')
+        if not isinstance(answer, str) or not answer.strip():
+            raise HTTPException(422, '回答不能为空')
+        view = plans.get(slice_id, actor=actor)
+        execution_id = view['execution_id']
+        if not execution_id:
+            raise HTTPException(409, '这个改造切片还没有绑定执行，无法回答问题')
+        svc.clarify(execution_id, answer.strip(), actor['username'])
+        return get_slice(slice_id, request)
 
     @api.post('/slices/{slice_id}/approve')
     def approve(slice_id: str, request: Request):

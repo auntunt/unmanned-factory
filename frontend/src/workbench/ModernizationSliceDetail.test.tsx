@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import ModernizationSliceDetail from './ModernizationSliceDetail'
@@ -106,7 +106,7 @@ describe('信创化改造切片详情页', () => {
     expect(screen.getByTestId('unverified-list').textContent).toContain('数据库/版本未在真实目标环境验证')
   })
 
-  it('waiting + clarification.requested 显示阻塞原因和继续/取消按钮', async () => {
+  it('waiting + clarification.requested 给的是回答入口，不是「继续执行」', async () => {
     api.mockImplementation(async (path) => {
       const p = String(path)
       if (p.includes('/events')) return { events: [] }
@@ -116,7 +116,9 @@ describe('信创化改造切片详情页', () => {
     renderDetail('mz-waiting-5678')
     await waitFor(() => expect(screen.getByTestId('blocking-reason')).toBeTruthy())
     expect(screen.getByTestId('blocking-message').textContent).toContain('需要补充信息')
-    expect(screen.getByText('继续执行')).toBeTruthy()
+    // 停在提问上时「继续执行」只会把运行推回同一个闸门，摆出来就是误导：
+    // 要的是回答，不是 resume。
+    expect(screen.queryByText('继续执行')).toBeNull()
     expect(screen.getByText('取消切片')).toBeTruthy()
     expect(screen.queryByText('批准计划')).toBeNull()
   })
@@ -136,7 +138,7 @@ describe('信创化改造切片详情页', () => {
 
   it('nextAction 只依据服务端给的 blocking_reason.kind 判断', () => {
     expect(nextAction('waiting', { kind: 'approval.requested', message: '' })).toBe('approve')
-    expect(nextAction('waiting', { kind: 'clarification.requested', message: '' })).toBe('resume')
+    expect(nextAction('waiting', { kind: 'clarification.requested', message: '' })).toBe('clarify')
     expect(nextAction('waiting', null)).toBe('resume')
     expect(nextAction('running', null)).toBeNull()
   })
@@ -241,5 +243,49 @@ describe('信创化改造切片详情页', () => {
     const section = screen.getByTestId('progress-section')
     expect(section.textContent).not.toMatch(/%/)
     expect(section.querySelector('progress')).toBeNull()
+  })
+})
+
+
+describe('模型提问时的回答入口', () => {
+  it('展示服务端给的问题，回答后用读回的真实状态刷新，刷新后未回答的问题仍在', async () => {
+    const waiting = {
+      ...delivered, status: 'waiting', pending_questions: ['金额是按含税还是不含税口径？'],
+      blocking_reason: { kind: 'clarification.requested', message: '模型提出了需要确认的问题', event: null },
+    }
+    const answered = { ...waiting, status: 'running', pending_questions: [], blocking_reason: null }
+    let answeredOnce = false
+    api.mockImplementation(async (path, options) => {
+      const url = String(path)
+      if (url.endsWith('/events')) return { events: [] }
+      if (options?.method === 'POST' && url.endsWith('/clarify')) {
+        answeredOnce = true
+        return answered
+      }
+      return answeredOnce ? answered : waiting
+    })
+
+    renderDetail(delivered.slice_id)
+    await waitFor(() => expect(screen.getByTestId('clarification-panel')).toBeTruthy())
+    expect(screen.getByTestId('clarification-questions').textContent).toContain('金额是按含税还是不含税口径？')
+
+    fireEvent.change(screen.getByTestId('clarification-answer'), { target: { value: '按不含税口径' } })
+    await act(async () => { fireEvent.click(screen.getByTestId('clarification-submit')) })
+
+    await waitFor(() => expect(screen.queryByTestId('clarification-panel')).toBeNull())
+    const posted = api.mock.calls.find(c => String(c[0]).endsWith('/clarify'))
+    expect(posted).toBeTruthy()
+    expect(String(posted![0])).toContain('/api/v2/modernization/slices/')
+    expect(posted![1]?.body).toEqual({ answer: '按不含税口径' })
+  })
+
+  it('没有待回答的问题时不出现这一块', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return { ...delivered, pending_questions: [] }
+    })
+    renderDetail(delivered.slice_id)
+    await waitFor(() => expect(api).toHaveBeenCalled())
+    expect(screen.queryByTestId('clarification-panel')).toBeNull()
   })
 })

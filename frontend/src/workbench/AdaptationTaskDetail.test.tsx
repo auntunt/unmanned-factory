@@ -257,3 +257,47 @@ describe('等待批准的计划', () => {
     expect(screen.queryByRole('button', { name: /批准计划/ })).toBeNull()
   })
 })
+
+
+describe('模型提问时的回答入口', () => {
+  it('展示服务端给的问题，回答后用读回的真实状态刷新，刷新后未回答的问题仍在', async () => {
+    const waiting = {
+      ...baseTask, status: 'waiting', pending_questions: ['金额是按含税还是不含税口径？'],
+      blocking_reason: { kind: 'clarification.requested', message: '模型提出了需要确认的问题', event: null },
+    }
+    const answered = { ...waiting, status: 'running', pending_questions: [], blocking_reason: null }
+    let answeredOnce = false
+    api.mockImplementation(async (path, options) => {
+      const url = String(path)
+      if (url.endsWith('/events')) return { events: [] }
+      if (options?.method === 'POST' && url.endsWith('/clarify')) {
+        answeredOnce = true
+        return answered
+      }
+      return answeredOnce ? answered : waiting
+    })
+
+    renderDetail(baseTask.task_id)
+    await waitFor(() => expect(screen.getByTestId('clarification-panel')).toBeTruthy())
+    expect(screen.getByTestId('clarification-questions').textContent).toContain('金额是按含税还是不含税口径？')
+
+    fireEvent.change(screen.getByTestId('clarification-answer'), { target: { value: '按不含税口径' } })
+    await act(async () => { fireEvent.click(screen.getByTestId('clarification-submit')) })
+
+    await waitFor(() => expect(screen.queryByTestId('clarification-panel')).toBeNull())
+    const posted = api.mock.calls.find(c => String(c[0]).endsWith('/clarify'))
+    expect(posted).toBeTruthy()
+    expect(String(posted![0])).toContain('/api/v2/adaptation/tasks/')
+    expect(posted![1]?.body).toEqual({ answer: '按不含税口径' })
+  })
+
+  it('没有待回答的问题时不出现这一块', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return { ...baseTask, pending_questions: [] }
+    })
+    renderDetail(baseTask.task_id)
+    await waitFor(() => expect(api).toHaveBeenCalled())
+    expect(screen.queryByTestId('clarification-panel')).toBeNull()
+  })
+})

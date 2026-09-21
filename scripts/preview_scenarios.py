@@ -173,8 +173,30 @@ class ScenarioRehearsalRunner:
         workspace = Path(request.workspace)
         kind = 'adaptation' if (workspace / 'adapter.py').exists() else 'modernization'
         if request.read_only:
+            # First planning round: ask, do not act. This is what a real model
+            # does when the request leaves something open, and it is the only
+            # way to rehearse the 「提问 → 回答 → 重新规划 → 批准」 path without
+            # paying for a model. The second round (history is no longer empty,
+            # because ``svc.clarify`` appended the answer) returns the plan.
+            first_round = 'Prior planning history:\n(none)' in request.prompt
+            if first_round:
+                return self._questions(kind, emit)
             return self._plan(kind, emit)
         return self._execute(kind, workspace, emit)
+
+    def _questions(self, kind, emit):
+        questions = ([
+            '这次只做 amount 映射与鉴权改造，还是要一并明确 metadata 的处理方式？',
+            '凭据来源用仓库里现有的模块常量，还是新建配置读取机制？',
+        ] if kind == 'adaptation' else [
+            '达梦方言的连接串按 jdbc:dm:// 还是厂商文档里的另一种写法？',
+            'mysql 现有输出必须逐字节不变，还是允许格式化差异？',
+        ])
+        emit('assistant.message', {'text': '演练脚本先提出需要确认的问题（没有调用模型）。'})
+        return ProviderResult(json.dumps({
+            'title': '先确认几个问题', 'summary': '有需要人工确认的点，确认后再给计划。',
+            'questions': questions, 'tasks': [],
+        }, ensure_ascii=False), cost_usd=0.0, tokens_in=0, tokens_out=0)
 
     def _plan(self, kind, emit):
         if kind == 'modernization':

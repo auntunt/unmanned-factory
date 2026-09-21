@@ -149,6 +149,9 @@ export interface AdaptationPendingPlan {
 }
 
 export interface AdaptationTaskView {
+  /** 模型在动手前提出的、等待人工回答的问题。回答走 `.../clarify`，
+   *  不要用 resume 顶替：停在提问上的运行需要的是答案。 */
+  pending_questions?: string[]
   pending_plan?: AdaptationPendingPlan | null
   schema_version: number
   task_id: string

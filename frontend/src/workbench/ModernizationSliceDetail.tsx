@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import { ErrorNotice, PageHeader, errorText, formatDate } from './ui'
+import ClarificationPanel from './ClarificationPanel'
 import type { PageProps } from './ui'
 import { CopyValue, LoadingCard, ListTime } from './presentation'
 import type {
@@ -395,6 +396,16 @@ export default function ModernizationSliceDetail({ csrfToken, onUnauthorized }: 
 
       {error && <ErrorNotice message={error} />}
       {actionError && <ErrorNotice message={actionError} />}
+
+      {slice && (
+        <ClarificationPanel<ModernizationSliceView>
+          questions={slice.pending_questions ?? []}
+          endpoint={`/api/v2/modernization/slices/${encodeURIComponent(sliceId ?? '')}/clarify`}
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onAnswered={updated => setSlice(updated)}
+        />
+      )}
       {loading && !slice && <LoadingCard label="正在读取切片详情" />}
 
       {slice && (

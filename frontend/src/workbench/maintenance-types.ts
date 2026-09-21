@@ -126,6 +126,9 @@ export interface MaintenanceReceipt {
 }
 
 export interface MaintenanceTaskView {
+  /** 模型在动手前提出的、等待人工回答的问题。回答走 `.../clarify`，
+   *  不要用 resume 顶替：停在提问上的运行需要的是答案。 */
+  pending_questions?: string[]
   schema_version: number
   task_id: string
   revision: number
@@ -284,9 +287,12 @@ export function canCancel(status: MaintenanceStatus): boolean {
   return status === 'received' || status === 'running' || status === 'waiting'
 }
 
-export function canResume(status: MaintenanceStatus, resumable?: boolean): boolean {
+export function canResume(status: MaintenanceStatus, resumable?: boolean,
+                          pendingQuestions?: string[]): boolean {
   // 服务端说得更准：停在没有计划的人工节点时，「继续执行」一定会被拒绝。
   if (resumable === false) return false
+  // 停在提问上时要的是答案：resume 只会把它推回同一个闸门，摆出来就是误导。
+  if (pendingQuestions && pendingQuestions.length > 0) return false
   return status === 'waiting'
 }
 

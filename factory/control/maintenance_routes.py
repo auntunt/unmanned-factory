@@ -92,6 +92,24 @@ def _state(supplement) -> str:
     return 'expired' if supplement['expired'] else 'pending'
 
 
+def _pending_questions(store, execution_id) -> list:
+    """The questions a human is being asked, or none.
+
+    A model that asks before acting is doing the right thing; a surface that
+    cannot show the question turns that into a dead end. Same shape the
+    adaptation surface already renders, so one page component covers all three.
+    """
+    if not execution_id:
+        return []
+    try:
+        run = store.get(execution_id)
+    except KeyError:
+        return []
+    if run.get('status') != 'needs_clarification':
+        return []
+    return list((run.get('plan') or {}).get('questions') or [])
+
+
 def router(store, svc):
     from factory.control.issue_maintenance_webuddy import tasks_for
 
@@ -167,6 +185,14 @@ def router(store, svc):
                                for s in _supplements(store, view['execution_id'])]
         view['resumable'] = _resumable(store, view['execution_id'], view['status'])
         view['pending_plan'] = _pending_plan(store, view['execution_id'])
+        view['pending_questions'] = _pending_questions(store, view['execution_id'])
+        if view['pending_questions'] and (view['blocking_reason'] or {}).get('kind') in (None, 'unknown'):
+            # Answering is not resuming: a run stopped on a question needs the
+            # answer, and 「继续执行」 would only push it back at the same gate.
+            view['blocking_reason'] = {
+                'kind': 'clarification.requested',
+                'message': '模型在动手前提出了需要确认的问题，回答后才会继续',
+                'event': None}
         if view['pending_plan'] and (view['blocking_reason'] or {}).get('kind') == 'unknown':
             # The port only cites events it already knows as blocking, and a plan
             # awaiting approval is not one of them. Saying "no citable reason"
@@ -200,6 +226,29 @@ def router(store, svc):
         return {'recorded': True, 'applied': state == 'applied', 'state': state,
                 'supplements': [{**s, 'state': _state(s)} for s in supplements],
                 'task_id': task_id, 'status': view['status']}
+
+    @api.post('/tasks/{task_id}/clarify')
+    async def clarify(task_id: str, request: Request):
+        """Answer the questions this task is waiting on, through the existing gate.
+
+        Carries a human answer to the run lifecycle rather than to the port, so
+        it performs the same plugin-availability check by hand that ``approve``
+        does -- answering is what lets the executor start, and a stopped plugin
+        must not accept one. Project authorization comes from ``tasks.get``
+        below, exactly as every other call here.
+        """
+        actor = _actor(request)
+        tasks.gate.require('continue')
+        body = await request.json()
+        answer = (body or {}).get('answer')
+        if not isinstance(answer, str) or not answer.strip():
+            raise HTTPException(422, '回答不能为空')
+        view = tasks.get(task_id, actor=actor)
+        execution_id = view['execution_id']
+        if not execution_id:
+            raise HTTPException(409, '这个维护任务还没有绑定执行，无法回答问题')
+        svc.clarify(execution_id, answer.strip(), actor['username'])
+        return get_task(task_id, request)
 
     @api.post('/tasks/{task_id}/approve')
     def approve(task_id: str, request: Request):

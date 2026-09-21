@@ -225,9 +225,12 @@ export function isKnownBlocking(kind: string): boolean {
 /** 停在 waiting 时该走哪个动作：approve 用的是同一个 blocking_reason.kind 字段
  *  服务端已经给出的信号，不是前端另猜一套规则；'awaiting_approval' 的执行状态
  *  正是通过 approval.requested 事件报告为阻塞原因的。 */
-export function nextAction(status: ModernizationStatus, blockingReason: BlockingReason | null): 'approve' | 'resume' | null {
+export function nextAction(status: ModernizationStatus, blockingReason: BlockingReason | null): 'approve' | 'resume' | 'clarify' | null {
   if (status !== 'waiting') return null
   if (blockingReason?.kind === 'approval.requested') return 'approve'
+  // 停在提问上的运行要的是答案，不是「继续执行」——resume 只会把它推回同一个
+  // 闸门。这里交给澄清面板，头部不再摆一个会误导的继续按钮。
+  if (blockingReason?.kind === 'clarification.requested') return 'clarify'
   return 'resume'
 }
 
@@ -236,6 +239,9 @@ export interface ModernizationReceipt {
 }
 
 export interface ModernizationSliceView {
+  /** 模型在动手前提出的、等待人工回答的问题。回答走 `.../clarify`，
+   *  不要用 resume 顶替：停在提问上的运行需要的是答案。 */
+  pending_questions?: string[]
   schema_version: number
   slice_id: string
   revision: number

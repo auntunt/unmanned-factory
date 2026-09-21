@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import { ErrorNotice, PageHeader, errorText, formatDate } from './ui'
+import ClarificationPanel from './ClarificationPanel'
 import type { PageProps } from './ui'
 import { CopyValue, LoadingCard, ListTime } from './presentation'
 import type {
@@ -396,6 +397,16 @@ export default function AdaptationTaskDetail({ csrfToken, onUnauthorized }: Page
 
       {error && <ErrorNotice message={error} />}
       {actionError && <ErrorNotice message={actionError} />}
+
+      {task && (
+        <ClarificationPanel<AdaptationTaskView>
+          questions={task.pending_questions ?? []}
+          endpoint={`/api/v2/adaptation/tasks/${encodeURIComponent(taskId ?? '')}/clarify`}
+          csrfToken={csrfToken}
+          onUnauthorized={onUnauthorized}
+          onAnswered={updated => setTask(updated)}
+        />
+      )}
 
       {task?.pending_plan && (
         <section className="wb-card" data-testid="pending-plan">
