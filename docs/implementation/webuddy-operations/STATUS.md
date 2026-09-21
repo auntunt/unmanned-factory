@@ -16,8 +16,8 @@
 | --- | --- | --- |
 | M0 费用候选验收边界收口 | 独立定向通过 | 见下 |
 | M1 长任务有效修订 / 原子干预回执 / 同快照验收 | 两条边界已转绿，待 Codex 复核 | 见下 |
-| M2 断点恢复、证据适用性、外部动作意图 | 未开始 | — |
-| M3 人工 Issue 纵向流程 | 未开始 | — |
+| M2 断点恢复、证据适用性、外部动作意图 | Codex 独立复核通过（3 条边界探针 + 五集 46 passed） | `81151d4` |
+| M3 人工 Issue 纵向流程 | 五条完成线定向通过（70 passed），待 Codex 复核 | `0e7f006`、`59ad7a2` |
 | M4 三个主 Skill + 三个骨架 + 最小运营 UI | 未开始 | — |
 | M5 Codex 集成与公司服务器发布 | 未开始 | — |
 
@@ -457,6 +457,83 @@ M1 的重启贯通属本单范围，不代表整个平台已验收。
 `TARGET_ENV`/`VERB_ENV` 这两个新环境变量是本轮为"目标能造出可绑定回执"而加的约定，
 真实目标脚本侧的适配尚未在真机上验证；A 项的进程组判活在 posix 上实测，非 posix 未覆盖。
 
+## M3 手动 Issue 维护切片与独立调用边界
+
+起点 `81151d4`（Codex 独立复核：原样 3 条边界探针 + M2 五集 **46 passed / exit 0**）。
+真实 SDK 进程树、Linux、真实目标脚本回执仍归 M5，本节不宣称它们已支持。
+
+**五条完成线（先列，逐条在下方回填实跑）**
+
+1. 同键同内容的手动导入回到原任务/原执行/原回执，不重复付费也不开第二个工作区；
+   同键不同内容是 409 等价冲突；reopen/update 形成显式新修订/后继，不覆盖旧证据；
+   绑定的 repo 与完整 SHA 要能在真实 ProviderRequest / 执行工作副本里查到，不只在登记表。
+2. 合成小型遗留仓库先有真实本地失败，再经执行端口修改、跑有意义的检查、导出补丁/构建物，
+   并给出机器可读 + 人可读回执（原 Issue、基线、交付 commit/hash、适用约定版本、
+   执行与测试结果、未验证项、部署层级）。单测/集成用显式 fake-model 隔离付费调用。
+3. 独立 CLI/进程证明：不经 webuddy 网页，与适配器同一 Task 契约，
+   创建 → 观察事件 → 补充/恢复 → 导出；CLI 必须以**真实子进程**跑，不是 `main(argv)` 单测。
+   身份走既有受控身份或显式本地操作者边界，不通过 `body.actor='admin'` 获得权限。
+4. waiting/failure/cancel/resume 如实映射，没有第二个无法解释的状态来源；
+   重开进程后找到同一任务，费用/干预/构建物都在，且不产生额外派发；
+   至少一条真实持久化恢复直接复用 M2。
+5. 交给 M4 的稳定类型化接口与最小样本数据：步骤、阻塞原因、事件引用、证据适用性、
+   实际能力来源、交付层级。本轮不改导航/大屏，不凭计时器编进度。
+
+**文件归属（主会话独占共享状态/迁移/生命周期）**
+
+| 文件 | 归属 | 说明 |
+| --- | --- | --- |
+| `factory/control/issue_maintenance.py` | 主会话 | 领域模块：任务身份、Issue 版本/来源、固定 repo+base SHA、约定版本、execution 引用、交付回执；模块自有表 |
+| `factory/control/issue_maintenance_webuddy.py` | 主会话 | webuddy 适配器：把端口接到既有 Service/Store/execution，不新建执行器/预算/状态机 |
+| `factory/control/maintenance_cli.py` | 子代理（接口稳定后） | 独立 CLI 入口，只调领域模块的 Task 契约 |
+| `tests/test_issue_maintenance_core.py` | 主会话 | 完成线 1、4 |
+| `tests/test_issue_maintenance_vertical.py` | 主会话 | 完成线 2（合成遗留仓库 + 真实失败 + 回执） |
+| `tests/test_issue_maintenance_cli.py` | 子代理 | 完成线 3（真实子进程） |
+| `docs/implementation/webuddy-operations/issue-maintenance.md` | 子代理 | 使用说明与合成 fixture 说明 |
+
+**实跑回填（命令 / 退出码 / 证据版本 / 未验证项）**
+
+落地两个提交：`0e7f006`（完成线 1、2、4、5）与 `59ad7a2`（完成线 3 + 一处静默降级修复）。
+
+统一命令（本工作树自己没有 `.venv`，用 `v3-skills-icons` 的解释器；`-m "not smoke"`
+排除真调模型的用例）：
+
+```
+PY=/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons/.venv/bin/python
+$PY -m pytest -q -p no:randomly -m "not smoke" \
+  tests/test_issue_maintenance_core.py tests/test_issue_maintenance_vertical.py \
+  tests/test_issue_maintenance_recovery.py tests/test_issue_maintenance_view_contract.py \
+  tests/test_issue_maintenance_cli.py
+```
+
+结果 **70 passed / exit 0**；重跑后工作树干净（生成的 M4 样本逐字节一致）。
+
+| 完成线 | 证据 | 未验证项 |
+| --- | --- | --- |
+| 1 | `test_issue_maintenance_core.py`（45 条）：计数式 fake 执行端口，重复导入的派发次数与工作区创建次数都是测出来的，不是描述的；同键改内容抛 `Conflict`（经 `app.py` 的 handler 即 409） | fake 端口不能证明跨进程存活，这一条由完成线 4 的真重启补上 |
+| 2 | `test_issue_maintenance_vertical.py`（3 条）：合成遗留仓库先真实失败，`_FakeModel` 在**调用时刻**记录 HEAD 并断言等于基线，导出的补丁 `git am` 到新克隆后检查退出码 0，`diff_hash` 对得上导出字节 | 真实 provider 未接入；检查脚本是合成的，不代表任何客户仓库 |
+| 3 | `test_issue_maintenance_cli.py`（13 条）：全部经 `subprocess.run` 起真实进程，文件里没有一处直接调 `main(argv)`；身份只认本机 OS 用户，`--operator root` 退出 2 且在打开数据库之前就拒绝（实测拒绝后目录仍为空）；补充→恢复各起一个子进程，从库里读回 `followup.pending` 与 `human.continued` | 未验证正在运行的 service 真的从队列取走 `create` 入队的那条运行；非 posix 未覆盖 |
+| 4 | `test_issue_maintenance_recovery.py`（4 条）：关掉第一个协调器，用第二个 `Store`/`Service` 打开同一 `control.db`，跑 M2 既有 `recover()`；阻塞原因引用日志里真实存在的 `run.recovered` 事件序号；费用与未核销调用数（`unknown_cost_calls`）重开后仍在 | 真实崩溃（非 `svc.close()`）未验证；Linux 未覆盖 |
+| 5 | `test_issue_maintenance_view_contract.py`（5 条）：样本由真实视图生成而非手写，递归扫描确认载荷里没有任何可用来画进度条的字段名；最后一步只在回执存在时才 `done`，两个方向都有断言 | M4 消费方尚未接入，不宣称界面已显示 |
+
+本轮修掉的静默降级（`59ad7a2`）：适配器把缺失的 `resume`/`cancel` 钩子替换成返回
+`None` 的 lambda，而 CLI 只为 `create` 接线，于是一次根本没到达生命周期的取消会打印
+任务视图并退出 0。现在钩子无条件接线，缺省改为抛 `Conflict`；只有 `dispatch` 仍按
+子命令门控，因为它未接线时是抛错而非静默成功。原有的 `cancel_requested` 断言在钩子
+为空操作时同样通过 —— 三处新断言都用变异验证过会红。
+
+**M2 遗留如实呈现（本单不追加大改）**
+
+- 进程组判活只覆盖**留在组里**的后代；真实 SDK 现场的异常登记与脱组仍待确认。
+  不把锁 / `killpg` 当成全平台恰好一次的证明。
+- `TargetStore.last_checks` 新增的 `current` / `ttl_s` 仍在等 M4 消费方，
+  不宣称用户页面已会显示过期。
+- 未适配结构化回执的目标保持旧命令兼容；未知响应不自动重发。
+  普通命令的 exit 0 与一次查询确认是两种不同证据。
+
 ## 下一步
 
-M2 三条边界补修完成，推候选后停写，交 Codex 独立复核并接手 M3。本轮不开始 M3。
+M3 五条完成线已落地（`0e7f006`、`59ad7a2`），候选分支 `codex/operations-20260921` 交
+Codex 复核。真实 SDK 进程树、Linux、真实服务器与真实目标脚本回执仍归 M5，本轮未触及。
+`docs/implementation/webuddy-operations/issue-maintenance.md`（使用说明，规格里标为可选）
+尚未写。
