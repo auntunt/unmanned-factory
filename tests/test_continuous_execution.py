@@ -219,11 +219,29 @@ def test_review_repair_preserves_commit_and_single_workspace(repo):
     assert 'verification' not in again
 
 
-def test_recovery_rejects_changed_checks_or_foreign_repository(repo, tmp_path):
+def test_changed_checks_are_rerun_on_recovery_not_used_to_discard_it(repo, tmp_path):
+    """An edited check invalidates its own recorded result, not the whole recovery.
+
+    This used to abort the recovery outright, which made one edited check throw
+    away every other check's still-valid result and the coding work with it. The
+    boundary that has to hold is narrower: the recovered round runs the
+    configuration in front of it, and a stage that runs no checks at all may not
+    be entered while the saved results no longer cover that configuration.
+    """
     artifact = run(repo, Writer())
     project = {**repo, 'checks': {'other': [sys.executable, '-c', 'pass']}}
-    with pytest.raises(ExecutionError, match='checks changed'):
-        run(project, Writer(), resume_artifacts=artifact)
+    resumed = run(project, Writer(), resume_artifacts=json.loads(json.dumps(artifact)))
+    assert [record['name'] for record in resumed['checks']] == ['other']
+    assert resumed['checks'][0]['exit'] == 0 and not resumed['checks'][0].get('reused')
+    assert resumed['execution_checks'] == project['checks']
+    # The verification-only stage runs nothing, so it must refuse instead.
+    with pytest.raises(ExecutionError, match='检查配置已变化'):
+        run(project, Writer(), resume_artifacts=json.loads(json.dumps(artifact)),
+            task_fields={'resume_stage': 'verification'})
+
+
+def test_recovery_rejects_foreign_repository(repo, tmp_path):
+    artifact = run(repo, Writer())
     artifact['worktree'] = repo['workspace']
     with pytest.raises(ExecutionError, match='outside'):
         run(repo, Writer(), resume_artifacts=artifact)

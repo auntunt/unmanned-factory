@@ -22,6 +22,7 @@ from factory.control.execution import (
     _commit_tree, _reported_cost, _reported_tokens, _emit, _FORBIDDEN_PARTS,
     _FORBIDDEN_NAMES,
 )
+from factory.control import evidence_identity, provider_activity
 from factory.control.model_routing import select_profile
 from factory.control.providers import ProviderRequest, ProviderError, ProviderCancelled
 from factory.control.store import scrub
@@ -96,8 +97,11 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         artifacts = json.loads(json.dumps(resume_artifacts))
         if artifacts.get('execution_mode') != 'continuous' or artifacts.get('base_sha') != base_sha:
             raise ExecutionError('continuous recovery baseline or execution mode changed')
-        if artifacts.get('execution_checks') != project.get('checks'):
-            raise ExecutionError('continuous recovery checks changed')
+        # An edited check invalidates its own recorded result, not every other
+        # check's. Whether a saved result still means anything is decided per
+        # check by its identity below; a changed configuration no longer discards
+        # a whole recovery, and it never lets a changed check's old pass stand.
+        checks_changed = artifacts.get('execution_checks') != project.get('checks')
         root = Path(artifacts['worktree']).resolve()
         if root == workspace or not root.is_relative_to(workspace.parent):
             raise ExecutionError('continuous recovery worktree is outside the project work area')
@@ -107,6 +111,13 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             raise ExecutionError('continuous recovery repository or branch mismatch')
         if _guard_snapshot(_baseline(root)) != artifacts.get('workspace_guard'):
             raise ExecutionError('continuous recovery Git metadata changed')
+        # A second writer against a live one corrupts the site this recovery is
+        # trying to return to. The previous worker's own OS lock is the only
+        # evidence here that it is gone; a pid or a durable status row is not.
+        artifacts.setdefault('activity_lock', provider_activity.lock_path_for(root))
+        if provider_activity.is_active(artifacts['activity_lock']):
+            raise ExecutionError('上一轮编码进程仍在写这个工作区，暂不恢复以避免两个写入方',
+                                 error_type='provider_active')
         old_route = artifacts.get('session_profile') or {}
         if any(old_route.get(key) != route.get(key) for key in ('provider', 'model')):
             raise ExecutionError('continuous recovery model changed')
@@ -115,6 +126,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             raise ExecutionError('continuous recovery task changed')
         artifacts.pop('verification', None)
         artifacts.pop('error', None)
+        # The site now runs the configuration in front of it. Each saved result is
+        # separately either still evidence for one of those checks or not.
+        artifacts['execution_checks'] = project['checks']
         # Preserve successful checks for validated finalization-only recovery.
     else:
         parent = Path(tempfile.mkdtemp(prefix=f'.factory-{run_part}-', dir=workspace.parent))
@@ -128,6 +142,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                      'worktree': str(root), 'commit': None, 'checks': [], 'tasks': [state],
                      'session_id': None, 'session_profile': dict(route),
                      'execution_checks': project['checks'], 'workspace_guard': _guard_snapshot(_baseline(root)),
+                     'activity_lock': provider_activity.lock_path_for(root),
                      'known_cost_usd': 0.0, 'observed_cost_usd': 0.0}
         feedback_session = task.get('_feedback_session')
         if isinstance(feedback_session, dict):
@@ -187,6 +202,19 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                    and not record.get('cancelled')
                    for record in attempt.get('command_evidence', []))
 
+    def check_identities(changed, signature):
+        """What a result for each configured check would be evidence about.
+
+        The requirement side comes from the agreement this round was queued
+        under, not from whatever is current: an arriving supplement must force
+        coverage to be re-established rather than relabel an old pass.
+        """
+        return {name: evidence_identity.check_identity(
+                    root, name, argv, code_signature=signature, paths=changed,
+                    revision=task.get('effective_revision'),
+                    digest=task.get('effective_digest'))
+                for name, argv in checks}
+
     def verify_changed_tree(changed, attempt):
         """Run the configured checks against one immutable working-tree image."""
         # Configuration/test edits are ordinary coding work. Give the final
@@ -203,10 +231,30 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         }
         signature = _working_hash(root, changed, timeout_s=timeout_s)
         _emit(emit, 'task.activity', {'phase': 'checks'}, task_id)
+        identities = check_identities(changed, signature)
+        # Results this run already recorded, from either durable place. Identity
+        # decides whether any of them is evidence about the tree in front of us;
+        # being present is not by itself a reason to trust one.
+        prior = [*((artifacts.get('finalization_checkpoint') or {}).get('checks') or ()),
+                 *(artifacts.get('checks') or ())]
+        reuse, _owed = evidence_identity.partition(prior, identities)
+        reusable = {item['name'] for item in reuse}
+        saved = {record['name']: record for record in prior or ()
+                 if isinstance(record, dict) and record.get('name')}
         records = []
         for name, argv in checks:
+            # A result already recorded against this exact identity is evidence
+            # for this tree; running it again buys nothing. Anything else --
+            # including a check whose identity could not be established -- runs.
+            if name in reusable:
+                records.append({**saved[name], 'reused': True})
+                _emit(emit, 'execution.reused', {'stage': 'check', 'check': name,
+                    'identity_fingerprint': saved[name].get('identity_fingerprint'),
+                    'message': '该检查的代码、命令、工具环境与要求身份均未变化，沿用已记录结果'}, task_id)
+                continue
             record = _run_check(root, name, argv, _remaining_budget(), emit, task_id, cancel)
-            records.append(record)
+            records.append({**record,
+                            'identity_fingerprint': evidence_identity.fingerprint(identities.get(name))})
             if record.get('cancelled') or record.get('timeout') or record.get('exit') != 0:
                 break
         state['checks'] = records
@@ -315,6 +363,11 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         if resume_artifacts and task.get('resume_stage') == 'verification':
             if artifacts.get('commit') != _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s) or guard():
                 raise ExecutionError('source changed after successful execution; cannot resume verification only')
+            if checks_changed:
+                # This stage runs no checks at all, so it can only be entered when
+                # the saved results still cover the configuration. They do not.
+                raise ExecutionError('检查配置已变化，已记录的结果不再覆盖当前配置；'
+                                     '不能只恢复独立验收')
             if not artifacts.get('checks') or any(c.get('exit') != 0 for c in artifacts['checks']):
                 raise ExecutionError('successful checks missing for verification-only recovery')
             state['status'] = 'verified'
@@ -330,9 +383,20 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             changed = guard()
             if list(changed) != pending['paths'] or _working_hash(root, changed, timeout_s=timeout_s) != pending['signature']:
                 raise ExecutionError('source changed after checks; cannot resume finalization only')
-            artifacts['checks'] = pending['checks']; state['checks'] = pending['checks']
+            attempt = state['attempts'][-1]
             _emit(emit, 'execution.reused', {'stage': 'finalization', 'message': '已通过检查的源码未变化，直接恢复提交与归档'}, task_id)
-            return finalize(changed, state['attempts'][-1])
+            # Not a blanket adoption of the saved results: each one is reused only
+            # where its identity still covers this tree, this command, this tool
+            # environment and this requirement. Whatever it no longer covers runs
+            # again here, with no coding call.
+            signature, records, failed = verify_changed_tree(changed, attempt)
+            if failed:
+                attempt.update(status='failed', error='saved finalization failed configured check: ' + failed['name'])
+                _emit(emit, 'attempt.failed', dict(attempt), task_id)
+                raise ExecutionError(attempt['error'])
+            artifacts['finalization_checkpoint'] = {
+                'paths': list(changed), 'signature': signature, 'checks': records}
+            return finalize(changed, attempt)
         if (resume_artifacts and task.get('resume_stage') == 'budget_finalization'
                 and artifacts.get('budget_exhausted') and not artifacts.get('commit')):
             prior_attempts = state.get('attempts') or []
@@ -436,7 +500,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                 result = runner.run(ProviderRequest(provider=route['provider'], model=route['model'],
                     prompt=prompt, workspace=str(root), session_id=artifacts.get('session_id'),
                     timeout_s=max(1, int(remaining)), read_only=False,
-                    max_budget_usd=provider_ceiling), callback, cancel=cancel)
+                    max_budget_usd=provider_ceiling,
+                    activity_lock=artifacts['activity_lock']), callback, cancel=cancel)
                 if getattr(result, 'session_id', None):
                     artifacts['session_id'] = result.session_id
                     state['session_id'] = result.session_id

@@ -251,9 +251,10 @@ def _run(self, rid):
         # queue bound a revision when it queued this round; `contract_prompt`
         # refuses to render a different one, so a round queued under revision 2
         # cannot quietly start coding against revision 3.
-        queued_revision = (run.get('execution_resume') or {}).get('effective_revision')
+        queued_binding = run.get('execution_resume') or {}
         run = {**run, 'request': run['request'] + effective_contract.contract_prompt(
-            run, revision=queued_revision)}
+            run, revision=queued_binding.get('effective_revision'),
+            digest=queued_binding.get('effective_digest'))}
         continuous = run.get('execution_mode') == 'continuous'
         deadline = time.monotonic() + limits['timeout_s']
         progress = {}
@@ -329,8 +330,13 @@ def _run(self, rid):
             project['routing_policy'] = {key: policy[key] for key in ('max_attempts', 'auto_escalate')}
         if run.get('context'):
             project = {**project, 'expected_base_sha': run['context']['commit_sha']}
+        # The agreement this round is bound to, carried down to the executor so a
+        # saved check result stays evidence about the requirement it was run for.
+        round_binding = effective_contract.resume_binding(run)
         plan = {**run['plan'], 'tasks': [
             {**task, '_routing_prompt': (self._submitted_request(run) if continuous else task['prompt']),
+             'effective_revision': round_binding['effective_revision'],
+             'effective_digest': round_binding['effective_digest'],
              'prompt': task['prompt'] + context_prompt(run.get('context')) +
                 agent_guidance(run) + capability_prompt(run.get('capabilities', [])) + module_prompt({**run, 'spec_tree_enabled': project.get('spec_tree_enabled', False)})}
             for task in run['plan']['tasks']]}
