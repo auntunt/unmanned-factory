@@ -303,7 +303,8 @@ def test_pending_write_receipt_survives_crash_without_replay(remote_env):
     pending = {'target_id': target['id'], 'target': target['name'], 'verb': 'deploy', 'status': 'unverified', 'exit_code': None,
                'executed': False, 'duration_s': 0, 'reason': 'unknown receipt'}
     with store.connect() as db:
-        db.execute('INSERT INTO remote_invocations VALUES(?,?,?,?)', (run['id'], target['id'], 'deploy', json.dumps(pending)))
+        db.execute('INSERT INTO remote_invocations(run_id,target_id,verb,result) VALUES(?,?,?,?)',
+                   (run['id'], target['id'], 'deploy', json.dumps(pending)))
     response = client.get('/api/v2/runs/' + run['id'])
     assert response.json()['artifacts']['remote_results'] == [pending]
     assert service.remote.execute(run['id'], target['id'], 'deploy') == pending

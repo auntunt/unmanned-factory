@@ -33,6 +33,16 @@ class TargetStore:
                     revision INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, data TEXT NOT NULL, at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS remote_invocations(run_id TEXT NOT NULL, target_id TEXT NOT NULL,
                     verb TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(run_id,target_id,verb));''')
+            # The row already identified the action by (run, target, verb) and
+            # already survived a lost response. What it could not say was *which*
+            # action it was, from outside this row: the parameters it was claimed
+            # with, and a stable id a later reconciliation can ask the target
+            # about. Added, not replaced -- the existing primary key still decides
+            # identity, so a repeat still returns the original receipt.
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(remote_invocations)')}
+            for name in ('action_id', 'intent', 'at'):
+                if name not in columns:
+                    db.execute(f'ALTER TABLE remote_invocations ADD COLUMN {name} TEXT')
 
     def key_dir(self):
         raw = os.environ.get('FACTORY_DEPLOY_KEY_DIR')

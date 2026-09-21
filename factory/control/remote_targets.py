@@ -1,4 +1,5 @@
 """Coordinator-only, pinned SSH verbs; no credentials or command text cross into agents."""
+import hashlib
 import json
 import os
 import selectors
@@ -14,6 +15,26 @@ from factory.control.store import Conflict, now
 from factory.redact import redact_text
 
 READ_ONLY = frozenset(('health_check', 'service_status', 'fetch_log'))
+
+
+def action_id(rid, target_id, verb):
+    """A stable name for one external write, derived from what identifies it.
+
+    Derived rather than random so that reopening the database, or asking a second
+    time after a lost response, arrives at the same name for the same action --
+    which is what makes a later reconciliation able to ask about *this* action
+    instead of guessing from a timestamp.
+    """
+    digest = hashlib.sha256('\x00'.join((str(rid), str(target_id), str(verb))).encode())
+    return 'act_' + digest.hexdigest()[:24]
+
+
+def intent_of(target, verb, *, lines=100):
+    """What was claimed before the I/O: enough to tell two calls apart."""
+    return {'target_id': target['id'], 'target': target['name'],
+            'target_revision': target.get('revision'), 'verb': verb,
+            'host': target['host'], 'port': target['port'], 'user': target['user'],
+            **({'lines': lines} if verb == 'fetch_log' else {})}
 
 
 class RemoteFailure(RuntimeError):
@@ -182,26 +203,117 @@ class RemoteTargets:
                         or run['status'] not in ('ready_for_review', 'published')):
                     raise Conflict('远程部署须为显式授权部署的 release 运行，且独立验收已通过')
                 # Claim before I/O. A coordinator crash must never replay a write script.
-                pending = {'target_id': target_id, 'target': target['name'], 'verb': verb, 'status': 'unverified',
-                           'exit_code': None, 'executed': False, 'duration_s': 0,
+                aid = action_id(rid, target_id, verb)
+                intent = intent_of(target, verb, lines=lines)
+                pending = {'action_id': aid, 'intent': intent,
+                           'target_id': target_id, 'target': target['name'], 'verb': verb,
+                           'status': 'unverified', 'exit_code': None, 'executed': False,
+                           'duration_s': 0,
                            'reason': '动作已登记但未收到完成回执；请人工核对，不自动重放'}
                 cached = None
                 with self.store.connect() as db:
-                    inserted = db.execute('INSERT OR IGNORE INTO remote_invocations VALUES(?,?,?,?)',
-                                          (rid, target_id, verb, json.dumps(pending))).rowcount
+                    inserted = db.execute(
+                        'INSERT OR IGNORE INTO remote_invocations'
+                        '(run_id,target_id,verb,result,action_id,intent,at) VALUES(?,?,?,?,?,?,?)',
+                        (rid, target_id, verb, json.dumps(pending), aid,
+                         json.dumps(intent, sort_keys=True), now())).rowcount
                     if not inserted:
-                        cached = json.loads(db.execute('SELECT result FROM remote_invocations WHERE run_id=? AND target_id=? AND verb=?',
-                                                     (rid, target_id, verb)).fetchone()['result'])
+                        row = db.execute('SELECT result,intent FROM remote_invocations WHERE run_id=? AND target_id=? AND verb=?',
+                                         (rid, target_id, verb)).fetchone()
+                        cached = json.loads(row['result'])
+                        claimed = row['intent']
+                        # Same key, different parameters is a different action wearing
+                        # this one's name. Returning the old receipt would report the
+                        # earlier action's outcome for it; running it would be a second
+                        # external write. Neither -- refuse.
+                        if claimed and claimed != json.dumps(intent, sort_keys=True):
+                            raise Conflict('同一动作键已登记过不同参数，拒绝复用回执或重发',
+                                           error_type='remote_action_conflict')
                 if cached is not None:
                     self._record(run, {**cached, 'reused': True})
                     return cached
             result = self._run(target, verb, lines)
             if verb not in READ_ONLY:
+                result = {'action_id': action_id(rid, target_id, verb),
+                          'intent': intent_of(target, verb, lines=lines), **result}
                 with self.store.connect() as db:
                     db.execute('UPDATE remote_invocations SET result=? WHERE run_id=? AND target_id=? AND verb=?',
                                (json.dumps(result), rid, target_id, verb))
             self._record(run, result)
             return result
+
+    def actions(self, rid=None, *, action_id=None):
+        """Read-only: what external writes were claimed, and what came back.
+
+        Performs no I/O and no writes, so it is safe to call while an action's
+        outcome is unknown -- which is exactly when someone needs to look.
+        """
+        query = ('SELECT run_id,target_id,verb,result,action_id,intent,at '
+                 'FROM remote_invocations')
+        clauses, params = [], []
+        if rid is not None:
+            clauses.append('run_id=?'); params.append(rid)
+        if action_id is not None:
+            clauses.append('action_id=?'); params.append(action_id)
+        if clauses:
+            query += ' WHERE ' + ' AND '.join(clauses)
+        with self.store.connect() as db:
+            rows = db.execute(query + ' ORDER BY at, verb', params).fetchall()
+        out = []
+        for row in rows:
+            result = json.loads(row['result'])
+            out.append({'action_id': row['action_id'] or result.get('action_id'),
+                        'run_id': row['run_id'], 'target_id': row['target_id'],
+                        'verb': row['verb'], 'claimed_at': row['at'],
+                        'intent': json.loads(row['intent']) if row['intent'] else result.get('intent'),
+                        'status': result.get('status', 'unverified'),
+                        'reconciled': result.get('reconciled'),
+                        'result': result})
+        return out
+
+    def reconcile(self, rid, target_id, verb):
+        """Decide an unknown write from target-verifiable evidence. Never re-writes.
+
+        Only a read-only verb runs here, and only evidence that names *this* action
+        can settle it: the deployed version or action id the target reports back. A
+        health check returning 200 says something is up; it does not say this
+        deploy is what put it there, and treating it as proof is how a lost
+        response becomes a false "published".
+        """
+        with self.targets.lock:
+            run = self.store.get(rid)
+            with self.store.connect() as db:
+                row = db.execute('SELECT result,intent,action_id FROM remote_invocations '
+                                 'WHERE run_id=? AND target_id=? AND verb=?',
+                                 (rid, target_id, verb)).fetchone()
+            if row is None:
+                raise Conflict('没有这条外部动作的登记记录')
+            record = json.loads(row['result'])
+            aid = row['action_id'] or record.get('action_id')
+            if record.get('status') == 'pass':
+                return {**record, 'reconciled': record.get('reconciled', 'already_known')}
+            target = self.targets.get(target_id)
+            probe = self._run(target, 'service_status')
+            evidence = probe.get('summary') or ''
+            # The target has to name this action. Anything less stays unknown.
+            if probe['status'] == 'pass' and aid and aid in evidence:
+                settled = {**record, 'status': 'pass', 'reconciled': 'target_reported_action',
+                           'reconciled_at': now(),
+                           'reason': '目标自述已应用此动作标识，按可验证证据关联成功',
+                           'reconcile_evidence': evidence[:2000]}
+            else:
+                settled = {**record, 'status': 'unverified',
+                           'reconciled': 'unknown_target_cannot_confirm',
+                           'reconciled_at': now(),
+                           'reason': ('目标无法报出此动作标识，维持未知待人工核对；'
+                                      '不因健康检查通过就认定本次写入成功'),
+                           'reconcile_evidence': evidence[:2000]}
+            with self.store.connect() as db:
+                db.execute('UPDATE remote_invocations SET result=? WHERE run_id=? AND target_id=? AND verb=?',
+                           (json.dumps(settled), rid, target_id, verb))
+            self._record(run, {**settled, 'verb': verb, 'target_id': target_id,
+                               'target': target['name']})
+            return settled
 
     def evidence(self, run):
         # Durable write receipts remain visible even if the coordinator died before
