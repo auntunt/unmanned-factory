@@ -22,9 +22,10 @@ const NEXT_STATES: Record<PluginState, { to: PluginState; label: string; hint: s
     { to: 'enabled', label: '重新启用', hint: '恢复接受新任务。' },
     { to: 'disabled', label: '停用', hint: '活跃执行清空后才会成功；不会取消客户任务。' },
   ],
+  // 两个新接入的场景出厂就是停用的，从没被启用过，所以这里不能说「重新启用」。
   disabled: [{
-    to: 'enabled', label: '重新启用',
-    hint: '历史任务不会自动重启，需要继续的任务重新启用后由人再发起。',
+    to: 'enabled', label: '启用',
+    hint: '历史任务不会自动重启，需要继续的任务由人再发起。',
   }],
 }
 

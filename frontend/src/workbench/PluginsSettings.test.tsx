@@ -71,7 +71,7 @@ describe('业务插件设置页', () => {
     const unwired = screen.getByTestId('plugin-api-adaptation')
     expect(unwired.textContent).toContain('尚未接入可执行处理器')
     const enableButton = Array.from(unwired.querySelectorAll('button'))
-      .find(b => b.textContent?.includes('重新启用'))
+      .find(b => b.textContent?.includes('启用'))
     expect(enableButton?.disabled).toBe(true)
   })
 

@@ -50,13 +50,57 @@
 - 代码关系查询沿用仓库内已接线的 `codegraph.py`，不装第三方图工具（理由见 B0-REUSE.md）。
 - 检查：`tests/test_scenario_memory.py` 8 passed；4 个「未确认被当成已确认」的变异全部被杀死。
 
+## 批次四：三个场景（提交 `30f987e`）
+
+三个场景由三个 Sonnet 子会话并行实现，集成者核对后合并。每个场景的端口都照维护
+模块的形状做，共用同一个可用性闸门与同一份项目记忆，没有各造一套。
+
+**信创化改造** `legacy_modernization.py` + `modernization_routes.py`（`/api/v2/modernization`）
+
+- 目标登记默认 `candidate`；只有 `confirm_dimension` 能把某个维度提升为
+  `active`/`decision`，且走同 key 的 CAS 更新，知识库因此记得下是谁确认的。
+- 一条数据库维度的切片真的过 `execute_plan`：基线先真失败（缺 dm 方言），
+  修复后 `git format-patch` 导出的补丁应用到全新 clone 能让检查真正转绿。
+- 没有达梦实例就把数据库验证记为未验证，不写成通过。
+
+**自动化三方接口适配** `api_adaptation.py` + `adaptation_routes.py`（`/api/v2/adaptation`）
+
+- 本地模拟第三方端点走真实 TCP；`mock` 在契约导入时声明并原样带进回执，不是事后贴标签。
+- `technical_success` / `business_accepted` / `business_completed` 三个字段分开，
+  200 与 mock 通过都不推出业务完成（本轮单向上报，`business_completed` 为 False）。
+- 无法映射的字段（`metadata`）标为待确认并写明影响，同时落进项目记忆，不静默丢弃。
+
+**自动化运维** `issue_maintenance.py`
+
+- 出回执时把这次改到的路径与 commit 写回项目记忆，状态 `candidate`；
+  同一 `(task_id, revision)` 重复导出不会写第二条。
+- 视图字段定名 `project_memory` 而不是 `memory_refs`：它是实时读的「项目现在知道什么」，
+  不是这条任务派发时刻真正带走的那一组。回执刻意不带这个字段——
+  冻结的交付记录不能引用一个还会变的值。**「派发时刻的冻结引用」没有做，见未验证项。**
+
+**集成侧的四处改动**
+
+1. 两个新场景声明为 `executable` 并接进 `app.py`，但 `default_enabled=False`：
+   新装的场景默认关着，由管理员按客户打开。升级不会替所有存量客户静默开两个业务面。
+2. `plugin_routes` 为两个新插件各接自己的活跃执行判定，没有给不知道的插件填假的 0。
+3. 补了信创 `approve` 的闸门测试——这条路绕过端口，端口自己的测试覆盖不到它。
+4. 「没有处理器就不能启用」这条规则现在没有任何已发布插件处于那个状态，
+   改为临时把一个声明降级来保持覆盖，而不是把测试删掉。
+
+**必要检查**：相关后端 190 passed；前端 22 passed、生产构建通过。
+新增 4 个变异全部被杀死（信创 approve 不问闸门、适配交出未包装端口、
+新插件默认自启、交付事实被写成已确认）。
+
 ## 模型事实
 
 - 集成者（本会话）：请求的是 Claude Code 默认会话模型，实际为 **Opus 5（`claude-opus-5`）**，
   取自会话 system prompt 的模型元数据。**用户要求的 Sonnet 5 没有用在集成者这一侧**——
   会话模型不能由我自己中途切换，这里如实记录，没有伪报。
-- 三个场景执行者：以 `model: sonnet` 派发的子代理，各自回报自身 system prompt 里的
-  精确模型 ID（见下面的场景批次）。
+- 三个场景执行者：以 `model: sonnet` 派发，三个子会话都逐字回报了同一行
+  system prompt 元数据：`You are powered by the model named Sonnet 5. The exact
+  model ID is claude-sonnet-5.` 即三个场景的编码实际由 **Sonnet 5
+  （`claude-sonnet-5`）** 完成，与请求一致。
+- 没有打断任何正在工作的会话去强切模型。
 
 ## 未验证项
 
@@ -64,5 +108,15 @@
 - 独立安装/独立发行包：**没有执行过**，因此不写「可独立部署已验收」。
 - 插件停用与启用没有在长时间真实并发下验证；排空判定与状态写入之间的竞态窗口
   已由 `approve` 的闸门兜住，但窗口本身没有被消除。
-- `legacy-modernization` 与 `api-adaptation` 仍是 `executable=False`，
-  按契约不挂假就绪入口；要翻成 True 需要先核对处理器真的可用。
+- 「派发时刻的冻结记忆引用」没有做：`project_memory` 是实时读，不是这条任务
+  派发那一刻真正带走的那一组。要做需要在 `WebuddyExecution.submit` 里把 recall
+  到的条目随 run 一起持久化。当前命名与回执的取舍已经把话说清楚，没有假装是绑定。
+- 三场景的执行链都用注入的 dispatch 跑过（与既有维护垂直测试同一手法），
+  **真实 LLM 规划 + 人工 approve 的完整 dag 路径本轮没有跑**。
+- 信创只验证了 `database` 一个维度的完整闭环；CA/签章、OS/CPU、浏览器、
+  外部组件四个维度的命中词表没有在真实项目上验证过。
+- 适配只跑了 `mock` 环境；`sandbox`/`production` 分支代码可用但没有被真实调用验证过。
+- 没有任何一条记忆条目被提升为 `active`（除测试内的合成数据），
+  因为没有真实客户确认人。
+- 前端只做了插件启停页与维护页的可用性联动；信创与适配**没有页面**，
+  本轮只有 HTTP 面。
