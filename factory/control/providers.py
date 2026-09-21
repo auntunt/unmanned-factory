@@ -25,6 +25,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from . import provider_activity
+
 
 @dataclass(frozen=True)
 class ProviderRequest:
@@ -1456,6 +1458,23 @@ class SDKRunner:
             raise
 
     def _run(self, request: ProviderRequest, emit: Emit, cancel=None) -> ProviderResult:
+        """Dispatch, and on the way out clear the writer-tree record we created.
+
+        A controlled end -- success, provider failure, timeout, cancellation --
+        must leave the workspace recoverable, so the record cannot be permanent.
+        `retire` only drops it once the kernel confirms the group is empty, so an
+        SDK descendant still writing keeps the site blocked instead.
+        """
+        tracked: dict[str, Any] = {}
+        try:
+            return self._dispatch(request, emit, cancel, tracked)
+        finally:
+            group = tracked.get('group')
+            if group and request.activity_lock:
+                provider_activity.retire(request.activity_lock, group)
+
+    def _dispatch(self, request: ProviderRequest, emit: Emit, cancel=None,
+                  tracked: dict[str, Any] | None = None) -> ProviderResult:
         if request.provider not in _PROVIDER_IMPORTS:
             raise ProviderError(f"unknown provider: {request.provider!r}")
         if not request.model:
@@ -1484,6 +1503,15 @@ class SDKRunner:
             )
         except OSError as exc:
             raise ProviderError(f"cannot launch provider worker: {exc}") from exc
+        # The worker registers its own tree, but only once it has parsed the
+        # request: between the fork and that moment the tree already exists and a
+        # recovering coordinator would read the site as free. `start_new_session`
+        # made this pid the group leader, so register it here, before the request
+        # is even written.
+        if request.activity_lock and not request.read_only and os.name == 'posix':
+            provider_activity.register(request.activity_lock, proc.pid)
+            if tracked is not None:
+                tracked['group'] = proc.pid
         try:
             assert proc.stdin is not None
             proc.stdin.write(payload)

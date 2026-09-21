@@ -244,6 +244,144 @@ def test_an_unrecorded_identity_is_unverified_rather_than_assumed_passing(tmp_pa
     assert resumed['commit']
 
 
+def _verification_events(events):
+    return [(kind, payload) for kind, payload in events
+            if kind in ('execution.reused', 'execution.recheck')]
+
+
+def test_verification_only_recovery_honours_a_still_valid_check(tmp_path):
+    """The stage that runs nothing still has to decide by identity -- and reuse wins here.
+
+    Nothing about the check moved, so this recovery must not re-earn it. This is
+    the direction the fix could easily break: making the stage re-run everything
+    would satisfy the environment case below while throwing away valid evidence.
+    """
+    root, counter = _repo(tmp_path)
+    project = _project(root)
+    artifacts, _ = _execute(project, _plan(), _Runner(_coder()))
+    assert _runs(counter) == 1
+
+    resumed, events = _execute(
+        project, _plan(resume_stage='verification'),
+        _Runner(lambda *a, **k: pytest.fail('verification recovery dispatched coding')),
+        resume_artifacts=artifacts)
+    assert _runs(counter) == 1, 'a valid check was re-earned at the verification stage'
+    assert _reused_checks(events) == ['local']
+    assert resumed['checks'][0]['reused'] is True
+
+
+def test_verification_only_recovery_reruns_a_check_whose_environment_moved(tmp_path,
+                                                                          monkeypatch):
+    """Same commit, different import environment: the saved pass no longer covers it.
+
+    The commit is identical and the tree is clean, so every source-based guard is
+    satisfied. Only the identity rule can see that the check would now run against
+    something else -- and the re-run is local, with no coding call.
+    """
+    root, counter = _repo(tmp_path)
+    (root / 'check.sh').write_text(
+        f'#!/bin/sh\necho ran >> {counter}\npython -c "import dep" || exit 1\n')
+    os.chmod(root / 'check.sh', 0o755)
+    subprocess.run(['git', 'add', '-A'], cwd=root, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'import check'], cwd=root, check=True,
+                   capture_output=True)
+    first = tmp_path / 'libs1'
+    first.mkdir()
+    (first / 'dep.py').write_text('VALUE = 1\n')
+    monkeypatch.setenv('PYTHONPATH', str(first))
+    project = _project(root)
+    artifacts, _ = _execute(project, _plan(), _Runner(_coder()))
+    assert _runs(counter) == 1
+
+    second = tmp_path / 'libs2'
+    second.mkdir()
+    (second / 'dep.py').write_text('VALUE = 2\n')
+    monkeypatch.setenv('PYTHONPATH', str(second))
+    resumed, events = _execute(
+        project, _plan(resume_stage='verification'),
+        _Runner(lambda *a, **k: pytest.fail('verification recovery dispatched coding')),
+        resume_artifacts=artifacts)
+    assert _runs(counter) == 2, 'the verification stage reused a pass across a changed environment'
+    assert _reused_checks(events) == []
+    assert [payload['check'] for kind, payload in events
+            if kind == 'execution.recheck'] == ['local']
+    assert resumed['checks'][0]['exit'] == 0
+
+
+def test_verification_only_recovery_blocks_when_identity_cannot_be_placed(tmp_path):
+    """No recorded code dimension means no identity to compare -- so it blocks.
+
+    A legacy checkpoint reaching this stage cannot be re-decided at all: the tree
+    is committed, so the code signature its fingerprints were built from is not
+    recomputable here. Refusing is the answer; assuming is what this replaces.
+    """
+    root, counter = _repo(tmp_path)
+    project = _project(root)
+    artifacts, _ = _execute(project, _plan(), _Runner(_coder()))
+    assert _runs(counter) == 1
+    artifacts.pop('checks_identity_code')  # written before this existed
+
+    with pytest.raises(ExecutionError, match='没有可核对的身份依据'):
+        _execute(project, _plan(resume_stage='verification'),
+                 _Runner(lambda *a, **k: pytest.fail('coding call')),
+                 resume_artifacts=artifacts)
+    assert _runs(counter) == 1
+
+
+def test_a_swapped_tool_with_preserved_timestamps_is_a_different_check(tmp_path,
+                                                                      monkeypatch):
+    """Identity is what is in the file, not when it was last written.
+
+    `cp -p`, `tar -p` and timestamp-restoring checkouts all put different content
+    at the same path with the same size and mtime. A stat-only fingerprint reads
+    that as the same tool, which is the reuse this module exists to refuse.
+    """
+    root, counter = _repo(tmp_path)
+    tool = tmp_path / 'bin' / 'countcheck'
+    tool.parent.mkdir()
+    tool.write_text(f'#!/bin/sh\necho ran >> {counter}\nexit 0\n')
+    os.chmod(tool, 0o755)
+    monkeypatch.setenv('PATH', f'{tool.parent}:{os.environ["PATH"]}')
+    project = _project(root, checks={'local': ['countcheck']})
+    artifacts, events = _execute(project, _plan(), _Runner(_coder()))
+    assert _runs(counter) == 1
+    checkpoint = _checkpoint_before_commit(events)
+
+    # Same path, same length, and the original stat restored afterwards.
+    stat_before = tool.stat()
+    tool.write_text(f'#!/bin/sh\necho ran >> {counter}\nexit 1\n')
+    os.chmod(tool, 0o755)
+    os.utime(tool, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+    assert tool.stat().st_size == stat_before.st_size, 'premise: size is unchanged'
+    assert tool.stat().st_mtime_ns == stat_before.st_mtime_ns, 'premise: mtime restored'
+
+    with pytest.raises(ExecutionError):
+        _resume(project, checkpoint,
+                _Runner(lambda *a, **k: pytest.fail('recovery dispatched coding')))
+    # Re-run rather than reused: the swapped tool now fails, which is why it matters.
+    assert _runs(counter) == 2, 'a swapped tool with restored timestamps was reused'
+
+
+def test_an_unreadable_tool_has_no_identity_at_all(tmp_path, monkeypatch):
+    """Present but unreadable is not identified; claiming otherwise would allow reuse."""
+    tool = tmp_path / 'bin' / 'countcheck'
+    tool.parent.mkdir()
+    tool.write_text('#!/bin/sh\nexit 0\n')
+    os.chmod(tool, 0o755)
+    monkeypatch.setenv('PATH', f'{tool.parent}:{os.environ["PATH"]}')
+    identity = evidence_identity.check_identity(
+        tmp_path, 'local', ['countcheck'], code_signature='sig', paths=[],
+        env={'PATH': str(tool.parent)})
+    assert identity is not None and identity['tool']['resolved'][2]
+    os.chmod(tool, 0o000)
+    try:
+        assert evidence_identity.check_identity(
+            tmp_path, 'local', ['countcheck'], code_signature='sig', paths=[],
+            env={'PATH': str(tool.parent)}) is None
+    finally:
+        os.chmod(tool, 0o755)
+
+
 def test_a_deployment_health_observation_expires(tmp_path):
     """Health is a fact about now; an old 200 is a record of the past.
 

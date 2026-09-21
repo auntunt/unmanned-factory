@@ -260,6 +260,14 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         state['checks'] = records
         artifacts['checks'] = records
         attempt['checks'] = records
+        # The code dimension these identities were built from. Recorded because a
+        # later stage cannot recompute it: by then the work is committed and the
+        # tree clean, so a fresh working hash would differ from the one every
+        # saved fingerprint contains and would invalidate results that are still
+        # perfectly valid. The other dimensions -- tool, environment, inputs,
+        # requirement -- are still recomputed there, which is the point.
+        artifacts['checks_identity_code'] = {'signature': signature,
+                                             'paths': sorted(changed)}
         after = guard()
         if after != changed or _working_hash(root, after, timeout_s=timeout_s) != signature:
             raise ExecutionError('verification changed source files')
@@ -267,6 +275,63 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                        if item.get('cancelled') or item.get('timeout')
                        or item.get('exit') != 0), None)
         return signature, records, failed
+
+    def revalidate_recorded_checks():
+        """Re-decide the saved check results by identity, before reusing any of them.
+
+        The verification-only stage runs no checks of its own, so it used to accept
+        every saved `exit == 0` as covering the tree in front of it. That is the
+        same all-or-nothing trust the identity rule replaced everywhere else: the
+        commit can be identical while the interpreter, `PYTHONPATH`, the resolved
+        tool or the requirement revision moved, and the saved pass is then evidence
+        about a check nobody ran here.
+
+        So the identities are recomputed -- from the recorded code dimension, which
+        is the only one this stage cannot re-derive -- and anything they no longer
+        cover is re-run locally. No coding call, and a check that is still covered
+        is still reused. A saved set with no recorded code dimension at all cannot
+        be placed against any identity, so it blocks instead of being assumed.
+        """
+        saved = artifacts.get('checks') or []
+        code = artifacts.get('checks_identity_code')
+        if not isinstance(code, dict) or not isinstance(code.get('paths'), list):
+            raise ExecutionError(
+                '已记录的检查结果没有可核对的身份依据，无法确认它覆盖当前环境；'
+                '请重新运行本地检查', artifacts=artifacts)
+        identities = check_identities(code['paths'], code.get('signature'))
+        reuse, owed = evidence_identity.partition(saved, identities)
+        reusable = {item['name'] for item in reuse}
+        by_name = {record['name']: record for record in saved
+                   if isinstance(record, dict) and record.get('name')}
+        records = []
+        for name, argv in checks:
+            if name in reusable:
+                records.append({**by_name[name], 'reused': True})
+                _emit(emit, 'execution.reused', {'stage': 'check', 'check': name,
+                    'identity_fingerprint': by_name[name].get('identity_fingerprint'),
+                    'message': '该检查的代码、命令、工具环境与要求身份均未变化，沿用已记录结果'}, task_id)
+                continue
+            reason = next((item['reason'] for item in owed if item['name'] == name), 'no saved result')
+            _emit(emit, 'execution.recheck', {'stage': 'verification', 'check': name,
+                'reason': reason,
+                'message': '已记录结果不再覆盖当前身份，本地重跑该检查，不调用编码模型'}, task_id)
+            record = _run_check(root, name, argv, _remaining_budget(), emit, task_id, cancel)
+            records.append({**record,
+                            'identity_fingerprint': evidence_identity.fingerprint(identities.get(name))})
+            if record.get('cancelled') or record.get('timeout') or record.get('exit') != 0:
+                break
+        failed = next((item for item in records if item.get('cancelled')
+                       or item.get('timeout') or item.get('exit') != 0), None)
+        if failed:
+            raise ExecutionError(
+                '恢复独立验收前重跑的配置检查未通过：' + str(failed.get('name')),
+                artifacts=artifacts)
+        if guard():
+            raise ExecutionError('重跑配置检查改动了源码，不能按已提交的结果恢复',
+                                 artifacts=artifacts)
+        state['checks'] = records
+        artifacts['checks'] = records
+        return records
 
     def finalize(changed, attempt):
         # Production cancellation and finalization share this gate. Service
@@ -370,8 +435,9 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                                      '不能只恢复独立验收')
             if not artifacts.get('checks') or any(c.get('exit') != 0 for c in artifacts['checks']):
                 raise ExecutionError('successful checks missing for verification-only recovery')
+            revalidate_recorded_checks()
             state['status'] = 'verified'
-            _emit(emit, 'execution.reused', {'stage': 'verification', 'message': '源码与已验证提交一致，直接恢复独立验收'}, task_id)
+            _emit(emit, 'execution.reused', {'stage': 'verification', 'message': '源码与已验证提交一致，检查身份已逐项核对，恢复独立验收'}, task_id)
             checkpoint()
             return artifacts
         pending = artifacts.get('finalization_checkpoint')

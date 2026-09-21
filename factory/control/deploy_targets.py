@@ -212,16 +212,23 @@ class TargetStore:
                 "WHERE action='target.test' AND id IN "
                 "(SELECT MAX(id) FROM deploy_target_audit WHERE action='target.test' GROUP BY target_id)"
             ).fetchall()
+        from factory.control.evidence_identity import HEALTH_TTL_S, health_is_current
         results = {}
         for row in rows:
             try:
                 data = json.loads(row['data'])
             except (json.JSONDecodeError, TypeError):
                 continue
+            # An observation of reachability is about the moment it was made. This
+            # surface is the one place a recorded `pass` is read back as the
+            # target's state, so it carries whether that reading is still current
+            # instead of presenting last week's probe as today's answer.
             results[row['target_id']] = {
                 'status': data.get('status', 'unverified'),
                 'reason': data.get('reason', ''),
                 'checked_at': row['at'],
+                'current': health_is_current(row['at']),
+                'ttl_s': HEALTH_TTL_S,
             }
         return results
 

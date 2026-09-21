@@ -16,6 +16,73 @@ from factory.redact import redact_text
 
 READ_ONLY = frozenset(('health_check', 'service_status', 'fetch_log'))
 
+#: The one line shape a target may use to state what it did with an action, and
+#: the only thing that can settle an unknown write. Carried on the target's own
+#: stdout, prefixed so it is distinguishable from arbitrary service output.
+RECEIPT_MARKER = 'WEBUDDY-RECEIPT '
+RECEIPT_SCHEMA = 'webuddy.action.receipt/1'
+#: States a receipt may declare. Only `applied` is success; the other two are
+#: answers, not confirmations. An undeclared or unlisted state is not a state.
+RECEIPT_STATES = ('applied', 'failed', 'unknown')
+
+#: Environment the coordinator prefixes onto a registered command so the target
+#: learns which action it is performing, or being asked about. A target that
+#: ignores them behaves exactly as before and stays unverifiable, which is the
+#: correct outcome rather than a failure.
+ACTION_ENV = 'WEBUDDY_ACTION_ID'
+INTENT_ENV = 'WEBUDDY_INTENT_DIGEST'
+QUERY_ENV = 'WEBUDDY_QUERY_ACTION_ID'
+#: A receipt is only accepted when it names the target and verb this side is
+#: asking about, so the convention has to hand the target both. Without them a
+#: cooperating target could not produce a bindable receipt at all -- it does not
+#: otherwise know the coordinator's id for it.
+TARGET_ENV = 'WEBUDDY_TARGET_ID'
+VERB_ENV = 'WEBUDDY_VERB'
+
+
+def intent_digest(intent):
+    """A stable digest of the frozen intent, for the target to echo back.
+
+    Binds a receipt to the parameters the action was claimed under. A claim that
+    names this action id but a different frozen intent is a different action.
+    """
+    return hashlib.sha256(
+        json.dumps(intent, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def receipts_in(text, *, action_id, target_id, verb, digest):
+    """Every well-formed receipt in this output that is about this exact action.
+
+    Returns (matching, malformed). Matching means: our schema, our action id, our
+    target, our verb, our frozen intent digest, and a declared state from the
+    closed list. Nothing here interprets prose -- a line either parses into that
+    shape or it is not a receipt, so no vocabulary of denials is involved and a
+    target cannot state success by accident.
+    """
+    matching, malformed = [], 0
+    for line in (text or '').splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(RECEIPT_MARKER):
+            continue
+        try:
+            payload = json.loads(stripped[len(RECEIPT_MARKER):])
+        except ValueError:
+            malformed += 1
+            continue
+        if not isinstance(payload, dict) or payload.get('schema') != RECEIPT_SCHEMA:
+            malformed += 1
+            continue
+        if payload.get('action_id') != action_id:
+            # A receipt about another action is not malformed, just not ours.
+            continue
+        if (payload.get('target_id') != target_id or payload.get('verb') != verb
+                or payload.get('intent_digest') != digest
+                or payload.get('state') not in RECEIPT_STATES):
+            malformed += 1
+            continue
+        matching.append(payload)
+    return matching, malformed
+
 
 def action_id(rid, target_id, verb):
     """A stable name for one external write, derived from what identifies it.
@@ -122,7 +189,15 @@ class RemoteTargets:
                 raise RemoteFailure('远程操作超时，进程组已终止', 'timeout')
             return process(argv, remaining)
 
-    def _run(self, target, verb, lines=100):
+    def _run(self, target, verb, lines=100, *, identity=None):
+        """Run one registered command. `identity` tells the target which action it is.
+
+        The registered command text is never rewritten: the identity is passed as
+        a leading environment assignment, so a target script that does not look
+        for it runs byte-identically to before and simply cannot issue a receipt.
+        That is the compatible half of the convention -- unsupported targets stay
+        `unknown` instead of failing.
+        """
         started = time.monotonic()
         result = {'target_id': target['id'], 'target': target['name'], 'verb': verb,
                   'status': 'unverified', 'exit_code': None, 'executed': False, 'attempts': 0}
@@ -136,6 +211,8 @@ class RemoteTargets:
             command = 'tail -n ' + str(lines) + ' -- ' + shlex.quote(command)
         if verb == 'health_check' and command.startswith(('http://', 'https://')):
             command = 'curl --fail --silent --show-error --max-time 15 -- ' + shlex.quote(command)
+        if identity:
+            command = self._with_identity(command, identity)
         for attempt in range(2 if verb in READ_ONLY else 1):
             result['attempts'] = attempt + 1
             try:
@@ -159,6 +236,27 @@ class RemoteTargets:
                 break
         result['duration_s'] = round(time.monotonic() - started, 3)
         return result
+
+    @staticmethod
+    def _with_identity(command, identity):
+        """Prefix the identity as shell environment assignments, quoted.
+
+        Values are derived here (a hex action id, a hex digest), never taken from
+        a caller's text, and each is `shlex.quote`d anyway so nothing in them can
+        reach the target as syntax.
+        """
+        assignments = []
+        for key, value in (
+                (ACTION_ENV, identity.get('action_id')),
+                (INTENT_ENV, identity.get('intent_digest')),
+                (QUERY_ENV, identity.get('query_action_id')),
+                (TARGET_ENV, identity.get('target_id')),
+                (VERB_ENV, identity.get('verb'))):
+            if value:
+                assignments.append(f'{key}={shlex.quote(str(value))}')
+        if not assignments:
+            return command
+        return ' '.join(assignments) + ' ' + command
 
     def _record(self, run, result):
         with self.store.connect() as db:
@@ -232,15 +330,77 @@ class RemoteTargets:
                 if cached is not None:
                     self._record(run, {**cached, 'reused': True})
                     return cached
-            result = self._run(target, verb, lines)
-            if verb not in READ_ONLY:
-                result = {'action_id': action_id(rid, target_id, verb),
-                          'intent': intent_of(target, verb, lines=lines), **result}
+            if verb in READ_ONLY:
+                result = self._run(target, verb, lines)
+            else:
+                # The write carries its own identity, so the target can record
+                # what it applied and answer for it later. Without this the only
+                # thing that could ever name the action was the coordinator, and
+                # a lost response left nothing to ask about.
+                claimed_intent = intent_of(target, verb, lines=lines)
+                digest = intent_digest(claimed_intent)
+                result = self._run(target, verb, lines, identity={
+                    'action_id': aid, 'intent_digest': digest,
+                    'target_id': target_id, 'verb': verb})
+                declared, malformed = receipts_in(result.get('summary'),
+                    action_id=aid, target_id=target_id, verb=verb, digest=digest)
+                receipt = self._settle_receipt(declared, malformed)
+                result = {'action_id': aid, 'intent': claimed_intent,
+                          'intent_digest': digest, **result,
+                          **({'receipt': receipt} if receipt else {})}
+                if receipt and receipt['state'] != 'applied':
+                    # The target answered, and its answer is not success.
+                    result.update(status='unverified', reconciled='target_reported_not_applied',
+                                  reason='目标回执声明此动作未成功应用，维持未知待人工核对')
                 with self.store.connect() as db:
                     db.execute('UPDATE remote_invocations SET result=? WHERE run_id=? AND target_id=? AND verb=?',
                                (json.dumps(result), rid, target_id, verb))
             self._record(run, result)
             return result
+
+    @staticmethod
+    def _frozen_intent_mismatch(run, target, claimed, verb):
+        """Why this target is no longer the one the action was claimed against, or None.
+
+        Checked against two frozen records, not against whatever is current: the
+        intent stored with the claim, and the target snapshot the run was
+        submitted with. Either moving means a receipt from this host would be
+        about a different machine or a different configuration.
+        """
+        if not isinstance(claimed, dict):
+            return '登记时的参数缺失，无法核对'
+        for key in ('host', 'port', 'user', 'target_id'):
+            expected = claimed.get(key)
+            current = target['id'] if key == 'target_id' else target.get(key)
+            if expected != current:
+                return f'{key} 已变化'
+        if claimed.get('target_revision') != target.get('revision'):
+            return 'target_revision 已变化'
+        if claimed.get('verb') != verb:
+            return 'verb 与登记不一致'
+        snapshot = (run.get('source') or {}).get('remote_targets') or []
+        if not any(item.get('id') == target['id']
+                   and item.get('revision') == target.get('revision') for item in snapshot):
+            return '运行提交时的目标快照与当前配置不同'
+        return None
+
+    @staticmethod
+    def _settle_receipt(declared, malformed):
+        """One receipt, or none. Contradiction and malformation are never success.
+
+        Two receipts for the same action that disagree mean the target cannot be
+        taken at its word here, and a line that claims our schema but does not
+        parse into it is a broken answer rather than an absent one; both keep the
+        action unknown. A single well-formed receipt is returned as-is -- its
+        declared state, not our reading of it, decides.
+        """
+        states = {item['state'] for item in declared}
+        if malformed or len(states) > 1:
+            return {'state': 'unknown', 'conflict': True,
+                    'declared': sorted(states), 'malformed': malformed}
+        if not declared:
+            return None
+        return declared[0]
 
     def actions(self, rid=None, *, action_id=None):
         """Read-only: what external writes were claimed, and what came back.
@@ -293,20 +453,47 @@ class RemoteTargets:
             if record.get('status') == 'pass':
                 return {**record, 'reconciled': record.get('reconciled', 'already_known')}
             target = self.targets.get(target_id)
-            probe = self._run(target, 'service_status')
+            claimed = json.loads(row['intent']) if row['intent'] else record.get('intent')
+            # Before asking anyone: is this still the machine the action was
+            # claimed against? A same-numbered claim collected from a host that
+            # has since been re-pointed would be a receipt about somewhere else.
+            frozen = self._frozen_intent_mismatch(run, target, claimed, verb)
+            if frozen is not None:
+                settled = {**record, 'status': 'unverified',
+                           'reconciled': 'frozen_target_changed', 'reconciled_at': now(),
+                           'reason': '目标配置与登记该动作时不同，拒绝据此认领同号回执：' + frozen,
+                           'reconcile_evidence': ''}
+                with self.store.connect() as db:
+                    db.execute('UPDATE remote_invocations SET result=? WHERE run_id=? AND target_id=? AND verb=?',
+                               (json.dumps(settled), rid, target_id, verb))
+                self._record(run, {**settled, 'verb': verb, 'target_id': target_id,
+                                   'target': target['name']})
+                return settled
+            digest = record.get('intent_digest') or intent_digest(claimed)
+            # Read-only, and it names the action being asked about rather than
+            # asking "is anything healthy".
+            probe = self._run(target, 'service_status', identity={
+                'query_action_id': aid, 'intent_digest': digest,
+                'target_id': target_id, 'verb': verb} if aid else None)
             evidence = probe.get('summary') or ''
-            # The target has to name this action. Anything less stays unknown.
-            if probe['status'] == 'pass' and aid and aid in evidence:
+            declared, malformed = receipts_in(evidence, action_id=aid, target_id=target_id,
+                                              verb=verb, digest=digest)
+            receipt = self._settle_receipt(declared, malformed) if aid else None
+            if probe['status'] == 'pass' and receipt and receipt.get('state') == 'applied':
                 settled = {**record, 'status': 'pass', 'reconciled': 'target_reported_action',
-                           'reconciled_at': now(),
-                           'reason': '目标自述已应用此动作标识，按可验证证据关联成功',
+                           'reconciled_at': now(), 'receipt': receipt,
+                           'reason': '目标按约定回执声明已应用此动作，且绑定动作标识与冻结意图',
                            'reconcile_evidence': evidence[:2000]}
             else:
+                reason = ('目标无法按约定回执声明此动作，维持未知待人工核对；'
+                          '不因健康检查通过或输出中出现动作标识就认定本次写入成功')
+                if receipt and receipt.get('state') != 'applied':
+                    reason = '目标回执声明此动作并未成功应用（' + str(receipt.get('state')) + '），维持未知待人工核对'
                 settled = {**record, 'status': 'unverified',
                            'reconciled': 'unknown_target_cannot_confirm',
                            'reconciled_at': now(),
-                           'reason': ('目标无法报出此动作标识，维持未知待人工核对；'
-                                      '不因健康检查通过就认定本次写入成功'),
+                           **({'receipt': receipt} if receipt else {}),
+                           'reason': reason,
                            'reconcile_evidence': evidence[:2000]}
             with self.store.connect() as db:
                 db.execute('UPDATE remote_invocations SET result=? WHERE run_id=? AND target_id=? AND verb=?',

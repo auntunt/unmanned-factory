@@ -43,12 +43,38 @@ ENV_KEYS = ('PATH', 'PYTHONPATH', 'VIRTUAL_ENV', 'PYTHONHOME', 'NODE_PATH',
 HEALTH_TTL_S = 900
 
 
+#: Above this, a file is identified by size alone rather than by content. Check
+#: scripts and interpreters are far smaller; the cap only stops an identity
+#: computation from reading an arbitrarily large argument off disk.
+MAX_FINGERPRINT_BYTES = 64 * 1024 * 1024
+
+
 def _file_fingerprint(path: Path) -> list | None:
+    """Identify a file by what is in it, not by when it was last written.
+
+    Size plus mtime was not enough: a build system, a `tar -p` extraction, a
+    `cp -p`, or a checkout that restores timestamps can put a different
+    executable at the same path with the same recorded stat, and the identity
+    would then read as unchanged across a tool swap -- exactly the case this
+    module exists to catch. The content digest is the fingerprint; size stays in
+    the record so an unreadable-but-present file is still distinguishable.
+    """
     try:
         stat = path.stat()
     except OSError:
         return None
-    return [str(path), stat.st_size, stat.st_mtime_ns]
+    if stat.st_size > MAX_FINGERPRINT_BYTES:
+        # Not read, therefore not identified. Reporting a stat-only record here
+        # would make two different files indistinguishable again.
+        return None
+    hasher = hashlib.sha256()
+    try:
+        with path.open('rb') as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b''):
+                hasher.update(block)
+    except OSError:
+        return None
+    return [str(path), stat.st_size, hasher.hexdigest()]
 
 
 def _tool_fingerprint(root, argv, env):
@@ -67,7 +93,13 @@ def _tool_fingerprint(root, argv, env):
         # Unresolvable now: refuse to claim identity rather than compare against
         # a name that may resolve to something else next time.
         return None
-    return {'argv0': argv[0], 'resolved': _file_fingerprint(Path(resolved)),
+    fingerprint = _file_fingerprint(Path(resolved))
+    if fingerprint is None:
+        # The tool is there but its content could not be read. "We cannot tell
+        # which tool this is" is not an identity; saying so keeps the result from
+        # being reused across a swap we would not have seen.
+        return None
+    return {'argv0': argv[0], 'resolved': fingerprint,
             'env': {key: env.get(key) for key in ENV_KEYS}}
 
 

@@ -390,6 +390,73 @@ append-only `events` 里只取九类平台记录的事实（中断/恢复/待处
 只在 fake-ssh 目标上验证过，目标端"自述已应用动作标识"的实际输出格式需要真实服务器确认；
 M1 的重启贯通属本单范围，不代表整个平台已验收。
 
+## M2 边界补修（对 `REVIEW-M2.md` 的三条已复现失败）
+
+适用提交：本节所述改动落在 `3991d2e` 之后的候选提交上。Codex 在 `3991d2e` 上的独立复核：
+上述五集 **21 passed / exit 0**，旁置探针 `tests/test_codex_m2_boundaries.py`
+**3 failed / exit 1**。探针按原样字节复制进 `tests/`，未作任何改动
+（sha256 `46748156c674d0f614698a130ab9e8809e06ce937981d5e98920178a621eb220`）。
+
+**先更正上一节的两处记法。**
+
+- 上一节写的"五个新集 → `30 passed`"混记了集合：`30` 来自六个文件，
+  `REVIEW-M2.md` 点名的那五个文件是 **21 passed**。本节所有数字均标注具体文件。
+- 上一节把 `_file_fingerprint` 说成"可执行文件字节指纹"，当时它只有路径/size/mtime，
+  保留时间戳的工具替换会被读成同一个工具；也把 `health_is_current` 说成"健康证据时效
+  已接通"，当时它只有测试引用、生产无调用。两处现已按原要求真正做到（见下），不是改说法。
+
+**A — SDK 包装进程锁不覆盖真正写入的子进程。** 原来"锁没了"就当写入方已退出，而写入方是
+一棵进程树：包装进程被 SIGKILL，内核立刻释放 flock，它的 SDK 后代却还在写这个工作区，
+恢复流程于是去开第二个执行方。现在启动方在 Popen 之后、写入请求之前就把写入方的**进程组**
+登记进 `provider-activity.record.json`（`os.replace` 原子落盘），判活问的是这个组是否还有
+成员：`ProcessLookupError` 才是空，`PermissionError` 与任何读不出来的状态都算"还活着"而阻塞。
+组确认为空之后才清记录，因此正常受控关闭仍然可恢复。没有引入跨主机调度器。
+
+**B — verification-only 恢复没有走身份规则。** 这个阶段自己不跑检查，原来把每条
+`exit == 0` 都当作覆盖了眼前这棵树。现在它和 `verify_changed_tree` 用同一条身份规则：
+代码维度从 `checks_identity_code` 取（这一维在此阶段无法重算——工作已提交、树是干净的），
+工具、环境、输入、要求四维现场重算；仍被覆盖的照旧复用，不再覆盖的**本地重跑**该条检查，
+不调用编码模型；记录里连代码维度都没有的（旧检查点）无法与任何身份比对，明确阻塞。
+另外两处按 §B 的原要求补齐：`_file_fingerprint` 现在是流式 sha256 内容摘要（读不出内容
+就返回 `None`，"分辨不出是哪个工具"不算身份）；`health_is_current` 接进了真实消费位置
+`TargetStore.last_checks()`，也即 `/api/v2/deploy-targets/checks` 与
+`admin_config_tools.list_deploy_targets` 的输出带 `current`/`ttl_s`。
+
+**C — 输出里出现动作号不等于动作成功。** 没有加任何否定词黑名单：只有一行按约定 schema
+解析成功、且 action_id / target_id / verb / 冻结 intent 摘要四项全绑上、状态取自封闭列表
+`applied|failed|unknown` 的回执才是回执，其余一概不是。只有 `applied` 判通过；矛盾、
+解析失败、未声明状态、绑到别的动作，全部留在 `unverified`。核对之前先校验冻结目标配置，
+主机/端口/用户/revision/运行提交时的目标快照任一不符即 `frozen_target_changed`，**不发起
+任何 I/O**，不去变更后的另一台主机领取同号声明。正向链路也补上了：写动作现在真的把
+`WEBUDDY_ACTION_ID` / `WEBUDDY_INTENT_DIGEST` / `WEBUDDY_TARGET_ID` / `WEBUDDY_VERB`
+以 `shlex.quote` 过的环境前缀交给目标（注册的命令文本本身一字不改，因此不支持该约定的目标
+行为与从前完全一致，只是始终停在 `unknown`）。新测试里的 fake-target 是真脚本：它从命令上
+读到身份、自己把回执写进 `target-receipts.jsonl`，丢响应之后重开服务只查询、不重复写。
+没有访问真服务器，没有读凭据。
+
+**测试范围与退出码**（解释器 `/Users/auntlee/workspace/.factory-worktrees/v3-skills-icons/
+.venv/bin/python -m pytest -q -p no:randomly -m "not smoke"`，`set -o pipefail`，
+退出码取自 pytest 本身而非管道末段）：
+
+- 旁置探针 `tests/test_codex_m2_boundaries.py`（未改） → `3 passed`，exit 0。
+- `REVIEW-M2.md` 点名的五集：`test_restart_same_site.py` + `test_second_writer.py` +
+  `test_workflow_evidence.py` + `test_evidence_reuse_scope.py` +
+  `test_remote_action_identity.py` → `43 passed`，exit 0（`3991d2e` 上是 21；本轮为这三条
+  边界新增了测试，所以条数变多）。
+- 确实改动的相邻路径：`test_remote_targets.py`、`test_continuous_execution.py`、
+  `test_control_providers.py`、`test_provider_continuity.py`、`test_admin_config_tools.py`
+  → `159 passed, 1 skipped`，exit 0。
+- 本轮**零变异轮次、零无关全量、零压力循环**，也没有在无代码改动的情况下重跑同一集合做
+  "最终确认"。唯一一次定位性重跑：`test_second_writer.py` 里新加的受控关闭用例首次报
+  `provider worker exited with status 1`，手工执行它生成的 worker 脚本一次，读到
+  `ImportError: cannot import name 'provider_activity'`——worker 继承的是 venv 自带的
+  `factory` 包而非本工作树，在生成脚本里 `sys.path.insert(0, <repo root>)` 后通过。
+
+**未覆盖 / 交给 Codex。** 目标端回执格式只在本地真脚本 fake-target 上验证过，真实服务器
+上的实际输出格式仍需确认（真实服务器属 M5）；本仓库后端全量未跑，本节只跑了上列集合；
+`TARGET_ENV`/`VERB_ENV` 这两个新环境变量是本轮为"目标能造出可绑定回执"而加的约定，
+真实目标脚本侧的适配尚未在真机上验证；A 项的进程组判活在 posix 上实测，非 posix 未覆盖。
+
 ## 下一步
 
-M2 五项完成，推候选后停写，交 Codex 独立复核并接手 M3。M3/M4 未预建，接口按需可调。
+M2 三条边界补修完成，推候选后停写，交 Codex 独立复核并接手 M3。本轮不开始 M3。
