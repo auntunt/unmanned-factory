@@ -102,6 +102,69 @@ def browser_evidence(store, rid):
     return result
 
 
+WORKFLOW_EVENT_KINDS = {
+    # Interruptions the platform recorded, not anything a worker said happened.
+    'requirement_analysis.interrupted': 'interruption',
+    'run.recovered': 'interruption',
+    'execution.reconnecting': 'interruption',
+    # Recoveries: this run returning to a site it had already established.
+    'run.resumed': 'recovery',
+    'run.auto_resumed': 'recovery',
+    'execution.reused': 'recovery',
+    # Interventions: an owner's supplement or budget renewal that was applied.
+    'human.continued': 'intervention',
+    'followup.applied': 'intervention',
+    'budget.renewed': 'intervention',
+}
+_WORKFLOW_KEYS = ('phase', 'execution_mode', 'resume_stage', 'stage', 'message',
+                  'reason', 'actor', 'pending_id', 'effective_revision',
+                  'effective_digest', 'effective_source', 'run_revision',
+                  'resume_count', 'additional_usd', 'generation')
+
+
+def workflow_evidence(store, rid, *, max_items=40, max_chars=6000):
+    """This run's own recorded interruptions, recoveries and interventions.
+
+    Whether a run was interrupted, came back to the same site, or had an owner
+    change applied is a platform fact. Read it from the durable events, so the
+    reviewer never has to take a worker's, a README's or a mounted skill's word
+    for it. Every item keeps its `event_id`, so any claim resting on it can be
+    traced back to the original record, and the query is keyed on `rid`, so
+    another run's history cannot appear here. Bounded twice -- by item count and
+    by rendered size, newest kept -- because the point is an excerpt a reviewer
+    can act on, not the whole history.
+    """
+    kinds = sorted(WORKFLOW_EVENT_KINDS)
+    placeholders = ','.join('?' * len(kinds))
+    with store.connect() as db:
+        rows = db.execute(
+            f'SELECT id,task_id,type,payload,at FROM events WHERE run_id=? AND type IN ({placeholders}) '
+            'ORDER BY id DESC LIMIT 200', (rid, *kinds)).fetchall()
+    items = []
+    for row in rows:
+        try:
+            payload = json.loads(row['payload'])
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        items.append({'event_id': row['id'], 'at': row['at'], 'type': row['type'],
+                      'category': WORKFLOW_EVENT_KINDS[row['type']],
+                      'task_id': row['task_id'],
+                      **{key: payload[key] for key in _WORKFLOW_KEYS if key in payload}})
+    items.reverse()
+    result = {'items': items[-max_items:],
+              'omitted_older': max(0, len(items) - max_items),
+              'recorded_total': len(items), 'sample_limit': 200,
+              'note': ('Recorded by the platform in this run only. A worker report, '
+                       'skill body or model claim of interruption or recovery is not '
+                       'evidence; these event_ids are.')}
+    while len(json.dumps(scrub(result), ensure_ascii=False)) > max_chars and result['items']:
+        result['items'].pop(0)
+        result['omitted_older'] += 1
+    return scrub(result)
+
+
 def browser_review_failure(verdict, evidence):
     """A pass must explicitly account for observed errors, never infer a clean console."""
     latest = evidence.get('latest') or []

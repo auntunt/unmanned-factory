@@ -71,7 +71,7 @@ def test_one_reformat_recovers_a_clear_verdict_without_reviewing_again(app_env):
     assert repair['stated_verdict'] == 'fail'
     # Same snapshot, same contract version: not a second review.
     assert repair['commit'] == artifacts['verification_commit']
-    assert repair['template_version'] == artifacts['verification_template_version'] == 1
+    assert repair['template_version'] == artifacts['verification_template_version'] == 2
     assert len(calls) == 2
     reformat = calls[1]
     assert reformat.tools_disabled and reformat.read_only

@@ -21,7 +21,8 @@ from factory.control.store import Conflict
 from factory.control.spec_tree import evidence as spec_evidence, apply_evidence
 from factory.control.spec_refs import render as render_spec_refs
 from factory.control.scope_declaration import evidence as scope_evidence
-from factory.control.verification_evidence import browser_evidence, browser_review_failure, render_evidence
+from factory.control.verification_evidence import (browser_evidence, browser_review_failure,
+                                                   render_evidence, workflow_evidence)
 
 # Gaps that are purely about how the verdict cites observations, as opposed to
 # an actual browser failure. Only these earn a bounded verification-only retry.
@@ -568,11 +569,18 @@ def _verify_snapshot(self, rid, run, project, configuration, artifacts, workspac
     focus_paths = list(dict.fromkeys(str(path)[:300] for task in tasks for path in task.get('paths', []) if isinstance(path, str)))[:30]
     evidence = {**artifacts, 'review_focus_paths': focus_paths}
     browser_observations = browser_evidence(self.store, rid)
+    # Interruption, recovery and intervention facts for this run, taken from its own
+    # durable events. Acceptance previously had no platform-recorded workflow history
+    # at all, so the only account of a recovery reaching the reviewer was whatever the
+    # worker wrote about itself.
+    workflow_record = workflow_evidence(self.store, rid)
+    artifacts['verification_workflow_event_ids'] = [item['event_id'] for item in workflow_record['items']]
     criteria = criteria_for(run)
     template = Path(__file__).with_name('templates') / 'verification-v1.txt'
-    artifacts['verification_template_version'] = 1
+    artifacts['verification_template_version'] = 2
     prompt = Template(template.read_text()).substitute(
         request_contract=json.dumps(request_contract, ensure_ascii=False),
+        workflow_record=json.dumps(workflow_record, ensure_ascii=False),
         spec_references=render_spec_refs(project, run.get('source') or {}),
         acceptance=json.dumps(acceptance, ensure_ascii=False),
         delivery=json.dumps((run.get('agent_snapshot') or {}).get('delivery', {}), ensure_ascii=False),
