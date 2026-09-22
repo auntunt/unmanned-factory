@@ -852,22 +852,7 @@ class MaintenanceSubsystem:
 
     # -- monitor -------------------------------------------------------------
     def executor_status(self) -> dict:
-        queue = getattr(self.svc, 'queue', None)
-        if queue is not None and getattr(queue, 'handle', None) is not None:
-            return {'status': 'online', 'detail': '本进程持有执行器锁'}
-        path = Path(self.store.path).with_suffix('.worker.lock')
-        if not path.exists():
-            return {'status': 'offline', 'detail': '没有进程启动过执行器'}
-        try:
-            with path.open('a+') as handle:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return {'status': 'online', 'detail': '另一个进程持有执行器锁'}
-                fcntl.flock(handle, fcntl.LOCK_UN)
-        except OSError:
-            return {'status': 'unknown', 'detail': '无法读取执行器锁'}
-        return {'status': 'offline', 'detail': '没有进程持有执行器锁，新任务会排队等待'}
+        return executor_status(self.svc, self.store)
 
     def _queue_counts(self):
         with self.store.connect() as db:
@@ -1076,6 +1061,26 @@ class MaintenanceSubsystem:
             'embed': {'component': 'EmbeddedMaintenance（frontend/src/maintenance/EmbeddedMaintenance.tsx）',
                       'route': '/embed/maintenance/*', 'same_origin_required': True},
         }
+
+
+def executor_status(svc, store) -> dict:
+    """Who, if anyone, holds the executor lock for this database."""
+    queue = getattr(svc, 'queue', None)
+    if queue is not None and getattr(queue, 'handle', None) is not None:
+        return {'status': 'online', 'detail': '本进程持有执行器锁'}
+    path = Path(store.path).with_suffix('.worker.lock')
+    if not path.exists():
+        return {'status': 'offline', 'detail': '没有进程启动过执行器'}
+    try:
+        with path.open('a+') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {'status': 'online', 'detail': '另一个进程持有执行器锁'}
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return {'status': 'unknown', 'detail': '无法读取执行器锁'}
+    return {'status': 'offline', 'detail': '没有进程持有执行器锁，新任务会排队等待'}
 
 
 _STATUS_TEXT = {'received': '已接收', 'queued': '排队中', 'planning': '制定计划', 'running': '执行中',
