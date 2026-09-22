@@ -301,9 +301,14 @@ def test_runtime_executes_the_queue_and_export_writes_a_patch(env, capsys, tmp_p
     pid = _ready_project(env, capsys)
     store = Store(env.db)
     project = store.project(pid)
-    store.update_project(pid, {'checks': {**project['checks'], 'greeting': [
-        sys.executable, '-c',
-        "from pathlib import Path; assert Path('greeting.txt').read_text() == 'hello world'"]}},
+    # The adopted suggestion is ``python3 -m pytest``, i.e. whatever python3 the
+    # host has on PATH -- on a machine whose python3 lacks pytest that check fails
+    # for a reason unrelated to this test (seen in independent review: Homebrew
+    # 3.14 without pytest). Pin it to the interpreter running the suite.
+    store.update_project(pid, {'checks': {
+        'pytest': [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider'],
+        'greeting': [sys.executable, '-c',
+                     "from pathlib import Path; assert Path('greeting.txt').read_text() == 'hello world'"]}},
         project['revision'], 'test')
 
     submitted = _run(env, capsys, 'submit', '--project', pid, '--text', '更新问候语',
@@ -398,3 +403,14 @@ def test_show_returns_the_same_enriched_view_as_the_page(env, capsys):
     for key in ('actions', 'pending_plan', 'pending_questions', 'supplements', 'resumable'):
         assert key in shown
     assert 'cancel' in shown['actions'] and 'pause' not in shown['actions']
+
+
+def test_repo_add_synthetic_flag_reaches_the_receipt(env, capsys):
+    _run(env, capsys, 'init')
+    added = _run(env, capsys, 'repo', 'add', '--source', str(env.repo), '--name', 'Demo', '--synthetic')
+    assert added['synthetic'] is True
+    receipt = _run(env, capsys, 'submit', '--project', added['project_id'], '--text', '演示需求',
+                   '--idempotency-key', 'synthetic-cli-0001')
+    assert receipt['synthetic'] is True
+    off = _run(env, capsys, 'repo', 'mark-synthetic', added['project_id'], '--off')
+    assert off['synthetic'] is False

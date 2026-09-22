@@ -30,6 +30,7 @@ class _RepoBody(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     branch: str | None = Field(default=None, max_length=200)
     credential_ref: str | None = Field(default=None, max_length=80)
+    synthetic: bool = False
 
 
 class _ManualBody(BaseModel):
@@ -56,6 +57,12 @@ class _SourceBody(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     project_ids: list[str] = Field(min_length=1, max_length=200)
     auto_dispatch: bool = False
+    synthetic: bool = False
+
+
+class _SyntheticBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    synthetic: bool
 
 
 class _AdoptBody(BaseModel):
@@ -117,7 +124,13 @@ def router(store, svc, tasks, workspace_root=None):
     def register(body: _RepoBody, request: Request):
         _admin(request)
         return _call(core.register_repo, source=body.source, name=body.name,
-                     branch=body.branch, credential_ref=body.credential_ref, actor=_actor(request))
+                     branch=body.branch, credential_ref=body.credential_ref, actor=_actor(request),
+                     synthetic=body.synthetic)
+
+    @api.post('/repos/{project_id}/synthetic')
+    def mark_synthetic(project_id: str, body: _SyntheticBody, request: Request):
+        _admin(request)
+        return core.set_synthetic(project_id, body.synthetic, actor=_actor(request))
 
     @api.get('/repos/{project_id}')
     def repo(project_id: str, request: Request):
@@ -172,7 +185,7 @@ def router(store, svc, tasks, workspace_root=None):
             source_kind='api', source_name=source['name'], actor=actor,
             external_id=body.external_id, title=body.title,
             attachments=[a.model_dump() for a in body.attachments],
-            auto_dispatch=source['auto_dispatch'])
+            auto_dispatch=source['auto_dispatch'], synthetic=bool(source.get('synthetic')))
         if not created:
             from fastapi.responses import JSONResponse
             return JSONResponse(receipt, status_code=200)
@@ -187,7 +200,8 @@ def router(store, svc, tasks, workspace_root=None):
     def create_source(body: _SourceBody, request: Request):
         _admin(request)
         return _call(core.create_source, name=body.name, project_ids=body.project_ids,
-                     auto_dispatch=body.auto_dispatch, actor=_actor(request))
+                     auto_dispatch=body.auto_dispatch, actor=_actor(request),
+                     synthetic=body.synthetic)
 
     @api.post('/intake-sources/{source_id}/revoke')
     def revoke(source_id: str, request: Request):

@@ -225,3 +225,133 @@ def test_generated_task_text_does_not_trip_the_high_risk_triage_words(app_env):
     request = core._task_request(record, store.project(pid), key='k' * 12)
     template = ' '.join([request['expected_behaviour'], request['delivery_goal']])
     assert not _HIGH_RISK_RE.search(template), _HIGH_RISK_RE.search(template)
+
+
+class _ChainSDK:
+    """Deterministic executor: round A fixes the greeting and adds a.txt, any later
+    round adds b.txt. Which round it is comes from the working copy it is handed,
+    so the test proves which baseline the executor really received."""
+
+    def available(self):
+        return [{'id': 'codex', 'installed': True, 'detail': 'test double'}]
+
+    def run(self, request, emit, cancel=None):
+        import json
+        from pathlib import Path
+        from factory.control.providers import ProviderResult
+        root = Path(request.workspace)
+        later = (root / 'a.txt').exists()
+        target = 'b.txt' if later else 'a.txt'
+        if request.read_only:
+            paths = [target] if later else ['greeting.txt', target]
+            plan = {'title': 'change', 'summary': 'deterministic change', 'questions': [],
+                    'tasks': [{'id': 'change', 'title': 'change', 'prompt': 'change',
+                               'acceptance': ['done'], 'paths': paths, 'checks': ['greeting'],
+                               'depends_on': [], 'complexity': 'small', 'risk': 'low'}]}
+            return ProviderResult(json.dumps(plan), cost_usd=0.0)
+        if not later:
+            (root / 'greeting.txt').write_text('hello world')
+        (root / target).write_text(target)
+        return ProviderResult('done', cost_usd=0.0)
+
+
+def _deliver(client, store, task_id, execution_id, headers):
+    wait_state(store, execution_id, {'awaiting_approval', 'ready_for_review'})
+    if store.get(execution_id)['status'] == 'awaiting_approval':
+        assert client.post(f'/api/v2/maintenance/tasks/{task_id}/approve', headers=headers).status_code == 200
+    wait_state(store, execution_id, {'ready_for_review'})
+
+
+def test_feedback_after_delivery_keeps_the_delivered_change_and_states_patch_basis(app_env):
+    client, store, svc, repo = app_env
+    svc.runner = _ChainSDK()
+    headers = login(client)
+    pid = _register(client, repo, headers, name='Chain')['project_id']
+    _adopt_greeting_check(store, pid)
+    base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    first = client.post('/api/v2/maintenance/requirements', json={
+        'project_id': pid, 'content': '改 A', 'idempotency_key': 'chain-key-0001'}, headers=headers).json()
+    _deliver(client, store, first['task_id'], first['execution_id'], headers)
+    delivered_a = store.get(first['execution_id'])['artifacts']['commit']
+
+    fb = client.post(f"/api/v2/maintenance/tasks/{first['task_id']}/feedback",
+                     json={'content': '再加 B'}, headers=headers)
+    assert fb.status_code == 201, fb.text
+    second = fb.json()
+    assert second['baseline']['base_sha'] == delivered_a  # continues from A, not the old baseline
+    assert store.get(second['execution_id'])['feedback_predecessor_id'] == first['execution_id']
+    _deliver(client, store, second['task_id'], second['execution_id'], headers)
+
+    # The final tree holds both A and B; the user's own branch was not touched.
+    final = store.get(second['execution_id'])['artifacts']
+    tree = subprocess.check_output(['git', 'ls-tree', '--name-only', final['commit']], cwd=repo, text=True)
+    assert {'a.txt', 'b.txt'} <= set(tree.split())
+    assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() == base
+
+    exported = client.get(f"/api/v2/maintenance/tasks/{second['task_id']}/export", headers=headers).json()
+    basis = {b['kind']: b for b in exported['receipt']['delivery']['patch_basis']}
+    assert basis['incremental']['applies_to'] == delivered_a
+    assert basis['cumulative']['applies_to'] == base
+    incremental = client.get(f"/api/v2/maintenance/tasks/{second['task_id']}/artifacts/"
+                             f"{basis['incremental']['artifact']}", headers=headers).text
+    cumulative = client.get(f"/api/v2/maintenance/tasks/{second['task_id']}/artifacts/"
+                            f"{basis['cumulative']['artifact']}", headers=headers).text
+    assert 'b/b.txt' in incremental and 'b/a.txt' not in incremental
+    assert 'b/a.txt' in cumulative and 'b/b.txt' in cumulative
+    assert '应用于' in exported['text']
+
+
+def test_feedback_refuses_rather_than_redo_when_the_delivery_is_gone(app_env):
+    import shutil
+    client, store, svc, repo = app_env
+    svc.runner = _ChainSDK()
+    headers = login(client)
+    pid = _register(client, repo, headers, name='Chain')['project_id']
+    _adopt_greeting_check(store, pid)
+    first = client.post('/api/v2/maintenance/requirements', json={
+        'project_id': pid, 'content': '改 A', 'idempotency_key': 'chain-key-0002'}, headers=headers).json()
+    _deliver(client, store, first['task_id'], first['execution_id'], headers)
+    shutil.rmtree(store.get(first['execution_id'])['artifacts']['worktree'])
+    fb = client.post(f"/api/v2/maintenance/tasks/{first['task_id']}/feedback",
+                     json={'content': '再加 B'}, headers=headers)
+    assert fb.status_code == 409 and '不会退回旧基线' in fb.json()['detail']
+    old = client.get(f"/api/v2/maintenance/tasks/{first['task_id']}", headers=headers).json()
+    assert old['successor_id'] is None
+
+
+def test_synthetic_is_declared_explicitly_and_travels_to_task_revision_and_receipt(app_env):
+    client, store, svc, repo = app_env
+    svc.runner = _ChainSDK()
+    headers = login(client)
+    view = client.post('/api/v2/maintenance/repos', json={'source': str(repo), 'name': 'Demo', 'synthetic': True},
+                       headers=headers).json()
+    assert view['synthetic'] is True
+    pid = view['project_id']
+    _adopt_greeting_check(store, pid)
+    receipt = client.post('/api/v2/maintenance/requirements', json={
+        'project_id': pid, 'content': '改 A', 'idempotency_key': 'synth-key-0001'}, headers=headers).json()
+    assert receipt['synthetic'] is True
+    _deliver(client, store, receipt['task_id'], receipt['execution_id'], headers)
+    task = client.get(f"/api/v2/maintenance/tasks/{receipt['task_id']}", headers=headers).json()
+    assert task['synthetic'] is True
+    exported = client.get(f"/api/v2/maintenance/tasks/{receipt['task_id']}/export", headers=headers).json()
+    assert exported['receipt']['synthetic'] is True
+    successor = client.post(f"/api/v2/maintenance/tasks/{receipt['task_id']}/feedback",
+                            json={'content': '再加 B'}, headers=headers).json()
+    assert successor['synthetic'] is True
+    graph = client.get('/api/v2/maintenance/graph', headers=headers).json()
+    assert all(n.get('synthetic') for n in graph['nodes'] if n['type'] in ('repo', 'requirement', 'task'))
+    # Undeclared repositories stay real by default.
+    client.post(f'/api/v2/maintenance/repos/{pid}/synthetic', json={'synthetic': False}, headers=headers)
+    assert client.get('/api/v2/maintenance/repos', headers=headers).json()['repos'][0]['synthetic'] is False
+
+
+def test_probe_flags_a_python3_that_cannot_import_pytest(tmp_path, monkeypatch):
+    from factory.control.maintenance_subsystem import _check_runnable
+    fake = tmp_path / 'bin'
+    fake.mkdir()
+    (fake / 'python3').write_text('#!/bin/sh\nexit 1\n')
+    (fake / 'python3').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{fake}:/usr/bin:/bin')
+    ok, note = _check_runnable(['python3', '-m', 'pytest', '-q'], tmp_path)
+    assert ok is False and '没有安装 pytest' in note

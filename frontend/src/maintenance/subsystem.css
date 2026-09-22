@@ -80,3 +80,6 @@
   .ms-repo-row { grid-template-columns: 1fr; }
   .ms-repo-row > *:last-child { justify-self: flex-start; }
 }
+
+.ms-synthetic { background: var(--color-warning-soft, #f6ecd6); color: var(--color-warning, #8a5a12); margin-left: 6px; }
+.ms-check-warn { display: block; color: var(--wb-red); font-size: 11px; margin-top: 3px; }

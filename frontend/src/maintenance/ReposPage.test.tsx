@@ -107,7 +107,7 @@ describe('维护代码库 · 列表', () => {
     fireEvent.click(screen.getByRole('button', { name: '登记代码库' }))
 
     await waitFor(() => expect(api.registerRepo).toHaveBeenCalledWith(
-      { source: 'git@github.com:org/new.git', name: '新项目', branch: undefined, credential_ref: undefined },
+      { source: 'git@github.com:org/new.git', name: '新项目', branch: undefined, credential_ref: undefined, synthetic: false },
       { csrfToken: 'csrf', onUnauthorized: noop },
     ))
     await waitFor(() => expect(screen.getByText('新项目')).toBeTruthy())
@@ -158,5 +158,28 @@ describe('维护代码库 · 详情', () => {
     await waitFor(() => expect(screen.getByText('重新分析')).toBeTruthy())
     fireEvent.click(screen.getByText('重新分析'))
     await waitFor(() => expect(api.probeRepo).toHaveBeenCalledWith('proj-1', { csrfToken: 'csrf', onUnauthorized: noop }))
+  })
+})
+
+describe('维护代码库 · 合成标记', () => {
+  it('登记时显式勾选合成，请求携带 synthetic，列表显示「合成」', async () => {
+    api.repos.mockResolvedValue({ repos: [] })
+    api.registerRepo.mockResolvedValue({ ...readyRepo, project_id: 'proj-3', name: '演示库', synthetic: true })
+    renderList()
+    await waitFor(() => expect(screen.getByPlaceholderText('用于在列表中识别这个代码库')).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('git@github.com:org/repo.git 或 执行主机上的本地目录'), { target: { value: '/srv/demo' } })
+    fireEvent.change(screen.getByPlaceholderText('用于在列表中识别这个代码库'), { target: { value: '演示库' } })
+    fireEvent.click(screen.getByLabelText(/这是合成\/演示仓库/))
+    fireEvent.click(screen.getByRole('button', { name: '登记代码库' }))
+    await waitFor(() => expect(api.registerRepo).toHaveBeenCalledWith(
+      expect.objectContaining({ synthetic: true }), expect.anything()))
+    await waitFor(() => expect(screen.getByText('合成')).toBeTruthy())
+  })
+
+  it('未声明的仓库不显示「合成」', async () => {
+    api.repos.mockResolvedValue({ repos: [readyRepo] })
+    renderList()
+    await waitFor(() => expect(screen.getByText('订单服务')).toBeTruthy())
+    expect(screen.queryByText('合成')).toBeNull()
   })
 })

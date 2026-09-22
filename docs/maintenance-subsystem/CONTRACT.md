@@ -70,7 +70,7 @@ RepoView = {
   "state_label": "待分析|分析中|待补充|可开始维护|接入失败",
   "probe": {"at", "head_sha", "branch", "remote", "access": {"ok", "message"},
             "stack": [{"name", "evidence"}],                 // 已发现，不等于已验证
-            "suggested_checks": [{"name", "argv", "evidence"}],
+            "suggested_checks": [{"name", "argv", "evidence", "available"}],  // available=false：执行主机无法启动
             "findings": [{"id", "label", "status": "found|verified|missing|failed", "message"}]},
   "needs": ["确认检查命令", ...],                            // 待补充项
   "memory": {"entries": 0, "confirmed": 0, "code_index": "on_demand"},
@@ -102,7 +102,19 @@ Receipt = {"requirement_id", "status": "dispatched|pending_dispatch|dispatch_fai
 - `GET /api/v2/maintenance/tasks/{id}` 追加 `actions`: 后端允许的动作子集
   `["answer","approve","supplement","resume","cancel","feedback","export"]`；页面只渲染其中的动作。
   不存在 `pause`：执行器不支持原地暂停，不显示。
-- `POST /api/v2/maintenance/tasks/{id}/feedback` `{"content"}`：已交付/失败后的后续反馈 → 新修订任务（`predecessor_id` 关联），返回新任务视图。
+- `POST /api/v2/maintenance/tasks/{id}/feedback` `{"content"}`：后续反馈 → 新修订任务（`predecessor_id` 关联），返回新任务视图。
+  - 上一修订**已交付**：新修订在上一版交付的工作副本上继续（`continue_from`），基线就是上一版交付 commit，
+    已交付改动全部保留，只追加本次反馈。上一版工作副本不可用或已偏离 → 409 阻塞，不退回旧基线重做。
+    不合并、不改动用户仓库分支。
+  - 上一修订失败/取消/规划前受阻（没有交付）：从项目当前基线开始。
+- 导出回执 `delivery.patch_basis`：每个补丁应用在哪个 commit 上。续做修订导出两份：
+  `maintenance-<exec>.patch`（`incremental`，应用于上一版交付 commit）与
+  `maintenance-<exec>.cumulative.patch`（`cumulative`，整条修订链，应用于原始项目基线）。
+
+## 合成标记
+`synthetic` 只来自显式声明：登记代码库时 `synthetic: true`（或 `POST /repos/{id}/synthetic`），
+或接入来源创建时 `synthetic: true`。贯穿需求、任务、修订、回执、监控与画布。改标记只影响此后接收的需求，
+已产生的任务与回执不被改写。
 
 ## 宿主清单
 `GET /api/v2/maintenance/manifest` → 组件名、版本、契约版本、入口（UI 路由、CLI 命令）、支持的动作、

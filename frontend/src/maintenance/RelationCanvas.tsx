@@ -28,42 +28,56 @@ interface LaidOutNode extends GraphNode {
   y: number
 }
 
-function layout(nodes: GraphNode[], edges: Graph['edges'] = []): { nodes: LaidOutNode[]; width: number; height: number } {
-  const columns = new Map<number, GraphNode[]>()
-  for (const node of nodes) {
-    const col = COLUMN_ORDER[node.type] ?? 3
-    const list = columns.get(col) ?? []
-    list.push(node)
-    columns.set(col, list)
+/** Tree layout by subtree size.
+ *
+ *  Each node is placed under its first parent, and every node reserves as many
+ *  rows as its subtree has leaves. A task with two patches, a target and a
+ *  blocker therefore takes four rows, and the next task starts below all of
+ *  them -- the group never borrows another task's row. Columns stay by type. */
+export function layout(nodes: GraphNode[], edges: Graph['edges'] = []): { nodes: LaidOutNode[]; width: number; height: number } {
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const children = new Map<string, string[]>()
+  const hasParent = new Set<string>()
+  for (const edge of edges) {
+    if (!byId.has(edge.from) || !byId.has(edge.to) || hasParent.has(edge.to)) continue
+    hasParent.add(edge.to)
+    children.set(edge.from, [...(children.get(edge.from) ?? []), edge.to])
   }
-  // Place each column next to its parents (left-to-right), so a task's artifact,
-  // target or blocker sits on the task's row instead of in an unrelated stack.
-  const parents = new Map<string, string[]>()
-  for (const edge of edges) parents.set(edge.to, [...(parents.get(edge.to) ?? []), edge.from])
-  const yOf = new Map<string, number>()
+  const rowsMemo = new Map<string, number>()
+  const rows = (id: string, seen: Set<string> = new Set()): number => {
+    if (rowsMemo.has(id)) return rowsMemo.get(id)!
+    if (seen.has(id)) return 1
+    seen.add(id)
+    const total = (children.get(id) ?? []).reduce((sum, child) => sum + rows(child, seen), 0)
+    const value = Math.max(1, total)
+    rowsMemo.set(id, value)
+    return value
+  }
   const laidOut: LaidOutNode[] = []
+  const placed = new Set<string>()
   let maxCol = 0
-  let maxY = PADDING
-  for (const col of [...columns.keys()].sort((a, b) => a - b)) {
+  const place = (id: string, row: number) => {
+    if (placed.has(id)) return
+    placed.add(id)
+    const node = byId.get(id)!
+    const col = COLUMN_ORDER[node.type] ?? 3
     maxCol = Math.max(maxCol, col)
-    const anchor = (node: GraphNode) => {
-      const ys = (parents.get(node.id) ?? []).map(id => yOf.get(id)).filter((y): y is number => y !== undefined)
-      return ys.length ? Math.min(...ys) : Number.POSITIVE_INFINITY
-    }
-    const list = [...(columns.get(col) ?? [])].sort((a, b) => anchor(a) - anchor(b))
-    let next = PADDING
-    for (const node of list) {
-      const wanted = anchor(node)
-      const y = Math.max(next, Number.isFinite(wanted) ? wanted : next)
-      yOf.set(node.id, y)
-      laidOut.push({ ...node, x: PADDING + col * COLUMN_GAP, y })
-      next = y + ROW_GAP
-      maxY = Math.max(maxY, y)
+    laidOut.push({ ...node, x: PADDING + col * COLUMN_GAP, y: PADDING + row * ROW_GAP })
+    let childRow = row
+    for (const child of children.get(id) ?? []) {
+      place(child, childRow)
+      childRow += rows(child)
     }
   }
-  const maxRows = Math.max(1, Math.ceil((maxY - PADDING) / ROW_GAP) + 1)
+  let nextRow = 0
+  // Roots in their original order (repositories first, as the backend sends them).
+  for (const node of nodes) {
+    if (hasParent.has(node.id) || placed.has(node.id)) continue
+    place(node.id, nextRow)
+    nextRow += rows(node.id)
+  }
   const width = PADDING * 2 + (maxCol + 1) * COLUMN_GAP
-  const height = PADDING * 2 + Math.max(1, maxRows) * ROW_GAP
+  const height = PADDING * 2 + Math.max(1, nextRow) * ROW_GAP
   return { nodes: laidOut, width, height }
 }
 

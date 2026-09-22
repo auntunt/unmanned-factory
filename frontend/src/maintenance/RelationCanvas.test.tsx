@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 import RelationCanvas from './RelationCanvas'
-import type { Graph } from './types'
+import type { Graph, GraphNode } from './types'
 
 afterEach(cleanup)
 
@@ -67,5 +67,31 @@ describe('RelationCanvas 工作画布', () => {
   it('truncated 时提示已聚合显示部分', () => {
     render(<RelationCanvas graph={sampleGraph({ truncated: true })} onOpenTask={vi.fn()} />)
     expect(screen.getByText('对象较多，已按项目聚合显示部分。')).toBeTruthy()
+  })
+})
+
+describe('layout', () => {
+  it('reserves one row per node in a task group so a multi-artifact task never shares the next task\'s row', async () => {
+    const { layout } = await import('./RelationCanvas')
+    const node = (id: string, type: GraphNode['type']): GraphNode =>
+      ({ id, type, label: id, sublabel: '', status: '', task_id: null, project_id: 'p' })
+    const nodes = [node('repo:p', 'repo'), node('req:1', 'requirement'), node('req:2', 'requirement'),
+      node('task:1', 'task'), node('task:2', 'task'),
+      node('artifact:1:a', 'artifact'), node('artifact:1:b', 'artifact'),
+      node('target:2', 'target'), node('blocker:2', 'blocker')]
+    const edges: Graph['edges'] = [
+      { from: 'repo:p', to: 'req:1', kind: 'has' }, { from: 'repo:p', to: 'req:2', kind: 'has' },
+      { from: 'req:1', to: 'task:1', kind: 'creates' }, { from: 'req:2', to: 'task:2', kind: 'creates' },
+      { from: 'task:1', to: 'artifact:1:a', kind: 'produces' }, { from: 'task:1', to: 'artifact:1:b', kind: 'produces' },
+      { from: 'task:2', to: 'target:2', kind: 'targets' }, { from: 'task:2', to: 'blocker:2', kind: 'blocked_by' }]
+    const y = new Map(layout(nodes, edges).nodes.map(n => [n.id, n.y]))
+    // Task 2's group starts below both of task 1's artifacts.
+    expect(y.get('task:2')!).toBeGreaterThan(y.get('artifact:1:b')!)
+    expect(y.get('target:2')).toBe(y.get('task:2'))
+    expect(y.get('artifact:1:a')).toBe(y.get('task:1'))
+    const ys = [...y.values()]
+    const cols = layout(nodes, edges).nodes.map(n => `${n.x}:${n.y}`)
+    expect(new Set(cols).size).toBe(cols.length) // no two nodes on the same spot
+    expect(ys.length).toBe(nodes.length)
   })
 })

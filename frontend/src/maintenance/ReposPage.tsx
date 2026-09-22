@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { WorkspaceApiError } from '../workspace/api'
 import { EmptyState, ErrorNotice, PageHeader, errorText } from '../workbench/ui'
+import SyntheticBadge from './SyntheticBadge'
 import type { PageProps } from '../workbench/ui'
 import { maintenanceApi } from './api'
 import type { Finding, RepoView } from './types'
@@ -29,6 +30,7 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
   const [name, setName] = useState('')
   const [branch, setBranch] = useState('')
   const [credentialRef, setCredentialRef] = useState('')
+  const [synthetic, setSynthetic] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -38,11 +40,11 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
     setBusy(true); setError(null)
     try {
       const repo = await maintenanceApi.registerRepo(
-        { source: source.trim(), name: name.trim(), branch: branch.trim() || undefined, credential_ref: credentialRef.trim() || undefined },
+        { source: source.trim(), name: name.trim(), branch: branch.trim() || undefined, credential_ref: credentialRef.trim() || undefined, synthetic },
         { csrfToken, onUnauthorized },
       )
       onRegistered(repo)
-      setSource(''); setName(''); setBranch(''); setCredentialRef('')
+      setSource(''); setName(''); setBranch(''); setCredentialRef(''); setSynthetic(false)
     } catch (cause) {
       setError(errorText(cause))
     } finally {
@@ -83,6 +85,10 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
                 <small>只填平台已配置的凭据名称，不要粘贴密钥。</small>
               </label>
             </div>
+            <label className="wb-checkbox">
+              <input type="checkbox" checked={synthetic} onChange={e => setSynthetic(e.target.checked)} />
+              这是合成/演示仓库（其需求、任务与回执都会标注为合成）
+            </label>
           </div>
         </details>
         {error && <ErrorNotice message={error} />}
@@ -155,7 +161,7 @@ function RepoList(props: PageProps) {
           {repos.map(repo => (
             <div className="ms-repo-row" key={repo.project_id}>
               <div>
-                <Link className="wb-table-link" to={`/maintenance/repos/${encodeURIComponent(repo.project_id)}`}>{repo.name}</Link>
+                <Link className="wb-table-link" to={`/maintenance/repos/${encodeURIComponent(repo.project_id)}`}>{repo.name}</Link> <SyntheticBadge synthetic={repo.synthetic} />
                 <small>{repo.repository}{repo.probe?.branch ? `　分支 ${repo.probe.branch}` : ''}{repo.probe?.head_sha ? `　${repo.probe.head_sha.slice(0, 8)}` : ''}</small>
               </div>
               <StateBadge state={repo.state} label={repo.state_label || REPO_STATE_LABEL[repo.state]} />
@@ -207,6 +213,14 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
     finally { setBusy(false) }
   }
 
+  const toggleSynthetic = async () => {
+    if (!repo) return
+    setBusy(true); setActionError(null)
+    try { setRepo(await maintenanceApi.markSynthetic(projectId, !repo.synthetic, { csrfToken, onUnauthorized })) }
+    catch (cause) { setActionError(errorText(cause)) }
+    finally { setBusy(false) }
+  }
+
   const adoptAll = async () => {
     if (!repo?.probe?.suggested_checks.length) return
     setBusy(true); setActionError(null)
@@ -229,6 +243,9 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
         actions={<>
           <button className="wb-button wb-button-secondary" onClick={() => navigate('/maintenance/repos')}>返回列表</button>
           <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void reprobe()}>{busy ? '处理中…' : '重新分析'}</button>
+          <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void toggleSynthetic()}
+            title="只影响此后接收的需求；已创建的任务与回执保持当时的标注">
+            {repo.synthetic ? '取消合成标记' : '标记为合成仓库'}</button>
         </>}
       />
 
@@ -237,7 +254,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
       <div className="ms-two-col">
         <div>
           <section className="wb-card" aria-label="接入状态">
-            <div className="wb-card-head"><div><span className="wb-eyebrow">状态</span><h2><StateBadge state={repo.state} label={repo.state_label} /></h2></div></div>
+            <div className="wb-card-head"><div><span className="wb-eyebrow">状态</span><h2><StateBadge state={repo.state} label={repo.state_label} /> <SyntheticBadge synthetic={repo.synthetic} /></h2></div></div>
             <div className="ms-note">「可开始维护」只表示工作区可用、基线可解析、至少一条检查已配置；不代表构建、部署与业务检查通过。</div>
             {repo.needs.length > 0 && (
               <div style={{ marginTop: 14 }}>
@@ -290,7 +307,8 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
                   </div>
                   <ul className="ms-check-list">
                     {probe.suggested_checks.map((c, i) => (
-                      <li key={i}><strong>{c.name}</strong><div className="ms-check-argv">{c.argv.join(' ')}</div><span>{c.evidence}</span></li>
+                      <li key={i}><strong>{c.name}</strong><div className="ms-check-argv">{c.argv.join(' ')}</div><span>{c.evidence}</span>
+                        {c.available === false && <span className="ms-check-warn">执行主机上无法启动这条命令，采纳后检查会失败</span>}</li>
                     ))}
                   </ul>
                 </div>

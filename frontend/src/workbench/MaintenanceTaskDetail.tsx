@@ -8,6 +8,7 @@ import ClarificationPanel from './ClarificationPanel'
 import type { PageProps } from './ui'
 import { CopyValue, LoadingCard, ListTime } from './presentation'
 import { maintenanceApi } from '../maintenance/api'
+import SyntheticBadge from '../maintenance/SyntheticBadge'
 import type {
   MaintenanceTaskView,
   MaintenanceEvent,
@@ -453,7 +454,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
               <div>
                 <span className="wb-eyebrow">当前状态</span>
                 <h2>
-                  <StatusBadge status={task.status} />
+                  <StatusBadge status={task.status} /> <SyntheticBadge synthetic={task.synthetic} />
                 </h2>
               </div>
             </div>

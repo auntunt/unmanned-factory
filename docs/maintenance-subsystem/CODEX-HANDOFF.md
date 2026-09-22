@@ -1,5 +1,27 @@
 # 给 Codex 的交接 · 运维维护子系统
 
+## 第二轮：回应初审 CODEX-REVIEW-baa8b62（未付费重跑模型，已有真实证据原样保留）
+1. **后续反馈保留已交付改动**：已交付任务的反馈生成修订时携带 `continue_from`，在提交前给新执行设置既有的
+   `feedback_predecessor_id`，规划与执行都在上一版交付的已验证工作副本上进行；基线=上一版交付 commit。
+   不合并、不改用户仓库分支。上一版工作副本缺失或偏离 → 409「不会退回旧基线重做」。导出两份补丁并在回执
+   `delivery.patch_basis` 写明：增量补丁应用于上一版交付 commit，累积补丁应用于原始项目基线。
+   证明：确定性测试 A→反馈 B，最终树同时含 a.txt 与 b.txt、用户仓库 HEAD 不变、增量补丁只含 B、累积含 A+B；
+   另测交付工作副本被删时拒绝。两处关键行各做一次定向变异，均被杀死并已还原。
+2. **合成标记显式贯穿**：登记代码库或接入来源时显式声明（页面勾选、`repo add --synthetic`、
+   `repo mark-synthetic`、`POST /repos/{id}/synthetic`），经需求 → 任务 → 修订 → 回执 → 监控/画布/任务现场。
+   不做关键字猜测；改标记只影响之后的需求，历史任务与回执不改写（见 `evidence/README.md`）。
+3. **画布按任务组分配行高**：按子树叶子数布局，多产物任务不再占用下一任务的行（单测 + 变异验证；
+   真实页面 `evidence/09-canvas-grouped-layout.png`，用既有验收数据）。
+4. **Codex 定向运行 1 失败的根因**（读自其临时库事件，未盲重跑）：采纳的建议检查是 `python3 -m pytest`，
+   Codex 的调用方式下 PATH 上的 `python3` 是没有 pytest 的 Homebrew 3.14，检查退出 1、修复尝试也失败——产品行为正确。
+   - 测试：该用例改为把检查固定到运行测试的解释器；断言未放宽。用与 Codex 相同的调用方式（直接用 venv 的 python，
+     PATH 首位是无 pytest 的 python3）复现：旧版失败、新版通过；两文件 33 passed。
+   - 产品：探测对 `python3 -m X` 类建议额外核对该解释器能否导入 X，不能则标记 `available: false` 与失败发现项。
+
+定向检查：后端维护相关 9 个测试文件 141 passed；前端 9 个文件 86 passed；tsc 通过；前端构建一次。
+
+---
+
 - 分支：`codex/maintenance-subsystem`（已推送 origin），基于 `363da96`。候选 SHA 以 `git log -1 origin/codex/maintenance-subsystem` 为准（本文件所在提交）。
 - 写入者：Claude（Opus 5.5）统筹并独写共享核心；三个执行子代理请求 `sonnet`，各自报告实际模型为 **claude-sonnet-5**：
   监控+画布页、外壳/代码库/需求/任务现场页、CLI+运行时+安装文档。子代理产出均经集成方复核、改过再提交。
@@ -36,9 +58,7 @@ cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build   # 通过
 ## 未验证 / 已知限制
 - Codex 执行器、非 macOS、URL 克隆登记的真实网络路径、真实外部宿主 iframe 嵌入、成员角色页面操作。
 - 机器来源以「令牌创建者」的项目权限为上限并收窄到令牌项目；创建者被降权后令牌随之失效。
-- `synthetic` 标记未从代码库传到接入任务：合成仓库的回执 `synthetic: false`（本次验收仓库在 README 中标注 SYNTHETIC）。
 - 项目记忆会把旧交付的文字带进后续提示词；本次 v3 因 v2 记忆里的旧措辞「不部署」仍被判为高风险需批准，新交付不再写入该词。
-- 画布同一任务的多个产物依次下排，可能与下一行任务视觉相邻（连线正确）。
 - 服务器 CPU/内存、应用探针、告警没有采集源，页面如实显示「未接入」。
 - 验收数据域里有一条机器需求任务停在「待批准」，作为监控的真实待处理样例保留。
 

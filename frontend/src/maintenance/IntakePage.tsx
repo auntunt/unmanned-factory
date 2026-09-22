@@ -6,6 +6,7 @@ import { WorkspaceApiError } from '../workspace/api'
 import { EmptyState, ErrorNotice, PageHeader, errorText, formatDate } from '../workbench/ui'
 import type { PageProps } from '../workbench/ui'
 import { maintenanceApi } from './api'
+import SyntheticBadge from './SyntheticBadge'
 import type { IntakeSource, Receipt, RepoView, Requirement, RequirementStatus } from './types'
 
 const RECEIPT_STATUS_LABEL: Record<RequirementStatus, string> = {
@@ -71,6 +72,7 @@ function ManualSubmit({ csrfToken, onUnauthorized, projects, onSubmitted }: Page
         <div className="wb-notice ms-receipt" role="status" data-testid="manual-receipt">
           <p>需求编号 <code>{receipt.requirement_id}</code>　状态：{RECEIPT_STATUS_LABEL[receipt.status]}</p>
           {receipt.duplicate && <p>这是一次重复提交，已返回原有记录。</p>}
+          {receipt.synthetic && <p><SyntheticBadge synthetic /> 该需求来自已声明的合成仓库或来源。</p>}
           <p>已接收 ≠ 已执行。{receipt.message}</p>
           {receipt.task_id && <p><Link to={`/maintenance/${encodeURIComponent(receipt.task_id)}`}>查看任务</Link></p>}
         </div>
@@ -110,6 +112,7 @@ function IntakeSourcesAdmin({ csrfToken, onUnauthorized, projects }: PageProps &
   const [name, setName] = useState('')
   const [selectedProjects, setSelectedProjects] = useState<string[]>([])
   const [autoDispatch, setAutoDispatch] = useState(false)
+  const [sourceSynthetic, setSourceSynthetic] = useState(false)
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [newToken, setNewToken] = useState<{ id: string; token: string } | null>(null)
@@ -130,11 +133,11 @@ function IntakeSourcesAdmin({ csrfToken, onUnauthorized, projects }: PageProps &
     setBusy(true); setCreateError(null); setNewToken(null)
     try {
       const created = await maintenanceApi.createIntakeSource(
-        { name: name.trim(), project_ids: selectedProjects, auto_dispatch: autoDispatch },
+        { name: name.trim(), project_ids: selectedProjects, auto_dispatch: autoDispatch, synthetic: sourceSynthetic },
         { csrfToken, onUnauthorized },
       )
       if (created.token) setNewToken({ id: created.id, token: created.token })
-      setName(''); setSelectedProjects([]); setAutoDispatch(false)
+      setName(''); setSelectedProjects([]); setAutoDispatch(false); setSourceSynthetic(false)
       load()
     } catch (cause) {
       setCreateError(errorText(cause))
@@ -168,7 +171,7 @@ function IntakeSourcesAdmin({ csrfToken, onUnauthorized, projects }: PageProps &
             <div className="ms-source-row" key={s.id}>
               <div>
                 <strong>{s.name}</strong>
-                <small>令牌 {s.token_hint}　{s.auto_dispatch ? '自动派发' : '人工派发'}{s.revoked_at ? '　已撤销' : ''}</small>
+                <small>令牌 {s.token_hint}　{s.auto_dispatch ? '自动派发' : '人工派发'}{s.revoked_at ? '　已撤销' : ''}</small> <SyntheticBadge synthetic={s.synthetic} />
               </div>
               {!s.revoked_at && <button className="wb-button wb-button-secondary" onClick={() => void revoke(s.id)}>撤销</button>}
             </div>
@@ -206,6 +209,10 @@ function IntakeSourcesAdmin({ csrfToken, onUnauthorized, projects }: PageProps &
         <label className="wb-checkbox">
           <input type="checkbox" checked={autoDispatch} onChange={e => setAutoDispatch(e.target.checked)} />
           自动派发执行（默认关闭）
+        </label>
+        <label className="wb-checkbox">
+          <input type="checkbox" checked={sourceSynthetic} onChange={e => setSourceSynthetic(e.target.checked)} />
+          这是合成/演示来源（其需求、任务与回执标注为合成）
         </label>
         {createError && <ErrorNotice message={createError} />}
         <div className="wb-form-actions">
@@ -264,7 +271,7 @@ function RequirementsTable({ csrfToken, onUnauthorized, projects, refreshKey, on
             <tbody>
               {requirements.map(r => (
                 <tr key={r.requirement_id}>
-                  <td>{r.source.name}（{r.source.kind}）</td>
+                  <td>{r.source.name}（{r.source.kind}） <SyntheticBadge synthetic={r.synthetic} /></td>
                   <td>{r.project_name ?? projectNames.get(r.project_id) ?? r.project_id}</td>
                   <td>{r.content.slice(0, 40)}{r.content.length > 40 ? '…' : ''}</td>
                   <td>{formatDate(r.received_at)}</td>

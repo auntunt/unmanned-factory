@@ -208,6 +208,28 @@ def detect_stack(root: Path) -> tuple[list[dict], list[dict]]:
     return stack, checks
 
 
+def _check_runnable(argv, root) -> tuple[bool, str]:
+    """Whether a suggested check can start on this host -- not whether it passes.
+
+    ``python3 -m pytest`` needs more than a ``python3`` on PATH: the interpreter
+    the executor will find must also import pytest, or every check fails with
+    "No module named pytest" after the model has already done its work. Only the
+    host toolchain is asked; nothing from the repository is imported or run.
+    """
+    exe = argv[0]
+    if not (shutil.which(exe) or (root / exe).is_file()):
+        return False, '执行主机上找不到该命令'
+    if len(argv) >= 3 and argv[1] == '-m' and 'python' in Path(exe).name:
+        try:
+            done = subprocess.run([exe, '-c', f'import {argv[2]}'], capture_output=True,
+                                  text=True, timeout=15, cwd=str(Path.home()))
+        except (OSError, subprocess.TimeoutExpired):
+            return False, f'无法确认 {exe} 能否导入 {argv[2]}'
+        if done.returncode != 0:
+            return False, f'执行主机的 {exe} 没有安装 {argv[2]}，采纳后检查会失败'
+    return True, '命令在执行主机上可启动（尚未运行）'
+
+
 # ---------------------------------------------------------------------------
 # The subsystem
 # ---------------------------------------------------------------------------
@@ -281,7 +303,7 @@ class MaintenanceSubsystem:
 
     # -- repositories --------------------------------------------------------
     def register_repo(self, *, source, name, actor, branch=None, credential_ref=None,
-                      background=True) -> dict:
+                      background=True, synthetic=False) -> dict:
         source = str(source or '').strip()
         name = str(name or '').strip()
         if not source:
@@ -293,8 +315,31 @@ class MaintenanceSubsystem:
         if branch and not re.fullmatch(r'[A-Za-z0-9._/-]{1,200}', str(branch)):
             raise ValueError('分支名格式无效')
         if _URL.match(source):
-            return self._register_url(source, name, actor, branch, credential_ref, background)
-        return self._register_path(source, name, actor, branch, credential_ref)
+            view = self._register_url(source, name, actor, branch, credential_ref, background)
+        else:
+            view = self._register_path(source, name, actor, branch, credential_ref)
+        if synthetic and not view.get('synthetic'):
+            view = {**self.set_synthetic(view['project_id'], True, actor=actor),
+                    'reused': view.get('reused', False)}
+        return view
+
+    def set_synthetic(self, project_id, synthetic, *, actor) -> dict:
+        """Declare (or withdraw) that this repository is a synthetic/demo one.
+
+        Explicit, never guessed from a README. It applies to requirements received
+        from now on; tasks already created keep what they were created with, so a
+        past receipt is never rewritten.
+        """
+        self._require(actor, project_id)
+        record = self._probe_record(project_id) or {'state': 'pending'}
+        record['synthetic'] = bool(synthetic)
+        record['synthetic_set_by'] = actor.get('username')
+        record['synthetic_set_at'] = now()
+        self._save_probe(project_id, record)
+        return self.repo_view(project_id, actor=actor)
+
+    def _repo_synthetic(self, project_id) -> bool:
+        return bool((self._probe_record(project_id) or {}).get('synthetic'))
 
     def _existing(self, *, repository=None, workspace=None):
         for project in self.store.projects():
@@ -451,10 +496,11 @@ class MaintenanceSubsystem:
                 finding(f'stack:{item["name"]}', f'技术栈 {item["name"]}', 'found',
                         f'依据 {item["evidence"]}；已发现，不等于环境可运行')
             for check in suggested:
-                available = bool(shutil.which(check['argv'][0])) or (root / check['argv'][0]).is_file()
-                finding(f'suggest:{check["name"]}', f'建议检查 {check["name"]}', 'found',
-                        f"{' '.join(check['argv'])}（{check['evidence']}）"
-                        + ('；命令在执行主机上存在' if available else '；执行主机上找不到该命令'))
+                available, note = _check_runnable(check['argv'], root)
+                check['available'] = available
+                finding(f'suggest:{check["name"]}', f'建议检查 {check["name"]}',
+                        'found' if available else 'failed',
+                        f"{' '.join(check['argv'])}（{check['evidence']}）；{note}")
         configured = sorted((project.get('checks') or {}).keys())
         if configured:
             finding('checks', '项目检查', 'found', f"已配置 {len(configured)} 条：{'、'.join(configured)}（尚未在本次探测中运行）")
@@ -519,7 +565,8 @@ class MaintenanceSubsystem:
                 'needs': record.get('needs') or [],
                 'checks_configured': sorted((project.get('checks') or {}).keys()),
                 'memory': self._memory(project_id),
-                'credential_ref': record.get('credential_ref')}
+                'credential_ref': record.get('credential_ref'),
+                'synthetic': bool(record.get('synthetic'))}
         if detail:
             view['requirements'] = self.requirements(actor=actor, project_id=project_id)
             view['tasks'] = [{'task_id': t['record']['id'], 'title': t['record']['issue']['title'],
@@ -531,7 +578,7 @@ class MaintenanceSubsystem:
         return [self.repo_view(pid, actor=None) for pid in self._scope(actor)]
 
     # -- intake sources ------------------------------------------------------
-    def create_source(self, *, name, project_ids, auto_dispatch, actor) -> dict:
+    def create_source(self, *, name, project_ids, auto_dispatch, actor, synthetic=False) -> dict:
         name = str(name or '').strip()
         if not re.fullmatch(r'[A-Za-z0-9_.\-一-鿿]{1,60}', name):
             raise ValueError('来源名称需为 1-60 个字母、数字、中文、点、下划线或连字符')
@@ -541,7 +588,8 @@ class MaintenanceSubsystem:
             self._require(actor, pid)
         token = 'wbm_' + secrets.token_urlsafe(32)
         source = {'id': uuid.uuid4().hex, 'name': name, 'project_ids': sorted(set(project_ids)),
-                  'auto_dispatch': bool(auto_dispatch), 'created_at': now(), 'revoked_at': None,
+                  'auto_dispatch': bool(auto_dispatch), 'synthetic': bool(synthetic),
+                  'created_at': now(), 'revoked_at': None,
                   'created_by': actor.get('username'), 'created_by_id': actor.get('id'),
                   'token_hint': token[-4:]}
         with self.store.connect() as db:
@@ -555,8 +603,9 @@ class MaintenanceSubsystem:
 
     @staticmethod
     def _source_view(source):
-        return {k: source[k] for k in ('id', 'name', 'project_ids', 'auto_dispatch',
-                                       'created_at', 'revoked_at', 'token_hint')}
+        return {**{k: source[k] for k in ('id', 'name', 'project_ids', 'auto_dispatch',
+                                          'created_at', 'revoked_at', 'token_hint')},
+                'synthetic': bool(source.get('synthetic'))}
 
     def sources(self) -> list[dict]:
         with self.store.connect() as db:
@@ -590,7 +639,7 @@ class MaintenanceSubsystem:
     # -- requirements --------------------------------------------------------
     def submit(self, *, project_id, content, source_kind, source_name, actor,
                external_id=None, idempotency_key=None, title=None, attachments=(),
-               auto_dispatch=True) -> tuple[dict, bool]:
+               auto_dispatch=True, synthetic=False) -> tuple[dict, bool]:
         """The one intake: a human, a CLI and another system all come through here.
 
         Returns ``(receipt, created)``. Received is not executed: the receipt says
@@ -629,6 +678,8 @@ class MaintenanceSubsystem:
                   'content_digest': digest, 'attachments': clean_attachments,
                   'received_at': now(), 'status': 'received', 'task_id': None,
                   'dispatch_error': None, 'submitted_by': actor.get('username'),
+                  # Declared by the source or by the repository's registration.
+                  'synthetic': bool(synthetic) or self._repo_synthetic(project_id),
                   'submitted_by_id': actor.get('id')}
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -704,7 +755,7 @@ class MaintenanceSubsystem:
             # reason the requirement itself never gave.
             'delivery_goal': '可审阅的补丁包与项目检查结果（只交付补丁，不上线）',
             'agreement': self.agreement(), 'idempotency_key': key,
-            'delivery_tier': 'package'}
+            'delivery_tier': 'package', 'synthetic': bool(record.get('synthetic'))}
 
     def dispatch(self, requirement_id, *, actor) -> dict:
         """Turn a received requirement into the existing maintenance task, once."""
@@ -768,7 +819,8 @@ class MaintenanceSubsystem:
                 'duplicate': duplicate, 'task_id': task_id, 'execution_id': execution_id,
                 'clarification': self._clarification(task_id),
                 'received_at': record['received_at'], 'source': record['source'],
-                'project_id': record['project_id'], 'message': message}
+                'project_id': record['project_id'], 'message': message,
+                'synthetic': bool(record.get('synthetic'))}
 
     def requirement_view(self, record, names=None) -> dict:
         task_status = None
@@ -785,7 +837,8 @@ class MaintenanceSubsystem:
                 'received_at': record['received_at'], 'status': record['status'],
                 'status_label': REQUIREMENT_STATUS_LABEL.get(record['status'], record['status']),
                 'task_id': record.get('task_id'), 'task_status': task_status,
-                'dispatch_error': record.get('dispatch_error')}
+                'dispatch_error': record.get('dispatch_error'),
+                'synthetic': bool(record.get('synthetic'))}
 
     def requirements(self, *, actor, project_id=None) -> list[dict]:
         scope = set(self._scope(actor, project_id)) if actor is not None else None
@@ -869,10 +922,21 @@ class MaintenanceSubsystem:
             # it is stopped for good before the linked revision starts over.
             self.tasks.cancel(task_id, actor=actor)
         project = self.store.project(previous['project_id'])
-        delivered = (view.get('delivery') or {}).get('commit')
+        delivered = (view.get('delivery') or {}).get('commit') if view['status'] == 'delivered' else None
+        continue_from = None
+        if delivered:
+            # Keep what was delivered: the revision works on the delivered working
+            # copy and its patch applies on top of that commit. If that copy is
+            # gone this refuses -- redoing from the old baseline would silently
+            # drop the delivered change.
+            continue_from = {'execution_id': view['execution_id'], 'commit': delivered,
+                             'chain_base_sha': (previous.get('continue_from') or {}).get('chain_base_sha')
+                             or previous['base_sha']}
+            self.tasks.port.execution._require_continuable(continue_from)
         body = previous['issue']['body'] + '\n\n--- 后续反馈（第 %d 次修订）---\n' % (previous['revision'] + 1)
         if delivered:
-            body += f'上一修订交付了 commit {delivered}（未合入基线，本次从当前基线重新开始）。\n'
+            body += (f'本修订在上一修订交付的 commit {delivered} 之上继续，已包含其全部改动；'
+                     '只追加本次反馈要求的修改，不要撤销已交付的内容。\n')
         body += content
         record = {'id': previous['id'], 'title': previous['issue']['title'],
                   'content': body, 'attachments': [],
@@ -885,6 +949,10 @@ class MaintenanceSubsystem:
                                      version=str(int(previous['issue']['version'] or 1) + 1)
                                      if str(previous['issue']['version']).isdigit() else '2')
         request['issue']['source'] = previous['issue']['source']
+        request['synthetic'] = bool(previous.get('synthetic'))
+        if continue_from:
+            request['base_sha'] = delivered
+            request['continue_from'] = continue_from
         return self.tasks.revise(task_id, request, actor=actor)
 
     # -- monitor -------------------------------------------------------------
@@ -982,7 +1050,8 @@ class MaintenanceSubsystem:
                               'repository': projects[pid]['repository'],
                               'repo_state': state, 'repo_state_label': REPO_STATE_LABEL.get(state, state),
                               **per_project[pid], 'delivery_target': '补丁包',
-                              'service_status': 'not_connected'})
+                              'service_status': 'not_connected',
+                              'synthetic': bool(record.get('synthetic'))})
         return {
             'contract_version': CONTRACT_VERSION, 'generated_at': now(),
             'window': {'kind': 'day', 'start': start.isoformat(), 'end': end.isoformat(),
@@ -1025,8 +1094,10 @@ class MaintenanceSubsystem:
         for pid in scope:
             record = self._probe_record(pid) or {'state': 'pending'}
             nodes.append({'id': f'repo:{pid}', 'type': 'repo', 'label': projects[pid]['name'],
-                          'sublabel': f"{projects[pid]['repository']} · {REPO_STATE_LABEL.get(record.get('state'), '待分析')}",
-                          'status': record.get('state', 'pending'), 'task_id': None, 'project_id': pid})
+                          'sublabel': ('合成 · ' if record.get('synthetic') else '')
+                          + f"{projects[pid]['repository']} · {REPO_STATE_LABEL.get(record.get('state'), '待分析')}",
+                          'status': record.get('state', 'pending'), 'task_id': None, 'project_id': pid,
+                          'synthetic': bool(record.get('synthetic'))})
         rows = sorted(self._task_rows(scope), key=lambda r: r['record']['created_at'], reverse=True)
         truncated = len(rows) > max_tasks
         rows = rows[:max_tasks]
@@ -1048,7 +1119,7 @@ class MaintenanceSubsystem:
                                   'sublabel': f"{ {'manual': '人工提交', 'api': '外部系统', 'cli': 'CLI'}.get(req['source']['kind'], req['source']['kind'])} · "
                                               f"{REQUIREMENT_STATUS_LABEL.get(req['status'], req['status'])}",
                                   'status': req['status'], 'task_id': req.get('task_id'),
-                                  'project_id': req['project_id']})
+                                  'project_id': req['project_id'], 'synthetic': bool(req.get('synthetic'))})
                     edges.append({'from': f"repo:{req['project_id']}", 'to': f"req:{req['id']}", 'kind': 'has'})
                     if req.get('task_id'):
                         requirement_of[req['task_id']] = req['id']
@@ -1078,8 +1149,10 @@ class MaintenanceSubsystem:
             task_node = f"task:{record['id']}"
             label = {'received': '已接收', 'missing': '执行记录缺失'}.get(status, status)
             nodes.append({'id': task_node, 'type': 'task', 'label': record['issue']['title'][:60],
-                          'sublabel': f"第 {record['revision']} 修订 · {_STATUS_TEXT.get(status, label)}",
-                          'status': status, 'task_id': record['id'], 'project_id': record['project_id']})
+                          'sublabel': ('合成 · ' if record.get('synthetic') else '')
+                          + f"第 {record['revision']} 修订 · {_STATUS_TEXT.get(status, label)}",
+                          'status': status, 'task_id': record['id'], 'project_id': record['project_id'],
+                          'synthetic': bool(record.get('synthetic'))})
             parent = f"req:{requirement_of[root_id]}" if root_id in requirement_of else f"repo:{record['project_id']}"
             edges.append({'from': parent, 'to': task_node, 'kind': 'creates'})
             kind = self._attention_kind(status)

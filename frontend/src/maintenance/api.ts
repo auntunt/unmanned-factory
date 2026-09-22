@@ -21,7 +21,7 @@ export const maintenanceApi = {
   repos: (o: CallOptions = {}) => request<{ repos: RepoView[] }>(`${base}/repos`, o),
   repo: (projectId: string, o: CallOptions = {}) =>
     request<RepoView>(`${base}/repos/${encodeURIComponent(projectId)}`, o),
-  registerRepo: (body: { source: string; name: string; branch?: string; credential_ref?: string }, o: CallOptions) =>
+  registerRepo: (body: { source: string; name: string; branch?: string; credential_ref?: string; synthetic?: boolean }, o: CallOptions) =>
     request<RepoView>(`${base}/repos`, { ...o, method: 'POST', body }),
   probeRepo: (projectId: string, o: CallOptions) =>
     request<RepoView>(`${base}/repos/${encodeURIComponent(projectId)}/probe`, { ...o, method: 'POST', body: {} }),
@@ -34,7 +34,9 @@ export const maintenanceApi = {
   dispatchRequirement: (id: string, o: CallOptions) =>
     request<Receipt>(`${base}/requirements/${encodeURIComponent(id)}/dispatch`, { ...o, method: 'POST', body: {} }),
   intakeSources: (o: CallOptions = {}) => request<{ sources: IntakeSource[] }>(`${base}/intake-sources`, o),
-  createIntakeSource: (body: { name: string; project_ids: string[]; auto_dispatch: boolean }, o: CallOptions) =>
+  markSynthetic: (projectId: string, synthetic: boolean, o: CallOptions) =>
+    request<RepoView>(`${base}/repos/${encodeURIComponent(projectId)}/synthetic`, { ...o, method: 'POST', body: { synthetic } }),
+  createIntakeSource: (body: { name: string; project_ids: string[]; auto_dispatch: boolean; synthetic?: boolean }, o: CallOptions) =>
     request<IntakeSource>(`${base}/intake-sources`, { ...o, method: 'POST', body }),
   revokeIntakeSource: (id: string, o: CallOptions) =>
     request<IntakeSource>(`${base}/intake-sources/${encodeURIComponent(id)}/revoke`, { ...o, method: 'POST', body: {} }),

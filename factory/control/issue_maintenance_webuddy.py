@@ -175,12 +175,38 @@ class WebuddyExecution:
                     # filtering happened at intake. ``refine_memory_for_plan``
                     # is what narrows it once a plan names the files.
                     'memory_scope_known': loaded['scope_known'],
-                    'synthetic': record.get('synthetic', False)},
+                    'synthetic': record.get('synthetic', False),
+                    # The original project baseline of the whole revision chain,
+                    # so the export can also say how to apply everything at once.
+                    'chain_base_sha': (record.get('continue_from') or {}).get('chain_base_sha')
+                    or record['base_sha']},
             delivery_id=f"maintenance:{record['id']}",
             semantic_id=f"maintenance:{record['project_id']}:{record['content_fingerprint']}")
+        continue_from = record.get('continue_from')
+        if continue_from and run.get('feedback_predecessor_id') != continue_from['execution_id']:
+            # Before dispatch, so planning already happens on the delivered working
+            # copy. The run lifecycle's own check (same repository, branch still at
+            # the delivered commit) refuses the run if the delivery is gone; it never
+            # falls back to the project baseline, and nothing is merged into the
+            # user's branch.
+            self._require_continuable(continue_from)
+            run = self.store.update(run['id'], {'feedback_predecessor_id': continue_from['execution_id']})
         if created or not self._dispatched(run):
             self.dispatch(run['id'])
         return run['id']
+
+    def _require_continuable(self, continue_from):
+        prior = self._run(continue_from['execution_id'])
+        artifacts = prior.get('artifacts') or {}
+        worktree = artifacts.get('worktree')
+        if (prior.get('status') not in ('ready_for_review', 'published')
+                or artifacts.get('commit') != continue_from['commit']
+                or not worktree or not Path(worktree).is_dir()):
+            raise Conflict('上一版交付的工作副本已不可用，不能在其上继续；不会退回旧基线重做')
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=worktree, capture_output=True,
+                              text=True, timeout=self.timeout_s)
+        if head.returncode != 0 or head.stdout.strip() != continue_from['commit']:
+            raise Conflict('上一版交付的工作副本已偏离交付 commit，不能在其上继续')
 
     def _dispatched(self, run) -> bool:
         """Has this run ever been handed to the durable queue?
@@ -361,9 +387,30 @@ class WebuddyExecution:
                               cwd=worktree, capture_output=True, timeout=self.timeout_s)
         if done.returncode != 0 or not done.stdout:
             raise Conflict('执行工作副本没有可导出的补丁')
+        name = f'maintenance-{execution_id}.patch'
+        artifacts_out = [{'name': name, 'bytes': done.stdout}]
+        chain_base = (run.get('source') or {}).get('chain_base_sha') or base
+        basis = [{'artifact': name, 'applies_to': base,
+                  'kind': 'incremental' if chain_base != base else 'full',
+                  'description': ('本修订的增量补丁，需在上一版交付之上应用' if chain_base != base
+                                  else '完整补丁')}]
+        if chain_base != base:
+            # A follow-up revision: also hand over everything since the original
+            # project baseline, so the whole chain can be applied in one step.
+            ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', chain_base, commit],
+                                      cwd=worktree, capture_output=True, timeout=self.timeout_s)
+            if ancestor.returncode != 0:
+                raise Conflict('修订链的原始基线不是本次交付的祖先，不能导出累积补丁')
+            full = subprocess.run(['git', 'format-patch', '--stdout', f'{chain_base}..{commit}'],
+                                  cwd=worktree, capture_output=True, timeout=self.timeout_s)
+            if full.returncode != 0 or not full.stdout:
+                raise Conflict('无法导出从原始基线起的累积补丁')
+            cumulative = f'maintenance-{execution_id}.cumulative.patch'
+            artifacts_out.append({'name': cumulative, 'bytes': full.stdout})
+            basis.append({'artifact': cumulative, 'applies_to': chain_base, 'kind': 'cumulative',
+                          'description': '累积补丁，包含整条修订链的全部改动，在原始项目基线上应用'})
         return {'diff_hash': hashlib.sha256(done.stdout).hexdigest(),
-                'artifacts': [{'name': f'maintenance-{execution_id}.patch',
-                               'bytes': done.stdout}]}
+                'artifacts': artifacts_out, 'patch_basis': basis}
 
 
 #: The plugin this module's business surface belongs to. Every surface that

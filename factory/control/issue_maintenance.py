@@ -123,15 +123,40 @@ def normalize(request) -> dict:
         # real delivery must not be able to acquire the disclaimer by omission,
         # and a demo must state that it is one.
         'synthetic': bool(request.get('synthetic')),
+        # A follow-up that must keep what was already delivered. ``base_sha`` is
+        # then the delivered commit, and the execution works on that delivery's
+        # own verified working copy instead of the project baseline.
+        'continue_from': _continue_from(request.get('continue_from'), request['base_sha']),
     }
+
+
+def _continue_from(value, base_sha):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('continue_from 必须是对象')
+    for key in ('execution_id', 'commit', 'chain_base_sha'):
+        if not value.get(key):
+            raise ValueError(f'continue_from 缺少 {key}')
+    if not _SHA.match(str(value['commit'])) or not _SHA.match(str(value['chain_base_sha'])):
+        raise ValueError('continue_from 的 commit 必须是完整 40 位 SHA')
+    if str(value['commit']) != str(base_sha):
+        raise ValueError('在上一版交付上继续时，基线必须就是上一版交付的 commit')
+    return {'execution_id': str(value['execution_id']), 'commit': str(value['commit']),
+            'chain_base_sha': str(value['chain_base_sha'])}
 
 
 def content_fingerprint(normalized) -> str:
     """Two imports are the same submission only if all of this is the same."""
-    return _digest({key: normalized[key] for key in (
-        'issue_digest', 'project_id', 'repository', 'base_sha',
-        'expected_behaviour', 'delivery_goal', 'agreement', 'delivery_tier',
-        'synthetic')})
+    keys = ('issue_digest', 'project_id', 'repository', 'base_sha',
+            'expected_behaviour', 'delivery_goal', 'agreement', 'delivery_tier',
+            'synthetic')
+    payload = {key: normalized[key] for key in keys}
+    # Only when present, so every fingerprint stored before this field existed
+    # still matches a byte-identical resubmission.
+    if normalized.get('continue_from'):
+        payload['continue_from'] = normalized['continue_from']
+    return _digest(payload)
 
 
 _DIFF_GIT_HEADER = re.compile(r'^diff --git a/(?P<a>.+) b/(?P<b>.+)$', re.MULTILINE)
@@ -719,7 +744,11 @@ class MaintenanceTasks:
             'baseline': view['baseline'],
             'delivery': {'commit': delivery.get('commit'),
                          'diff_hash': exported['diff_hash'],
-                         'artifacts': [a['name'] for a in exported['artifacts']]},
+                         'artifacts': [a['name'] for a in exported['artifacts']],
+                         # Which commit each exported patch applies to. A follow-up
+                         # revision's incremental patch applies on top of the
+                         # previous delivery, not on the project baseline.
+                         'patch_basis': list(exported.get('patch_basis') or [])},
             'agreement': view['agreement'],
             'checks': [{'name': check.get('name'), 'passed': check.get('passed'),
                         'exit_code': check.get('exit_code'),
@@ -754,6 +783,8 @@ def render_receipt(receipt) -> str:
         f"交付：commit {receipt['delivery']['commit']}"
         f"，diff {receipt['delivery']['diff_hash']}",
         f"  构建物：{'、'.join(receipt['delivery']['artifacts']) or '（无）'}",
+        *[f"  {b['artifact']}：{b['description']}，应用于 {b['applies_to']}"
+          for b in receipt['delivery'].get('patch_basis') or []],
         f"适用约定版本：{receipt['agreement']['revision']}"
         + (f"（Skill {receipt['agreement']['skill_version']}）"
            if receipt['agreement'].get('skill_version') else ''),

@@ -34,6 +34,7 @@ export interface ProjectRow {
   delivered: number
   delivery_target: string
   service_status: 'not_connected' | string
+  synthetic?: boolean
 }
 
 export interface MonitorEvent {
@@ -82,6 +83,7 @@ export interface GraphNode {
   status: string
   task_id: string | null
   project_id: string
+  synthetic?: boolean
 }
 
 export interface GraphEdge {
@@ -110,6 +112,8 @@ export interface SuggestedCheck {
   name: string
   argv: string[]
   evidence: string
+  /** 命令能否在执行主机上启动（未运行）；false 时采纳后检查会失败。 */
+  available?: boolean
 }
 
 export interface RepoView {
@@ -135,6 +139,7 @@ export interface RepoView {
   checks_configured: string[]
   memory: { entries: number | null; confirmed: number | null; code_index: string }
   credential_ref: string | null
+  synthetic?: boolean
   requirements?: Requirement[]
   tasks?: { task_id: string; title: string; status: string; created_at: string }[]
 }
@@ -156,6 +161,7 @@ export interface Requirement {
   task_id: string | null
   task_status: string | null
   dispatch_error: string | null
+  synthetic?: boolean
 }
 
 export interface Receipt {
@@ -168,6 +174,7 @@ export interface Receipt {
   received_at: string
   source: { kind: 'manual' | 'api' | 'cli'; name: string }
   message: string
+  synthetic?: boolean
 }
 
 export interface IntakeSource {
@@ -178,6 +185,7 @@ export interface IntakeSource {
   created_at: string
   revoked_at: string | null
   token_hint: string
+  synthetic?: boolean
   /** 只在创建时出现一次。 */
   token?: string
 }

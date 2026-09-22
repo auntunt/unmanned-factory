@@ -212,6 +212,11 @@ def _parser() -> argparse.ArgumentParser:
                     help='Git URL or a directory on the execution host')
     ra.add_argument('--name', required=True)
     ra.add_argument('--branch', default=None)
+    ra.add_argument('--synthetic', action='store_true',
+                    help='Declare this a synthetic/demo repository (carried into tasks and receipts)')
+    rsy = repo_sub.add_parser('mark-synthetic', help='Declare or withdraw the synthetic flag')
+    rsy.add_argument('project_id')
+    rsy.add_argument('--off', action='store_true', help='Withdraw the flag')
     repo_sub.add_parser('list', help='List registered repositories')
     rs = repo_sub.add_parser('show', help='Show one repository')
     rs.add_argument('project_id')
@@ -529,7 +534,9 @@ def _dispatch_repo(args, subsystem, actor) -> dict:
     if rc == 'add':
         return subsystem.register_repo(
             source=args.source, name=args.name, actor=actor, branch=args.branch,
-            background=False)
+            background=False, synthetic=args.synthetic)
+    if rc == 'mark-synthetic':
+        return subsystem.set_synthetic(args.project_id, not args.off, actor=actor)
     if rc == 'list':
         return {'repos': subsystem.repos(actor=actor)}
     if rc == 'show':

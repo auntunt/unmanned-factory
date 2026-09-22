@@ -6,6 +6,7 @@ import { EmptyState, ErrorNotice, PageHeader, errorText, formatDate } from '../w
 import { WorkspaceApiError } from '../workspace/api'
 import type { PageProps } from '../workbench/ui'
 import { maintenanceApi } from './api'
+import SyntheticBadge from './SyntheticBadge'
 import type { AttentionKind, DataSource, Graph, Overview, ProjectRow, SourceStatus } from './types'
 import { ATTENTION_LABEL } from './types'
 import RelationCanvas from './RelationCanvas'
@@ -363,7 +364,7 @@ function ProjectRowView({ row }: { row: ProjectRow }) {
   return (
     <tr>
       <td>
-        {row.name}
+        {row.name} <SyntheticBadge synthetic={row.synthetic} />
         <small>{row.repository}</small>
       </td>
       <td><span className="wb-status">{row.repo_state_label}</span></td>

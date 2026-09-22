@@ -57,7 +57,7 @@
       "entries": [
         {
           "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
-          "key": "4344b2503abf4244b9b07b6cb9ee9a65",
+          "key": "48554b85f8cc4adcbbebfa4a076db1e9",
           "kind": "fact",
           "paths": [],
           "revision": 1,
@@ -103,7 +103,8 @@
             "exec-1.patch"
           ],
           "commit": "cccccccccccccccccccccccccccccccccccccccc",
-          "diff_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          "diff_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "patch_basis": []
         },
         "delivery_tier": "package",
         "issue": {
