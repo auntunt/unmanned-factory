@@ -37,7 +37,7 @@ const delivered: MaintenanceTaskView = {
       { name: 'lint', passed: true, exit_code: 0, reused: true, identity_fingerprint: 'fp-456' },
       { name: 'typecheck', passed: true, exit_code: 0, reused: false },
     ],
-    unverified: false,
+    unverified: [],
     working_copy_base_sha: 'c'.repeat(40),
     repository: 'org/repo',
   },
@@ -74,6 +74,29 @@ describe('维护任务详情页', () => {
     await waitFor(() => expect(screen.getAllByText('修复登录异常').length).toBeGreaterThanOrEqual(1))
     expect(screen.getByText('已交付')).toBeTruthy()
     expect(screen.getByTestId('step-list')).toBeTruthy()
+  })
+
+  it('未验证项为空列表时不显示未验证警告', async () => {
+    api.mockImplementation(async path => {
+      if (String(path).includes('/events')) return { events: [] }
+      return delivered
+    })
+    renderDetail(delivered.task_id)
+    await waitFor(() => expect(screen.getByTestId('delivery-section')).toBeTruthy())
+    expect(screen.queryByText('验证状态')).toBeNull()
+    expect(screen.queryByText('未验证', { exact: true })).toBeNull()
+  })
+
+  it('未验证项非空时显示警告和每项具体说明', async () => {
+    const unverified = ['尚未在真实达梦实例验证', '尚未进行客户环境验收']
+    api.mockImplementation(async path => {
+      if (String(path).includes('/events')) return { events: [] }
+      return { ...delivered, delivery: { ...delivered.delivery!, unverified } }
+    })
+    renderDetail(delivered.task_id)
+    await waitFor(() => expect(screen.getByTestId('delivery-section')).toBeTruthy())
+    expect(screen.getByText('未验证', { exact: true })).toBeTruthy()
+    for (const item of unverified) expect(screen.getByText(item)).toBeTruthy()
   })
 
   it('显示交付物检查的健康证据标签', async () => {

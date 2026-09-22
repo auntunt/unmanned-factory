@@ -92,10 +92,11 @@ function DeliverySection({ delivery }: { delivery: MaintenanceTaskView['delivery
           <span className="wb-eyebrow">工作区基线</span>
           <p><CopyValue value={delivery.working_copy_base_sha} label="base SHA" length={12} /></p>
         </div>
-        {delivery.unverified && (
+        {delivery.unverified.length > 0 && (
           <div>
             <span className="wb-eyebrow">验证状态</span>
             <p><span className="wb-status wb-status-warning"><i aria-hidden="true" />未验证</span></p>
+            <ul>{delivery.unverified.map((item, index) => <li key={index}>{item}</li>)}</ul>
           </div>
         )}
       </div>

@@ -40,7 +40,7 @@ export interface MaintenanceCheck {
 export interface MaintenanceDelivery {
   commit: string
   checks: MaintenanceCheck[]
-  unverified: boolean
+  unverified: string[]
   working_copy_base_sha: string
   repository: string
   capability_source?: string
