@@ -103,3 +103,7 @@
   .as-drawer-close { border: 0; background: transparent; color: var(--cv-muted); padding: 6px; border-radius: 8px; cursor: pointer; }
 }
 @media (prefers-reduced-motion: reduce) { .as-nav-item, .as-collapse, .as-account { transition: none; } }
+
+@media (max-width: 640px) {
+  .as-content .cv-dock { position: static; }
+}

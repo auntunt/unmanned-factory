@@ -245,7 +245,20 @@ function ThreadMessage({ message, followups = [] }: { message: ConversationMessa
     return <div className="cv-msg is-user"><div className="cv-msg-bubble">{message.content}{badgeLabel && <small className={`cv-followup-badge is-${badge}`} style={{ display: 'block' }}>{badgeLabel}</small>}</div></div>
   }
   return <div className="cv-msg is-assistant"><div className="cv-msg-head"><span className="cv-msg-avatar">w</span>webuddy<span style={{ marginLeft: 'auto', color: 'var(--cv-faint)', fontWeight: 400 }}>{formatDate(message.at)}</span></div>
-    <div className="cv-msg-body">{message.content}</div></div>
+    <div className="cv-msg-body"><MessageContent content={message.content} /></div></div>
+}
+
+/** Structured runner output stays available without filling the conversation with JSON. */
+function MessageContent({ content }: { content: string }) {
+  let structured: unknown
+  try { structured = JSON.parse(content) } catch { /* Ordinary prose remains verbatim. */ }
+  if (structured && typeof structured === 'object') {
+    return <details className="cv-collapse cv-technical-message">
+      <summary>查看结构化执行记录</summary>
+      <pre>{JSON.stringify(structured, null, 2)}</pre>
+    </details>
+  }
+  return <div className="cv-message-text">{content}</div>
 }
 
 function ProductCard({ run, title, rid, ledger, csrfToken, onUnauthorized, isAdmin }: { run: Run; title: string; rid: string; ledger: Ledger | null; csrfToken: string; onUnauthorized: () => void; isAdmin: boolean }) {

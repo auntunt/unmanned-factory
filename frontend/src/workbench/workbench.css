@@ -232,3 +232,28 @@ a { color: inherit; text-decoration: none; }
   .wb-start-page .wb-form-actions { flex-direction: column; align-items: stretch; }
   .wb-start-page .wb-form-actions .wb-button { width: 100%; white-space: nowrap; }
 }
+
+/* Shared page controls: long project names must not determine the page width. */
+.wb-page-header { flex-wrap: wrap; align-items: center; }
+.wb-page-header > div:first-child { flex: 1 1 220px; min-width: 0; }
+.wb-page-actions { align-items: center; max-width: 100%; min-width: 0; }
+.wb-page-actions .wb-button { min-height: 40px; flex-shrink: 0; white-space: nowrap; }
+.wb-inline-field { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; color: var(--wb-muted); font-size: 13px; }
+.wb-inline-field select { width: 280px; max-width: 100%; min-width: 0; min-height: 40px; border: 1px solid var(--wb-border-strong); border-radius: 8px; padding: 9px 32px 9px 12px; background-color: var(--color-surface); color: var(--wb-ink); font: inherit; text-overflow: ellipsis; cursor: pointer; }
+.wb-inline-field select:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
+.wb-form > label + label, .wb-form > label + .wb-form-grid, .wb-form > .wb-form-grid + label { margin-top: 16px; }
+.wb-form fieldset { min-width: 0; margin: 18px 0; padding: 16px; border: 1px solid var(--wb-border); border-radius: 8px; }
+.wb-form legend { padding: 0 6px; font-size: 13px; }
+.wb-form-actions { flex-wrap: wrap; }
+@media (max-width: 700px) {
+  .wb-page-header > div:first-child { flex-basis: auto; }
+  .wb-inline-field { flex: 1 1 100%; }
+  .wb-inline-field select { flex: 1; width: 0; }
+  .wb-form { padding: 16px; }
+}
+
+.pk-from-deliverables > p { font-size: 13px; font-weight: 400; line-height: 1.65; color: var(--wb-muted); }
+.pk-from-deliverables .pk-list { list-style: none; padding: 0; display: grid; gap: 12px; }
+.pk-from-deliverables .pk-list li { min-width: 0; display: grid; gap: 8px; }
+.pk-from-deliverables .pk-list label:has(input[type="checkbox"]) { flex-direction: row; align-items: flex-start; overflow-wrap: anywhere; font-size: 13px; font-weight: 400; }
+.pk-from-deliverables .pk-list input[type="checkbox"] { margin: 3px 0 0; accent-color: var(--wb-teal); }

@@ -36,7 +36,7 @@ export default function PackFromDeliverables({ runId, files, csrfToken, onUnauth
     } catch (cause) { setError(cause instanceof Error ? cause.message : '无法创建工具包草稿') }
     finally { setBusy(false) }
   }
-  return <details className="wb-card wb-form">
+  return <details className="wb-card wb-form pk-from-deliverables">
     <summary>转换为可复用工具</summary>
     <p>选择程序、方法与测试样例，创建职能包草稿。验证并发布后可挂靠到职能体；不会修改本次成果，也不会自动部署。</p>
     {packId ? <p role="status">工具包草稿已创建。<Link to={`/ability-center/packs/${encodeURIComponent(packId)}`}>查看草稿并运行验证</Link></p> : <>

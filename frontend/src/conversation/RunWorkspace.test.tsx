@@ -287,3 +287,14 @@ it('resumes skill ingestion on the same run instead of creating a generic retry'
   await waitFor(() => expect(api.mock.calls.some(([url]) => url.endsWith('/continue'))).toBe(true))
   expect(api.mock.calls.some(([url]) => url.endsWith('/retry'))).toBe(false)
 })
+
+it('collapses structured runner output while keeping normal replies readable', async () => {
+  mount({ ...base, status: 'ready_for_review' }, [
+    { id: 1, role: 'assistant', content: '{"criterion_ids":["task:coding:1"],"startup_command":"python app.py"}', at: '' },
+    { id: 2, role: 'assistant', content: '已完成。\n请查看成果。', at: '' },
+  ])
+  const summary = await screen.findByText('查看结构化执行记录')
+  expect(summary.closest('details')?.open).toBe(false)
+  expect(summary.closest('details')?.textContent).toContain('python app.py')
+  expect(screen.getByText(/请查看成果/).className).toBe('cv-message-text')
+})

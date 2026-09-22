@@ -97,8 +97,8 @@
 /* ---- run workspace ---- */
 .cv-run { display: flex; flex-direction: column; min-height: calc(100vh - 66px); }
 .cv-run-scroll { flex: 1; overflow-y: auto; }
-.cv-run-inner { max-width: var(--cv-thread); margin: 0 auto; padding: 20px 20px 140px; }
-.cv-progress { background: var(--cv-surface); border: 1px solid var(--cv-border); border-radius: var(--cv-radius); box-shadow: var(--cv-shadow-soft); padding: 18px 20px; margin-bottom: 22px; position: sticky; top: 12px; z-index: 5; }
+.cv-run-inner { max-width: var(--cv-thread); margin: 0 auto; padding: 20px 20px 24px; }
+.cv-progress { background: var(--cv-surface); border: 1px solid var(--cv-border); border-radius: var(--cv-radius); box-shadow: var(--cv-shadow-soft); padding: 18px 20px; margin-bottom: 22px; }
 .cv-progress-head { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 16px; }
 .cv-progress-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--cv-accent); flex-shrink: 0; }
 .cv-progress-dot.is-wait, .cv-progress-dot.is-fail { background: var(--cv-warning); }
@@ -124,7 +124,8 @@
 .cv-msg-bubble { background: var(--cv-raised); border-radius: 14px; padding: 11px 15px; max-width: 82%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cv-msg.is-assistant .cv-msg-head { display: flex; align-items: center; gap: 8px; color: var(--cv-muted); font-size: 13px; }
 .cv-msg-avatar { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--cv-accent); color: var(--cv-on-accent); font-weight: 700; font-size: 13px; }
-.cv-msg.is-assistant .cv-msg-body { color: var(--cv-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cv-msg.is-assistant .cv-msg-body { color: var(--cv-ink); overflow-wrap: anywhere; min-width: 0; }
+.cv-message-text { white-space: pre-wrap; }
 
 /* embedded product / preview card */
 .cv-artifact { border: 1px solid var(--cv-border); border-radius: var(--cv-radius); background: var(--cv-surface); box-shadow: var(--cv-shadow-soft); overflow: hidden; margin-top: 4px; }
@@ -202,7 +203,7 @@
   .cv-topbar { padding: 12px 14px; }
   .cv-title { max-width: 40vw; }
   .cv-start { padding: 9vh 16px 48px; }
-  .cv-run-inner { padding: 16px 14px 132px; }
+  .cv-run-inner { padding: 16px 14px 20px; }
   .cv-progress { padding: 14px 14px; top: 8px; }
   .cv-stage { font-size: 11px; }
   .cv-msg-bubble { max-width: 88%; }
@@ -348,3 +349,25 @@
 .cv-card-menu [role="menuitem"]:hover, .cv-card-menu [role="menuitem"]:focus { background: var(--cv-raised); outline: none; }
 .cv-card-edit-wrap { padding: 8px 0 0; }
 .cv-metadata-editor { display: flex; flex-direction: column; gap: 4px; }
+
+/* One readable conversation column; only the compact composer stays in view. */
+.cv-msg-body > .wb-card { margin-top: 12px; }
+.cv-msg-body > details.wb-form { padding: 0; }
+.cv-msg-body > details.wb-form > summary { cursor: pointer; padding: 12px 14px; font-size: 13px; color: var(--cv-muted); }
+.cv-msg-body > details.wb-form > :not(summary) { margin: 12px 14px; }
+.cv-collapse > summary::before { content: '›'; display: inline-block; font-size: 18px; line-height: 1; }
+.cv-collapse[open] > summary::before { transform: rotate(90deg); }
+.cv-collapse > summary:has(.cv-disclosure)::before { display: none; }
+.cv-collapse .cv-file { margin: 0; border: 0; border-radius: 0; border-top: 1px solid var(--cv-border); }
+.cv-artifact-head { flex-wrap: wrap; overflow-wrap: anywhere; }
+.cv-artifact-head + .cv-artifact-foot { border-top: 0; }
+.cv-technical-message pre { margin: 0; padding: 14px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.cv-dock { z-index: 6; padding-top: 10px; }
+.cv-dock .cv-composer textarea { min-height: 56px; max-height: 120px; }
+.cv-dock-note { line-height: 1.5; }
+@media (max-width: 640px) {
+  .cv-dock { position: static; background: var(--cv-bg); }
+  .cv-artifact-foot .cv-btn { white-space: normal; justify-content: center; }
+  .cv-msg-head { flex-wrap: wrap; }
+  .cv-file { flex-wrap: wrap; }
+}
