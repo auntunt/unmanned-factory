@@ -139,6 +139,9 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     if not hasattr(svc, 'runtime_settings'):
         svc.runtime_settings = RuntimeSettings(store)
     secret = webhook_secret if webhook_secret is not None else os.getenv('FACTORY_WEBHOOK_SECRET', '')
+    # Hosts allowed to frame /embed/* (space separated https origins). Empty = none.
+    embed_origins = [o for o in os.getenv('FACTORY_EMBED_ORIGINS', '').split()
+                     if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::\d+)?|http://(?:127\.0\.0\.1|localhost)(?::\d+)?', o)]
     static = Path(static_dir or os.getenv('FACTORY_STATIC_DIR') or Path(__file__).resolve().parents[2] / 'frontend' / 'dist').expanduser().resolve()
 
     @asynccontextmanager
@@ -191,6 +194,11 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(plugin_router(store, svc))
     from factory.control.maintenance_routes import router as maintenance_router
     app.include_router(maintenance_router(store, svc))
+    from factory.control.maintenance_subsystem_routes import router as maintenance_subsystem_router
+    from factory.control.issue_maintenance_webuddy import tasks_for as maintenance_tasks_for
+    subsystem_api, app.state.maintenance = maintenance_subsystem_router(
+        store, svc, maintenance_tasks_for(svc), allowed_root)
+    app.include_router(subsystem_api)
     from factory.control.modernization_routes import router as modernization_router
     app.include_router(modernization_router(store, svc))
     from factory.control.adaptation_routes import router as adaptation_router
@@ -222,7 +230,10 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     @app.middleware('http')
     async def boundary(request: Request, call_next):
         path = request.url.path
-        public_api = path in ('/api/auth/login', '/api/v2/github/webhook')
+        # The maintenance machine-intake route authenticates its own bearer token
+        # (an intake source, scoped to its projects); it has no browser session.
+        machine_intake = request.method == 'POST' and path == '/api/v2/maintenance/intake'
+        public_api = path in ('/api/auth/login', '/api/v2/github/webhook') or machine_intake
         is_api = path.startswith('/api/')
         skill_upload = request.method == 'POST' and re.fullmatch(r'/api/v4/agents/[^/]+/(skills|abilities)', path) is not None
         project_upload = request.method == 'POST' and path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')
@@ -266,7 +277,7 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     return JSONResponse({'detail': '请求体过大'}, status_code=413)
                 chunks.append(chunk)
             request._body = b''.join(chunks)
-            if path != '/api/v2/github/webhook' and request.headers.get('origin') != origin:
+            if path != '/api/v2/github/webhook' and not machine_intake and request.headers.get('origin') != origin:
                 return JSONResponse({'detail': '请求来源不匹配'}, status_code=403)
         if is_api and not public_api:
             user = auth.authenticate(request.cookies.get(COOKIE, ''))
@@ -297,7 +308,9 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     member_chat = request.method == 'POST' and bool(
                         re.fullmatch(r'/api/v4/agents/[^/]+/conversations', path)
                         or re.fullmatch(r'/api/v4/conversations/[^/]+/(messages|attachments|calc|export)', path)
-                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path))
+                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path)
+                        # 运维维护子系统的人工需求提交：项目授权由路由内的身份端口校验。
+                        or path == '/api/v2/maintenance/requirements')
                     try:
                         if session_skill_action or member_chat:
                             pass  # 路由处理器验证会话归属
@@ -325,7 +338,12 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         if bounded_upload and upload_size > upload_limit:
             response = JSONResponse({'detail': '上传请求体超过限制'}, status_code=413)
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Frame-Options'] = 'DENY'
+        if embed_origins and path.startswith('/embed/'):
+            # Opt-in host embedding of the maintenance subsystem pages only; every
+            # other page and the whole API stay unframeable.
+            response.headers['Content-Security-Policy'] = 'frame-ancestors ' + ' '.join(embed_origins)
+        else:
+            response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
         if is_api or response.headers.get('content-type', '').startswith('text/html') or response.status_code == 404:
             response.headers['Cache-Control'] = 'no-store'

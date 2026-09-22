@@ -114,6 +114,8 @@ def router(store, svc):
     from factory.control.issue_maintenance_webuddy import tasks_for
 
     tasks = tasks_for(svc)
+    from factory.control.maintenance_subsystem_routes import subsystem_for
+    subsystem = subsystem_for(svc, tasks)
     api = APIRouter(prefix='/api/v2/maintenance')
 
     def _actor(request: Request) -> dict:
@@ -202,6 +204,9 @@ def router(store, svc):
                 'kind': 'approval.required',
                 'message': '计划已就绪，等待人工批准后才会开始改动',
                 'event': None}
+        # What the caller may do now, from the execution's real state. The page
+        # renders only these; there is no pause because the executor has none.
+        view['actions'] = subsystem.task_actions(view)
         return view
 
     @api.get('/tasks/{task_id}/events')

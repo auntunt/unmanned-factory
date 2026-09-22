@@ -1,0 +1,1086 @@
+"""webuddy 运维维护子系统的共享业务核心（契约 ``maintenance-subsystem/1``）。
+
+HTTP、CLI 和页面操作的是这里的同一组对象。这个模块只拥有既有表里没有的东西：
+
+* 代码库的**探测结果**（``maintenance_repo_probes``）——项目本身仍是既有 ``projects``
+  表里的那一行，登记同一仓库复用既有 ``project_id``；
+* **需求**（``maintenance_requirements``）——人工与机器提交共用 ``Intake.submit``，
+  需求派发后变成既有的维护任务（``issue_maintenance``），状态从执行派生，不在这里另存；
+* **接入来源**（``maintenance_intake_sources``）——机器提交的令牌与项目范围，库内只存哈希。
+
+监控总览与关系画布都是对上面这些与既有 ``runs``/``events``/``control_jobs`` 的只读投影，
+节点位置、计数都不持有业务状态。没有数据源的指标（CPU/内存、应用探针、告警）如实报
+``not_connected``，不从任务成功推断服务器健康。
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import threading
+import uuid
+from pathlib import Path
+
+from factory.control.store import Conflict, now
+
+VERSION = '0.1.0'
+CONTRACT_VERSION = 'maintenance-subsystem/1'
+PLUGIN_ID = 'issue-maintenance'
+
+REPO_STATE_LABEL = {'pending': '待分析', 'analyzing': '分析中', 'needs_input': '待补充',
+                    'ready': '可开始维护', 'failed': '接入失败'}
+REQUIREMENT_STATUS_LABEL = {'received': '已接收', 'dispatched': '已派发执行',
+                            'pending_dispatch': '已接收，待派发', 'dispatch_failed': '派发失败'}
+SOURCE_KINDS = ('manual', 'api', 'cli')
+
+#: Run states grouped the way the monitor counts them. Anything not listed is not
+#: silently bucketed: it shows up as ``other`` and is counted nowhere.
+_ACTIVE = {'received', 'queued', 'planning', 'running', 'verifying', 'publishing',
+           'requirement_analysis'}
+_ANSWER = {'needs_clarification'}
+_APPROVAL = {'awaiting_approval', 'awaiting_spec_confirmation'}
+_BLOCKED = {'needs_human', 'failed'}
+_DELIVERED = {'ready_for_review', 'published'}
+
+_EVENT_LABELS = {
+    'user.message': '收到需求', 'queue.enqueued': '进入执行队列', 'run.planning': '开始制定计划',
+    'run.started': '开始修改', 'run.verified': '检查完成，产物就绪', 'run.failed': '执行失败',
+    'run.blocked': '执行受阻', 'run.recovered': '服务重启后恢复', 'run.resumed': '继续执行',
+    'clarification.requested': '模型提问，等待业务回答', 'clarification.answered': '已回答问题',
+    'approval.requested': '计划待批准', 'run.approved': '计划已批准', 'run.cancelled': '已取消',
+    'budget.exhausted': '预算用尽', 'followup.pending': '收到补充信息', 'check.completed': '检查完成',
+    'maintenance.memory_scope_recorded': '记录计划涉及的项目记忆',
+}
+
+_URL = re.compile(r'^(?:https?://|ssh://|git@)[^\s]+$')
+_SLUG = re.compile(r'[^A-Za-z0-9_.-]+')
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _git(args, cwd, timeout=15):
+    try:
+        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _ok(done) -> bool:
+    return done is not None and done.returncode == 0
+
+
+def local_timezone() -> str:
+    """An IANA name for the server's day window, or the abbreviation if none is known."""
+    explicit = os.getenv('FACTORY_TIMEZONE') or os.getenv('TZ')
+    if explicit:
+        return explicit
+    try:
+        target = os.readlink('/etc/localtime')
+        if 'zoneinfo/' in target:
+            return target.split('zoneinfo/', 1)[1]
+    except OSError:
+        pass
+    return _dt.datetime.now().astimezone().tzname() or 'local'
+
+
+def _day_window():
+    start = _dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + _dt.timedelta(days=1)
+    return start, end
+
+
+def _parse(ts):
+    if not ts:
+        return None
+    try:
+        value = _dt.datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+
+
+def _repository_from_url(url: str) -> str:
+    """``owner/name`` from a git URL, in the shape the projects table requires."""
+    path = re.sub(r'^(?:[a-z+]+://[^/]+/|git@[^:]+:)', '', url.strip()).rstrip('/')
+    path = re.sub(r'\.git$', '', path)
+    parts = [p for p in path.split('/') if p]
+    if len(parts) < 2:
+        raise ValueError('仓库地址需要包含所有者和仓库名，例如 https://host/owner/name.git')
+    owner, name = _SLUG.sub('-', parts[-2]).strip('-.'), _SLUG.sub('-', parts[-1]).strip('-.')
+    if not owner or not name:
+        raise ValueError('无法从仓库地址解析出所有者和仓库名')
+    return f'{owner}/{name}'
+
+
+# ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+def _ensure_tables(store):
+    with store.connect() as db:
+        db.executescript('''
+        CREATE TABLE IF NOT EXISTS maintenance_repo_probes(
+            project_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS maintenance_requirements(
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL, idem_key TEXT UNIQUE,
+            received_at TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS maintenance_requirements_project
+            ON maintenance_requirements(project_id, received_at);
+        CREATE TABLE IF NOT EXISTS maintenance_intake_sources(
+            id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
+        ''')
+
+
+# ---------------------------------------------------------------------------
+# Repository detection
+# ---------------------------------------------------------------------------
+def detect_stack(root: Path) -> tuple[list[dict], list[dict]]:
+    """What the files say, not what has run: every result here is ``found``."""
+    stack, checks = [], []
+
+    def check(name, argv, evidence):
+        checks.append({'name': name, 'argv': argv, 'evidence': evidence})
+
+    package = root / 'package.json'
+    if package.is_file():
+        stack.append({'name': 'Node.js', 'evidence': 'package.json'})
+        try:
+            scripts = json.loads(package.read_text(encoding='utf-8')).get('scripts') or {}
+        except (OSError, ValueError, AttributeError):
+            scripts = {}
+        runner = 'pnpm' if (root / 'pnpm-lock.yaml').is_file() else (
+            'yarn' if (root / 'yarn.lock').is_file() else 'npm')
+        for script in ('test', 'build', 'lint'):
+            if isinstance(scripts, dict) and scripts.get(script):
+                check(f'{script}', [runner, 'run', script], f'package.json scripts.{script}')
+    if any((root / f).is_file() for f in ('pyproject.toml', 'setup.py', 'requirements.txt')):
+        marker = next(f for f in ('pyproject.toml', 'setup.py', 'requirements.txt') if (root / f).is_file())
+        stack.append({'name': 'Python', 'evidence': marker})
+        if (root / 'tests').is_dir() or (root / 'test').is_dir():
+            uses_uv = (root / 'uv.lock').is_file()
+            check('pytest', ['uv', 'run', 'pytest', '-q'] if uses_uv else ['python3', '-m', 'pytest', '-q'],
+                  'tests/ 目录' + ('，uv.lock' if uses_uv else ''))
+    if (root / 'go.mod').is_file():
+        stack.append({'name': 'Go', 'evidence': 'go.mod'})
+        check('go-test', ['go', 'test', './...'], 'go.mod')
+    if (root / 'Cargo.toml').is_file():
+        stack.append({'name': 'Rust', 'evidence': 'Cargo.toml'})
+        check('cargo-test', ['cargo', 'test'], 'Cargo.toml')
+    if (root / 'pom.xml').is_file():
+        stack.append({'name': 'Java (Maven)', 'evidence': 'pom.xml'})
+        check('maven-test', ['mvn', '-q', 'test'], 'pom.xml')
+    if (root / 'build.gradle').is_file() or (root / 'build.gradle.kts').is_file():
+        stack.append({'name': 'Java/Kotlin (Gradle)', 'evidence': 'build.gradle'})
+        if (root / 'gradlew').is_file():
+            check('gradle-test', ['./gradlew', 'test'], 'gradlew')
+    makefile = root / 'Makefile'
+    if makefile.is_file():
+        stack.append({'name': 'Make', 'evidence': 'Makefile'})
+        try:
+            if re.search(r'^test\s*:', makefile.read_text(encoding='utf-8', errors='replace'), re.M):
+                check('make-test', ['make', 'test'], 'Makefile test 目标')
+        except OSError:
+            pass
+    if (root / 'Dockerfile').is_file():
+        stack.append({'name': 'Docker 镜像', 'evidence': 'Dockerfile'})
+    return stack, checks
+
+
+# ---------------------------------------------------------------------------
+# The subsystem
+# ---------------------------------------------------------------------------
+class MaintenanceSubsystem:
+    """One object per process, handed the existing service and the gated task port.
+
+    ``tasks`` is what ``issue_maintenance_webuddy.tasks_for`` returns -- the same
+    gated port the old routes and the CLI use -- so creation, the plugin stop and
+    project authorization are enforced where they already are.
+    """
+
+    def __init__(self, svc, tasks, *, workspace_root=None, identity=None):
+        self.svc = svc
+        self.store = svc.store
+        self.tasks = tasks
+        self.identity = identity
+        self.workspace_root = Path(workspace_root or os.getenv('FACTORY_WORKSPACE_ROOT', '~/projects')
+                                   ).expanduser().resolve()
+        self._analysis = {}
+        self._analysis_lock = threading.Lock()
+        _ensure_tables(self.store)
+
+    # -- authorization -------------------------------------------------------
+    def _permitted(self, actor, project_id) -> bool:
+        try:
+            self.tasks.port.identity.require(actor, project_id)
+            return True
+        except Exception:  # noqa: BLE001 - any refusal means "not in scope"
+            return False
+
+    def _require(self, actor, project_id):
+        self.store.project(project_id)
+        self.tasks.port.identity.require(actor, project_id)
+
+    # -- probes --------------------------------------------------------------
+    def _probe_record(self, project_id):
+        with self.store.connect() as db:
+            row = db.execute('SELECT data FROM maintenance_repo_probes WHERE project_id=?',
+                             (project_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _save_probe(self, project_id, record):
+        with self.store.connect() as db:
+            db.execute('INSERT INTO maintenance_repo_probes VALUES (?,?) ON CONFLICT(project_id) '
+                       'DO UPDATE SET data=excluded.data',
+                       (project_id, json.dumps(record, ensure_ascii=False)))
+
+    def maintained_project_ids(self) -> list[str]:
+        """Projects this subsystem looks after: registered here, or already carrying a task."""
+        from factory.control.issue_maintenance import MaintenanceStore
+        with self.store.connect() as db:
+            ids = [r[0] for r in db.execute('SELECT project_id FROM maintenance_repo_probes')]
+        ids += [r['project_id'] for r in MaintenanceStore(self.store).tasks()]
+        known = {p['id'] for p in self.store.projects()}
+        seen, ordered = set(), []
+        for pid in ids:
+            if pid in known and pid not in seen:
+                seen.add(pid)
+                ordered.append(pid)
+        return ordered
+
+    def _scope(self, actor, project_id=None) -> list[str]:
+        ids = self.maintained_project_ids()
+        if project_id:
+            if project_id not in ids:
+                self.store.project(project_id)  # 404 for an unknown id
+                ids = [project_id]
+            else:
+                ids = [project_id]
+        return [pid for pid in ids if self._permitted(actor, pid)]
+
+    # -- repositories --------------------------------------------------------
+    def register_repo(self, *, source, name, actor, branch=None, credential_ref=None,
+                      background=True) -> dict:
+        source = str(source or '').strip()
+        name = str(name or '').strip()
+        if not source:
+            raise ValueError('请填写代码库地址或执行主机上的目录')
+        if not name or len(name) > 120:
+            raise ValueError('请填写 1-120 个字符的项目名称')
+        if credential_ref and not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', str(credential_ref)):
+            raise ValueError('凭据引用只能是平台已配置的凭据名称，不能粘贴密钥本身')
+        if branch and not re.fullmatch(r'[A-Za-z0-9._/-]{1,200}', str(branch)):
+            raise ValueError('分支名格式无效')
+        if _URL.match(source):
+            return self._register_url(source, name, actor, branch, credential_ref, background)
+        return self._register_path(source, name, actor, branch, credential_ref)
+
+    def _existing(self, *, repository=None, workspace=None):
+        for project in self.store.projects():
+            if repository and project.get('repository', '').casefold() == repository.casefold():
+                return project
+            if workspace and Path(project.get('workspace', '')).expanduser().resolve() == workspace:
+                return project
+        return None
+
+    def _reuse(self, project, actor, credential_ref):
+        self._require(actor, project['id'])
+        record = self._probe_record(project['id']) or {'state': 'pending'}
+        if credential_ref:
+            record['credential_ref'] = credential_ref
+        self._save_probe(project['id'], record)
+        if record.get('state') in (None, 'pending'):
+            self.probe(project['id'], actor=actor)
+        return {**self.repo_view(project['id'], actor=actor), 'reused': True}
+
+    def _register_path(self, source, name, actor, branch, credential_ref):
+        root = Path(source).expanduser().resolve()
+        existing = self._existing(workspace=root)
+        if existing:
+            return self._reuse(existing, actor, credential_ref)
+        if not root.is_relative_to(self.workspace_root) or root == self.workspace_root:
+            raise ValueError(f'本地目录必须位于执行主机的工作区根目录（FACTORY_WORKSPACE_ROOT={self.workspace_root}）'
+                             '下的独立子目录；网页不能读取你电脑上的文件')
+        if not root.is_dir():
+            raise ValueError('执行主机上不存在这个目录')
+        top = _git(['rev-parse', '--show-toplevel'], root)
+        if not _ok(top) or Path(top.stdout.strip()).resolve() != root:
+            raise ValueError('这个目录不是 Git 仓库根目录；请先在该目录初始化并提交一个基线')
+        remote = _git(['remote', 'get-url', 'origin'], root)
+        repository = None
+        if _ok(remote) and remote.stdout.strip():
+            try:
+                repository = _repository_from_url(remote.stdout.strip())
+            except ValueError:
+                repository = None
+        repository = repository or f'local/{_SLUG.sub("-", root.name).strip("-.") or "repo"}'
+        existing = self._existing(repository=repository)
+        if existing:
+            return self._reuse(existing, actor, credential_ref)
+        base = branch or (_git(['symbolic-ref', '--short', 'HEAD'], root).stdout.strip()
+                          if _ok(_git(['symbolic-ref', '--short', 'HEAD'], root)) else 'main')
+        if not _ok(_git(['rev-parse', '--verify', f'refs/heads/{base}'], root)):
+            raise ValueError(f'本地分支 {base} 不存在，请在高级配置里指定已有分支')
+        project = self._add_project(name, repository, root, base, actor)
+        self._save_probe(project['id'], {'state': 'pending', 'source': str(root),
+                                         'credential_ref': credential_ref})
+        self.probe(project['id'], actor=actor)
+        return self.repo_view(project['id'], actor=actor)
+
+    def _register_url(self, url, name, actor, branch, credential_ref, background):
+        repository = _repository_from_url(url)
+        existing = self._existing(repository=repository)
+        if existing:
+            return self._reuse(existing, actor, credential_ref)
+        target = self.workspace_root / 'maintained' / repository.replace('/', '__')
+        if target.exists() and any(target.iterdir()):
+            raise ValueError(f'执行主机上的目标目录已存在且非空：{target}；请改用本地目录方式登记')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        project = self._add_project(name, repository, target, branch or 'main', actor)
+        self._save_probe(project['id'], {'state': 'analyzing', 'source': url,
+                                         'credential_ref': credential_ref, 'started_at': now()})
+
+        def work():
+            self._clone_and_probe(project['id'], url, target, branch)
+
+        if background:
+            threading.Thread(target=work, daemon=True, name=f'maintenance-clone-{project["id"][:8]}').start()
+        else:
+            work()
+        return self.repo_view(project['id'], actor=actor)
+
+    def _add_project(self, name, repository, root, base, actor):
+        return self.store.add_project({
+            'name': name, 'repository': repository, 'workspace': str(root),
+            'base_branch': base, 'checks': {}, 'auto_issues': False, 'auto_publish': False,
+            'budget_usd': None, 'budget_source': 'inherit',
+            'actor': actor.get('username', 'system'), 'registered_by': 'maintenance-subsystem'})
+
+    def _clone_and_probe(self, project_id, url, target, branch):
+        args = ['clone', '--no-tags', '--single-branch']
+        if branch:
+            args += ['--branch', branch]
+        # No credential material is passed here: the host's own git configuration
+        # (SSH agent, credential helper) is what authorises the clone.
+        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+        try:
+            done = subprocess.run(['git', *args, url, str(target)], capture_output=True, text=True,
+                                  timeout=int(os.getenv('FACTORY_CLONE_TIMEOUT', '600')), env=env)
+            error = None if done.returncode == 0 else (done.stderr or '').strip()[-400:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            error = f'克隆失败：{type(exc).__name__}'
+        record = self._probe_record(project_id) or {}
+        if error:
+            record.update({'state': 'failed', 'at': now(),
+                           'access': {'ok': False, 'message': f'无法访问仓库：{error}'}})
+            self._save_probe(project_id, record)
+            return
+        if not branch:
+            head = _git(['symbolic-ref', '--short', 'HEAD'], target)
+            if _ok(head) and head.stdout.strip():
+                project = self.store.project(project_id)
+                if project['base_branch'] != head.stdout.strip():
+                    self.store.update_project(project_id, {'base_branch': head.stdout.strip()},
+                                              project['revision'], 'maintenance-subsystem')
+        self.probe(project_id, actor=None)
+
+    def probe(self, project_id, *, actor) -> dict:
+        """Inspect the checkout the executor will use. Nothing here runs project code."""
+        if actor is not None:
+            self._require(actor, project_id)
+        project = self.store.project(project_id)
+        record = self._probe_record(project_id) or {}
+        root = Path(project['workspace']).expanduser()
+        findings = []
+
+        def finding(fid, label, status, message):
+            findings.append({'id': fid, 'label': label, 'status': status, 'message': message})
+
+        access_ok = root.is_dir() and _ok(_git(['rev-parse', '--git-dir'], root))
+        head_sha = branch_sha = remote = None
+        stack, suggested = [], []
+        if not access_ok:
+            finding('access', '仓库访问', 'failed', '执行主机上的工作区不存在或不是 Git 仓库')
+        else:
+            finding('access', '仓库访问', 'verified', '执行主机可读取该 Git 仓库')
+            ref = _git(['rev-parse', '--verify', f"refs/heads/{project['base_branch']}"], root)
+            if _ok(ref):
+                branch_sha = ref.stdout.strip()
+                finding('baseline', '基线版本', 'verified',
+                        f"分支 {project['base_branch']} 当前为 {branch_sha[:12]}，新需求以此为基线")
+            else:
+                finding('baseline', '基线版本', 'failed', f"本地分支 {project['base_branch']} 不存在")
+            head = _git(['rev-parse', 'HEAD'], root)
+            head_sha = head.stdout.strip() if _ok(head) else None
+            origin = _git(['remote', 'get-url', 'origin'], root)
+            remote = origin.stdout.strip() if _ok(origin) and origin.stdout.strip() else None
+            # Only the host part is shown: a URL can carry an embedded credential.
+            if remote:
+                remote = re.sub(r'//[^/@]+@', '//', remote)
+            status = _git(['status', '--porcelain=v1'], root)
+            if _ok(status) and status.stdout.strip():
+                finding('clean', '工作区', 'found', '工作区有未提交改动；执行在独立工作副本里进行，不会带上这些改动')
+            elif _ok(status):
+                finding('clean', '工作区', 'verified', '工作区干净')
+            stack, suggested = detect_stack(root)
+            for item in stack:
+                finding(f'stack:{item["name"]}', f'技术栈 {item["name"]}', 'found',
+                        f'依据 {item["evidence"]}；已发现，不等于环境可运行')
+            for check in suggested:
+                available = bool(shutil.which(check['argv'][0])) or (root / check['argv'][0]).is_file()
+                finding(f'suggest:{check["name"]}', f'建议检查 {check["name"]}', 'found',
+                        f"{' '.join(check['argv'])}（{check['evidence']}）"
+                        + ('；命令在执行主机上存在' if available else '；执行主机上找不到该命令'))
+        configured = sorted((project.get('checks') or {}).keys())
+        if configured:
+            finding('checks', '项目检查', 'found', f"已配置 {len(configured)} 条：{'、'.join(configured)}（尚未在本次探测中运行）")
+        else:
+            finding('checks', '项目检查', 'missing', '还没有可信检查命令；执行结果将无法被项目检查验证')
+        needs = []
+        if access_ok and not branch_sha:
+            needs.append('指定存在的基线分支')
+        if not configured:
+            needs.append('确认检查命令' + ('（可采纳系统建议）' if suggested else ''))
+        state = 'failed' if not access_ok else ('needs_input' if needs else 'ready')
+        record.update({
+            'state': state, 'at': now(), 'head_sha': head_sha, 'branch': project['base_branch'],
+            'base_sha': branch_sha, 'remote': remote,
+            'access': {'ok': access_ok, 'message': '可访问' if access_ok else '执行主机无法访问该仓库'},
+            'stack': stack, 'suggested_checks': suggested, 'findings': findings, 'needs': needs})
+        self._save_probe(project_id, record)
+        return self.repo_view(project_id, actor=actor) if actor is not None else record
+
+    def adopt_checks(self, project_id, names, *, actor) -> dict:
+        self._require(actor, project_id)
+        record = self._probe_record(project_id) or {}
+        suggested = {c['name']: c['argv'] for c in record.get('suggested_checks') or []}
+        chosen = {n: suggested[n] for n in names if n in suggested}
+        if not chosen:
+            raise ValueError('没有可采纳的建议检查；请先重新分析')
+        project = self.store.project(project_id)
+        checks = {**(project.get('checks') or {}), **chosen}
+        self.store.update_project(project_id, {'checks': checks}, project['revision'],
+                                  actor.get('username', 'system'))
+        return self.probe(project_id, actor=actor)
+
+    def _memory(self, project_id) -> dict:
+        try:
+            from factory.control import scenario_memory
+            entries = scenario_memory.recall(self.store, project_id, plugin_id=PLUGIN_ID)
+            confirmed = sum(1 for e in entries if scenario_memory.role_of(e) == 'constraint')
+            return {'entries': len(entries), 'confirmed': confirmed, 'code_index': 'on_demand'}
+        except Exception:  # noqa: BLE001 - memory unreadable is reported, not fatal
+            return {'entries': None, 'confirmed': None, 'code_index': 'on_demand'}
+
+    def repo_view(self, project_id, *, actor, detail=False) -> dict:
+        if actor is not None:
+            self._require(actor, project_id)
+        project = self.store.project(project_id)
+        record = self._probe_record(project_id) or {'state': 'pending'}
+        state = record.get('state', 'pending')
+        probe = None
+        if record.get('at') or record.get('access'):
+            probe = {'at': record.get('at'), 'head_sha': record.get('head_sha'),
+                     'branch': record.get('branch'), 'remote': record.get('remote'),
+                     'access': record.get('access') or {'ok': False, 'message': '尚未探测'},
+                     'stack': record.get('stack') or [],
+                     'suggested_checks': record.get('suggested_checks') or [],
+                     'findings': record.get('findings') or []}
+        view = {'project_id': project_id, 'name': project['name'],
+                'repository': project['repository'], 'workspace': project['workspace'],
+                'base_branch': project['base_branch'], 'state': state,
+                'state_label': REPO_STATE_LABEL.get(state, state), 'probe': probe,
+                'needs': record.get('needs') or [],
+                'checks_configured': sorted((project.get('checks') or {}).keys()),
+                'memory': self._memory(project_id),
+                'credential_ref': record.get('credential_ref')}
+        if detail:
+            view['requirements'] = self.requirements(actor=actor, project_id=project_id)
+            view['tasks'] = [{'task_id': t['record']['id'], 'title': t['record']['issue']['title'],
+                              'status': t['status'], 'created_at': t['record']['created_at']}
+                             for t in self._task_rows([project_id])]
+        return view
+
+    def repos(self, *, actor) -> list[dict]:
+        return [self.repo_view(pid, actor=None) for pid in self._scope(actor)]
+
+    # -- intake sources ------------------------------------------------------
+    def create_source(self, *, name, project_ids, auto_dispatch, actor) -> dict:
+        name = str(name or '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.\-一-鿿]{1,60}', name):
+            raise ValueError('来源名称需为 1-60 个字母、数字、中文、点、下划线或连字符')
+        if not project_ids:
+            raise ValueError('至少选择一个允许提交的项目')
+        for pid in project_ids:
+            self._require(actor, pid)
+        token = 'wbm_' + secrets.token_urlsafe(32)
+        source = {'id': uuid.uuid4().hex, 'name': name, 'project_ids': sorted(set(project_ids)),
+                  'auto_dispatch': bool(auto_dispatch), 'created_at': now(), 'revoked_at': None,
+                  'created_by': actor.get('username'), 'created_by_id': actor.get('id'),
+                  'token_hint': token[-4:]}
+        with self.store.connect() as db:
+            for row in db.execute('SELECT data FROM maintenance_intake_sources'):
+                other = json.loads(row[0])
+                if other['name'] == name and not other.get('revoked_at'):
+                    raise Conflict('同名的接入来源已存在；请先吊销或换一个名称')
+            db.execute('INSERT INTO maintenance_intake_sources VALUES (?,?,?)',
+                       (source['id'], _sha256(token), json.dumps(source, ensure_ascii=False)))
+        return {**self._source_view(source), 'token': token}
+
+    @staticmethod
+    def _source_view(source):
+        return {k: source[k] for k in ('id', 'name', 'project_ids', 'auto_dispatch',
+                                       'created_at', 'revoked_at', 'token_hint')}
+
+    def sources(self) -> list[dict]:
+        with self.store.connect() as db:
+            return [self._source_view(json.loads(r[0]))
+                    for r in db.execute('SELECT data FROM maintenance_intake_sources ORDER BY rowid DESC')]
+
+    def revoke_source(self, source_id) -> dict:
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM maintenance_intake_sources WHERE id=?',
+                             (source_id,)).fetchone()
+            if row is None:
+                raise KeyError(source_id)
+            source = json.loads(row[0])
+            source['revoked_at'] = source.get('revoked_at') or now()
+            db.execute('UPDATE maintenance_intake_sources SET data=? WHERE id=?',
+                       (json.dumps(source, ensure_ascii=False), source_id))
+        return self._source_view(source)
+
+    def authenticate_source(self, token: str) -> dict | None:
+        if not token or not token.startswith('wbm_'):
+            return None
+        with self.store.connect() as db:
+            row = db.execute('SELECT data FROM maintenance_intake_sources WHERE token_hash=?',
+                             (_sha256(token),)).fetchone()
+        if row is None:
+            return None
+        source = json.loads(row[0])
+        return None if source.get('revoked_at') else source
+
+    # -- requirements --------------------------------------------------------
+    def submit(self, *, project_id, content, source_kind, source_name, actor,
+               external_id=None, idempotency_key=None, title=None, attachments=(),
+               auto_dispatch=True) -> tuple[dict, bool]:
+        """The one intake: a human, a CLI and another system all come through here.
+
+        Returns ``(receipt, created)``. Received is not executed: the receipt says
+        which of the two happened.
+        """
+        if source_kind not in SOURCE_KINDS:
+            raise ValueError('未知的需求来源类型')
+        content = str(content or '').strip()
+        if not content:
+            raise ValueError('需求内容不能为空')
+        if len(content) > 20_000:
+            raise ValueError('需求内容过长（上限 20000 字）')
+        if external_id is not None and not re.fullmatch(r'[A-Za-z0-9_.:#/-]{1,120}', str(external_id)):
+            raise ValueError('外部事件标识需为 1-120 位字母、数字或 _.:#/-')
+        if idempotency_key is not None and not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', str(idempotency_key)):
+            raise ValueError('幂等键需为 8-100 位字母、数字、下划线或连字符')
+        clean_attachments = []
+        for item in attachments or ():
+            if not isinstance(item, dict) or not item.get('ref'):
+                raise ValueError('附件只接受受控引用 {name, ref}')
+            ref = str(item['ref'])
+            if len(ref) > 500 or re.search(r'(?i)(token|secret|password|key)=', ref):
+                raise ValueError('附件引用不能携带凭据')
+            clean_attachments.append({'name': str(item.get('name') or ref)[:200], 'ref': ref})
+        self._require(actor, project_id)
+        # A stopped plugin refuses new work at the door, not after a record exists.
+        self.tasks.gate.require('create')
+        title = (str(title).strip() if title else content.splitlines()[0])[:120]
+        scope = f'{source_kind}:{source_name}|{project_id}'
+        idem = (f'{scope}|ext:{external_id}' if external_id else
+                f'{scope}|key:{idempotency_key}' if idempotency_key else None)
+        digest = _sha256(json.dumps([title, content, clean_attachments], ensure_ascii=False))
+        record = {'id': uuid.uuid4().hex, 'project_id': project_id,
+                  'source': {'kind': source_kind, 'name': source_name},
+                  'external_id': external_id, 'title': title, 'content': content,
+                  'content_digest': digest, 'attachments': clean_attachments,
+                  'received_at': now(), 'status': 'received', 'task_id': None,
+                  'dispatch_error': None, 'submitted_by': actor.get('username'),
+                  'submitted_by_id': actor.get('id')}
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if idem:
+                row = db.execute('SELECT data FROM maintenance_requirements WHERE idem_key=?',
+                                 (idem,)).fetchone()
+                if row is not None:
+                    existing = json.loads(row[0])
+                    if existing['content_digest'] != digest:
+                        raise Conflict('同一来源、项目和事件标识已提交过不同内容；不会覆盖原记录，'
+                                       '请换一个事件标识作为新需求提交')
+                    db.execute('ROLLBACK')
+                    return self.receipt(existing, duplicate=True), False
+            db.execute('INSERT INTO maintenance_requirements VALUES (?,?,?,?,?)',
+                       (record['id'], project_id, idem, record['received_at'],
+                        json.dumps(record, ensure_ascii=False)))
+        if auto_dispatch:
+            record = self.dispatch(record['id'], actor=actor)
+        else:
+            record = self._update_requirement(record['id'], {'status': 'pending_dispatch'})
+        return self.receipt(record), True
+
+    def _requirement(self, requirement_id) -> dict:
+        with self.store.connect() as db:
+            row = db.execute('SELECT data FROM maintenance_requirements WHERE id=?',
+                             (requirement_id,)).fetchone()
+        if row is None:
+            raise KeyError(requirement_id)
+        return json.loads(row[0])
+
+    def _update_requirement(self, requirement_id, changes) -> dict:
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM maintenance_requirements WHERE id=?',
+                             (requirement_id,)).fetchone()
+            if row is None:
+                raise KeyError(requirement_id)
+            record = {**json.loads(row[0]), **changes}
+            db.execute('UPDATE maintenance_requirements SET data=? WHERE id=?',
+                       (json.dumps(record, ensure_ascii=False), requirement_id))
+        return record
+
+    def agreement(self) -> dict:
+        from factory.control import agent_packs
+        from factory.control.issue_maintenance import SCHEMA_VERSION
+        pack = next((p for p in agent_packs.catalog() if p['id'] == PLUGIN_ID), None)
+        if pack is None:
+            raise Conflict('没有安装 Issue 维护方法包，暂时不能派发维护任务')
+        return {'revision': f'v{SCHEMA_VERSION}', 'skill_version': f"{pack['id']}@{pack['version']}"}
+
+    def _baseline(self, project) -> str:
+        root = Path(project['workspace']).expanduser()
+        done = _git(['rev-parse', '--verify', f"refs/heads/{project['base_branch']}"], root)
+        if not _ok(done):
+            raise Conflict(f"无法解析项目基线分支 {project['base_branch']}；请在维护代码库里重新分析")
+        return done.stdout.strip()
+
+    def _task_request(self, record, project, *, key, body=None, version='1') -> dict:
+        lines = [body if body is not None else record['content']]
+        if record.get('attachments'):
+            lines += ['', '附件（受控引用）：'] + [f"- {a['name']}: {a['ref']}" for a in record['attachments']]
+        source = record['source']
+        return {
+            'issue': {'source': f"{source['kind']}:{source['name']}",
+                      'external_id': record.get('external_id') or record['id'],
+                      'version': version, 'title': record['title'], 'body': '\n'.join(lines)},
+            'project_id': project['id'], 'repository': project['repository'],
+            'base_sha': self._baseline(project),
+            'base_branch_label': project['base_branch'],
+            'expected_behaviour': '以需求原文为准；信息不足时先向业务提问，再动手修改',
+            'delivery_goal': '可审阅的补丁包与项目检查结果（不部署）',
+            'agreement': self.agreement(), 'idempotency_key': key,
+            'delivery_tier': 'package'}
+
+    def dispatch(self, requirement_id, *, actor) -> dict:
+        """Turn a received requirement into the existing maintenance task, once."""
+        record = self._requirement(requirement_id)
+        self._require(actor, record['project_id'])
+        if record.get('task_id'):
+            return record
+        try:
+            project = self.store.project(record['project_id'])
+            view = self.tasks.create(self._task_request(record, project, key=f"req-{record['id']}"),
+                                     actor=actor)
+        except (Conflict, ValueError, KeyError) as exc:
+            return self._update_requirement(requirement_id, {
+                'status': 'dispatch_failed', 'dispatch_error': str(exc)[:500]})
+        return self._update_requirement(requirement_id, {
+            'status': 'dispatched', 'task_id': view['task_id'], 'dispatch_error': None,
+            'dispatched_at': now(), 'dispatched_by': actor.get('username')})
+
+    def _head(self, task_id):
+        from factory.control.issue_maintenance import MaintenanceStore
+        records = MaintenanceStore(self.store)
+        record = records.get(task_id)
+        seen = set()
+        while record.get('successor_id') and record['id'] not in seen:
+            seen.add(record['id'])
+            record = records.get(record['successor_id'])
+        return record
+
+    def _clarification(self, task_id):
+        if not task_id:
+            return {'state': 'analysis_pending', 'questions': []}
+        record = self._head(task_id)
+        run = self._run(record.get('execution_id'))
+        if run and run.get('status') == 'needs_clarification':
+            return {'state': 'questions', 'questions': list((run.get('plan') or {}).get('questions') or [])}
+        if run and run.get('status') in _ACTIVE | {'received'} and not run.get('plan'):
+            return {'state': 'analysis_pending', 'questions': []}
+        return {'state': 'not_needed', 'questions': []}
+
+    def _run(self, execution_id):
+        if not execution_id:
+            return None
+        try:
+            return self.store.get(execution_id)
+        except KeyError:
+            return None
+
+    def receipt(self, record, *, duplicate=False) -> dict:
+        task_id = record.get('task_id')
+        execution_id = None
+        if task_id:
+            try:
+                execution_id = self._head(task_id).get('execution_id')
+            except KeyError:
+                execution_id = None
+        message = {'dispatched': '已接收并派发执行；接收不等于完成，进度见任务现场',
+                   'pending_dispatch': '已接收；该来源未开启自动执行，需有权限的人派发',
+                   'dispatch_failed': '已接收但派发失败：' + (record.get('dispatch_error') or ''),
+                   'received': '已接收'}.get(record['status'], '已接收')
+        return {'requirement_id': record['id'], 'status': record['status'],
+                'duplicate': duplicate, 'task_id': task_id, 'execution_id': execution_id,
+                'clarification': self._clarification(task_id),
+                'received_at': record['received_at'], 'source': record['source'],
+                'project_id': record['project_id'], 'message': message}
+
+    def requirement_view(self, record, names=None) -> dict:
+        task_status = None
+        if record.get('task_id'):
+            try:
+                task_status = self._task_status(self._head(record['task_id']))
+            except KeyError:
+                task_status = None
+        return {'requirement_id': record['id'], 'project_id': record['project_id'],
+                'project_name': (names or {}).get(record['project_id']),
+                'source': record['source'], 'external_id': record.get('external_id'),
+                'title': record['title'], 'content': record['content'],
+                'attachments': record.get('attachments') or [],
+                'received_at': record['received_at'], 'status': record['status'],
+                'status_label': REQUIREMENT_STATUS_LABEL.get(record['status'], record['status']),
+                'task_id': record.get('task_id'), 'task_status': task_status,
+                'dispatch_error': record.get('dispatch_error')}
+
+    def requirements(self, *, actor, project_id=None) -> list[dict]:
+        scope = set(self._scope(actor, project_id)) if actor is not None else None
+        names = {p['id']: p['name'] for p in self.store.projects()}
+        with self.store.connect() as db:
+            rows = [json.loads(r[0]) for r in db.execute(
+                'SELECT data FROM maintenance_requirements ORDER BY received_at DESC LIMIT 500')]
+        return [self.requirement_view(r, names) for r in rows
+                if (scope is None or r['project_id'] in scope)
+                and (project_id is None or r['project_id'] == project_id)]
+
+    # -- tasks ---------------------------------------------------------------
+    def _task_status(self, record) -> str:
+        run = self._run(record.get('execution_id'))
+        return run['status'] if run else 'received'
+
+    def _task_rows(self, project_ids):
+        """Head revisions only: a revised task is one piece of work, not two."""
+        from factory.control.issue_maintenance import MaintenanceStore
+        wanted = set(project_ids)
+        rows = []
+        for record in MaintenanceStore(self.store).tasks():
+            if record['project_id'] not in wanted or record.get('successor_id'):
+                continue
+            run = self._run(record.get('execution_id'))
+            status = run['status'] if run else ('received' if not record.get('execution_id') else 'missing')
+            rows.append({'record': record, 'run': run, 'status': status})
+        return rows
+
+    def task_actions(self, view) -> list[str]:
+        """What a caller may do now, from the execution's real state. No ``pause``."""
+        run = self._run(view.get('execution_id'))
+        status = run['status'] if run else None
+        actions = []
+        if status in _ANSWER:
+            actions.append('answer')
+        if status in _APPROVAL and status == 'awaiting_approval':
+            actions.append('approve')
+        if status == 'needs_human':
+            actions.append('supplement')
+            if run.get('plan'):
+                actions.append('resume')
+        if view.get('status') in ('received', 'running', 'waiting'):
+            actions.append('cancel')
+        if view.get('status') == 'delivered':
+            actions.append('export')
+        if view.get('status') in ('delivered', 'failed', 'cancelled') and not view.get('successor_id'):
+            actions.append('feedback')
+        return actions
+
+    def feedback(self, task_id, content, *, actor) -> dict:
+        """Follow-up on a finished task: a new revision linked to the old one.
+
+        The original process is not resumed in place -- the executor cannot do
+        that -- so the successor says so in its own text and in ``predecessor_id``.
+        """
+        from factory.control.issue_maintenance import MaintenanceStore
+        content = str(content or '').strip()
+        if not content:
+            raise ValueError('反馈内容不能为空')
+        previous = MaintenanceStore(self.store).get(task_id)
+        self._require(actor, previous['project_id'])
+        if previous.get('successor_id'):
+            raise Conflict('这个任务已经有后续修订，请在最新修订上反馈')
+        view = self.tasks.get(task_id, actor=actor)
+        if view['status'] not in ('delivered', 'failed', 'cancelled'):
+            raise Conflict('任务尚未结束；进行中的任务请使用回答或补充信息')
+        project = self.store.project(previous['project_id'])
+        delivered = (view.get('delivery') or {}).get('commit')
+        body = previous['issue']['body'] + '\n\n--- 后续反馈（第 %d 次修订）---\n' % (previous['revision'] + 1)
+        if delivered:
+            body += f'上一修订交付了 commit {delivered}（未合入基线，本次从当前基线重新开始）。\n'
+        body += content
+        record = {'id': previous['id'], 'title': previous['issue']['title'],
+                  'content': body, 'attachments': [],
+                  'external_id': previous['issue']['external_id'],
+                  'source': {'kind': previous['issue']['source'].split(':', 1)[0]
+                             if ':' in previous['issue']['source'] else 'manual',
+                             'name': previous['issue']['source'].split(':', 1)[-1]}}
+        request = self._task_request(record, project, body=body,
+                                     key='fb-' + _sha256(task_id + content)[:40],
+                                     version=str(int(previous['issue']['version'] or 1) + 1)
+                                     if str(previous['issue']['version']).isdigit() else '2')
+        request['issue']['source'] = previous['issue']['source']
+        return self.tasks.revise(task_id, request, actor=actor)
+
+    # -- monitor -------------------------------------------------------------
+    def executor_status(self) -> dict:
+        queue = getattr(self.svc, 'queue', None)
+        if queue is not None and getattr(queue, 'handle', None) is not None:
+            return {'status': 'online', 'detail': '本进程持有执行器锁'}
+        path = Path(self.store.path).with_suffix('.worker.lock')
+        if not path.exists():
+            return {'status': 'offline', 'detail': '没有进程启动过执行器'}
+        try:
+            with path.open('a+') as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return {'status': 'online', 'detail': '另一个进程持有执行器锁'}
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            return {'status': 'unknown', 'detail': '无法读取执行器锁'}
+        return {'status': 'offline', 'detail': '没有进程持有执行器锁，新任务会排队等待'}
+
+    def _queue_counts(self):
+        with self.store.connect() as db:
+            rows = dict(db.execute("SELECT status,COUNT(*) FROM control_jobs "
+                                   "WHERE status IN ('pending','running') GROUP BY status").fetchall())
+        return rows.get('pending', 0), rows.get('running', 0)
+
+    def _delivered_at(self, run):
+        for event in reversed(self.store.events(run['id'], limit=2000)):
+            if event['type'] == 'run.verified':
+                return event['at']
+        return None
+
+    @staticmethod
+    def _attention_kind(status):
+        if status in _ANSWER:
+            return 'answer'
+        if status in _APPROVAL:
+            return 'approval'
+        if status in _BLOCKED or status == 'missing':
+            return 'blocked'
+        return None
+
+    def _reason(self, row, kind):
+        run = row['run']
+        if kind == 'answer':
+            questions = (run.get('plan') or {}).get('questions') or []
+            first = questions[0] if questions else None
+            text = first.get('question') if isinstance(first, dict) else first
+            return str(text or '模型在动手前提出了需要业务确认的问题')[:200]
+        if kind == 'approval':
+            return '计划已就绪，等待批准后开始修改'
+        if row['status'] == 'missing':
+            return '执行记录不可读，需人工核对'
+        return str((run or {}).get('error') or ('执行失败' if row['status'] == 'failed' else '执行已停下，等待人工处理'))[:200]
+
+    def overview(self, *, actor, project_id=None) -> dict:
+        errors = []
+        scope = self._scope(actor, project_id)
+        projects = {p['id']: p for p in self.store.projects() if p['id'] in scope}
+        start, end = _day_window()
+        rows = self._task_rows(scope)
+        running = sum(1 for r in rows if r['status'] in _ACTIVE)
+        attention, counts = [], {'answer': 0, 'approval': 0, 'blocked': 0}
+        delivered_window = 0
+        per_project = {pid: {'running': 0, 'waiting': 0, 'delivered': 0} for pid in scope}
+        for row in rows:
+            record, status = row['record'], row['status']
+            stats = per_project[record['project_id']]
+            kind = self._attention_kind(status)
+            if status in _ACTIVE:
+                stats['running'] += 1
+            if kind:
+                stats['waiting'] += 1
+                counts[kind] += 1
+                attention.append({'task_id': record['id'], 'project_id': record['project_id'],
+                                  'project_name': projects[record['project_id']]['name'],
+                                  'title': record['issue']['title'], 'kind': kind,
+                                  'reason': self._reason(row, kind),
+                                  'since': (row['run'] or {}).get('updated_at') or record['created_at']})
+            if status in _DELIVERED:
+                stats['delivered'] += 1
+                at = _parse(self._delivered_at(row['run']))
+                if at and start <= at.astimezone(start.tzinfo) < end:
+                    delivered_window += 1
+        attention.sort(key=lambda a: a['since'] or '', reverse=True)
+        try:
+            events = self._events(rows, projects)
+        except Exception as exc:  # noqa: BLE001 - a partial failure must not blank the page
+            events = []
+            errors.append({'section': 'events', 'message': f'事件读取失败：{type(exc).__name__}'})
+        executor = self.executor_status()
+        try:
+            pending, active_jobs = self._queue_counts()
+        except Exception as exc:  # noqa: BLE001
+            pending = active_jobs = None
+            errors.append({'section': 'queue', 'message': f'队列读取失败：{type(exc).__name__}'})
+        try:
+            availability = self.tasks.gate.availability.view(self.tasks.gate.plugin_id)
+        except Exception:  # noqa: BLE001
+            availability = {'state': 'unknown'}
+        repo_rows = []
+        for pid in scope:
+            record = self._probe_record(pid) or {'state': 'pending'}
+            state = record.get('state', 'pending')
+            repo_rows.append({'project_id': pid, 'name': projects[pid]['name'],
+                              'repository': projects[pid]['repository'],
+                              'repo_state': state, 'repo_state_label': REPO_STATE_LABEL.get(state, state),
+                              **per_project[pid], 'delivery_target': '补丁包',
+                              'service_status': 'not_connected'})
+        return {
+            'contract_version': CONTRACT_VERSION, 'generated_at': now(),
+            'window': {'kind': 'day', 'start': start.isoformat(), 'end': end.isoformat(),
+                       'timezone': local_timezone()},
+            'scope': {'project_ids': scope},
+            'sources': {'maintenance': {'status': 'connected', 'detail': '维护任务与执行记录'},
+                        'executor': executor,
+                        'server_metrics': {'status': 'not_connected', 'detail': '未配置 CPU/内存采集源'},
+                        'app_probes': {'status': 'not_connected', 'detail': '未配置应用探针'},
+                        'alerts': {'status': 'not_connected', 'detail': '未配置告警源'}},
+            'counts': {'projects': len(scope), 'running': running,
+                       'attention': {'total': sum(counts.values()), **counts},
+                       'delivered_in_window': delivered_window},
+            'attention': attention[:50], 'projects': repo_rows, 'events': events,
+            'queue': {'pending': pending, 'running': active_jobs, 'executor': executor},
+            'availability': availability, 'partial_errors': errors}
+
+    def _events(self, rows, projects, limit=20):
+        ids = {r['record']['execution_id']: r['record'] for r in rows if r['record'].get('execution_id')}
+        if not ids:
+            return []
+        marks = ','.join('?' * len(ids))
+        with self.store.connect() as db:
+            found = db.execute(f'SELECT id,run_id,type,at FROM events WHERE run_id IN ({marks}) '
+                               'ORDER BY id DESC LIMIT ?', (*ids, limit)).fetchall()
+        return [{'task_id': ids[e['run_id']]['id'], 'project_id': ids[e['run_id']]['project_id'],
+                 'execution_id': e['run_id'], 'sequence': e['id'], 'kind': e['type'],
+                 'label': f"{ids[e['run_id']]['issue']['title'][:40]} · {_EVENT_LABELS.get(e['type'], e['type'])}",
+                 'at': e['at']} for e in found]
+
+    def graph(self, *, actor, project_id=None, max_tasks=200) -> dict:
+        scope = self._scope(actor, project_id)
+        projects = {p['id']: p for p in self.store.projects() if p['id'] in scope}
+        nodes, edges = [], []
+        for pid in scope:
+            record = self._probe_record(pid) or {'state': 'pending'}
+            nodes.append({'id': f'repo:{pid}', 'type': 'repo', 'label': projects[pid]['name'],
+                          'sublabel': f"{projects[pid]['repository']} · {REPO_STATE_LABEL.get(record.get('state'), '待分析')}",
+                          'status': record.get('state', 'pending'), 'task_id': None, 'project_id': pid})
+        rows = sorted(self._task_rows(scope), key=lambda r: r['record']['created_at'], reverse=True)
+        truncated = len(rows) > max_tasks
+        rows = rows[:max_tasks]
+        from factory.control.issue_maintenance import MaintenanceStore
+        chain_root = {}
+        store = MaintenanceStore(self.store)
+        for row in rows:
+            record, seen = row['record'], set()
+            while record.get('predecessor_id') and record['id'] not in seen:
+                seen.add(record['id'])
+                record = store.get(record['predecessor_id'])
+            chain_root[record['id']] = row
+        requirement_of = {}
+        with self.store.connect() as db:
+            for r in db.execute('SELECT data FROM maintenance_requirements'):
+                req = json.loads(r[0])
+                if req['project_id'] in projects:
+                    nodes.append({'id': f"req:{req['id']}", 'type': 'requirement', 'label': req['title'][:60],
+                                  'sublabel': f"{ {'manual': '人工提交', 'api': '外部系统', 'cli': 'CLI'}.get(req['source']['kind'], req['source']['kind'])} · "
+                                              f"{REQUIREMENT_STATUS_LABEL.get(req['status'], req['status'])}",
+                                  'status': req['status'], 'task_id': req.get('task_id'),
+                                  'project_id': req['project_id']})
+                    edges.append({'from': f"repo:{req['project_id']}", 'to': f"req:{req['id']}", 'kind': 'has'})
+                    if req.get('task_id'):
+                        requirement_of[req['task_id']] = req['id']
+        for root_id, row in chain_root.items():
+            record, status = row['record'], row['status']
+            task_node = f"task:{record['id']}"
+            label = {'received': '已接收', 'missing': '执行记录缺失'}.get(status, status)
+            nodes.append({'id': task_node, 'type': 'task', 'label': record['issue']['title'][:60],
+                          'sublabel': f"第 {record['revision']} 修订 · {_STATUS_TEXT.get(status, label)}",
+                          'status': status, 'task_id': record['id'], 'project_id': record['project_id']})
+            parent = f"req:{requirement_of[root_id]}" if root_id in requirement_of else f"repo:{record['project_id']}"
+            edges.append({'from': parent, 'to': task_node, 'kind': 'creates'})
+            kind = self._attention_kind(status)
+            if status in _DELIVERED and ((row['run'] or {}).get('artifacts') or {}).get('commit'):
+                name = f"maintenance-{record['execution_id']}.patch"
+                nodes.append({'id': f"artifact:{record['id']}:{name}", 'type': 'artifact', 'label': '补丁包',
+                              'sublabel': f"已生成 · commit {row['run']['artifacts']['commit'][:10]}",
+                              'status': 'generated', 'task_id': record['id'], 'project_id': record['project_id']})
+                edges.append({'from': task_node, 'to': f"artifact:{record['id']}:{name}", 'kind': 'produces'})
+            elif status not in ('cancelled', 'discarded'):
+                nodes.append({'id': f"target:{record['id']}", 'type': 'target', 'label': '目标：补丁包',
+                              'sublabel': '尚未生成，不计入交付', 'status': 'pending',
+                              'task_id': record['id'], 'project_id': record['project_id']})
+                edges.append({'from': task_node, 'to': f"target:{record['id']}", 'kind': 'targets'})
+            if kind:
+                nodes.append({'id': f"blocker:{record['id']}", 'type': 'blocker',
+                              'label': {'answer': '等待业务回答', 'approval': '等待批准', 'blocked': '执行受阻'}[kind],
+                              'sublabel': self._reason(row, kind)[:60], 'status': kind,
+                              'task_id': record['id'], 'project_id': record['project_id']})
+                edges.append({'from': task_node, 'to': f"blocker:{record['id']}", 'kind': 'blocked_by'})
+        return {'generated_at': now(), 'nodes': nodes, 'edges': edges, 'truncated': truncated}
+
+    # -- host manifest -------------------------------------------------------
+    @staticmethod
+    def manifest() -> dict:
+        return {
+            'id': 'webuddy-maintenance', 'name': 'webuddy 运维维护子系统', 'version': VERSION,
+            'contract_version': CONTRACT_VERSION, 'plugin_id': PLUGIN_ID,
+            'entries': {'ui': {'monitor': '/maintenance', 'repos': '/maintenance/repos',
+                               'intake': '/maintenance/intake', 'task': '/maintenance/{task_id}',
+                               'embed': '/embed/maintenance'},
+                        'api_prefix': '/api/v2/maintenance',
+                        'cli': 'webuddy-maintenance'},
+            'actions': ['answer', 'approve', 'supplement', 'resume', 'cancel', 'feedback', 'export'],
+            'supports_pause': False,
+            'intake': {'manual': 'POST /api/v2/maintenance/requirements（会话）',
+                       'machine': 'POST /api/v2/maintenance/intake（Bearer 接入令牌）',
+                       'idempotency': '来源 + 项目 + external_id'},
+            'host_ports': {'identity': '宿主解析的用户身份（会话 / 本地 OS 用户 / 接入令牌）',
+                           'project_authorization': '宿主项目权限（governance.require_project）',
+                           'executor': '宿主已配置的 Claude Code / Codex 运行时（不携带凭据）',
+                           'data_dir': 'FACTORY_CONTROL_DATA（control.db 所在目录）',
+                           'workspace_root': 'FACTORY_WORKSPACE_ROOT'},
+            'not_connected': ['server_metrics', 'app_probes', 'alerts'],
+            'embed': {'component': 'EmbeddedMaintenance（frontend/src/maintenance/EmbeddedMaintenance.tsx）',
+                      'route': '/embed/maintenance/*', 'same_origin_required': True},
+        }
+
+
+_STATUS_TEXT = {'received': '已接收', 'queued': '排队中', 'planning': '制定计划', 'running': '执行中',
+                'verifying': '检查中', 'requirement_analysis': '需求分析', 'needs_clarification': '等待回答',
+                'awaiting_approval': '等待批准', 'awaiting_spec_confirmation': '等待确认',
+                'needs_human': '执行受阻', 'failed': '失败', 'cancelled': '已取消',
+                'ready_for_review': '产物就绪', 'published': '已发布', 'discarded': '已丢弃',
+                'missing': '执行记录缺失'}
