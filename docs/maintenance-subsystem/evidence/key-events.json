@@ -1,0 +1,305 @@
+{
+ "67a63c885a894e2fa5478760283ef748": {
+  "label": "v1 人工需求：规划前被脏工作区拦下",
+  "events": [
+   {
+    "seq": 1,
+    "kind": "user.message",
+    "at": "2026-09-22T18:12:50.603185+00:00",
+    "payload": {
+     "text_head": "按已授权的维护流程处理下面这条人工导入的 Issue。\n仓库：local/demo-invoice\n必须基于基线 commit：609f2058f3e22e0459bb88067cfc26b9a63e1696\n适用约定版本：v1\n期望行为：以需求原文为准；信息不足时先向业务提问，再动手修改\n交付目标：可审阅的补丁包与项"
+    }
+   },
+   {
+    "seq": 8,
+    "kind": "run.failed",
+    "at": "2026-09-22T18:12:51.439478+00:00",
+    "payload": {
+     "message": "规划工作区必须检出项目基线且保持干净；请先保存本地变更并切换至基线，再重新规划",
+     "error_type": "ValueError"
+    }
+   },
+   {
+    "seq": 9,
+    "kind": "run.cancelled",
+    "at": "2026-09-22T18:15:27.337662+00:00",
+    "payload": {
+     "message": "用户取消执行，保留日志和工作区",
+     "actor": "acceptor"
+    }
+   }
+  ]
+ },
+ "8b308f824d5542b882cb8125615e19ac": {
+  "label": "v2 后续反馈重开：交付补丁",
+  "events": [
+   {
+    "seq": 10,
+    "kind": "user.message",
+    "at": "2026-09-22T18:15:27.400381+00:00",
+    "payload": {
+     "text_head": "按已授权的维护流程处理下面这条人工导入的 Issue。\n仓库：local/demo-invoice\n必须基于基线 commit：05bedd7d373b0a57518e374b2053329eac8c029b\n适用约定版本：v1\n期望行为：以需求原文为准；信息不足时先向业务提问，再动手修改\n交付目标：可审阅的补丁包与项"
+    }
+   },
+   {
+    "seq": 47,
+    "kind": "usage.recorded",
+    "at": "2026-09-22T18:16:01.016906+00:00",
+    "payload": {
+     "profile": "planner",
+     "provider": "claude",
+     "model": "claude-sonnet-5",
+     "cost_usd": 0.395014
+    }
+   },
+   {
+    "seq": 48,
+    "kind": "plan.created",
+    "at": "2026-09-22T18:16:01.075491+00:00",
+    "payload": {
+     "title": "修复发票总额计算：多件商品未乘数量",
+     "tasks": [
+      "修复 total() 未乘数量的 bug 并补充回归测试"
+     ]
+    }
+   },
+   {
+    "seq": 49,
+    "kind": "triage.decided",
+    "at": "2026-09-22T18:16:01.078157+00:00",
+    "payload": {
+     "decision": "human_approval",
+     "reasons": [
+      "request or task scope contains a high-risk security, deployment, or access signal"
+     ],
+     "questions": [],
+     "risk": "high"
+    }
+   },
+   {
+    "seq": 53,
+    "kind": "run.started",
+    "at": "2026-09-22T18:17:07.698201+00:00",
+    "payload": {}
+   },
+   {
+    "seq": 126,
+    "kind": "usage.recorded",
+    "at": "2026-09-22T18:17:56.101161+00:00",
+    "payload": {
+     "profile": "cheap",
+     "provider": "claude",
+     "model": "claude-sonnet-5",
+     "cost_usd": 0.840258
+    }
+   },
+   {
+    "seq": 130,
+    "kind": "check.result",
+    "at": "2026-09-22T18:17:56.561241+00:00",
+    "payload": {
+     "name": "pytest",
+     "argv": [
+      "python3",
+      "-m",
+      "pytest",
+      "-q"
+     ],
+     "exit": 0
+    }
+   },
+   {
+    "seq": 131,
+    "kind": "git.commit",
+    "at": "2026-09-22T18:17:56.856920+00:00",
+    "payload": {
+     "commit": "92897b934bc81d69f5b60d6661f4a0ad6d497127"
+    }
+   },
+   {
+    "seq": 140,
+    "kind": "check.result",
+    "at": "2026-09-22T18:17:57.291599+00:00",
+    "payload": {
+     "name": "pytest",
+     "argv": [
+      "python3",
+      "-m",
+      "pytest",
+      "-q"
+     ],
+     "exit": 0
+    }
+   },
+   {
+    "seq": 144,
+    "kind": "run.verified",
+    "at": "2026-09-22T18:17:57.690129+00:00",
+    "payload": {
+     "base_sha": "05bedd7d373b0a57518e374b2053329eac8c029b",
+     "commit": "92897b934bc81d69f5b60d6661f4a0ad6d497127"
+    }
+   }
+  ]
+ },
+ "525b661e4e8d4228b99c826f3fcc4142": {
+  "label": "v3 交付后继续反馈：补多行测试",
+  "events": [
+   {
+    "seq": 150,
+    "kind": "user.message",
+    "at": "2026-09-22T18:21:22.007944+00:00",
+    "payload": {
+     "text_head": "按已授权的维护流程处理下面这条人工导入的 Issue。\n仓库：local/demo-invoice\n必须基于基线 commit：05bedd7d373b0a57518e374b2053329eac8c029b\n适用约定版本：v1\n期望行为：以需求原文为准；信息不足时先向业务提问，再动手修改\n交付目标：可审阅的补丁包与项"
+    }
+   },
+   {
+    "seq": 191,
+    "kind": "usage.recorded",
+    "at": "2026-09-22T18:21:55.220701+00:00",
+    "payload": {
+     "profile": "planner",
+     "provider": "claude",
+     "model": "claude-sonnet-5",
+     "cost_usd": 0.463462
+    }
+   },
+   {
+    "seq": 192,
+    "kind": "plan.created",
+    "at": "2026-09-22T18:21:55.280962+00:00",
+    "payload": {
+     "title": "修复发票总额计算未乘数量的问题",
+     "tasks": [
+      "修复 total() 未乘数量的计算错误并补充回归测试"
+     ]
+    }
+   },
+   {
+    "seq": 193,
+    "kind": "triage.decided",
+    "at": "2026-09-22T18:21:55.282554+00:00",
+    "payload": {
+     "decision": "human_approval",
+     "reasons": [
+      "request or task scope contains a high-risk security, deployment, or access signal"
+     ],
+     "questions": [],
+     "risk": "high"
+    }
+   },
+   {
+    "seq": 197,
+    "kind": "run.started",
+    "at": "2026-09-22T18:25:30.023296+00:00",
+    "payload": {}
+   },
+   {
+    "seq": 250,
+    "kind": "usage.recorded",
+    "at": "2026-09-22T18:26:27.460438+00:00",
+    "payload": {
+     "profile": "cheap",
+     "provider": "claude",
+     "model": "claude-sonnet-5",
+     "cost_usd": 0.9908539999999999
+    }
+   },
+   {
+    "seq": 254,
+    "kind": "check.result",
+    "at": "2026-09-22T18:26:27.852216+00:00",
+    "payload": {
+     "name": "pytest",
+     "argv": [
+      "python3",
+      "-m",
+      "pytest",
+      "-q"
+     ],
+     "exit": 0
+    }
+   },
+   {
+    "seq": 255,
+    "kind": "git.commit",
+    "at": "2026-09-22T18:26:28.089136+00:00",
+    "payload": {
+     "commit": "2fae6ba149399c8dcda9a1b79ec0d000ab069794"
+    }
+   },
+   {
+    "seq": 264,
+    "kind": "check.result",
+    "at": "2026-09-22T18:26:28.472783+00:00",
+    "payload": {
+     "name": "pytest",
+     "argv": [
+      "python3",
+      "-m",
+      "pytest",
+      "-q"
+     ],
+     "exit": 0
+    }
+   },
+   {
+    "seq": 265,
+    "kind": "run.verified",
+    "at": "2026-09-22T18:26:28.814238+00:00",
+    "payload": {
+     "base_sha": "05bedd7d373b0a57518e374b2053329eac8c029b",
+     "commit": "2fae6ba149399c8dcda9a1b79ec0d000ab069794"
+    }
+   }
+  ]
+ },
+ "ec368737eb07448bbfbc2f2a14cefd12": {
+  "label": "API 机器需求：停在待批准",
+  "events": [
+   {
+    "seq": 77,
+    "kind": "user.message",
+    "at": "2026-09-22T18:17:24.654585+00:00",
+    "payload": {
+     "text_head": "按已授权的维护流程处理下面这条人工导入的 Issue。\n仓库：local/demo-invoice\n必须基于基线 commit：05bedd7d373b0a57518e374b2053329eac8c029b\n适用约定版本：v1\n期望行为：以需求原文为准；信息不足时先向业务提问，再动手修改\n交付目标：可审阅的补丁包与项"
+    }
+   },
+   {
+    "seq": 147,
+    "kind": "usage.recorded",
+    "at": "2026-09-22T18:17:58.234967+00:00",
+    "payload": {
+     "profile": "planner",
+     "provider": "claude",
+     "model": "claude-sonnet-5",
+     "cost_usd": 0.361604
+    }
+   },
+   {
+    "seq": 148,
+    "kind": "plan.created",
+    "at": "2026-09-22T18:17:58.289848+00:00",
+    "payload": {
+     "title": "修复 format_amount 负数金额格式异常",
+     "tasks": [
+      "修复负数金额格式并补充回归测试"
+     ]
+    }
+   },
+   {
+    "seq": 149,
+    "kind": "triage.decided",
+    "at": "2026-09-22T18:17:58.292076+00:00",
+    "payload": {
+     "decision": "human_approval",
+     "reasons": [
+      "request or task scope contains a high-risk security, deployment, or access signal"
+     ],
+     "questions": [],
+     "risk": "high"
+    }
+   }
+  ]
+ }
+}

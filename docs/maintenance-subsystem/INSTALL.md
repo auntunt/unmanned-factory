@@ -130,11 +130,20 @@ webuddy-maintenance export <task_id> --output ./out
   需要停下来就是 `cancel`（不可逆）或让它自然停在人工确认点（回答/批准/
   补充信息）。
 
-## 已验证 / 未验证
+## 已验证 / 未验证（2026-09-23，集成方实测）
 
-> 以下由集成方（integrator）填写：哪些路径已经用真实执行器跑通过端到端
-> 验收（提交 → 计划 → 批准 → 执行 → 检查 → 导出），哪些只跑过本仓库测试套件
-> 里的注入 fake runner。当前状态：本文档随附的自动化测试
-> （`tests/test_maintenance_subsystem_cli.py`）全部使用注入的 fake 执行器，
-> 不含任何真实模型调用；尚未有真实 Claude Code / Codex 运行时下的端到端
-> 人工验收记录。
+已用真实执行器验证（Claude Code 运行时，模型 `claude-sonnet-5`，走本机用户自己的
+`~/.claude/settings.json` 中转配置；验收进程用 `env -i` 启动，不继承宿主会话变量）：
+
+- **接法 B 独立最小运行时**：从分支全新 clone → `uv sync --extra claude` → `init` →
+  `repo add` → `repo adopt-checks` → `submit`（回执如实报执行器离线）→ `runtime` →
+  模型提出澄清问题 → `answer` → `approve` → 交付并通过 pytest → `export` 写出补丁。
+  合成仓库，单任务花费 $2.55。补丁见 `evidence/standalone-runtime-delivery.patch`。
+- **接法 A 连接网页服务数据域**：网页服务持有执行器，CLI 在同一 `FACTORY_CONTROL_DATA`
+  上 `approve`、`events --follow`、`show`、`export`，与页面读到同一任务对象。
+
+仅由自动化测试（注入 fake 执行器）覆盖：URL 克隆登记（`repo add --source https://…`）、
+`intake-sources` 吊销、插件停用后拒绝接入。
+
+未验证：Codex 执行器；非 macOS 主机；`/embed/*` 被真实外部宿主以 iframe 嵌入
+（仅验证了路由与响应头逻辑）；多用户成员权限下的页面操作。

@@ -1,0 +1,51 @@
+From dd772c3a2a969b4b490acd545672b20f523973ca Mon Sep 17 00:00:00 2001
+From: Factory <factory@localhost>
+Date: Wed, 23 Sep 2026 02:28:28 +0800
+Subject: [PATCH 1/2] factory: fix-c2f-formula
+
+---
+ units.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/units.py b/units.py
+index 3f68694..3bc404d 100644
+--- a/units.py
++++ b/units.py
+@@ -2,4 +2,4 @@
+ 
+ 
+ def celsius_to_fahrenheit(c):
+-    return c * 9 / 5  # BUG: missing + 32
++    return c * 9 / 5 + 32
+-- 
+2.55.0
+
+
+From 73bce91fd590d7ba65afb731689dc3da936302de Mon Sep 17 00:00:00 2001
+From: Factory <factory@localhost>
+Date: Wed, 23 Sep 2026 02:28:57 +0800
+Subject: [PATCH 2/2] factory: add-c2f-regression-test
+
+---
+ tests/test_units_celsius_to_fahrenheit.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+ create mode 100644 tests/test_units_celsius_to_fahrenheit.py
+
+diff --git a/tests/test_units_celsius_to_fahrenheit.py b/tests/test_units_celsius_to_fahrenheit.py
+new file mode 100644
+index 0000000..73ebcc3
+--- /dev/null
++++ b/tests/test_units_celsius_to_fahrenheit.py
+@@ -0,0 +1,9 @@
++from units import celsius_to_fahrenheit
++
++
++def test_celsius_to_fahrenheit_freezing_point():
++    assert celsius_to_fahrenheit(0) == 32
++
++
++def test_celsius_to_fahrenheit_boiling_point():
++    assert celsius_to_fahrenheit(100) == 212
+-- 
+2.55.0
+

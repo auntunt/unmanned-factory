@@ -1,0 +1,40 @@
+From 2fae6ba149399c8dcda9a1b79ec0d000ab069794 Mon Sep 17 00:00:00 2001
+From: Factory <factory@localhost>
+Date: Wed, 23 Sep 2026 02:26:28 +0800
+Subject: [PATCH] factory: fix-total-quantity
+
+---
+ invoice.py            | 2 +-
+ tests/test_invoice.py | 4 ++++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/invoice.py b/invoice.py
+index 9766b73..9d7ffc6 100644
+--- a/invoice.py
++++ b/invoice.py
+@@ -5,7 +5,7 @@ def total(items):
+     """Sum line amounts: each item is (unit_price, quantity)."""
+     result = 0
+     for price, qty in items:
+-        result += price  # BUG: quantity is ignored
++        result += price * qty
+     return round(result, 2)
+ 
+ 
+diff --git a/tests/test_invoice.py b/tests/test_invoice.py
+index 9c8d042..143526c 100644
+--- a/tests/test_invoice.py
++++ b/tests/test_invoice.py
+@@ -5,5 +5,9 @@ def test_total_single():
+     assert total([(10.0, 1)]) == 10.0
+ 
+ 
++def test_total_multiple_lines_with_quantity():
++    assert total([(10.0, 2), (2.5, 4)]) == 30.0
++
++
+ def test_format():
+     assert format_amount(3) == "¥3.00"
+-- 
+2.55.0
+
