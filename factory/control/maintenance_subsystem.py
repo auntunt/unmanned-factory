@@ -56,7 +56,21 @@ _EVENT_LABELS = {
     'approval.requested': '计划待批准', 'run.approved': '计划已批准', 'run.cancelled': '已取消',
     'budget.exhausted': '预算用尽', 'followup.pending': '收到补充信息', 'check.completed': '检查完成',
     'maintenance.memory_scope_recorded': '记录计划涉及的项目记忆',
+    'execution.mode_selected': '选定执行方式', 'modules.frozen': '固定本次能力模块',
+    'policy.frozen': '固定本次执行策略', 'runtime.configuration_frozen': '固定本次模型配置',
+    'assistant.message': '执行器汇报进展', 'task.started': '子任务开始', 'task.completed': '子任务完成',
+    'verification.completed': '独立验证完成', 'run.cancel_requested': '请求取消',
+    'plan.created': '计划已生成', 'triage.decided': '判定是否需要人工批准', 'check.result': '项目检查出结果',
+    'git.commit': '提交修改',
 }
+
+#: What the monitor's event feed shows. Everything else is engine detail.
+_FEED_KINDS = frozenset({
+    'user.message', 'run.planning', 'plan.created', 'triage.decided', 'approval.requested',
+    'run.approved', 'run.started', 'task.completed', 'check.result', 'run.verified', 'run.failed',
+    'run.blocked', 'run.recovered', 'run.resumed', 'clarification.requested',
+    'clarification.answered', 'budget.exhausted', 'followup.pending', 'run.cancelled',
+    'run.cancel_requested', 'git.commit'})
 
 _URL = re.compile(r'^(?:https?://|ssh://|git@)[^\s]+$')
 _SLUG = re.compile(r'[^A-Za-z0-9_.-]+')
@@ -405,6 +419,7 @@ class MaintenanceSubsystem:
 
         access_ok = root.is_dir() and _ok(_git(['rev-parse', '--git-dir'], root))
         head_sha = branch_sha = remote = None
+        dirty = False
         stack, suggested = [], []
         if not access_ok:
             finding('access', '仓库访问', 'failed', '执行主机上的工作区不存在或不是 Git 仓库')
@@ -425,8 +440,10 @@ class MaintenanceSubsystem:
             if remote:
                 remote = re.sub(r'//[^/@]+@', '//', remote)
             status = _git(['status', '--porcelain=v1'], root)
-            if _ok(status) and status.stdout.strip():
-                finding('clean', '工作区', 'found', '工作区有未提交改动；执行在独立工作副本里进行，不会带上这些改动')
+            dirty = _ok(status) and bool(status.stdout.strip())
+            if dirty:
+                # The planner refuses a dirty checkout, so this is a blocker, not a note.
+                finding('clean', '工作区', 'failed', '工作区有未提交或未跟踪的改动；规划前必须清理或提交（可加入 .gitignore）')
             elif _ok(status):
                 finding('clean', '工作区', 'verified', '工作区干净')
             stack, suggested = detect_stack(root)
@@ -444,6 +461,8 @@ class MaintenanceSubsystem:
         else:
             finding('checks', '项目检查', 'missing', '还没有可信检查命令；执行结果将无法被项目检查验证')
         needs = []
+        if access_ok and dirty:
+            needs.append('清理工作区的未提交/未跟踪改动')
         if access_ok and not branch_sha:
             needs.append('指定存在的基线分支')
         if not configured:
@@ -680,7 +699,10 @@ class MaintenanceSubsystem:
             'base_sha': self._baseline(project),
             'base_branch_label': project['base_branch'],
             'expected_behaviour': '以需求原文为准；信息不足时先向业务提问，再动手修改',
-            'delivery_goal': '可审阅的补丁包与项目检查结果（不部署）',
+            # Worded to stay clear of the planner's high-risk vocabulary: a fixed
+            # phrase here would force every intake task to human approval for a
+            # reason the requirement itself never gave.
+            'delivery_goal': '可审阅的补丁包与项目检查结果（只交付补丁，不上线）',
             'agreement': self.agreement(), 'idempotency_key': key,
             'delivery_tier': 'package'}
 
@@ -780,13 +802,17 @@ class MaintenanceSubsystem:
         run = self._run(record.get('execution_id'))
         return run['status'] if run else 'received'
 
-    def _task_rows(self, project_ids):
-        """Head revisions only: a revised task is one piece of work, not two."""
+    def _task_rows(self, project_ids, *, include_superseded=False):
+        """Head revisions by default: a revised task is one piece of work, not two.
+
+        Deliveries are the exception -- a revision that delivered and was then
+        followed up still delivered -- so callers counting artifacts ask for all.
+        """
         from factory.control.issue_maintenance import MaintenanceStore
         wanted = set(project_ids)
         rows = []
         for record in MaintenanceStore(self.store).tasks():
-            if record['project_id'] not in wanted or record.get('successor_id'):
+            if record['project_id'] not in wanted or (record.get('successor_id') and not include_superseded):
                 continue
             run = self._run(record.get('execution_id'))
             status = run['status'] if run else ('received' if not record.get('execution_id') else 'missing')
@@ -810,9 +836,15 @@ class MaintenanceSubsystem:
             actions.append('cancel')
         if view.get('status') == 'delivered':
             actions.append('export')
-        if view.get('status') in ('delivered', 'failed', 'cancelled') and not view.get('successor_id'):
+        if not view.get('successor_id') and (view.get('status') in ('delivered', 'failed', 'cancelled')
+                                             or self._stopped_before_plan(run)):
             actions.append('feedback')
         return actions
+
+    @staticmethod
+    def _stopped_before_plan(run) -> bool:
+        """Stopped at a human gate with no plan: ``resume`` cannot continue it."""
+        return bool(run) and run.get('status') == 'needs_human' and not run.get('plan')
 
     def feedback(self, task_id, content, *, actor) -> dict:
         """Follow-up on a finished task: a new revision linked to the old one.
@@ -829,8 +861,13 @@ class MaintenanceSubsystem:
         if previous.get('successor_id'):
             raise Conflict('这个任务已经有后续修订，请在最新修订上反馈')
         view = self.tasks.get(task_id, actor=actor)
-        if view['status'] not in ('delivered', 'failed', 'cancelled'):
+        restart = self._stopped_before_plan(self._run(view.get('execution_id')))
+        if view['status'] not in ('delivered', 'failed', 'cancelled') and not restart:
             raise Conflict('任务尚未结束；进行中的任务请使用回答或补充信息')
+        if restart:
+            # The old execution never got a plan and cannot be resumed in place, so
+            # it is stopped for good before the linked revision starts over.
+            self.tasks.cancel(task_id, actor=actor)
         project = self.store.project(previous['project_id'])
         delivered = (view.get('delivery') or {}).get('commit')
         body = previous['issue']['body'] + '\n\n--- 后续反馈（第 %d 次修订）---\n' % (previous['revision'] + 1)
@@ -913,8 +950,11 @@ class MaintenanceSubsystem:
                                   'title': record['issue']['title'], 'kind': kind,
                                   'reason': self._reason(row, kind),
                                   'since': (row['run'] or {}).get('updated_at') or record['created_at']})
-            if status in _DELIVERED:
-                stats['delivered'] += 1
+        # Every revision whose execution produced its artifact counts once, even if
+        # a follow-up revision has since superseded it as the live head.
+        for row in self._task_rows(scope, include_superseded=True):
+            if row['status'] in _DELIVERED:
+                per_project[row['record']['project_id']]['delivered'] += 1
                 at = _parse(self._delivered_at(row['run']))
                 if at and start <= at.astimezone(start.tzinfo) < end:
                     delivered_window += 1
@@ -965,9 +1005,14 @@ class MaintenanceSubsystem:
         if not ids:
             return []
         marks = ','.join('?' * len(ids))
+        # Business milestones only: provider timing, raw SDK frames and usage rows
+        # stay in the task's own log, where they can be read in context.
+        kinds = sorted(_FEED_KINDS)
+        kind_marks = ','.join('?' * len(kinds))
         with self.store.connect() as db:
             found = db.execute(f'SELECT id,run_id,type,at FROM events WHERE run_id IN ({marks}) '
-                               'ORDER BY id DESC LIMIT ?', (*ids, limit)).fetchall()
+                               f'AND type IN ({kind_marks}) ORDER BY id DESC LIMIT ?',
+                               (*ids, *kinds, limit)).fetchall()
         return [{'task_id': ids[e['run_id']]['id'], 'project_id': ids[e['run_id']]['project_id'],
                  'execution_id': e['run_id'], 'sequence': e['id'], 'kind': e['type'],
                  'label': f"{ids[e['run_id']]['issue']['title'][:40]} · {_EVENT_LABELS.get(e['type'], e['type'])}",
@@ -1007,6 +1052,27 @@ class MaintenanceSubsystem:
                     edges.append({'from': f"repo:{req['project_id']}", 'to': f"req:{req['id']}", 'kind': 'has'})
                     if req.get('task_id'):
                         requirement_of[req['task_id']] = req['id']
+        head_of = {}
+        for root_id, row in chain_root.items():
+            record, seen = row['record'], set()
+            head_of[record['id']] = record['id']
+        for row in self._task_rows(scope, include_superseded=True):
+            record = row['record']
+            if not record.get('successor_id') or row['status'] not in _DELIVERED:
+                continue
+            head = self._head(record['id'])
+            if head['id'] not in head_of:
+                continue
+            commit = ((row['run'] or {}).get('artifacts') or {}).get('commit')
+            if not commit:
+                continue
+            name = f"maintenance-{record['execution_id']}.patch"
+            nodes.append({'id': f"artifact:{record['id']}:{name}", 'type': 'artifact',
+                          'label': f"补丁包（第 {record['revision']} 修订）",
+                          'sublabel': f"已生成 · commit {commit[:10]}", 'status': 'generated',
+                          'task_id': record['id'], 'project_id': record['project_id']})
+            edges.append({'from': f"task:{head['id']}", 'to': f"artifact:{record['id']}:{name}",
+                          'kind': 'produces'})
         for root_id, row in chain_root.items():
             record, status = row['record'], row['status']
             task_node = f"task:{record['id']}"

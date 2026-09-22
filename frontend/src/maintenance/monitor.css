@@ -39,7 +39,7 @@
 
 .mn-event { border-left: 2px solid var(--wb-border); padding: 0 0 14px 14px; margin: 0; }
 .mn-event:last-child { padding-bottom: 0; }
-.mn-event a { font-weight: 650; }
+.mn-event a { font-weight: 600; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .mn-event small { display: block; color: var(--wb-faint); font-size: 10px; margin-top: 3px; }
 
 .mn-viewbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -68,7 +68,9 @@
   font-size: 12px; font-weight: 650; color: var(--wb-ink);
 }
 .mn-node:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
-.mn-node small { display: block; margin-top: 5px; color: var(--wb-muted); font-size: 10px; font-weight: 400; }
+.mn-node { height: 74px; overflow: hidden; box-sizing: border-box; }
+.mn-node-label { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
+.mn-node small { display: block; margin-top: 4px; color: var(--wb-muted); font-size: 10px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mn-node.is-selected { box-shadow: 0 0 0 2px var(--wb-teal); }
 .mn-node-requirement { border-left-color: var(--color-info); }
 .mn-node-artifact { border-left-color: var(--wb-teal); }

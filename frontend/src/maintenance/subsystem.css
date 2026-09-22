@@ -3,6 +3,15 @@
  * 这里只补子系统特有的布局，不重定义颜色。 */
 
 .ms-shell { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+/* 挂在 AppShell 里时与其他管理页同样的内容边距与最大宽度 */
+.as-content .wb-shell > .ms-shell { padding: 24px 40px 56px; max-width: 1440px; margin-inline: auto; box-sizing: border-box; }
+.ms-content .wb-page { padding: 0; }
+.ms-content > * { min-width: 0; }
+.ms-two-col > * { min-width: 0; }
+.ms-side-list li { overflow-wrap: anywhere; }
+.ms-side-list code { white-space: normal; overflow-wrap: anywhere; }
+.ms-receipt { display: grid; gap: 6px; margin-top: 14px; font-size: 12px; line-height: 1.6; }
+.ms-receipt code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
 
 .ms-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .ms-title-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -26,8 +35,8 @@
 .ms-note { border-left: 3px solid var(--wb-border-strong); background: var(--color-surface); padding: 12px 14px; color: var(--wb-muted); font-size: 12px; line-height: 1.6; border-radius: 0 8px 8px 0; }
 .ms-two-col { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .ms-side-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
-.ms-side-list li { display: flex; gap: 8px; color: var(--wb-muted); font-size: 12px; line-height: 1.55; }
-.ms-side-list li::before { content: '•'; color: var(--wb-teal); flex: 0 0 auto; }
+.ms-side-list li { position: relative; padding-left: 14px; color: var(--wb-muted); font-size: 12px; line-height: 1.6; }
+.ms-side-list li::before { content: '•'; color: var(--wb-teal); position: absolute; left: 0; top: 0; }
 
 .ms-finding-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--color-border); padding: 10px 0; }
 .ms-finding-row:first-child { border-top: 0; padding-top: 0; }
@@ -55,6 +64,10 @@
 
 @media (max-width: 920px) {
   .ms-two-col { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .as-content .wb-shell > .ms-shell { padding: 16px 16px 48px; }
 }
 
 @media (max-width: 700px) {

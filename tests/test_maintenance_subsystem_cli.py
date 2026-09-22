@@ -341,3 +341,21 @@ def test_runtime_executes_the_queue_and_export_writes_a_patch(env, capsys, tmp_p
     assert len(written) >= 1
     assert Path(written[0]).is_file()
     assert Path(written[0]).stat().st_size > 0
+
+
+def test_events_follow_streams_ndjson_until_terminal(env, capsys):
+    """--follow must reach the streaming handler (a legacy branch once shadowed it)."""
+    _run(env, capsys, 'init')
+    pid = _ready_project(env, capsys)
+    receipt = _run(env, capsys, 'submit', '--project', pid, '--text', '跟读事件',
+                   '--idempotency-key', 'follow-key-0001')
+    _run(env, capsys, 'cancel', receipt['task_id'])
+    rc = maintenance_cli.main(['--data-dir', str(env.data_dir), '--workspace-root', str(env.workspace_root),
+                               '--operator', OS_USER, 'events', receipt['task_id'], '--follow',
+                               '--interval', '0.01'])
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert rc == 0
+    assert lines[-1]['followed'] is True
+    streamed = lines[:-1]
+    assert streamed and all('sequence' in e and 'kind' in e for e in streamed)
+    assert streamed[0]['kind'] == 'user.message'

@@ -1,6 +1,6 @@
 // 工作画布：代码库 → 需求 → 任务 → 产物/目标/阻塞 的关系投影。
 // 纯 SVG/HTML 实现，不引入新依赖；节点位置由稳定布局计算，不持有业务状态。
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { EmptyState } from '../workbench/ui'
 import type { Graph, GraphNode, NodeType } from './types'
@@ -28,7 +28,7 @@ interface LaidOutNode extends GraphNode {
   y: number
 }
 
-function layout(nodes: GraphNode[]): { nodes: LaidOutNode[]; width: number; height: number } {
+function layout(nodes: GraphNode[], edges: Graph['edges'] = []): { nodes: LaidOutNode[]; width: number; height: number } {
   const columns = new Map<number, GraphNode[]>()
   for (const node of nodes) {
     const col = COLUMN_ORDER[node.type] ?? 3
@@ -36,16 +36,32 @@ function layout(nodes: GraphNode[]): { nodes: LaidOutNode[]; width: number; heig
     list.push(node)
     columns.set(col, list)
   }
+  // Place each column next to its parents (left-to-right), so a task's artifact,
+  // target or blocker sits on the task's row instead of in an unrelated stack.
+  const parents = new Map<string, string[]>()
+  for (const edge of edges) parents.set(edge.to, [...(parents.get(edge.to) ?? []), edge.from])
+  const yOf = new Map<string, number>()
   const laidOut: LaidOutNode[] = []
   let maxCol = 0
-  let maxRows = 0
-  for (const [col, list] of columns) {
+  let maxY = PADDING
+  for (const col of [...columns.keys()].sort((a, b) => a - b)) {
     maxCol = Math.max(maxCol, col)
-    maxRows = Math.max(maxRows, list.length)
-    list.forEach((node, row) => {
-      laidOut.push({ ...node, x: PADDING + col * COLUMN_GAP, y: PADDING + row * ROW_GAP })
-    })
+    const anchor = (node: GraphNode) => {
+      const ys = (parents.get(node.id) ?? []).map(id => yOf.get(id)).filter((y): y is number => y !== undefined)
+      return ys.length ? Math.min(...ys) : Number.POSITIVE_INFINITY
+    }
+    const list = [...(columns.get(col) ?? [])].sort((a, b) => anchor(a) - anchor(b))
+    let next = PADDING
+    for (const node of list) {
+      const wanted = anchor(node)
+      const y = Math.max(next, Number.isFinite(wanted) ? wanted : next)
+      yOf.set(node.id, y)
+      laidOut.push({ ...node, x: PADDING + col * COLUMN_GAP, y })
+      next = y + ROW_GAP
+      maxY = Math.max(maxY, y)
+    }
   }
+  const maxRows = Math.max(1, Math.ceil((maxY - PADDING) / ROW_GAP) + 1)
   const width = PADDING * 2 + (maxCol + 1) * COLUMN_GAP
   const height = PADDING * 2 + Math.max(1, maxRows) * ROW_GAP
   return { nodes: laidOut, width, height }
@@ -75,8 +91,8 @@ export default function RelationCanvas({ graph, onOpenTask }: {
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null)
 
   const { nodes: laidOutNodes, width: worldWidth, height: worldHeight } = useMemo(
-    () => layout(graph.nodes),
-    [graph.nodes],
+    () => layout(graph.nodes, graph.edges),
+    [graph.nodes, graph.edges],
   )
   const nodeById = useMemo(() => new Map(laidOutNodes.map(n => [n.id, n])), [laidOutNodes])
   const selected = selectedId ? nodeById.get(selectedId) ?? null : null
@@ -110,6 +126,14 @@ export default function RelationCanvas({ graph, onOpenTask }: {
     setScale(nextScale)
     setPan({ x: 12, y: 12 })
   }
+
+  const fittedRef = useRef(false)
+  useEffect(() => {
+    if (fittedRef.current || laidOutNodes.length === 0) return
+    fittedRef.current = true
+    fitView()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [laidOutNodes.length])
 
   function handleWheel(e: React.WheelEvent<HTMLDivElement>) {
     e.preventDefault()
@@ -179,8 +203,8 @@ export default function RelationCanvas({ graph, onOpenTask }: {
                 style={{ left: node.x, top: node.y, width: NODE_WIDTH }}
                 onClick={() => setSelectedId(node.id)}
               >
-                {node.label}
-                <small>{node.sublabel}</small>
+                <span className="mn-node-label" title={node.label}>{node.label}</span>
+                <small title={node.sublabel}>{node.sublabel}</small>
                 {node.type === 'target' && <small>目标，尚未生成，不计入交付</small>}
               </button>
             ))}

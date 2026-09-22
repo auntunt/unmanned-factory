@@ -415,8 +415,9 @@ def _init(args) -> int:
 # ---------------------------------------------------------------------------
 # Legacy task-port subcommands
 # ---------------------------------------------------------------------------
+# ``events`` is not here: the subsystem handler covers the plain read and --follow.
 _LEGACY_COMMANDS = frozenset({
-    'create', 'list', 'show', 'events', 'intervene', 'resume', 'cancel', 'export',
+    'create', 'list', 'show', 'intervene', 'resume', 'cancel', 'export',
 })
 
 

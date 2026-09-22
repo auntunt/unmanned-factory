@@ -65,6 +65,18 @@ export function resolveRoute(pathname: string): Resolved {
   // 面包屑也回到职能体目录——不重定向，查询参数与来源上下文原样保留。
   if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '职能包' }] }
   if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力资产', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力资产' }] }
+  // 运维维护子系统有自己的三级入口；顶栏标题跟随子页面，而不是一律「详情」。
+  if (is('/maintenance', false)) {
+    const sub: [string, string][] = [['/maintenance/repos', '维护代码库'], ['/maintenance/intake', '需求接入'],
+      ['/maintenance/tasks', '全部任务'], ['/maintenance/about', '技术详情']]
+    const hit = sub.find(([path]) => is(path, false))
+    const isTask = !hit && is('/maintenance/:taskId')
+    const label = hit ? hit[1] : isTask ? '任务现场' : '运维监控'
+    return {
+      activeKey: 'maintenance', title: label, usesWorkTitle: isTask,
+      breadcrumb: [{ label: '业务插件' }, { label: '运维维护', to: '/maintenance' }, { label }],
+    }
+  }
   for (const plugin of BUSINESS_PLUGIN_NAV) {
     const detail = is(plugin.to + '/:id')
     if (is(plugin.to) || detail) return {

@@ -142,6 +142,11 @@ def test_manual_and_machine_intake_share_one_path_to_a_delivered_task(app_env):
     assert '后续反馈' in successor['issue']['body']
     old = client.get(f'/api/v2/maintenance/tasks/{task_id}', headers=headers).json()
     assert old['successor_id'] == successor['task_id'] and 'feedback' not in old['actions']
+    # The superseded revision still delivered: it stays counted and visible.
+    ov = client.get('/api/v2/maintenance/overview', headers=headers).json()
+    assert ov['counts']['delivered_in_window'] == 1
+    graph = client.get('/api/v2/maintenance/graph', headers=headers).json()
+    assert any(n['id'].startswith(f'artifact:{task_id}:') for n in graph['nodes'])
 
     # The human dispatches the machine requirement explicitly.
     sent = client.post(f"/api/v2/maintenance/requirements/{auto['requirement_id']}/dispatch", headers=headers)
@@ -181,3 +186,42 @@ def test_overview_reports_executor_and_empty_scope_honestly(app_env):
     assert ov['sources']['executor']['status'] in ('online', 'offline', 'unknown')
     manifest = client.get('/api/v2/maintenance/manifest', headers=headers).json()
     assert manifest['supports_pause'] is False and manifest['contract_version'] == 'maintenance-subsystem/1'
+
+
+def test_dirty_workspace_is_a_need_and_a_pre_plan_block_continues_as_a_revision(app_env):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    (repo / 'scratch.log').write_text('untracked')
+    view = _register(client, repo, headers)
+    assert '清理工作区的未提交/未跟踪改动' in view['needs']
+    assert {f['id']: f['status'] for f in view['probe']['findings']}['clean'] == 'failed'
+    pid = view['project_id']
+    _adopt_greeting_check(store, pid)
+    receipt = client.post('/api/v2/maintenance/requirements', json={
+        'project_id': pid, 'content': '把问候语改成 hello world', 'idempotency_key': 'dirty-key-0001'},
+        headers=headers).json()
+    wait_state(store, receipt['execution_id'], {'needs_human'})
+    task = client.get(f"/api/v2/maintenance/tasks/{receipt['task_id']}", headers=headers).json()
+    assert 'feedback' in task['actions'] and 'resume' not in task['actions']
+    (repo / 'scratch.log').unlink()
+    fb = client.post(f"/api/v2/maintenance/tasks/{receipt['task_id']}/feedback",
+                     json={'content': '工作区已清理，请重新开始'}, headers=headers)
+    assert fb.status_code == 201, fb.text
+    assert fb.json()['predecessor_id'] == receipt['task_id']
+    old = client.get(f"/api/v2/maintenance/tasks/{receipt['task_id']}", headers=headers).json()
+    assert old['status'] == 'cancelled'
+    wait_state(store, fb.json()['execution_id'], {'awaiting_approval'})
+
+
+def test_generated_task_text_does_not_trip_the_high_risk_triage_words(app_env):
+    """Only the requirement itself may make a task high-risk, not our template."""
+    client, store, svc, repo = app_env
+    from factory.control.planning import _HIGH_RISK_RE
+    headers = login(client)
+    pid = _register(client, repo, headers)['project_id']
+    core = client.app.state.maintenance
+    record = {'id': 'r' * 32, 'title': '修复金额', 'content': '修复金额', 'attachments': [],
+              'external_id': None, 'source': {'kind': 'manual', 'name': 'owner'}}
+    request = core._task_request(record, store.project(pid), key='k' * 12)
+    template = ' '.join([request['expected_behaviour'], request['delivery_goal']])
+    assert not _HIGH_RISK_RE.search(template), _HIGH_RISK_RE.search(template)

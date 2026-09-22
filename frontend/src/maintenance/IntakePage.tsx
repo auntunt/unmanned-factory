@@ -68,7 +68,7 @@ function ManualSubmit({ csrfToken, onUnauthorized, projects, onSubmitted }: Page
         </div>
       </form>
       {receipt && (
-        <div className="wb-notice" role="status" data-testid="manual-receipt">
+        <div className="wb-notice ms-receipt" role="status" data-testid="manual-receipt">
           <p>需求编号 <code>{receipt.requirement_id}</code>　状态：{RECEIPT_STATUS_LABEL[receipt.status]}</p>
           {receipt.duplicate && <p>这是一次重复提交，已返回原有记录。</p>}
           <p>已接收 ≠ 已执行。{receipt.message}</p>
