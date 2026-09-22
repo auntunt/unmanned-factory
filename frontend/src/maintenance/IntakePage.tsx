@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useMaintenancePath } from './base-path'
 import type { FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -19,6 +20,7 @@ function ManualSubmit({ csrfToken, onUnauthorized, projects, onSubmitted }: Page
   projects: RepoView[]
   onSubmitted: () => void
 }) {
+  const mp = useMaintenancePath()
   const [projectId, setProjectId] = useState('')
   const [content, setContent] = useState('')
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID())
@@ -74,7 +76,7 @@ function ManualSubmit({ csrfToken, onUnauthorized, projects, onSubmitted }: Page
           {receipt.duplicate && <p>这是一次重复提交，已返回原有记录。</p>}
           {receipt.synthetic && <p><SyntheticBadge synthetic /> 该需求来自已声明的合成仓库或来源。</p>}
           <p>已接收 ≠ 已执行。{receipt.message}</p>
-          {receipt.task_id && <p><Link to={`/maintenance/${encodeURIComponent(receipt.task_id)}`}>查看任务</Link></p>}
+          {receipt.task_id && <p><Link to={mp(`/${encodeURIComponent(receipt.task_id)}`)}>查看任务</Link></p>}
         </div>
       )}
     </section>
@@ -230,6 +232,7 @@ function RequirementsTable({ csrfToken, onUnauthorized, projects, refreshKey, on
   refreshKey: number
   onDispatched: () => void
 }) {
+  const mp = useMaintenancePath()
   const [requirements, setRequirements] = useState<Requirement[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -283,7 +286,7 @@ function RequirementsTable({ csrfToken, onUnauthorized, projects, refreshKey, on
                       </button>
                     )}
                   </td>
-                  <td>{r.task_id ? <Link to={`/maintenance/${encodeURIComponent(r.task_id)}`}>查看任务</Link> : '—'}</td>
+                  <td>{r.task_id ? <Link to={mp(`/${encodeURIComponent(r.task_id)}`)}>查看任务</Link> : '—'}</td>
                 </tr>
               ))}
             </tbody>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useMaintenancePath } from '../maintenance/base-path'
 import type { FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
@@ -258,6 +259,7 @@ function MaintenanceStatusBadge({ status }: { status: string }) {
 }
 
 export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }: PageProps) {
+  const mp = useMaintenancePath()
   const [searchParams, setSearchParams] = useSearchParams()
   const isAdmin = user?.role !== 'member'
   const [tasks, setTasks] = useState<MaintenanceTaskView[] | null>(null)
@@ -464,7 +466,7 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
                 {visible.map(task => (
                   <tr key={task.task_id}>
                     <td>
-                      <Link className="wb-table-link" to={`/maintenance/${encodeURIComponent(task.task_id)}`}>
+                      <Link className="wb-table-link" to={mp(`/${encodeURIComponent(task.task_id)}`)}>
                         {task.issue.title || `任务 ${task.task_id.slice(0, 8)}`}
                       </Link>
                       <small style={{ display: 'block', color: 'var(--wb-muted)' }}>
@@ -486,7 +488,7 @@ export default function MaintenanceTasksPage({ csrfToken, onUnauthorized, user }
                     <td>
                       <Link
                         className="wb-button wb-button-secondary"
-                        to={`/maintenance/${encodeURIComponent(task.task_id)}`}
+                        to={mp(`/${encodeURIComponent(task.task_id)}`)}
                       >
                         查看详情
                       </Link>

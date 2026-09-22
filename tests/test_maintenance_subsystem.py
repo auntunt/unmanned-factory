@@ -355,3 +355,57 @@ def test_probe_flags_a_python3_that_cannot_import_pytest(tmp_path, monkeypatch):
     monkeypatch.setenv('PATH', f'{fake}:/usr/bin:/bin')
     ok, note = _check_runnable(['python3', '-m', 'pytest', '-q'], tmp_path)
     assert ok is False and '没有安装 pytest' in note
+
+
+def _member(client, pid, name):
+    user = client.app.state.auth.create_user(name, 'long-member-password', role='member')
+    if pid:
+        client.app.state.governance.assign(user['id'], [pid], 'owner')
+    client.cookies.clear()
+    response = client.post('/api/auth/login', json={'username': name, 'password': 'long-member-password'},
+                           headers={'Origin': 'http://testserver'})
+    return {'Origin': 'http://testserver', 'X-CSRF-Token': response.json()['csrf_token']}
+
+
+def test_member_own_task_can_cancel(app_env):
+    """Codex review e2d87cf: actions offered cancel, the gateway answered 403."""
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = _register(client, repo, headers)['project_id']
+    headers = _member(client, pid, 'member-check')
+    response = client.post('/api/v2/maintenance/requirements', json={'project_id': pid, 'content': 'Fix greeting'},
+                           headers=headers)
+    assert response.status_code == 201, response.text
+    tid = response.json()['task_id']
+    view = client.get(f'/api/v2/maintenance/tasks/{tid}').json()
+    assert 'cancel' in view['actions'], view
+    response = client.post(f'/api/v2/maintenance/tasks/{tid}/cancel', headers=headers)
+    assert response.status_code == 200, response.text
+
+
+def test_member_cannot_act_on_someone_elses_task_and_is_not_offered_to(app_env):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = _register(client, repo, headers)['project_id']
+    theirs = client.post('/api/v2/maintenance/requirements', json={
+        'project_id': pid, 'content': 'admin task', 'idempotency_key': 'admin-task-0001'}, headers=headers).json()
+    headers = _member(client, pid, 'member-other')
+    view = client.get(f"/api/v2/maintenance/tasks/{theirs['task_id']}").json()
+    assert not ({'cancel', 'approve', 'answer', 'supplement', 'resume', 'feedback'} & set(view['actions']))
+    for action in ('cancel', 'approve', 'resume', 'feedback'):
+        res = client.post(f"/api/v2/maintenance/tasks/{theirs['task_id']}/{action}", json={'content': 'x'}, headers=headers)
+        assert res.status_code == 403, (action, res.text)
+    # Admin-only entry points stay admin-only for members.
+    assert client.post('/api/v2/maintenance/repos', json={'source': str(repo), 'name': 'x'}, headers=headers).status_code == 403
+    assert client.post(f"/api/v2/maintenance/requirements/{theirs['requirement_id']}/dispatch", headers=headers).status_code == 403
+    assert client.post('/api/v2/maintenance/intake-sources', json={'name': 'n', 'project_ids': [pid]},
+                       headers=headers).status_code == 403
+
+
+def test_member_without_the_project_cannot_submit_or_act(app_env):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    pid = _register(client, repo, headers)['project_id']
+    headers = _member(client, None, 'member-outside')
+    res = client.post('/api/v2/maintenance/requirements', json={'project_id': pid, 'content': 'x'}, headers=headers)
+    assert res.status_code == 403, res.text

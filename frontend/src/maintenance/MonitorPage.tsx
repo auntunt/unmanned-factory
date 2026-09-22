@@ -1,5 +1,6 @@
 // 运维监控：数字大屏 / 工作画布。只渲染页面内容，外框（三级入口）由子系统壳负责。
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMaintenancePath } from './base-path'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { EmptyState, ErrorNotice, PageHeader, errorText, formatDate } from '../workbench/ui'
@@ -54,6 +55,7 @@ function windowLabel(kind: string): string {
 }
 
 export default function MonitorPage(props: PageProps & { projectId?: string }) {
+  const mp = useMaintenancePath()
   const { projectId, onUnauthorized } = props
   const navigate = useNavigate()
 
@@ -162,7 +164,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
   }, [])
 
   const retry = () => setReloadKey(k => k + 1)
-  const openTask = useCallback((taskId: string) => navigate(`/maintenance/${taskId}`), [navigate])
+  const openTask = useCallback((taskId: string) => navigate(mp(`/${taskId}`)), [navigate, mp])
 
   if (forbidden) {
     return (
@@ -238,7 +240,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
           <EmptyState
             title="还没有接入代码库"
             description="先登记要维护的项目，才能看到运维监控数据。"
-            action={<Link className="wb-button wb-button-primary" to="/maintenance/repos">去接入代码库</Link>}
+            action={<Link className="wb-button wb-button-primary" to={mp('/repos')}>去接入代码库</Link>}
           />
         )
         : (
@@ -286,7 +288,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
                                   <span>{attentionBadge(item.kind)}</span>
                                   <span className="mn-attention-reason">{item.reason}</span>
                                 </div>
-                                <Link className="wb-text-link" to={`/maintenance/${item.task_id}`}>进入现场</Link>
+                                <Link className="wb-text-link" to={mp(`/${item.task_id}`)}>进入现场</Link>
                               </div>
                             ))}
                           </div>
@@ -297,7 +299,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
                       <div className="wb-card-head"><h2>维护项目概览</h2></div>
                       {partialErrorFor('projects') && <p className="mn-hint">部分数据不可用：{partialErrorFor('projects')}</p>}
                       {overview.projects.length === 0
-                        ? <EmptyState title="还没有接入代码库" action={<Link className="wb-text-link" to="/maintenance/repos">去接入代码库</Link>} />
+                        ? <EmptyState title="还没有接入代码库" action={<Link className="wb-text-link" to={mp('/repos')}>去接入代码库</Link>} />
                         : (
                           <div className="wb-table-wrap">
                             <table className="wb-table">
@@ -321,7 +323,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
                         ? <EmptyState title="暂无最新事件" />
                         : overview.events.map(ev => (
                           <div className="mn-event" key={`${ev.task_id}-${ev.sequence}`}>
-                            <Link to={`/maintenance/${ev.task_id}`}>{ev.label}</Link>
+                            <Link to={mp(`/${ev.task_id}`)}>{ev.label}</Link>
                             <small>{formatDate(ev.at)}</small>
                           </div>
                         ))}

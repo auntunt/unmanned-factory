@@ -110,7 +110,7 @@ def _pending_questions(store, execution_id) -> list:
     return list((run.get('plan') or {}).get('questions') or [])
 
 
-def task_view(store, subsystem, view) -> dict:
+def task_view(store, subsystem, view, user=None) -> dict:
     """The task现场 view every surface returns: HTTP and CLI read the same object."""
     # Supplements are part of what the task现场 must explain, and they have
     # to survive a refresh, so they travel with the task rather than only in
@@ -138,7 +138,8 @@ def task_view(store, subsystem, view) -> dict:
             'event': None}
     # What the caller may do now, from the execution's real state. The page
     # renders only these; there is no pause because the executor has none.
-    view['actions'] = subsystem.task_actions(view)
+    from factory.control.maintenance_subsystem import actions_for_user
+    view['actions'] = actions_for_user(store, view, subsystem.task_actions(view), user)
     return view
 
 
@@ -211,7 +212,8 @@ def router(store, svc):
 
     @api.get('/tasks/{task_id}')
     def get_task(task_id: str, request: Request):
-        return task_view(store, subsystem, tasks.get(task_id, actor=_actor(request)))
+        return task_view(store, subsystem, tasks.get(task_id, actor=_actor(request)),
+                         request.state.user)
 
     @api.get('/tasks/{task_id}/events')
     def task_events(task_id: str, request: Request, after: int = 0):

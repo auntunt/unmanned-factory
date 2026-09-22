@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMaintenancePath } from './base-path'
 import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
@@ -103,6 +104,7 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
 // --- List ---
 
 function RepoList(props: PageProps) {
+  const mp = useMaintenancePath()
   const { onUnauthorized } = props
   const [repos, setRepos] = useState<RepoView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -161,7 +163,7 @@ function RepoList(props: PageProps) {
           {repos.map(repo => (
             <div className="ms-repo-row" key={repo.project_id}>
               <div>
-                <Link className="wb-table-link" to={`/maintenance/repos/${encodeURIComponent(repo.project_id)}`}>{repo.name}</Link> <SyntheticBadge synthetic={repo.synthetic} />
+                <Link className="wb-table-link" to={mp(`/repos/${encodeURIComponent(repo.project_id)}`)}>{repo.name}</Link> <SyntheticBadge synthetic={repo.synthetic} />
                 <small>{repo.repository}{repo.probe?.branch ? `　分支 ${repo.probe.branch}` : ''}{repo.probe?.head_sha ? `　${repo.probe.head_sha.slice(0, 8)}` : ''}</small>
               </div>
               <StateBadge state={repo.state} label={repo.state_label || REPO_STATE_LABEL[repo.state]} />
@@ -176,6 +178,7 @@ function RepoList(props: PageProps) {
 // --- Detail ---
 
 function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { projectId: string }) {
+  const mp = useMaintenancePath()
   const navigate = useNavigate()
   const [repo, setRepo] = useState<RepoView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -241,7 +244,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
         title={repo.name}
         description={repo.repository}
         actions={<>
-          <button className="wb-button wb-button-secondary" onClick={() => navigate('/maintenance/repos')}>返回列表</button>
+          <button className="wb-button wb-button-secondary" onClick={() => navigate(mp('/repos'))}>返回列表</button>
           <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void reprobe()}>{busy ? '处理中…' : '重新分析'}</button>
           <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void toggleSynthetic()}
             title="只影响此后接收的需求；已创建的任务与回执保持当时的标注">
@@ -347,7 +350,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
                 <div>
                   <span className="wb-eyebrow">任务</span>
                   <ul className="ms-side-list" style={{ marginTop: 8 }}>
-                    {repo.tasks.map(t => <li key={t.task_id}><Link to={`/maintenance/${encodeURIComponent(t.task_id)}`}>{t.title || t.task_id.slice(0, 8)}</Link>　{t.status}</li>)}
+                    {repo.tasks.map(t => <li key={t.task_id}><Link to={mp(`/${encodeURIComponent(t.task_id)}`)}>{t.title || t.task_id.slice(0, 8)}</Link>　{t.status}</li>)}
                   </ul>
                 </div>
               )}

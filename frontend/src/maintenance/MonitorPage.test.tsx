@@ -118,3 +118,23 @@ describe('MonitorPage 运维监控', () => {
     expect(link.closest('a')?.getAttribute('href')).toBe('/maintenance/repos')
   })
 })
+
+describe('嵌入挂载', () => {
+  it('在 /embed/maintenance 下，进入现场与接入链接都留在嵌入前缀里，不跳进主壳', async () => {
+    const { default: EmbeddedMaintenance } = await import('./EmbeddedMaintenance')
+    const { Route, Routes } = await import('react-router-dom')
+    mockFetchSequence([baseOverview()])
+    render(
+      <MemoryRouter initialEntries={['/embed/maintenance']}>
+        <Routes>
+          <Route path="embed/maintenance/*" element={<EmbeddedMaintenance basePath="/embed/maintenance" csrfToken="csrf" onUnauthorized={noop} />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('进入现场')).toBeTruthy())
+    expect(screen.getByText('进入现场').getAttribute('href')).toBe('/embed/maintenance/task-1')
+    for (const link of Array.from(document.querySelectorAll('a[href^="/"]'))) {
+      expect(link.getAttribute('href')!.startsWith('/embed/maintenance')).toBe(true)
+    }
+  })
+})

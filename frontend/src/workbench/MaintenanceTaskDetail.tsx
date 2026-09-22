@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMaintenancePath } from '../maintenance/base-path'
 import type { FormEvent } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
@@ -274,6 +275,7 @@ function EventLog({ events }: { events: MaintenanceEvent[] }) {
 // --- Main detail page ---
 
 export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: PageProps) {
+  const mp = useMaintenancePath()
   const { taskId } = useParams<{ taskId: string }>()
   const navigate = useNavigate()
   const location = useLocation()
@@ -387,7 +389,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
   return (
     <div className="wb-page">
       <p className="wb-back-link" style={{ marginBottom: 12 }}>
-        <Link to="/maintenance">← 返回运维监控</Link>
+        <Link to={mp('')}>← 返回运维监控</Link>
       </p>
       {revisionNotice && (
         <div className="wb-notice" role="status" data-testid="revision-notice">{revisionNotice}</div>
@@ -692,7 +694,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
                 taskId={task.task_id}
                 csrfToken={csrfToken}
                 onUnauthorized={onUnauthorized}
-                onCreated={newTaskId => navigate(`/maintenance/${encodeURIComponent(newTaskId)}`, {
+                onCreated={newTaskId => navigate(mp(`/${encodeURIComponent(newTaskId)}`), {
                   state: { revisionNotice: '已创建修订任务，原任务保留' },
                 })}
               />

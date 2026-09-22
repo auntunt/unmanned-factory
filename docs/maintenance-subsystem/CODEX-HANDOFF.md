@@ -1,5 +1,19 @@
 # 给 Codex 的交接 · 运维维护子系统
 
+## 第三轮：回应复核 CODEX-REVIEW-e2d87cf（未做变异测试、未全量、未付费模型）
+1. **成员自己的维护任务动作**：`app.py` 精确放行 `POST /api/v2/maintenance/tasks/{id}/(clarify|approve|follow-up|resume|cancel|feedback)`，
+   授权与既有 run 动作完全相同——任务所绑定执行的 `source.actor_id` 必须是本人，再 `governance.require_project`。
+   其余维护写入口（登记代码库、派发需求、接入来源等）仍只限管理员。`actions` 按同一规则过滤：
+   非本人任务对成员只剩 `export`，页面不再给出会被 403 的按钮。
+   测试：原样运行 Codex 的复现文件通过；新增本人可取消、他人任务 6 类动作 403 且不在 actions、管理员入口 403、
+   未分配项目成员提交 403。
+2. **嵌入真实接线**：修掉嵌入页的硬编码 `/maintenance` 链接（原来在 iframe 里下钻会跳进主壳并被 DENY），
+   改为基于挂载前缀的 `useMaintenancePath`。第二端口宿主页 iframe 实测：同站可用并下钻/返回不逃逸
+   （`evidence/10-embed-same-site-task.png`），跨站只显示登录页（`evidence/11-embed-cross-site-no-session.png`）。
+   部署边界写入 INSTALL.md「嵌入到其他系统」：只支持同站；不放宽 cookie/CSRF/CORS，不建设 SSO。
+
+定向检查：维护相关后端 4 个测试文件 64 passed；前端 9 个文件 87 passed；tsc 通过；前端构建一次。
+
 ## 第二轮：回应初审 CODEX-REVIEW-baa8b62（未付费重跑模型，已有真实证据原样保留）
 1. **后续反馈保留已交付改动**：已交付任务的反馈生成修订时携带 `continue_from`，在提交前给新执行设置既有的
    `feedback_predecessor_id`，规划与执行都在上一版交付的已验证工作副本上进行；基线=上一版交付 commit。
@@ -56,7 +70,7 @@ cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build   # 通过
 9. 页面：子系统无内容边距、顶栏标题错、需求页溢出、画布节点重叠与未自适应。
 
 ## 未验证 / 已知限制
-- Codex 执行器、非 macOS、URL 克隆登记的真实网络路径、真实外部宿主 iframe 嵌入、成员角色页面操作。
+- Codex 执行器、非 macOS、URL 克隆登记的真实网络路径、生产域名下的同站子域嵌入、跨站 iframe 内登录（按设计不支持）。
 - 机器来源以「令牌创建者」的项目权限为上限并收窄到令牌项目；创建者被降权后令牌随之失效。
 - 项目记忆会把旧交付的文字带进后续提示词；本次 v3 因 v2 记忆里的旧措辞「不部署」仍被判为高风险需批准，新交付不再写入该词。
 - 服务器 CPU/内存、应用探针、告警没有采集源，页面如实显示「未接入」。

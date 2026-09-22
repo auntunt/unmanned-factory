@@ -296,6 +296,10 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     # an admin decision, not something a member may do on a run
                     # they happen to own.
                     run_action = re.fullmatch(r'/api/v[23]/runs/([^/]+)/(clarify|continue|approve|cancel|discard|retry|confirm-spec|follow-up)', path)
+                    # 运维维护任务上的同一组「自己发起的运行」动作；授权规则与 run_action
+                    # 完全相同（执行的发起人 + 项目授权），只是先从任务找到它的执行。
+                    maintenance_action = re.fullmatch(
+                        r'/api/v2/maintenance/tasks/([^/]+)/(clarify|approve|follow-up|resume|cancel|feedback)', path)
                     creation = path == '/api/v2/runs' or re.fullmatch(r'/api/v3/capabilities/[^/]+/invoke', path)
                     # 窄授权：member 对自己会话的 Skill 增/删/读，
                     # 归属验证由路由处理器执行，中间件只放行路径。
@@ -314,8 +318,13 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                     try:
                         if session_skill_action or member_chat:
                             pass  # 路由处理器验证会话归属
-                        elif request.method == 'POST' and (run_action or creation):
-                            if run_action:
+                        elif request.method == 'POST' and (run_action or creation or maintenance_action):
+                            if maintenance_action:
+                                from factory.control.maintenance_subsystem import task_execution_owner
+                                owner_id, project_id = task_execution_owner(store, maintenance_action[1])
+                                if owner_id != user['id']:
+                                    raise AuthError('成员只能操作自己发起的维护任务', 403)
+                            elif run_action:
                                 target = store.get(run_action[1])
                                 if target.get('source', {}).get('actor_id') != user['id']:
                                     raise AuthError('成员只能操作自己发起的运行', 403)

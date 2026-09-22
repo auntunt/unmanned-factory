@@ -1222,6 +1222,41 @@ def executor_status(svc, store) -> dict:
     return {'status': 'offline', 'detail': '没有进程持有执行器锁，新任务会排队等待'}
 
 
+def task_execution_owner(store, task_id) -> tuple:
+    """``(actor_id, project_id)`` of whoever started this maintenance task's execution.
+
+    The same identity the run-action rule checks (``runs.source.actor_id``). A task
+    with no execution yet has no owner a member could match, so it answers
+    ``(None, project_id)`` and the caller refuses. Unknown task ids raise
+    ``KeyError`` (404), exactly as an unknown run does.
+    """
+    from factory.control.issue_maintenance import MaintenanceStore
+    record = MaintenanceStore(store).get(task_id)
+    execution_id = record.get('execution_id')
+    if not execution_id:
+        return None, record['project_id']
+    run = store.get(execution_id)
+    return (run.get('source') or {}).get('actor_id'), record['project_id']
+
+
+def actions_for_user(store, view, actions, user) -> list:
+    """The actions this signed-in user may actually perform, matching the gateway.
+
+    Admins keep everything. A member keeps the write actions only on a task whose
+    execution they started (and ``export``, a read, everywhere they can see the
+    task) -- so the page never offers a button the gateway will answer with 403.
+    """
+    if user is None or user.get('role') == 'admin':
+        return actions
+    try:
+        owner_id, _ = task_execution_owner(store, view['task_id'])
+    except KeyError:
+        owner_id = None
+    if owner_id == user.get('id'):
+        return actions
+    return [a for a in actions if a == 'export']
+
+
 _STATUS_TEXT = {'received': '已接收', 'queued': '排队中', 'planning': '制定计划', 'running': '执行中',
                 'verifying': '检查中', 'requirement_analysis': '需求分析', 'needs_clarification': '等待回答',
                 'awaiting_approval': '等待批准', 'awaiting_spec_confirmation': '等待确认',

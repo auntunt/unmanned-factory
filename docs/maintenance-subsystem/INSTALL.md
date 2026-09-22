@@ -130,6 +130,19 @@ webuddy-maintenance export <task_id> --output ./out
   需要停下来就是 `cancel`（不可逆）或让它自然停在人工确认点（回答/批准/
   补充信息）。
 
+## 嵌入到其他系统（iframe）· 部署边界
+
+- 入口 `/embed/maintenance/*`：同一组页面，不带 webuddy 外框；页内所有链接都留在嵌入前缀下，不会跳进主壳。
+- 设置 `FACTORY_EMBED_ORIGINS="https://host.example.com"`（空格分隔；仅 https 或本机 http），只有 `/embed/*`
+  改发 `Content-Security-Policy: frame-ancestors <这些来源>`，其余页面与 API 仍是 `X-Frame-Options: DENY`。
+- 会话 cookie 是 `SameSite=Strict`，本期**不放宽**，也不建设跨站 SSO。因此：
+  - **支持**：宿主与 webuddy **同站**（同一可注册域，如 `host.example.com` 嵌 `webuddy.example.com`；
+    或同一域名下的反代路径）。用户在 webuddy 已登录即可在宿主页里直接使用。
+  - **不支持**：宿主与 webuddy **跨站**（不同可注册域，或 `localhost` 对 `127.0.0.1`）。浏览器不会在
+    iframe 里携带 Strict 会话 cookie，嵌入页只会显示登录页；需要跨站嵌入时应走后续的 SSO 设计，而不是放宽
+    cookie/CSRF/CORS。
+- 写操作仍要求 Origin 与 `FACTORY_PUBLIC_ORIGIN` 一致并带 CSRF 头；iframe 内的页面本身来自 webuddy 源，天然满足。
+
 ## 已验证 / 未验证（2026-09-23，集成方实测）
 
 已用真实执行器验证（Claude Code 运行时，模型 `claude-sonnet-5`，走本机用户自己的
@@ -145,5 +158,9 @@ webuddy-maintenance export <task_id> --output ./out
 仅由自动化测试（注入 fake 执行器）覆盖：URL 克隆登记（`repo add --source https://…`）、
 `intake-sources` 吊销、插件停用后拒绝接入。
 
-未验证：Codex 执行器；非 macOS 主机；`/embed/*` 被真实外部宿主以 iframe 嵌入
-（仅验证了路由与响应头逻辑）；多用户成员权限下的页面操作。
+嵌入（2026-09-23 实测，截图 `evidence/10-*`、`11-*`）：`127.0.0.1:8800` 的宿主页 iframe 打开
+`127.0.0.1:8799/embed/maintenance`（同站、不同端口），沿用已有会话看到监控，点「进入现场」下钻、点「返回」
+回到监控，全程停留在嵌入前缀内；同一页面换成 `localhost:8800`（跨站）宿主时 iframe 只显示登录页。
+跨站 iframe 内登录后能否保持会话未实测（验收不在页面输入密码；按 Strict 语义预期不能）。
+
+未验证：Codex 执行器；非 macOS 主机；真实生产域名下的同站子域嵌入。

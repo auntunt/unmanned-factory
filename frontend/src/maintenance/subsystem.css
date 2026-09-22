@@ -83,3 +83,5 @@
 
 .ms-synthetic { background: var(--color-warning-soft, #f6ecd6); color: var(--color-warning, #8a5a12); margin-left: 6px; }
 .ms-check-warn { display: block; color: var(--wb-red); font-size: 11px; margin-top: 3px; }
+.ms-embed { min-height: 100vh; box-sizing: border-box; padding: 20px 24px 40px; }
+@media (max-width: 760px) { .ms-embed { padding: 16px; } }

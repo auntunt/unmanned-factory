@@ -10,6 +10,7 @@ import IntakePage from './IntakePage'
 import AboutPage from './AboutPage'
 import MonitorPage from './MonitorPage'
 import { setMaintenanceApiBase } from './api'
+import { MaintenanceBaseContext } from './base-path'
 
 /** Mount point for embedding the maintenance subsystem into another host,
  *  without the webuddy AppShell chrome. Same route shapes as the AppShell-
@@ -21,6 +22,8 @@ export default function EmbeddedMaintenance({ basePath, apiBase, ...pageProps }:
   useEffect(() => { if (apiBase) setMaintenanceApiBase(apiBase) }, [apiBase])
 
   return (
+    <MaintenanceBaseContext.Provider value={basePath}>
+    <div className="ms-embed wb-shell">
     <Routes>
       <Route element={<MaintenanceShell basePath={basePath} />}>
         <Route index element={<MonitorPage {...pageProps} />} />
@@ -32,5 +35,7 @@ export default function EmbeddedMaintenance({ basePath, apiBase, ...pageProps }:
         <Route path=":taskId" element={<MaintenanceTaskDetail {...pageProps} />} />
       </Route>
     </Routes>
+    </div>
+    </MaintenanceBaseContext.Provider>
   )
 }
