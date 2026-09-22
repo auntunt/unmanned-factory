@@ -625,7 +625,13 @@ def _dispatch_legacy(args, tasks, actor: dict) -> dict:
         return {'tasks': items}
 
     if cmd == 'show':
-        return tasks.get(args.task_id, actor=actor)
+        # Same enriched view the page reads (blocking reason, pending plan and
+        # questions, allowed actions), not the bare port view.
+        from factory.control.maintenance_routes import task_view
+        from factory.control.maintenance_subsystem import MaintenanceSubsystem
+        svc = _service_cache['svc']
+        return task_view(svc.store, MaintenanceSubsystem(svc, tasks),
+                         tasks.get(args.task_id, actor=actor))
 
     if cmd == 'events':
         evts = tasks.events(args.task_id, actor=actor, after=args.after)

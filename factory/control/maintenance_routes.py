@@ -110,6 +110,38 @@ def _pending_questions(store, execution_id) -> list:
     return list((run.get('plan') or {}).get('questions') or [])
 
 
+def task_view(store, subsystem, view) -> dict:
+    """The task现场 view every surface returns: HTTP and CLI read the same object."""
+    # Supplements are part of what the task现场 must explain, and they have
+    # to survive a refresh, so they travel with the task rather than only in
+    # the reply to the POST that created them.
+    view['supplements'] = [{**s, 'state': _state(s)}
+                           for s in _supplements(store, view['execution_id'])]
+    view['resumable'] = _resumable(store, view['execution_id'], view['status'])
+    view['pending_plan'] = _pending_plan(store, view['execution_id'])
+    view['pending_questions'] = _pending_questions(store, view['execution_id'])
+    if view['pending_questions'] and (view['blocking_reason'] or {}).get('kind') in (None, 'unknown'):
+        # Answering is not resuming: a run stopped on a question needs the
+        # answer, and 「继续执行」 would only push it back at the same gate.
+        view['blocking_reason'] = {
+            'kind': 'clarification.requested',
+            'message': '模型在动手前提出了需要确认的问题，回答后才会继续',
+            'event': None}
+    if view['pending_plan'] and (view['blocking_reason'] or {}).get('kind') == 'unknown':
+        # The port only cites events it already knows as blocking, and a plan
+        # awaiting approval is not one of them. Saying "no citable reason"
+        # while the plan sits right there teaches the reader to ignore the
+        # field, so the gate names itself.
+        view['blocking_reason'] = {
+            'kind': 'approval.required',
+            'message': '计划已就绪，等待人工批准后才会开始改动',
+            'event': None}
+    # What the caller may do now, from the execution's real state. The page
+    # renders only these; there is no pause because the executor has none.
+    view['actions'] = subsystem.task_actions(view)
+    return view
+
+
 def router(store, svc):
     from factory.control.issue_maintenance_webuddy import tasks_for
 
@@ -179,35 +211,7 @@ def router(store, svc):
 
     @api.get('/tasks/{task_id}')
     def get_task(task_id: str, request: Request):
-        view = tasks.get(task_id, actor=_actor(request))
-        # Supplements are part of what the task现场 must explain, and they have
-        # to survive a refresh, so they travel with the task rather than only in
-        # the reply to the POST that created them.
-        view['supplements'] = [{**s, 'state': _state(s)}
-                               for s in _supplements(store, view['execution_id'])]
-        view['resumable'] = _resumable(store, view['execution_id'], view['status'])
-        view['pending_plan'] = _pending_plan(store, view['execution_id'])
-        view['pending_questions'] = _pending_questions(store, view['execution_id'])
-        if view['pending_questions'] and (view['blocking_reason'] or {}).get('kind') in (None, 'unknown'):
-            # Answering is not resuming: a run stopped on a question needs the
-            # answer, and 「继续执行」 would only push it back at the same gate.
-            view['blocking_reason'] = {
-                'kind': 'clarification.requested',
-                'message': '模型在动手前提出了需要确认的问题，回答后才会继续',
-                'event': None}
-        if view['pending_plan'] and (view['blocking_reason'] or {}).get('kind') == 'unknown':
-            # The port only cites events it already knows as blocking, and a plan
-            # awaiting approval is not one of them. Saying "no citable reason"
-            # while the plan sits right there teaches the reader to ignore the
-            # field, so the gate names itself.
-            view['blocking_reason'] = {
-                'kind': 'approval.required',
-                'message': '计划已就绪，等待人工批准后才会开始改动',
-                'event': None}
-        # What the caller may do now, from the execution's real state. The page
-        # renders only these; there is no pause because the executor has none.
-        view['actions'] = subsystem.task_actions(view)
-        return view
+        return task_view(store, subsystem, tasks.get(task_id, actor=_actor(request)))
 
     @api.get('/tasks/{task_id}/events')
     def task_events(task_id: str, request: Request, after: int = 0):

@@ -387,3 +387,14 @@ def test_first_cli_command_seeds_runtime_settings_from_environment(env, capsys, 
     profiles = RuntimeSettings(Store(env.db)).get()['profiles']
     assert {p['provider'] for p in profiles.values()} == {'claude'}
     assert {p['model'] for p in profiles.values()} == {'claude-sonnet-5'}
+
+
+def test_show_returns_the_same_enriched_view_as_the_page(env, capsys):
+    _run(env, capsys, 'init')
+    pid = _ready_project(env, capsys)
+    receipt = _run(env, capsys, 'submit', '--project', pid, '--text', '同一视图',
+                   '--idempotency-key', 'show-view-0001')
+    shown = _run(env, capsys, 'show', receipt['task_id'])
+    for key in ('actions', 'pending_plan', 'pending_questions', 'supplements', 'resumable'):
+        assert key in shown
+    assert 'cancel' in shown['actions'] and 'pause' not in shown['actions']
