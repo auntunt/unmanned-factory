@@ -276,7 +276,7 @@ def _wait_for(fn, deadline_s=15, interval=0.1):
     return result[0]
 
 
-def test_runtime_executes_the_queue_and_export_writes_a_patch(env, capsys, tmp_path):
+def test_runtime_executes_the_queue_and_export_writes_a_patch(env, capsys, tmp_path, monkeypatch):
     """submit (enqueues) → runtime executes the plan → approve → runtime
     finishes it → export writes a real .patch.
 
@@ -292,6 +292,11 @@ def test_runtime_executes_the_queue_and_export_writes_a_patch(env, capsys, tmp_p
     ``repo adopt-checks`` (which only offers checks the repo probe actually
     detected, and this repo's stack does not include one named ``greeting``).
     """
+    # A real install configures its model profiles (INSTALL.md); the first data
+    # domain write seeds them from the environment.
+    for role in ('PLANNER', 'CHEAP', 'STANDARD', 'STRONG'):
+        monkeypatch.setenv(f'FACTORY_{role}_PROVIDER', 'codex')
+        monkeypatch.setenv(f'FACTORY_{role}_MODEL', 'test')
     _run(env, capsys, 'init')
     pid = _ready_project(env, capsys)
     store = Store(env.db)
@@ -359,3 +364,26 @@ def test_events_follow_streams_ndjson_until_terminal(env, capsys):
     streamed = lines[:-1]
     assert streamed and all('sequence' in e and 'kind' in e for e in streamed)
     assert streamed[0]['kind'] == 'user.message'
+
+
+def test_version_and_manifest_need_no_data_domain(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv('FACTORY_CONTROL_DATA', str(tmp_path / 'absent'))
+    assert maintenance_cli.main(['version']) == 0
+    assert json.loads(capsys.readouterr().out)['contract_version'] == 'maintenance-subsystem/1'
+    assert maintenance_cli.main(['manifest']) == 0
+    assert json.loads(capsys.readouterr().out)['supports_pause'] is False
+    assert not (tmp_path / 'absent').exists()
+
+
+def test_first_cli_command_seeds_runtime_settings_from_environment(env, capsys, monkeypatch):
+    """The CLI must not persist placeholder model profiles the runtime will execute with."""
+    for role in ('PLANNER', 'CHEAP', 'STANDARD', 'STRONG'):
+        monkeypatch.setenv(f'FACTORY_{role}_PROVIDER', 'claude')
+        monkeypatch.setenv(f'FACTORY_{role}_MODEL', 'claude-sonnet-5')
+    _run(env, capsys, 'init')
+    _run(env, capsys, 'repo', 'add', '--source', str(env.repo), '--name', 'Sample')
+    from factory.control.runtime import RuntimeSettings
+    from factory.control.store import Store
+    profiles = RuntimeSettings(Store(env.db)).get()['profiles']
+    assert {p['provider'] for p in profiles.values()} == {'claude'}
+    assert {p['model'] for p in profiles.values()} == {'claude-sonnet-5'}

@@ -109,11 +109,13 @@ def _make_service(store):
     if 'svc' in _service_cache:
         return _service_cache['svc']
     from factory.control.service import Service
-    svc = Service(
-        store, runner=_NeverRuns(),
-        profiles={role: {'provider': 'codex', 'model': 'cli-enqueue'}
-                  for role in ('planner', 'cheap', 'standard', 'strong')},
-    )
+    # No ``profiles`` argument: on a fresh database the first Service to open it
+    # seeds the persisted runtime settings, and the runtime that later executes
+    # the queue reads them. A placeholder here once became the real model config
+    # (codex/"cli-enqueue") of every standalone install whose first command was
+    # a CLI call. The environment is the only honest seed; this runner never
+    # calls a model either way.
+    svc = Service(store, runner=_NeverRuns())
     # Do not start the scheduler thread or acquire the worker lock.
     # The CLI is a single-shot invocation; it enqueues to the durable
     # queue and exits.  Whoever holds the executor lock picks the job up.
@@ -331,6 +333,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == 'init':
         return _init(args)
+    # Static facts about this install: no data domain needed, none touched.
+    if args.command in ('version', 'manifest'):
+        from factory.control.maintenance_subsystem import (
+            CONTRACT_VERSION, VERSION, MaintenanceSubsystem)
+        print(json.dumps({'version': VERSION, 'contract_version': CONTRACT_VERSION}
+                         if args.command == 'version' else MaintenanceSubsystem.manifest(),
+                         ensure_ascii=False))
+        return 0
 
     db_path = _resolve_db(args)
     if not db_path.is_file():
