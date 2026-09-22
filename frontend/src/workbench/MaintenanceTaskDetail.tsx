@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { request, WorkspaceApiError } from '../workspace/api'
 import { ErrorNotice, PageHeader, errorText, formatDate } from './ui'
 import ClarificationPanel from './ClarificationPanel'
 import type { PageProps } from './ui'
 import { CopyValue, LoadingCard, ListTime } from './presentation'
+import { maintenanceApi } from '../maintenance/api'
 import type {
   MaintenanceTaskView,
   MaintenanceEvent,
@@ -184,6 +185,55 @@ function FollowUpForm({ taskId, csrfToken, onUnauthorized, onSubmitted }: {
   )
 }
 
+// --- Post-delivery feedback (new revision) ---
+
+function FeedbackForm({ taskId, csrfToken, onUnauthorized, onCreated }: {
+  taskId: string
+  csrfToken: string
+  onUnauthorized: () => void
+  onCreated: (newTaskId: string) => void
+}) {
+  const [content, setContent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (busy || !content.trim()) return
+    setError(null)
+    setBusy(true)
+    try {
+      const result = await maintenanceApi.feedback(taskId, content.trim(), { csrfToken, onUnauthorized })
+      onCreated(result.task_id)
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form className="wb-form" onSubmit={submit} data-testid="feedback-form">
+      <label>
+        后续反馈
+        <textarea
+          rows={3}
+          value={content}
+          onChange={e => setContent(e.target.value)}
+          placeholder="交付或失败后，需要继续处理的后续反馈"
+          disabled={busy}
+        />
+      </label>
+      {error && <ErrorNotice message={error} />}
+      <div className="wb-form-actions">
+        <button className="wb-button wb-button-primary" disabled={busy || !content.trim()}>
+          {busy ? '提交中…' : '提交反馈，创建修订任务'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
 // --- Event log ---
 
 function EventLog({ events }: { events: MaintenanceEvent[] }) {
@@ -224,6 +274,9 @@ function EventLog({ events }: { events: MaintenanceEvent[] }) {
 
 export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: PageProps) {
   const { taskId } = useParams<{ taskId: string }>()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const revisionNotice = (location.state as { revisionNotice?: string } | null)?.revisionNotice ?? null
   const [task, setTask] = useState<MaintenanceTaskView | null>(null)
   const [events, setEvents] = useState<MaintenanceEvent[]>([])
   const [loading, setLoading] = useState(true)
@@ -317,8 +370,27 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
 
   if (!taskId) return <ErrorNotice message="缺少任务编号。" />
 
+  // 后端在 `actions` 里给出这一刻允许的动作子集；给了就只按它渲染，不叠加旧的状态
+  // 推断。没给（旧后端）时退回原来按状态/字段判断的行为，保持兼容。永远不出现 pause：
+  // 执行器不支持原地暂停。
+  const actions = task?.actions
+  const allow = (key: string, fallback: boolean) => (actions ? actions.includes(key) : fallback)
+  const showApprove = Boolean(task?.pending_plan) && allow('approve', true)
+  const showResume = Boolean(task && canResume(task.status, task.resumable, task.pending_questions)) && allow('resume', true)
+  const showCancel = Boolean(task && canCancel(task.status)) && allow('cancel', true)
+  const showExport = Boolean(task?.delivery) && allow('export', true)
+  const showAnswer = allow('answer', true)
+  const showSupplement = allow('supplement', true)
+  const showFeedback = allow('feedback', false)
+
   return (
     <div className="wb-page">
+      <p className="wb-back-link" style={{ marginBottom: 12 }}>
+        <Link to="/maintenance">← 返回运维监控</Link>
+      </p>
+      {revisionNotice && (
+        <div className="wb-notice" role="status" data-testid="revision-notice">{revisionNotice}</div>
+      )}
       <PageHeader
         title={task ? task.issue.title || `任务 ${task.task_id.slice(0, 8)}` : '维护任务'}
         description={task ? `任务 ${task.task_id}` : undefined}
@@ -327,7 +399,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
             <button className="wb-button wb-button-secondary" onClick={() => load(true)}>
               刷新
             </button>
-            {task?.pending_plan && (
+            {showApprove && (
               <button
                 className="wb-button wb-button-primary"
                 disabled={actionBusy}
@@ -336,7 +408,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
                 {actionBusy ? '操作中…' : '批准计划'}
               </button>
             )}
-            {task && canResume(task.status, task.resumable, task.pending_questions) && (
+            {showResume && (
               <button
                 className="wb-button wb-button-primary"
                 disabled={actionBusy}
@@ -345,7 +417,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
                 {actionBusy ? '操作中…' : '继续执行'}
               </button>
             )}
-            {task && canCancel(task.status) && (
+            {showCancel && (
               <button
                 className="wb-button wb-button-secondary"
                 disabled={actionBusy}
@@ -362,7 +434,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
       {error && <ErrorNotice message={error} />}
       {actionError && <ErrorNotice message={actionError} />}
 
-      {task && (
+      {task && showAnswer && (
         <ClarificationPanel<MaintenanceTaskView>
           questions={task.pending_questions ?? []}
           endpoint={`/api/v2/maintenance/tasks/${encodeURIComponent(taskId ?? '')}/clarify`}
@@ -502,7 +574,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
                 <span className="wb-eyebrow">交付</span>
                 <h2>交付物与检查</h2>
               </div>
-              {task.delivery && (
+              {showExport && (
                 <button className="wb-button wb-button-secondary" onClick={() => void doExport()}>
                   导出回执
                 </button>
@@ -575,6 +647,7 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
       )}
 
       {/* Follow-up supplement */}
+          {showSupplement && (
           <section className="wb-card" aria-label="补充说明" data-testid="followup-section">
             <div className="wb-card-head">
               <div>
@@ -601,6 +674,30 @@ export default function MaintenanceTaskDetail({ csrfToken, onUnauthorized }: Pag
               />
             </div>
           </section>
+          )}
+
+          {/* Post-delivery feedback → new revision task */}
+          {showFeedback && (
+          <section className="wb-card" aria-label="后续反馈" data-testid="feedback-section">
+            <div className="wb-card-head">
+              <div>
+                <span className="wb-eyebrow">反馈</span>
+                <h2>后续反馈</h2>
+                <p>已交付或失败后仍需处理的诉求，提交后会创建一个新修订任务，原任务保留不变。</p>
+              </div>
+            </div>
+            <div style={{ padding: '0 20px 20px' }}>
+              <FeedbackForm
+                taskId={task.task_id}
+                csrfToken={csrfToken}
+                onUnauthorized={onUnauthorized}
+                onCreated={newTaskId => navigate(`/maintenance/${encodeURIComponent(newTaskId)}`, {
+                  state: { revisionNotice: '已创建修订任务，原任务保留' },
+                })}
+              />
+            </div>
+          </section>
+          )}
 
           {/* Events */}
           <section className="wb-card" aria-label="事件日志">

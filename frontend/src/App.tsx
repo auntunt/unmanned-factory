@@ -1,7 +1,7 @@
 import Icon from './workbench/Icon'
 import CapabilityCenter from './workbench/CapabilityCenter'
 import { LegacyCapabilityRedirect } from './workbench/capability-links'
-import { lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 
@@ -12,6 +12,7 @@ import ProjectsPage from './workbench/ProjectsPage'
 import ProjectPage from './workbench/ProjectPage'
 import RunsPage from './workbench/RunsPage'
 import MaintenanceTasksPage from './workbench/MaintenanceTasksPage'
+import MonitorPage from './maintenance/MonitorPage'
 import ModernizationPage from './workbench/ModernizationPage'
 import PluginsSettings from './workbench/PluginsSettings'
 import CostsPage from './workbench/CostsPage'
@@ -35,6 +36,11 @@ const MaintenanceTaskDetail = lazy(() => import('./workbench/MaintenanceTaskDeta
 const AdaptationPage = lazy(() => import('./workbench/AdaptationPage'))
 const AdaptationTaskDetail = lazy(() => import('./workbench/AdaptationTaskDetail'))
 const ModernizationSliceDetail = lazy(() => import('./workbench/ModernizationSliceDetail'))
+const MaintenanceShell = lazy(() => import('./maintenance/MaintenanceShell'))
+const ReposPage = lazy(() => import('./maintenance/ReposPage'))
+const IntakePage = lazy(() => import('./maintenance/IntakePage'))
+const AboutPage = lazy(() => import('./maintenance/AboutPage'))
+const EmbeddedMaintenance = lazy(() => import('./maintenance/EmbeddedMaintenance'))
 
 interface AuthResponse {
   user: User
@@ -113,8 +119,15 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="projects" element={<ProjectsPage {...pageProps} />} />
       <Route path="projects/:projectId" element={<ProjectPage {...pageProps} />} />
       <Route path="runs" element={<RunsPage {...pageProps} />} />
-      <Route path="maintenance" element={<MaintenanceTasksPage {...pageProps} />} />
-      <Route path="maintenance/:taskId" element={<MaintenanceTaskDetail {...pageProps} />} />
+      <Route path="maintenance" element={<MaintenanceShell />}>
+        <Route index element={<MonitorPage {...pageProps} />} />
+        <Route path="repos" element={<ReposPage {...pageProps} />} />
+        <Route path="repos/:projectId" element={<ReposPage {...pageProps} />} />
+        <Route path="intake" element={<IntakePage {...pageProps} />} />
+        <Route path="about" element={<AboutPage {...pageProps} />} />
+        <Route path="tasks" element={<MaintenanceTasksPage {...pageProps} />} />
+        <Route path=":taskId" element={<MaintenanceTaskDetail {...pageProps} />} />
+      </Route>
       <Route path="adaptation" element={<AdaptationPage {...pageProps} />} />
       <Route path="adaptation/:taskId" element={<AdaptationTaskDetail {...pageProps} />} />
       <Route path="modernization" element={<ModernizationPage {...pageProps} />} />
@@ -132,5 +145,15 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
 }
 
 export default function App() {
-  return <BrowserRouter><AuthGate>{(session, logout) => <RoutedWorkbench session={session} logout={logout} />}</AuthGate></BrowserRouter>
+  return <BrowserRouter><AuthGate>{(session, logout) => (
+    <Routes>
+      {/* Embedding entry: same maintenance routes, no AppShell chrome, still behind AuthGate. */}
+      <Route path="embed/maintenance/*" element={
+        <Suspense fallback={<div className="cv-loading"><span className="cv-spinner" />正在打开…</div>}>
+          <EmbeddedMaintenance basePath="/embed/maintenance" csrfToken={session.csrf_token} onUnauthorized={logout} user={session.user} />
+        </Suspense>
+      } />
+      <Route path="/*" element={<RoutedWorkbench session={session} logout={logout} />} />
+    </Routes>
+  )}</AuthGate></BrowserRouter>
 }

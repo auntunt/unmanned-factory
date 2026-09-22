@@ -1,0 +1,69 @@
+/* 运维维护子系统：外壳、代码库、需求接入页面样式。
+ * 复用主工作台的米白/墨绿与深色 token（见 workbench.css / app-shell.css），
+ * 这里只补子系统特有的布局，不重定义颜色。 */
+
+.ms-shell { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+.ms-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.ms-title-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ms-icon { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 9px; background: var(--wb-teal-soft); color: var(--wb-teal-dark); flex: 0 0 auto; }
+.ms-icon svg { width: 20px; height: 20px; }
+.ms-breadcrumb { display: flex; align-items: center; gap: 6px; color: var(--wb-faint); font-size: 11px; }
+.ms-crumb-sep { opacity: .6; }
+.ms-header h1 { margin: 2px 0 0; font-size: 22px; letter-spacing: -.02em; line-height: 1.25; }
+.ms-secondary-links { display: flex; align-items: center; gap: 14px; }
+.ms-secondary-link { color: var(--wb-muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ms-secondary-link:hover { color: var(--wb-teal-dark); }
+
+.ms-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--wb-border); flex-wrap: wrap; }
+.ms-tab { display: inline-flex; align-items: center; padding: 9px 14px; border-radius: 8px 8px 0 0; color: var(--wb-muted); font-size: 13px; font-weight: 650; position: relative; top: 1px; }
+.ms-tab:hover { color: var(--wb-teal-dark); }
+.ms-tab.is-active { color: var(--wb-teal-dark); border-bottom: 2px solid var(--wb-teal); }
+
+.ms-content { min-width: 0; }
+
+/* 通用：说明卡、要点列表 */
+.ms-note { border-left: 3px solid var(--wb-border-strong); background: var(--color-surface); padding: 12px 14px; color: var(--wb-muted); font-size: 12px; line-height: 1.6; border-radius: 0 8px 8px 0; }
+.ms-two-col { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.ms-side-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ms-side-list li { display: flex; gap: 8px; color: var(--wb-muted); font-size: 12px; line-height: 1.55; }
+.ms-side-list li::before { content: '•'; color: var(--wb-teal); flex: 0 0 auto; }
+
+.ms-finding-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--color-border); padding: 10px 0; }
+.ms-finding-row:first-child { border-top: 0; padding-top: 0; }
+.ms-finding-row strong { font-size: 12px; font-weight: 650; }
+.ms-finding-row span.ms-finding-msg { display: block; margin-top: 2px; color: var(--wb-faint); font-size: 11px; }
+
+.ms-stack-list, .ms-check-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ms-stack-list li, .ms-check-list li { border: 1px solid var(--color-border); border-radius: 7px; padding: 9px 11px; font-size: 12px; }
+.ms-stack-list li strong, .ms-check-list li strong { display: block; margin-bottom: 3px; font-size: 12px; }
+.ms-stack-list li span, .ms-check-list li span { color: var(--wb-faint); font-size: 11px; }
+.ms-check-argv { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--wb-muted); }
+
+.ms-repo-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border-top: 1px solid var(--color-border); padding: 13px 0; }
+.ms-repo-row:first-child { border-top: 0; padding-top: 0; }
+.ms-repo-row strong { display: block; font-size: 13px; }
+.ms-repo-row small { display: block; margin-top: 3px; color: var(--wb-faint); font-size: 11px; overflow-wrap: anywhere; }
+
+.ms-token-box { display: flex; align-items: center; gap: 8px; border: 1px dashed var(--wb-border-strong); border-radius: 7px; background: var(--color-surface); padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.ms-curl { background: var(--color-bg); border-radius: 7px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; line-height: 1.6; overflow-x: auto; white-space: pre; }
+
+.ms-source-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--color-border); padding: 11px 0; flex-wrap: wrap; }
+.ms-source-row:first-child { border-top: 0; padding-top: 0; }
+.ms-source-row strong { font-size: 12px; }
+.ms-source-row small { display: block; color: var(--wb-faint); font-size: 10px; margin-top: 2px; }
+
+@media (max-width: 920px) {
+  .ms-two-col { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 700px) {
+  .ms-header { flex-direction: column; align-items: flex-start; }
+  .ms-tabs { overflow-x: auto; flex-wrap: nowrap; }
+}
+
+@media (max-width: 390px) {
+  .ms-header h1 { font-size: 19px; }
+  .ms-repo-row { grid-template-columns: 1fr; }
+  .ms-repo-row > *:last-child { justify-self: flex-start; }
+}

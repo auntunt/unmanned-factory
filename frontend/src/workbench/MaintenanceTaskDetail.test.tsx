@@ -265,3 +265,73 @@ describe('模型提问时的回答入口', () => {
     expect(screen.queryByTestId('clarification-panel')).toBeNull()
   })
 })
+
+describe('后端给出的 actions 子集控制动作渲染', () => {
+  it('给了 actions 时只按它渲染，不叠加旧的状态推断（waiting 但 actions 只放 cancel）', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return { ...waiting, actions: ['cancel'] }
+    })
+    renderDetail(waiting.task_id)
+    await waitFor(() => expect(screen.getByTestId('blocking-reason')).toBeTruthy())
+    // waiting 状态原本会显示「继续执行」，但 actions 没给 resume，就不该出现。
+    expect(screen.queryByText('继续执行')).toBeNull()
+    expect(screen.getByText('取消任务')).toBeTruthy()
+    expect(screen.queryByTestId('feedback-section')).toBeNull()
+  })
+
+  it('没有 actions 字段时保持原来按状态判断的行为（向后兼容）', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      const { actions: _drop, ...rest } = waiting as MaintenanceTaskView & { actions?: string[] }
+      return rest
+    })
+    renderDetail(waiting.task_id)
+    await waitFor(() => expect(screen.getByTestId('blocking-reason')).toBeTruthy())
+    expect(screen.getByText('继续执行')).toBeTruthy()
+    expect(screen.getByText('取消任务')).toBeTruthy()
+  })
+
+  it('actions 包含 feedback 时才出现后续反馈入口，提交后创建修订任务并跳转', async () => {
+    const withFeedback = { ...delivered, actions: ['feedback'] }
+    const revised = { ...delivered, task_id: 'mt-revision-999', actions: [] as string[] }
+    api.mockImplementation(async (path, options) => {
+      const url = String(path)
+      if (url.endsWith('/events')) return { events: [] }
+      if (options?.method === 'POST' && url.endsWith('/feedback')) return { task_id: 'mt-revision-999' }
+      if (url.includes('mt-revision-999')) return revised
+      return withFeedback
+    })
+    renderDetail(delivered.task_id)
+    await waitFor(() => expect(screen.getByTestId('feedback-section')).toBeTruthy())
+
+    fireEvent.change(screen.getByPlaceholderText(/后续反馈/), { target: { value: '交付后还有一个问题' } })
+    await act(async () => { fireEvent.click(screen.getByText('提交反馈，创建修订任务')) })
+
+    await waitFor(() => expect(screen.getByTestId('revision-notice')).toBeTruthy())
+    expect(screen.getByTestId('revision-notice').textContent).toContain('已创建修订任务，原任务保留')
+    const posted = api.mock.calls.find(c => c[1]?.method === 'POST' && String(c[0]).endsWith('/feedback'))
+    expect(posted).toBeTruthy()
+    expect(posted![1]?.body).toEqual({ content: '交付后还有一个问题' })
+  })
+
+  it('delivered 任务默认（无 actions）不显示后续反馈入口', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return delivered
+    })
+    renderDetail(delivered.task_id)
+    await waitFor(() => expect(screen.getByText('已交付')).toBeTruthy())
+    expect(screen.queryByTestId('feedback-section')).toBeNull()
+  })
+
+  it('返回运维监控的链接始终存在', async () => {
+    api.mockImplementation(async (path) => {
+      if (String(path).endsWith('/events')) return { events: [] }
+      return delivered
+    })
+    renderDetail(delivered.task_id)
+    await waitFor(() => expect(screen.getByText('已交付')).toBeTruthy())
+    expect(screen.getByText('← 返回运维监控').closest('a')?.getAttribute('href')).toBe('/maintenance')
+  })
+})

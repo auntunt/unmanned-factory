@@ -156,6 +156,9 @@ export interface MaintenanceTaskView {
   /** 停在计划批准节点时，待批准的计划本身。 */
   pending_plan?: MaintenancePendingPlan | null
   created_at: string
+  /** 后端允许的动作子集：["answer","approve","supplement","resume","cancel","feedback","export"]。
+   *  缺省（旧后端）时按状态推断，保持向后兼容；不存在 "pause"。 */
+  actions?: string[]
 }
 
 /** The method version a new task binds to, as the server reads it from the pack. */
