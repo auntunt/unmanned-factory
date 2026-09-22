@@ -4,7 +4,7 @@ import type { IconName } from '../workbench/Icon'
 /** Single source of truth for global navigation, route ownership, titles,
  *  breadcrumbs and in-page tabs. The shell and every page read from here so
  *  there is never a second menu to maintain. */
-export type NavKey = 'start' | 'history' | 'agents' | 'engineering' | 'settings'
+export type NavKey = 'start' | 'history' | 'agents' | 'engineering' | 'settings' | 'modernization' | 'maintenance' | 'adaptation'
 export interface NavItem { key: NavKey; to: string; label: string; icon: IconName }
 
 export const PRIMARY_NAV: NavItem[] = [
@@ -13,13 +13,20 @@ export const PRIMARY_NAV: NavItem[] = [
   { key: 'agents', to: '/agents', label: '职能体', icon: 'agent' },
   { key: 'engineering', to: '/overview', label: '工程总览', icon: 'project' },
 ]
+// Business workspaces stay reachable when disabled so existing history remains accessible.
+// Creation/continuation permissions remain enforced by each plugin's server-side gate.
+export const BUSINESS_PLUGIN_NAV: NavItem[] = [
+  { key: 'modernization', to: '/modernization', label: '信创化改造', icon: 'modules' },
+  { key: 'maintenance', to: '/maintenance', label: '运维维护', icon: 'runs' },
+  { key: 'adaptation', to: '/adaptation', label: '接口适配', icon: 'workflow' },
+]
 export const SETTINGS_NAV: NavItem = { key: 'settings', to: '/settings', label: '设置', icon: 'settings' }
 
 export interface GroupTab { to: string; label: string; end?: boolean; adminOnly?: boolean }
 export const GROUP_TABS: Record<'engineering' | 'agents' | 'settings', GroupTab[]> = {
   engineering: [
     { to: '/overview', label: '总览', end: true }, { to: '/projects', label: '项目' },
-    { to: '/runs', label: '运行记录', end: true }, { to: '/maintenance', label: '维护任务', end: true }, { to: '/adaptation', label: '接口适配', end: true }, { to: '/modernization', label: '信创化改造', end: true }, { to: '/costs', label: '用量与预算', adminOnly: true }, { to: '/team', label: '团队', adminOnly: true },
+    { to: '/runs', label: '运行记录', end: true }, { to: '/costs', label: '用量与预算', adminOnly: true }, { to: '/team', label: '团队', adminOnly: true },
   ],
   // 能力围绕某个职能体管理，不再有并列的「能力库」页签。旧能力页面仍可直达，
   // 但作为无主导航的兼容次级页面，归属在「职能体」下。
@@ -58,15 +65,21 @@ export function resolveRoute(pathname: string): Resolved {
   // 面包屑也回到职能体目录——不重定向，查询参数与来源上下文原样保留。
   if (is('/ability-center/packs/:packId')) return { activeKey: 'agents', title: '职能包详情', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '职能包' }] }
   if (is('/ability-center') || is('/modules') || is('/capabilities')) return { activeKey: 'agents', title: '能力资产', group: 'agents', activeTab: '/agents', showTabs: false, breadcrumb: [{ label: '职能体', to: '/agents' }, { label: '能力资产' }] }
+  for (const plugin of BUSINESS_PLUGIN_NAV) {
+    const detail = is(plugin.to + '/:id')
+    if (is(plugin.to) || detail) return {
+      activeKey: plugin.key, title: plugin.label + (detail ? '详情' : ''),
+      usesWorkTitle: detail,
+      breadcrumb: [
+        { label: '业务插件' },
+        { label: plugin.label, ...(detail ? { to: plugin.to } : {}) },
+        ...(detail ? [{ label: '详情' }] : []),
+      ],
+    }
+  }
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
   if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
   if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }
-  if (is('/maintenance')) return { activeKey: 'engineering', title: '维护任务', group: 'engineering', activeTab: '/maintenance', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '维护任务' }] }
-  if (is('/maintenance/:taskId')) return { activeKey: 'engineering', title: '维护任务详情', usesWorkTitle: true, group: 'engineering', activeTab: '/maintenance', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '维护任务', to: '/maintenance' }, { label: '详情' }] }
-  if (is('/adaptation')) return { activeKey: 'engineering', title: '接口适配', group: 'engineering', activeTab: '/adaptation', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '接口适配' }] }
-  if (is('/adaptation/:taskId')) return { activeKey: 'engineering', title: '接口适配详情', usesWorkTitle: true, group: 'engineering', activeTab: '/adaptation', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '接口适配', to: '/adaptation' }, { label: '详情' }] }
-  if (is('/modernization')) return { activeKey: 'engineering', title: '信创化改造', group: 'engineering', activeTab: '/modernization', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '信创化改造' }] }
-  if (is('/modernization/:sliceId')) return { activeKey: 'engineering', title: '信创化改造详情', usesWorkTitle: true, group: 'engineering', activeTab: '/modernization', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '信创化改造', to: '/modernization' }, { label: '详情' }] }
   if (is('/runs')) return { activeKey: 'engineering', title: '运行记录', group: 'engineering', activeTab: '/runs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '运行记录' }] }
   if (is('/costs')) return { activeKey: 'engineering', title: '用量与预算', group: 'engineering', activeTab: '/costs', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '用量与预算' }] }
   if (is('/team')) return { activeKey: 'engineering', title: '团队', group: 'engineering', activeTab: '/team', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '团队' }] }

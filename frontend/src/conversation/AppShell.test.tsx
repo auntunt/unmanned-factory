@@ -88,3 +88,31 @@ it('closes the mobile drawer and releases the scroll lock when the viewport grow
   expect(document.body.style.overflow).toBe('')
   vi.unstubAllGlobals()
 })
+
+it('gives business list and detail routes their own sidebar selection and breadcrumbs', () => {
+  for (const [route, label] of [['modernization', '信创化改造'], ['maintenance', '运维维护'], ['adaptation', '接口适配']]) {
+    for (const path of ['/' + route, '/' + route + '/task-1']) {
+      cleanup(); shell(path)
+      const nav = screen.getByRole('navigation', { name: '业务插件' })
+      expect(within(nav).getByRole('link', { name: label }).getAttribute('aria-current')).toBe('page')
+      expect(screen.getByLabelText('工程总览').getAttribute('aria-current')).toBeNull()
+      expect(document.querySelector('.as-subnav')).toBeNull()
+      expect(resolveRoute(path).breadcrumb[0].label).toBe('业务插件')
+    }
+  }
+  cleanup(); shell('/overview')
+  const tabs = document.querySelector('.as-subnav') as HTMLElement
+  for (const label of ['维护任务', '运维维护', '信创化改造', '接口适配']) expect(within(tabs).queryByText(label)).toBeNull()
+})
+
+it('keeps plugin links usable in collapsed navigation and closes the mobile drawer on selection', () => {
+  shell('/overview')
+  fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
+  expect(screen.getByRole('link', { name: '信创化改造' }).getAttribute('title')).toBe('信创化改造')
+  fireEvent.click(screen.getByRole('button', { name: '打开导航' }))
+  const drawer = document.querySelector('.as-drawer') as HTMLElement
+  expect(within(drawer).getByRole('navigation', { name: '业务插件' })).toBeTruthy()
+  fireEvent.click(within(drawer).getByRole('link', { name: '接口适配' }))
+  expect(document.querySelector('.as-drawer')).toBeNull()
+  expect(screen.getByRole('link', { name: '接口适配' }).getAttribute('aria-current')).toBe('page')
+})

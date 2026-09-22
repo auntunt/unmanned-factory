@@ -3,7 +3,7 @@ import { Link, Outlet, useLocation } from 'react-router-dom'
 import Icon from '../workbench/Icon'
 import { request } from '../workspace/api'
 import type { WorkbenchProps } from '../workbench/ui'
-import { PRIMARY_NAV, SETTINGS_NAV, GROUP_TABS, resolveRoute, type NavItem } from './nav-config'
+import { PRIMARY_NAV, BUSINESS_PLUGIN_NAV, SETTINGS_NAV, GROUP_TABS, resolveRoute, type NavItem } from './nav-config'
 import { WorkTitleContext } from './title-context'
 import './app-shell.css'
 
@@ -85,7 +85,13 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
     </Link>
   }
   const renderNav = (onNavigate?: () => void) => (
-    <nav className="as-nav" aria-label="主导航">{navItems.map(item => navLink(item, onNavigate))}</nav>
+    <div className="as-nav-scroll">
+      <nav className="as-nav" aria-label="主导航">{navItems.map(item => navLink(item, onNavigate))}</nav>
+      <nav className="as-nav as-plugin-nav" aria-label="业务插件">
+        <span className="as-plugin-heading" aria-hidden="true">业务插件</span>
+        {BUSINESS_PLUGIN_NAV.map(item => navLink(item, onNavigate))}
+      </nav>
+    </div>
   )
 
   const footer = (onNavigate?: () => void) => (
