@@ -84,6 +84,22 @@ describe('RelationCanvas 工作画布', () => {
     expect((screen.getByRole('button', { name: '定位选中' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('多行项目首次打开仍以可读的 100% 显示，只有主动选择适应视图才缩成总览', () => {
+    const base = sampleGraph()
+    const extra = Array.from({ length: 9 }, (_, i) => ({
+      id: `task:extra-${i}`, type: 'task' as const, label: `附加任务 ${i}`, sublabel: '等待',
+      status: 'pending', task_id: `extra-${i}`, project_id: 'proj-1',
+    }))
+    renderCanvas({ ...base, nodes: [...base.nodes, ...extra], edges: [
+      ...base.edges,
+      ...extra.map(n => ({ from: 'req:req-1', to: n.id, kind: 'creates' as const })),
+    ] }, { project: 'proj-1' })
+    expect(screen.getByText('100%')).toBeTruthy()
+    expect(screen.getByText('拖动画布查看后续阶段；“适应视图”用于总览。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '适应视图' }))
+    expect(screen.getByText('49%')).toBeTruthy()
+  })
+
   it('没有节点时显示空状态', () => {
     renderCanvas(sampleGraph({ nodes: [], edges: [] }))
     expect(screen.getByText('暂无可投影的对象')).toBeTruthy()

@@ -42,6 +42,10 @@
 .mn-event a { font-weight: 600; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .mn-event small { display: block; color: var(--wb-faint); font-size: 10px; margin-top: 3px; }
 
+.mn-project-row-action { display: inline-flex; align-items: center; margin-top: 7px; font-size: 11px; font-weight: 650; }
+.mn-project-row-action::after { content: '→'; margin-left: 5px; font-size: 13px; line-height: 1; }
+.mn-project-row-action:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 3px; }
+
 .mn-viewbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 
 /* 工程关系画布：颜色只表达状态语义（正常/需要人处理/受阻/进行中/无记录），类型用文字标签。 */
@@ -55,6 +59,7 @@
 .mn-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .mn-legend-item i { width: 10px; height: 10px; border-radius: 2px; background: var(--mn-tone, var(--wb-faint)); }
 .mn-legend-item i.mn-legend-dash { width: 18px; height: 0; border-top: 2px dashed var(--wb-faint); background: none; border-radius: 0; }
+.mn-canvas-usage { margin: 0 0 9px; color: var(--wb-faint); font-size: 11px; }
 
 .mn-tone-ok { --mn-tone: var(--wb-teal); }
 .mn-tone-attention { --mn-tone: var(--wb-amber, var(--color-warning)); }

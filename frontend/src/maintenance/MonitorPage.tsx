@@ -333,7 +333,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
                           <div className="wb-table-wrap">
                             <table className="wb-table">
                               <thead>
-                                <tr><th>代码库</th><th>接入状态</th><th>执行/等待</th><th>已交付</th><th>交付目标</th><th>服务状态</th><th>下一步</th></tr>
+                                <tr><th>代码库与下一步</th><th>接入状态</th><th>执行/等待</th><th>已交付</th><th>交付目标</th><th>服务状态</th></tr>
                               </thead>
                               <tbody>
                                 {overview.projects.map(row => <ProjectRowView key={row.project_id} row={row} href={mp(`/repos/${encodeURIComponent(row.project_id)}`)} />)}
@@ -410,14 +410,14 @@ function ProjectRowView({ row, href }: { row: ProjectRow; href: string }) {
       <td>
         <Link className="wb-table-link" to={href}>{row.name}</Link> <SyntheticBadge synthetic={row.synthetic} />
         <small>{row.repository}</small>
+        <Link className="wb-text-link mn-project-row-action" to={href}>{projectRowAction(row.repo_state)}</Link>
       </td>
-      {/* 状态只是状态，不兼任按钮；可点击的入口在最后一列。 */}
+      {/* 状态只是状态；下一步入口始终和项目名同列，不会藏在横向滚动的末端。 */}
       <td><span className="wb-status">{row.repo_state_label}</span></td>
       <td>{row.running} / {row.waiting}</td>
       <td>{row.delivered}</td>
       <td>{row.delivery_target}</td>
       <td>{serviceStatusLabel(row.service_status)}</td>
-      <td><Link className="wb-text-link" to={href}>{projectRowAction(row.repo_state)}</Link></td>
     </tr>
   )
 }

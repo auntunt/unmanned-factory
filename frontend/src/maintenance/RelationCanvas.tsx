@@ -221,6 +221,13 @@ export default function RelationCanvas({ graph, state, onStateChange }: {
     setPan({ x: 12, y: 12 })
   }
 
+  // Initial navigation keeps labels legible. A tall graph can still be seen in
+  // one frame via the explicit “适应视图” control, but that is a bird's-eye view.
+  function openReadableView() {
+    setScale(1)
+    setPan({ x: 12, y: 12 })
+  }
+
   function locateSelected() {
     const node = state.node ? nodeById.get(state.node) : undefined
     const el = canvasRef.current
@@ -230,14 +237,14 @@ export default function RelationCanvas({ graph, state, onStateChange }: {
     setPan({ x: el.clientWidth / 2 - (node.x + NODE_WIDTH / 2) * nextScale, y: el.clientHeight / 2 - (node.y + NODE_HEIGHT / 2) * nextScale })
   }
 
-  // Fit once per project/collapse/mode; coming back with a selected node centres on it instead.
+  // Open once per project/collapse/mode at a readable scale; a selected node is centred instead.
   const fittedFor = useRef<string | null>(null)
   useEffect(() => {
     const key = `${state.project}|${collapsed}|${state.mode}`
     if (fittedFor.current === key || laidOutNodes.length === 0 || state.mode !== 'canvas') return
     fittedFor.current = key
     if (state.node && nodeById.has(state.node)) locateSelected()
-    else fitView()
+    else openReadableView()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [laidOutNodes.length, state.project, collapsed, state.mode])
 
@@ -302,6 +309,7 @@ export default function RelationCanvas({ graph, state, onStateChange }: {
           {(Object.keys(TONE_LABEL) as NodeTone[]).map(t => <span key={t} className={`mn-legend-item mn-tone-${t}`}><i aria-hidden="true" />{TONE_LABEL[t]}</span>)}
           <span className="mn-legend-item"><i className="mn-legend-dash" aria-hidden="true" />虚线：目标或卡点，不是已发生的交付</span>
         </div>
+        {state.mode === 'canvas' && shown.nodes.length > 0 && <p className="mn-canvas-usage">拖动画布查看后续阶段；“适应视图”用于总览。</p>}
         {graph.truncated && <p className="mn-hint">任务较多，只显示最近的部分；请按项目筛选查看完整链路。</p>}
         {dense && state.collapsed === null && <p className="mn-hint">对象较多，已折叠方案/检查/交付阶段；选择项目或取消折叠可展开。</p>}
 
