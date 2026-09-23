@@ -205,3 +205,30 @@ describe('接入失败的仓库', () => {
     expect(await screen.findByText('分析中')).toBeTruthy()
   })
 })
+
+describe('没有检查命令的仓库详情', () => {
+  const bare: RepoView = { ...readyRepo, state: 'needs_input', state_label: '待补充', checks_configured: [],
+    needs: ['确认检查命令'], probe: { ...readyRepo.probe!, suggested_checks: [] } }
+
+  function renderDetail(user?: { id: number; username: string; role: 'admin' | 'member' }) {
+    return render(
+      <MemoryRouter initialEntries={['/maintenance/repos/proj-1']}>
+        <Routes><Route path="maintenance/repos/:projectId" element={<ReposPage csrfToken="csrf" onUnauthorized={noop} user={user as never} />} /></Routes>
+      </MemoryRouter>)
+  }
+
+  it('如实说明缺少配置；管理员得到真实配置入口，不出现采纳按钮', async () => {
+    api.repo.mockResolvedValue(bare)
+    renderDetail({ id: 1, username: 'a', role: 'admin' })
+    expect(await screen.findByText('尚未配置，也没有可建议的命令')).toBeTruthy()
+    expect(screen.getByRole('link', { name: '在项目设置里配置检查命令' }).getAttribute('href')).toBe('/projects/proj-1#project-checks')
+    expect(screen.queryByRole('button', { name: '采纳建议检查' })).toBeNull()
+  })
+
+  it('成员只看到需要管理员配置的说明，没有死链接', async () => {
+    api.repo.mockResolvedValue(bare)
+    renderDetail({ id: 2, username: 'm', role: 'member' })
+    expect(await screen.findByText(/请管理员在 webuddy 的项目设置中/)).toBeTruthy()
+    expect(screen.queryByRole('link', { name: '在项目设置里配置检查命令' })).toBeNull()
+  })
+})

@@ -138,3 +138,25 @@ describe('嵌入挂载', () => {
     }
   })
 })
+
+describe('MonitorPage 项目行下钻', () => {
+  const row = (id: string, state: 'needs_input' | 'failed' | 'ready', name: string) => ({
+    project_id: id, name, repository: 'org/r', repo_state: state, repo_state_label: state,
+    running: 0, waiting: 0, delivered: 0, delivery_target: '补丁', service_status: 'not_connected' })
+
+  it('项目名与下一步链接到仓库详情，状态徽标不是链接；嵌入前缀下仍留在嵌入路由', async () => {
+    const { MaintenanceBaseContext } = await import('./base-path')
+    for (const base of ['/maintenance', '/embed/maintenance']) {
+      mockFetchSequence([baseOverview({ projects: [row('p/1', 'needs_input', '待补充仓库'), row('p2', 'failed', '失败仓库'), row('p3', 'ready', '就绪仓库')] })])
+      render(<MaintenanceBaseContext.Provider value={base}><MemoryRouter><MonitorPage csrfToken="c" onUnauthorized={noop} /></MemoryRouter></MaintenanceBaseContext.Provider>)
+      const name = await screen.findByRole('link', { name: '待补充仓库' })
+      expect(name.getAttribute('href')).toBe(`${base}/repos/p%2F1`)
+      expect(screen.getByRole('link', { name: '查看待补充项' }).getAttribute('href')).toBe(`${base}/repos/p%2F1`)
+      expect(screen.getByRole('link', { name: '查看接入失败原因' }).getAttribute('href')).toBe(`${base}/repos/p2`)
+      expect(screen.getByRole('link', { name: '查看项目' }).getAttribute('href')).toBe(`${base}/repos/p3`)
+      expect(screen.getByText('needs_input').closest('a')).toBeNull()
+      expect(screen.getByRole('link', { name: '维护代码库' }).getAttribute('href')).toBe(`${base}/repos`)
+      cleanup()
+    }
+  })
+})

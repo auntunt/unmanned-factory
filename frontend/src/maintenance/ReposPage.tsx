@@ -204,8 +204,11 @@ function RepoList(props: PageProps) {
 
 // --- Detail ---
 
-function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { projectId: string }) {
+function RepoDetail({ csrfToken, onUnauthorized, projectId, user }: PageProps & { projectId: string }) {
   const mp = useMaintenancePath()
+  // Inside webuddy (not embedded) a link to the main project settings stays on this host.
+  const embedded = mp('') !== '/maintenance'
+  const isAdmin = user?.role !== 'member'
   const navigate = useNavigate()
   const [repo, setRepo] = useState<RepoView | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -343,6 +346,18 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
                   </ul>
                 </div>
               )}
+            </section>
+          )}
+
+          {repo.checks_configured.length === 0 && probe?.access.ok && probe.suggested_checks.length === 0 && (
+            <section className="wb-card" aria-label="尚无检查命令" style={{ marginTop: 18 }}>
+              <div className="wb-card-head"><div><span className="wb-eyebrow">检查命令</span><h2>尚未配置，也没有可建议的命令</h2></div></div>
+              <p>分析没有在仓库里识别出可直接建议的检查命令（例如测试或构建脚本）。没有检查命令时，维护任务的交付只能得到“未验证”结论，不能证明补丁可用。</p>
+              <p><strong>现在可以做的：</strong>
+                {isAdmin && !embedded
+                  ? <><Link className="wb-text-link" to={`/projects/${encodeURIComponent(repo.project_id)}#project-checks`}>在项目设置里配置检查命令</Link>，保存后回到这里点“重新分析”。</>
+                  : '请管理员在 webuddy 的项目设置中为这个仓库配置检查命令，然后回到这里重新分析。'}
+              </p>
             </section>
           )}
 

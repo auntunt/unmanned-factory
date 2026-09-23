@@ -208,6 +208,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
             <button type="button" className={`wb-button${view === 'grid' ? ' wb-button-primary' : ''}`} onClick={() => setView('grid')}>数字大屏</button>
             <button type="button" className={`wb-button${view === 'canvas' ? ' wb-button-primary' : ''}`} onClick={() => setView('canvas')}>工作画布</button>
             <button type="button" className="wb-button" onClick={toggleFullscreen}>全屏展示</button>
+            <Link className="wb-button" to={mp('/repos')}>维护代码库</Link>
           </div>
         )}
       />
@@ -304,10 +305,10 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
                           <div className="wb-table-wrap">
                             <table className="wb-table">
                               <thead>
-                                <tr><th>代码库</th><th>接入状态</th><th>执行/等待</th><th>已交付</th><th>交付目标</th><th>服务状态</th></tr>
+                                <tr><th>代码库</th><th>接入状态</th><th>执行/等待</th><th>已交付</th><th>交付目标</th><th>服务状态</th><th>下一步</th></tr>
                               </thead>
                               <tbody>
-                                {overview.projects.map(row => <ProjectRowView key={row.project_id} row={row} />)}
+                                {overview.projects.map(row => <ProjectRowView key={row.project_id} row={row} href={mp(`/repos/${encodeURIComponent(row.project_id)}`)} />)}
                               </tbody>
                             </table>
                           </div>
@@ -362,18 +363,27 @@ function attentionBadge(kind: AttentionKind): string {
   return ATTENTION_LABEL[kind]
 }
 
-function ProjectRowView({ row }: { row: ProjectRow }) {
+/** What the row's link says: the next thing to look at, from the repo's real state. */
+export function projectRowAction(state: ProjectRow['repo_state']): string {
+  if (state === 'needs_input') return '查看待补充项'
+  if (state === 'failed') return '查看接入失败原因'
+  return '查看项目'
+}
+
+function ProjectRowView({ row, href }: { row: ProjectRow; href: string }) {
   return (
     <tr>
       <td>
-        {row.name} <SyntheticBadge synthetic={row.synthetic} />
+        <Link className="wb-table-link" to={href}>{row.name}</Link> <SyntheticBadge synthetic={row.synthetic} />
         <small>{row.repository}</small>
       </td>
+      {/* 状态只是状态，不兼任按钮；可点击的入口在最后一列。 */}
       <td><span className="wb-status">{row.repo_state_label}</span></td>
       <td>{row.running} / {row.waiting}</td>
       <td>{row.delivered}</td>
       <td>{row.delivery_target}</td>
       <td>{serviceStatusLabel(row.service_status)}</td>
+      <td><Link className="wb-text-link" to={href}>{projectRowAction(row.repo_state)}</Link></td>
     </tr>
   )
 }
