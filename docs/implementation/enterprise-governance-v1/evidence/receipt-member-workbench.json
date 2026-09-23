@@ -1,0 +1,54 @@
+{
+  "actor": "member-sales",
+  "login": 200,
+  "at": "2026-09-23T04:57:34.609Z",
+  "precondition": "管理员已经 PUT /api/v3/team/members/3/projects 把 sales-crm 分配给 member-sales（既有团队接口）",
+  "probes": [
+    {
+      "url": "/api/v5/me/workspaces",
+      "status": 200,
+      "summary": {
+        "management": false
+      }
+    },
+    {
+      "url": "/api/v5/management/overview",
+      "status": 403,
+      "summary": "{\"detail\":\"你没有管理查看范围\"}"
+    },
+    {
+      "url": "/api/v2/projects",
+      "status": 200,
+      "summary": [
+        "sales-crm"
+      ]
+    },
+    {
+      "url": "/api/v2/runs",
+      "status": 200,
+      "summary": [
+        "9faf0f9b01e744ed813d344a743116b6"
+      ]
+    },
+    {
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2",
+      "status": 200,
+      "summary": "ok"
+    },
+    {
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2/conversation",
+      "status": 200,
+      "summary": "ok"
+    },
+    {
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2/events",
+      "status": 200,
+      "summary": "ok"
+    },
+    {
+      "url": "/api/v2/runs/3282a623654a496cb42eec44fbd5b057",
+      "status": 403,
+      "summary": "{\"detail\":\"你没有该运行的访问权限\"}"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "actor": "leader-rnd",
+  "at": "2026-09-23T04:58:04.843Z",
+  "after": "admin revoked 示例集团 / 研发部 via /management/org",
+  "probes": [
+    {
+      "url": "/api/v5/me/workspaces",
+      "status": 200,
+      "body": "{\"management\":false,\"admin\":false,\"scopes\":[],\"execution_note\":\"管理查看不包含执行、取消、批准或读取对话的权限；这些仍按项目分配与发起人判断。\"}"
+    },
+    {
+      "url": "/api/v5/management/overview",
+      "status": 403,
+      "body": "{\"detail\":\"你没有管理查看范围\"}"
+    },
+    {
+      "url": "/api/v5/management/projects/3b0b2c464c28413a8b3e7975d1e5e25e",
+      "status": 403,
+      "body": "{\"detail\":\"你没有管理查看范围\"}"
+    }
+  ]
+}

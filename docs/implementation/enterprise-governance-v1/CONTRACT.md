@@ -5,7 +5,7 @@
 ## 现状缺口（开工前核实）
 - 账号只有全局 `admin` / `member`（`users.role`）；成员靠 `team_projects` 获得项目**执行**权（`Governance._can_run`）。
 - 所有非 GET 请求默认只有 admin 能发，成员只有中间件白名单里的动作（`app.py` 中的 `boundary`）。
-- **既有通用 GET 接口对所有登录账号开放**（例如 `/api/v2/projects`、`/api/v2/runs`、`/api/v2/runs/{id}`、`/events`、`/conversation`），代码注释说明这是 "shared workspace"。本轮**没有改**这些接口：一来保证成员工作台不退化，二来收紧读权限是单独的产品决定。所以，组织范围约束的是 `/api/v5/management/*` 这个管理视图，**不是**跨部门的保密边界。见“限制”。
+- 开工时，既有通用 GET 接口对所有登录账号都开放（例如 `/api/v2/projects`、`/api/v2/runs/{id}`、`/events`、`/conversation`），跨部门数据可以从这些旧入口直接读出。本轮已按下文“旧入口读取收窄”补齐。
 
 ## 数据（存放在 users.db，与 team_projects/team_audit 同库；只新建表，不改旧表）
 - `org_units(id, name, kind∈company|department|group, parent_id, created_at)`：唯一顶层（部分唯一索引），其余节点必须有上级。
@@ -35,6 +35,23 @@
 
 没有范围的成员访问 management 接口 → 403。范围外的 unit_id / project_id 与不存在的 ID 返回同一个 404（`范围不存在或你无权查看`），不泄露它是否存在。写接口对非 admin 有两层拦截：中间件默认拒绝，路由里再检查一次。
 
+## 旧入口读取收窄（本轮补齐，复用 Governance，不引入新权限模型）
+规则：非 admin 读取项目或运行数据 = 该项目在自己的 `team_projects` 分配里，**或者**是本人发起的运行（`source.actor_id`）。组织查看授权对这些入口**不增加任何权限**；负责人只能经 `/api/v5/management/*` 看摘要。实现是 `Governance.readable_projects / can_read_run / require_read_project / require_read_run`。
+
+| 入口 | 处理 |
+|---|---|
+| `/api/v{2,3,4}/projects/{pid}/…`（readiness、inspection、agent、knowledge、code-*、spec-tree、policy、capabilities、assistant、sources、modules、learnings、evolution-policy 等） | 独立中间件 `member_read_scope` 拒绝，返回 403；项目不存在返回 404 |
+| `/api/v{2,3,4}/runs/{rid}/…`（详情、events、conversation、export、context、plans、github-options、deliverables、mounts） | 同上 |
+| 任意 GET 带 `?project_id=` | 同上 |
+| `GET /api/v2/projects`、`GET /api/v2/runs` | 在处理器里过滤 |
+| `GET /api/v3/overview`（工程总览与用量聚合） | 先按可读项目过滤项目、运行与能力，再聚合 |
+| `GET /api/v3/team` 的 `projects[]` | 成员只看到自己分配的项目 |
+| 运维维护子系统、旧维护、接口适配、信创切片、职能包调用、职能体会话、维护作业 | 已有的身份/归属检查（`identity.require` → `Governance.require_project`，或者按发起人/会话归属），本轮未改 |
+
+`boundary` 中间件一个字节都没改；新增的读取拦截放在独立中间件里。它自己解析会话，只处理非 admin 的 GET/HEAD，不处理 `/api/v5/`。
+
+**仍然开放的例外（是工作区级资产，不按项目归属）**：`/api/v3/capabilities*`（沉淀下来的能力资产，记录里带 `source_run_id`）、`/api/v4/agents*`、`/api/v4/modules`、`/api/v4/capability-packs/*` 的职能包本体、`/api/v2/plugins/{id}/audit`、`/api/v2/runtime*`、`/api/v2/operation-presets`、`/api/v2/providers`。如果这些资产也要按部门隔离，需要先确定资产的组织归属，属于后续工作。
+
 ## overview 字段
 - `scope`：`label`、`units[]`（范围内的节点）、`grants[]`。
 - `window`：`days`（1–90）与 `since`。进行中和待处理按**当前**状态统计；成果就绪、已发布、失败只统计窗口内更新过的任务。
@@ -45,7 +62,7 @@
 - `usage`：费用来自运行事件 `usage.recorded`。没有记录时 `recorded=false`、`known_cost_usd=null`（显示“未记录”，不显示 0）；另外单独给出未知费用的调用数。token 数取本月 `token_calls` 台账。
 - `audit[]`：只包含触及范围内节点或项目的 `org.*` 记录，字段有操作者、动作、时间、`data.unit_path`/`target_username`/`result`。
 - admin 在不指定 unit 时，额外返回 `unassigned_projects`。
-- 管理视图**不返回**对话、原始请求全文、日志或凭据。任务标题取方案标题，没有方案标题时退到请求文本，截到 80 字。
+- 管理视图**不返回**对话、原始请求全文、日志或凭据。任务标题只取方案标题（截到 80 字）；没有方案标题时显示 `任务 <id 前 8 位>（尚无方案标题）`，**不回退请求原文**。
 
 ## 无损升级
 启动时只执行 `CREATE TABLE/INDEX IF NOT EXISTS`，不迁移、不改写旧表。旧的 admin/member、team_projects、配额和审计保持原样。组织树为空时，只有 admin 能看到管理面（包括所有未归属项目）。

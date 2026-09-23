@@ -89,7 +89,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
   }
   // 企业治理 v1：管理入口不在 nav-config 里（只读管理视图，非工作台业务插件），
   // 有管理查看范围（管理员或获授权成员）时才显示，普通成员导航保持不变。
-  const managementActive = location.pathname === '/management' || location.pathname.startsWith('/management/')
+  const managementActive = resolved.activeKey === 'management'
   const renderNav = (onNavigate?: () => void) => (
     <div className="as-nav-scroll">
       <nav className="as-nav" aria-label="主导航">{navItems.map(item => navLink(item, onNavigate))}</nav>

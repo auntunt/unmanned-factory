@@ -4,7 +4,7 @@ import type { IconName } from '../workbench/Icon'
 /** Single source of truth for global navigation, route ownership, titles,
  *  breadcrumbs and in-page tabs. The shell and every page read from here so
  *  there is never a second menu to maintain. */
-export type NavKey = 'start' | 'history' | 'agents' | 'engineering' | 'settings' | 'modernization' | 'maintenance' | 'adaptation'
+export type NavKey = 'start' | 'history' | 'agents' | 'engineering' | 'settings' | 'modernization' | 'maintenance' | 'adaptation' | 'management'
 export interface NavItem { key: NavKey; to: string; label: string; icon: IconName }
 
 export const PRIMARY_NAV: NavItem[] = [
@@ -89,6 +89,10 @@ export function resolveRoute(pathname: string): Resolved {
       ],
     }
   }
+  // 管理面（企业治理 v1）：与工作面分开，不落回「开始制作」。
+  if (is('/management')) return { activeKey: 'management', title: '管理首页', breadcrumb: [{ label: '管理' }] }
+  if (is('/management/org')) return { activeKey: 'management', title: '组织与授权', breadcrumb: [{ label: '管理', to: '/management' }, { label: '组织与授权' }] }
+  if (is('/management/projects/:projectId')) return { activeKey: 'management', title: '项目摘要', breadcrumb: [{ label: '管理', to: '/management' }, { label: '项目摘要' }] }
   if (is('/overview')) return { activeKey: 'engineering', title: '工程总览', group: 'engineering', activeTab: '/overview', breadcrumb: [{ label: '工程总览' }] }
   if (is('/projects')) return { activeKey: 'engineering', title: '项目', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目' }] }
   if (is('/projects/:projectId')) return { activeKey: 'engineering', title: '项目详情', group: 'engineering', activeTab: '/projects', breadcrumb: [{ label: '工程总览', to: '/overview' }, { label: '项目', to: '/projects' }, { label: '详情' }] }

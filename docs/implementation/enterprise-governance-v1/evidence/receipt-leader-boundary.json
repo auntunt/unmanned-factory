@@ -1,0 +1,159 @@
+{
+  "actor": "leader-rnd",
+  "at": "2026-09-23T04:56:55.419Z",
+  "probes": [
+    {
+      "method": "GET",
+      "url": "/api/v5/management/overview?unit_id=1fbaa96af88c472fa61746b1d74f6fa1",
+      "status": 404,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"范围不存在或你无权查看\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v5/management/overview?unit_id=3bf6fc8a9027469dab5a1aaf0cae045e",
+      "status": 404,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"范围不存在或你无权查看\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v5/management/projects/9faf0f9b01e744ed813d344a743116b6",
+      "status": 404,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"范围不存在或你无权查看\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v5/management/projects/56667c3d73714032899b984156d6f12e",
+      "status": 404,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"范围不存在或你无权查看\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v5/org",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"此操作需要管理员权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/projects/9faf0f9b01e744ed813d344a743116b6/readiness",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该项目的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v4/projects/9faf0f9b01e744ed813d344a743116b6/assistant",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该项目的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2/events",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2/conversation",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/f744cb2d372a42b990d87bd19d3ac2c2/export",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs?project_id=9faf0f9b01e744ed813d344a743116b6",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该项目的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v3/overview?project_id=9faf0f9b01e744ed813d344a743116b6",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该项目的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/3282a623654a496cb42eec44fbd5b057/conversation",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs/48496f80ff544d2a89f605b0efc416d3/events",
+      "status": 403,
+      "leaks_sales": false,
+      "body_head": "{\"detail\":\"你没有该运行的访问权限\"}"
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/projects",
+      "status": 200,
+      "leaks_sales": false
+    },
+    {
+      "method": "GET",
+      "url": "/api/v2/runs",
+      "status": 200,
+      "leaks_sales": false
+    },
+    {
+      "method": "GET",
+      "url": "/api/v3/overview",
+      "status": 200,
+      "leaks_sales": false
+    },
+    {
+      "method": "GET",
+      "url": "/api/v3/team",
+      "status": 200,
+      "leaks_sales": false
+    },
+    {
+      "method": "GET",
+      "url": "/api/v5/management/projects/c5cd1f819dbf4036b0b4d97332c140d6",
+      "status": 200,
+      "leaks_sales": false
+    },
+    {
+      "method": "POST",
+      "url": "/api/v2/runs/48496f80ff544d2a89f605b0efc416d3/approve",
+      "status": 403,
+      "body_head": "{\"detail\":\"成员只能操作自己发起的运行\"}"
+    },
+    {
+      "method": "POST",
+      "url": "/api/v5/org/scopes",
+      "status": 403,
+      "body_head": "{\"detail\":\"此操作需要管理员权限\"}"
+    },
+    {
+      "method": "PUT",
+      "url": "/api/v5/org/projects/9faf0f9b01e744ed813d344a743116b6",
+      "status": 403,
+      "body_head": "{\"detail\":\"此操作需要管理员权限\"}"
+    }
+  ]
+}
