@@ -44,51 +44,80 @@
 
 .mn-viewbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 
-/* 工作画布 */
-.mn-canvasbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 10px; }
-.mn-canvasbar small { margin-right: auto; color: var(--wb-muted); font-size: 12px; }
+/* 工程关系画布：颜色只表达状态语义（正常/需要人处理/受阻/进行中/无记录），类型用文字标签。 */
+.mn-canvasbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 8px; }
+.mn-canvas-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wb-muted); margin-right: auto; }
+.mn-canvas-filter select { max-width: 220px; }
+.mn-segment { display: inline-flex; gap: 4px; }
+.mn-collapse { font-size: 12px; }
 .mn-zoom-readout { min-width: 44px; text-align: center; color: var(--wb-muted); font-size: 12px; }
+.mn-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 10px; font-size: 11px; color: var(--wb-muted); }
+.mn-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.mn-legend-item i { width: 10px; height: 10px; border-radius: 2px; background: var(--mn-tone, var(--wb-faint)); }
+.mn-legend-item i.mn-legend-dash { width: 18px; height: 0; border-top: 2px dashed var(--wb-faint); background: none; border-radius: 0; }
+
+.mn-tone-ok { --mn-tone: var(--wb-teal); }
+.mn-tone-attention { --mn-tone: var(--wb-amber, var(--color-warning)); }
+.mn-tone-blocked { --mn-tone: var(--wb-red, var(--color-danger)); }
+.mn-tone-pending { --mn-tone: var(--color-info, var(--wb-muted)); }
+.mn-tone-none { --mn-tone: var(--wb-faint); }
 
 .mn-canvas-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: 16px; align-items: start; }
+.mn-canvas-main { min-width: 0; }
 .mn-canvas {
-  position: relative; overflow: hidden; height: 560px;
+  position: relative; overflow: hidden; height: 600px;
   border: 1px solid var(--wb-border); border-radius: 10px;
   background-color: var(--color-surface);
   background-image: radial-gradient(var(--color-border) 1px, transparent 1px);
   background-size: 20px 20px;
   touch-action: none; cursor: grab;
 }
+.mn-canvas:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
 .mn-canvas:active { cursor: grabbing; }
 .mn-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .mn-world svg { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.mn-edge { fill: none; stroke: var(--wb-border-strong); stroke-width: 1.6; }
+.mn-edge-targets, .mn-edge-blocked_by { stroke-dasharray: 5 4; }
+.mn-edge-blocked_by { stroke: var(--wb-amber, var(--color-warning)); }
 .mn-node {
-  position: absolute; width: 188px; text-align: left; padding: 12px 13px;
-  border: 1px solid var(--wb-border); border-left: 4px solid var(--wb-teal);
+  position: absolute; box-sizing: border-box; overflow: hidden; text-align: left; padding: 8px 11px;
+  border: 1px solid var(--wb-border); border-left: 4px solid var(--mn-tone, var(--wb-teal));
   border-radius: 8px; background: var(--color-surface); box-shadow: var(--wb-shadow);
-  font-size: 12px; font-weight: 650; color: var(--wb-ink);
+  font-size: 12px; font-weight: 650; color: var(--wb-ink); cursor: pointer;
 }
 .mn-node:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
-.mn-node { height: 74px; overflow: hidden; box-sizing: border-box; }
-.mn-node-label { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
-.mn-node small { display: block; margin-top: 4px; color: var(--wb-muted); font-size: 10px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mn-node-type { display: block; font-size: 10px; font-weight: 600; color: var(--wb-faint); letter-spacing: .02em; }
+.mn-node-label { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.35; }
+.mn-node small { display: block; margin-top: 2px; color: var(--wb-muted); font-size: 10px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mn-node.is-selected { box-shadow: 0 0 0 2px var(--wb-teal); }
-.mn-node-requirement { border-left-color: var(--color-info); }
-.mn-node-artifact { border-left-color: var(--wb-teal); }
-.mn-node-blocker { border-left-color: var(--wb-red); }
-.mn-node-target { border-left-style: dashed; border-left-color: var(--wb-faint); background: var(--color-bg); opacity: .92; }
-.mn-node-repo { border-left-width: 5px; }
+.mn-node-target, .mn-node.mn-tone-none { border-left-style: dashed; background: var(--color-bg); }
+.mn-node-repo { border-left-width: 6px; }
 
-.mn-canvas-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.mn-graph-list, .mn-graph-list ul { list-style: none; margin: 0; padding: 0; }
+.mn-graph-list ul { margin-left: 18px; border-left: 1px solid var(--wb-border); padding-left: 10px; }
+.mn-graph-list li { margin: 6px 0; }
+.mn-list-node { display: grid; width: 100%; gap: 1px; text-align: left; padding: 8px 10px; border: 1px solid var(--wb-border);
+  border-left: 4px solid var(--mn-tone, var(--wb-teal)); border-radius: 8px; background: var(--color-surface); color: var(--wb-ink); cursor: pointer; }
+.mn-list-node strong { font-size: 13px; overflow-wrap: anywhere; }
+.mn-list-node small { color: var(--wb-muted); font-size: 11px; }
+.mn-list-node.is-selected { box-shadow: 0 0 0 2px var(--wb-teal); }
+.mn-list-node:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
+
+.mn-canvas-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; position: sticky; top: 12px; }
+.mn-detail h2 { margin: 4px 0; font-size: 15px; overflow-wrap: anywhere; }
+.mn-detail dl { margin: 10px 0 0; }
 .mn-detail dt { color: var(--wb-faint); font-size: 10px; margin: 10px 0 2px; }
 .mn-detail dt:first-child { margin-top: 0; }
 .mn-detail dd { margin: 0; color: var(--wb-ink); font-size: 12px; overflow-wrap: anywhere; }
 .mn-detail-id { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; color: var(--wb-faint); }
+.mn-detail-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 
 @media (max-width: 920px) {
   .mn-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mn-split { grid-template-columns: 1fr; }
   .mn-canvas-wrap { grid-template-columns: 1fr; }
   .mn-canvas { height: 440px; }
+  .mn-canvas-side { position: static; }
 }
 
 @media (max-width: 700px) {

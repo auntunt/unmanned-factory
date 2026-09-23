@@ -73,23 +73,37 @@ export interface Overview {
   partial_errors: { section: string; message: string }[]
 }
 
-export type NodeType = 'repo' | 'requirement' | 'task' | 'artifact' | 'target' | 'blocker'
+export type NodeType = 'repo' | 'requirement' | 'task' | 'plan' | 'check' | 'artifact' | 'target' | 'blocker'
+
+/** Semantic tone, limited on purpose: normal / needs a person / blocked / pending / no record. */
+export type NodeTone = 'ok' | 'attention' | 'blocked' | 'pending' | 'none'
+
+export interface GraphLink {
+  kind: 'repo' | 'task'
+  id: string
+  label: string
+}
 
 export interface GraphNode {
   id: string
   type: NodeType
   label: string
+  /** Untruncated title when `label` was shortened. */
+  full_label?: string
   sublabel: string
   status: string
   task_id: string | null
   project_id: string
   synthetic?: boolean
+  tone?: NodeTone
+  facts?: { label: string; value: string }[]
+  links?: GraphLink[]
 }
 
 export interface GraphEdge {
   from: string
   to: string
-  kind: 'has' | 'creates' | 'produces' | 'targets' | 'blocked_by'
+  kind: 'has' | 'creates' | 'plans' | 'verified_by' | 'produces' | 'targets' | 'blocked_by'
 }
 
 export interface Graph {
@@ -97,6 +111,8 @@ export interface Graph {
   nodes: GraphNode[]
   edges: GraphEdge[]
   truncated: boolean
+  /** Projects in the caller's scope (server-filtered), for the canvas filter. */
+  projects?: { id: string; name: string }[]
 }
 
 export type RepoState = 'pending' | 'analyzing' | 'needs_input' | 'ready' | 'failed'

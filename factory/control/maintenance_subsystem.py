@@ -1267,92 +1267,186 @@ class MaintenanceSubsystem:
                  'at': e['at']} for e in found]
 
     def graph(self, *, actor, project_id=None, max_tasks=200) -> dict:
+        """Read-only relation projection: repo → requirement → task → plan → check → patch.
+
+        Every fact comes from a stored record; a stage without a record says so
+        rather than being inferred. Scope is the same ``_scope`` every read uses,
+        so nothing from a project the caller may not read is counted or named.
+        """
+        from factory.control.engineering_overview import current_evidence
+        from factory.control.issue_maintenance import MaintenanceStore
         scope = self._scope(actor, project_id)
         projects = {p['id']: p for p in self.store.projects() if p['id'] in scope}
         nodes, edges = [], []
+        unrecorded = '未记录（系统没有该字段）'
+
+        def add(node, parent=None, kind=None):
+            nodes.append(node)
+            if parent:
+                edges.append({'from': parent, 'to': node['id'], 'kind': kind})
+
         for pid in scope:
             record = self._probe_record(pid) or {'state': 'pending'}
-            nodes.append({'id': f'repo:{pid}', 'type': 'repo', 'label': projects[pid]['name'],
-                          'sublabel': ('合成 · ' if record.get('synthetic') else '')
-                          + f"{projects[pid]['repository']} · {REPO_STATE_LABEL.get(record.get('state'), '待分析')}",
-                          'status': record.get('state', 'pending'), 'task_id': None, 'project_id': pid,
-                          'synthetic': bool(record.get('synthetic'))})
+            state = record.get('state', 'pending')
+            project = projects[pid]
+            base = record.get('base_sha') or record.get('head_sha')
+            add({'id': f'repo:{pid}', 'type': 'repo', 'label': project['name'],
+                 'sublabel': ('合成 · ' if record.get('synthetic') else '')
+                 + f"{project['repository']} · {REPO_STATE_LABEL.get(state, '待分析')}",
+                 'status': state, 'task_id': None, 'project_id': pid, 'synthetic': bool(record.get('synthetic')),
+                 'tone': {'ready': 'ok', 'needs_input': 'attention', 'failed': 'blocked'}.get(state, 'pending'),
+                 'facts': [{'label': '仓库', 'value': project['repository']},
+                           {'label': '基线分支', 'value': project.get('base_branch') or '未记录'},
+                           {'label': '基线版本', 'value': base[:12] if base else '尚未分析'},
+                           {'label': '接入状态', 'value': REPO_STATE_LABEL.get(state, state)},
+                           {'label': '待补充', 'value': '、'.join(record.get('needs') or []) or '无'},
+                           {'label': '负责人', 'value': unrecorded},
+                           {'label': '登记人', 'value': project.get('actor') or '未记录'}],
+                 'links': [{'kind': 'repo', 'id': pid, 'label': '仓库详情'}]})
         rows = sorted(self._task_rows(scope), key=lambda r: r['record']['created_at'], reverse=True)
         truncated = len(rows) > max_tasks
         rows = rows[:max_tasks]
-        from factory.control.issue_maintenance import MaintenanceStore
+        tasks = MaintenanceStore(self.store)
         chain_root = {}
-        store = MaintenanceStore(self.store)
         for row in rows:
             record, seen = row['record'], set()
             while record.get('predecessor_id') and record['id'] not in seen:
                 seen.add(record['id'])
-                record = store.get(record['predecessor_id'])
+                record = tasks.get(record['predecessor_id'])
             chain_root[record['id']] = row
         requirement_of = {}
         with self.store.connect() as db:
-            for r in db.execute('SELECT data FROM maintenance_requirements'):
-                req = json.loads(r[0])
-                if req['project_id'] in projects:
-                    nodes.append({'id': f"req:{req['id']}", 'type': 'requirement', 'label': req['title'][:60],
-                                  'sublabel': f"{ {'manual': '人工提交', 'api': '外部系统', 'cli': 'CLI'}.get(req['source']['kind'], req['source']['kind'])} · "
-                                              f"{REQUIREMENT_STATUS_LABEL.get(req['status'], req['status'])}",
-                                  'status': req['status'], 'task_id': req.get('task_id'),
-                                  'project_id': req['project_id'], 'synthetic': bool(req.get('synthetic'))})
-                    edges.append({'from': f"repo:{req['project_id']}", 'to': f"req:{req['id']}", 'kind': 'has'})
-                    if req.get('task_id'):
-                        requirement_of[req['task_id']] = req['id']
-        head_of = {}
-        for root_id, row in chain_root.items():
-            record, seen = row['record'], set()
-            head_of[record['id']] = record['id']
+            requirements = [json.loads(r[0]) for r in db.execute('SELECT data FROM maintenance_requirements')]
+        for req in requirements:
+            if req['project_id'] not in projects:
+                continue
+            source = req.get('source') or {}
+            kind_label = {'manual': '人工提交', 'api': '外部系统', 'cli': 'CLI'}.get(source.get('kind'), source.get('kind'))
+            add({'id': f"req:{req['id']}", 'type': 'requirement', 'label': req['title'][:60], 'full_label': req['title'],
+                 'sublabel': f"{kind_label} · {REQUIREMENT_STATUS_LABEL.get(req['status'], req['status'])}",
+                 'status': req['status'], 'task_id': req.get('task_id'), 'project_id': req['project_id'],
+                 'synthetic': bool(req.get('synthetic')),
+                 'tone': {'dispatched': 'ok', 'dispatch_failed': 'blocked'}.get(req['status'], 'pending'),
+                 'facts': [{'label': '来源', 'value': f"{kind_label}（{source.get('name') or '未记录'}）"},
+                           {'label': '接收时间', 'value': req.get('received_at') or req.get('created_at') or '未记录'},
+                           {'label': '状态', 'value': REQUIREMENT_STATUS_LABEL.get(req['status'], req['status'])},
+                           {'label': '需求 ID', 'value': req['id']}],
+                 'links': [{'kind': 'task', 'id': req['task_id'], 'label': '任务现场'}] if req.get('task_id') else []},
+                f"repo:{req['project_id']}", 'has')
+            if req.get('task_id'):
+                requirement_of[req['task_id']] = req['id']
+        head_ids = {row['record']['id'] for row in chain_root.values()}
+        history = {}
         for row in self._task_rows(scope, include_superseded=True):
             record = row['record']
-            if not record.get('successor_id') or row['status'] not in _DELIVERED:
-                continue
-            head = self._head(record['id'])
-            if head['id'] not in head_of:
-                continue
             commit = ((row['run'] or {}).get('artifacts') or {}).get('commit')
-            if not commit:
-                continue
-            name = f"maintenance-{record['execution_id']}.patch"
-            nodes.append({'id': f"artifact:{record['id']}:{name}", 'type': 'artifact',
-                          'label': f"补丁包（第 {record['revision']} 修订）",
-                          'sublabel': f"已生成 · commit {commit[:10]}", 'status': 'generated',
-                          'task_id': record['id'], 'project_id': record['project_id']})
-            edges.append({'from': f"task:{head['id']}", 'to': f"artifact:{record['id']}:{name}",
-                          'kind': 'produces'})
+            if record.get('successor_id') and row['status'] in _DELIVERED and commit:
+                head = self._head(record['id'])
+                if head['id'] in head_ids:
+                    history.setdefault(head['id'], []).append((record, commit))
         for root_id, row in chain_root.items():
-            record, status = row['record'], row['status']
-            task_node = f"task:{record['id']}"
-            label = {'received': '已接收', 'missing': '执行记录缺失'}.get(status, status)
-            nodes.append({'id': task_node, 'type': 'task', 'label': record['issue']['title'][:60],
-                          'sublabel': ('合成 · ' if record.get('synthetic') else '')
-                          + f"第 {record['revision']} 修订 · {_STATUS_TEXT.get(status, label)}",
-                          'status': status, 'task_id': record['id'], 'project_id': record['project_id'],
-                          'synthetic': bool(record.get('synthetic'))})
-            parent = f"req:{requirement_of[root_id]}" if root_id in requirement_of else f"repo:{record['project_id']}"
-            edges.append({'from': parent, 'to': task_node, 'kind': 'creates'})
+            record, status, run = row['record'], row['status'], row['run'] or {}
+            tid, pid = record['id'], record['project_id']
+            task_node = f'task:{tid}'
             kind = self._attention_kind(status)
-            if status in _DELIVERED and ((row['run'] or {}).get('artifacts') or {}).get('commit'):
+            source = run.get('source') or {}
+            initiator = source.get('actor')
+            providers = sorted({(e.get('payload') or {}).get('provider') for e in self._run_events(run.get('id'))
+                                if e.get('type') == 'usage.recorded' and (e.get('payload') or {}).get('provider')}) if run else []
+            add({'id': task_node, 'type': 'task', 'label': record['issue']['title'][:60], 'full_label': record['issue']['title'],
+                 'sublabel': ('合成 · ' if record.get('synthetic') else '')
+                 + f"第 {record['revision']} 修订 · {_STATUS_TEXT.get(status, status)}",
+                 'status': status, 'task_id': tid, 'project_id': pid, 'synthetic': bool(record.get('synthetic')),
+                 'tone': 'attention' if kind in ('answer', 'approval') else 'blocked' if kind == 'blocked'
+                 else 'ok' if status in _DELIVERED else 'none' if status in ('cancelled', 'discarded') else 'pending',
+                 'facts': [{'label': '基线版本', 'value': str(record.get('base_sha') or '未记录')[:12]},
+                           {'label': '修订', 'value': f"第 {record['revision']} 修订"},
+                           {'label': '状态', 'value': _STATUS_TEXT.get(status, status)},
+                           {'label': '执行发起人', 'value': initiator or ('尚未执行' if not run else '未记录')},
+                           {'label': '当前可处理', 'value': (f'发起人 {initiator} 或管理员' if initiator else '管理员')
+                            if kind else '无需人工处理'},
+                           {'label': '负责人', 'value': unrecorded},
+                           {'label': '执行器', 'value': '、'.join(providers) or '未记录'},
+                           {'label': '任务 ID', 'value': tid}],
+                 'links': [{'kind': 'task', 'id': tid, 'label': '任务现场'}]},
+                f'req:{requirement_of[root_id]}' if root_id in requirement_of else f'repo:{pid}', 'creates')
+            for old, commit in history.get(tid, []):
+                name = f"maintenance-{old['execution_id']}.patch"
+                add({'id': f'artifact:{old["id"]}:{name}', 'type': 'artifact', 'label': f"补丁包（第 {old['revision']} 修订）",
+                     'sublabel': f'已生成 · commit {commit[:10]}', 'status': 'generated', 'task_id': old['id'],
+                     'project_id': pid, 'tone': 'ok',
+                     'facts': [{'label': 'commit', 'value': commit}, {'label': '说明', 'value': '已生成 ≠ 已验收 ≠ 已上线'}],
+                     'links': [{'kind': 'task', 'id': old['id'], 'label': '该修订的任务现场'}]}, task_node, 'produces')
+            last = task_node
+            if run:
+                evidence = current_evidence(run)
+                plan = run.get('plan') if isinstance(run.get('plan'), dict) else None
+                plan_state = 'awaiting_approval' if status in _APPROVAL else ('executing' if evidence['execution'] else
+                                                                                 'generated' if plan else 'none')
+                add({'id': f'plan:{tid}', 'type': 'plan',
+                     'label': (plan or {}).get('title') or '尚无方案', 'full_label': (plan or {}).get('title') or '尚无方案',
+                     'sublabel': {'awaiting_approval': '等待批准', 'executing': '已进入执行', 'generated': '方案已生成',
+                                  'none': '尚无记录'}[plan_state],
+                     'status': plan_state, 'task_id': tid, 'project_id': pid,
+                     'tone': {'awaiting_approval': 'attention', 'none': 'none'}.get(plan_state, 'ok'),
+                     'facts': [{'label': '方案', 'value': (plan or {}).get('title') or '尚无记录'},
+                               {'label': '步骤数', 'value': str(len(plan.get('tasks') or [])) if plan and plan.get('tasks') else '未记录'},
+                               {'label': '批准', 'value': '等待批准' if plan_state == 'awaiting_approval' else
+                                '尚无方案' if plan_state == 'none' else '批准记录见任务现场（此处不推断审批人）'}],
+                     'links': [{'kind': 'task', 'id': tid, 'label': '在任务现场查看方案'}]}, task_node, 'plans')
+                artifacts = run.get('artifacts') or {}
+                checks = [c for c in (artifacts.get('checks') or []) if isinstance(c, dict)]
+                check_state = evidence['checks']
+                add({'id': f'check:{tid}', 'type': 'check',
+                     'label': {'passed': '检查通过', 'failed': '检查未通过', 'recorded': '检查已记录',
+                               'unverified': '未验证', 'none': '尚无检查记录'}.get(check_state, check_state),
+                     'sublabel': f'{len(checks)} 条检查记录' if checks else '没有检查结果',
+                     'status': check_state, 'task_id': tid, 'project_id': pid,
+                     'tone': {'passed': 'ok', 'failed': 'blocked', 'none': 'none', 'unverified': 'attention'}.get(check_state, 'pending'),
+                     'facts': ([{'label': str(c.get('name') or '检查'), 'value': '通过' if c.get('exit') == 0 else
+                                 f"未通过（退出码 {c.get('exit')}）" if c.get('exit') is not None else '未完成'} for c in checks[:8]]
+                               or [{'label': '检查', 'value': '尚无记录（项目未配置检查命令或尚未执行到检查）'}]),
+                     'links': [{'kind': 'task', 'id': tid, 'label': '在任务现场查看检查输出'}]}, f'plan:{tid}', 'verified_by')
+                last = f'check:{tid}'
+                if kind == 'approval':
+                    blocker_parent = f'plan:{tid}'
+                else:
+                    blocker_parent = task_node
+            else:
+                blocker_parent = task_node
+            commit = (run.get('artifacts') or {}).get('commit') if run else None
+            if status in _DELIVERED and commit:
                 name = f"maintenance-{record['execution_id']}.patch"
-                nodes.append({'id': f"artifact:{record['id']}:{name}", 'type': 'artifact', 'label': '补丁包',
-                              'sublabel': f"已生成 · commit {row['run']['artifacts']['commit'][:10]}",
-                              'status': 'generated', 'task_id': record['id'], 'project_id': record['project_id']})
-                edges.append({'from': task_node, 'to': f"artifact:{record['id']}:{name}", 'kind': 'produces'})
+                add({'id': f'artifact:{tid}:{name}', 'type': 'artifact', 'label': '补丁包',
+                     'sublabel': f'已生成 · commit {commit[:10]}', 'status': 'generated', 'task_id': tid, 'project_id': pid,
+                     'tone': 'ok',
+                     'facts': [{'label': 'commit', 'value': commit}, {'label': '产物', 'value': name},
+                               {'label': '说明', 'value': '已生成 ≠ 已验收 ≠ 已上线'}],
+                     'links': [{'kind': 'task', 'id': tid, 'label': '在任务现场导出补丁'}]}, last, 'produces')
             elif status not in ('cancelled', 'discarded'):
-                nodes.append({'id': f"target:{record['id']}", 'type': 'target', 'label': '目标：补丁包',
-                              'sublabel': '尚未生成，不计入交付', 'status': 'pending',
-                              'task_id': record['id'], 'project_id': record['project_id']})
-                edges.append({'from': task_node, 'to': f"target:{record['id']}", 'kind': 'targets'})
+                add({'id': f'target:{tid}', 'type': 'target', 'label': '目标：补丁包', 'sublabel': '尚未生成，不计入交付',
+                     'status': 'pending', 'task_id': tid, 'project_id': pid, 'tone': 'none',
+                     'facts': [{'label': '交付', 'value': '尚未生成'}], 'links': []}, last, 'targets')
             if kind:
-                nodes.append({'id': f"blocker:{record['id']}", 'type': 'blocker',
-                              'label': {'answer': '等待业务回答', 'approval': '等待批准', 'blocked': '执行受阻'}[kind],
-                              'sublabel': self._reason(row, kind)[:60], 'status': kind,
-                              'task_id': record['id'], 'project_id': record['project_id']})
-                edges.append({'from': task_node, 'to': f"blocker:{record['id']}", 'kind': 'blocked_by'})
-        return {'generated_at': now(), 'nodes': nodes, 'edges': edges, 'truncated': truncated}
+                reason = self._reason(row, kind)
+                add({'id': f'blocker:{tid}', 'type': 'blocker',
+                     'label': {'answer': '等待业务回答', 'approval': '等待批准', 'blocked': '执行受阻'}[kind],
+                     'sublabel': reason[:60], 'full_label': reason, 'status': kind, 'task_id': tid, 'project_id': pid,
+                     'tone': 'blocked' if kind == 'blocked' else 'attention',
+                     'facts': [{'label': '原因', 'value': reason},
+                               {'label': '可处理', 'value': (f'发起人 {initiator} 或管理员' if initiator else '管理员')}],
+                     'links': [{'kind': 'task', 'id': tid, 'label': '去处理'}]}, blocker_parent, 'blocked_by')
+        return {'generated_at': now(), 'nodes': nodes, 'edges': edges, 'truncated': truncated,
+                'projects': [{'id': pid, 'name': projects[pid]['name']} for pid in scope]}
+
+    def _run_events(self, run_id):
+        if not run_id:
+            return []
+        from factory.control.autonomy import all_events
+        try:
+            return all_events(self.store, run_id)
+        except Exception:  # noqa: BLE001 - unreadable events mean "not recorded", not a failure
+            return []
 
     # -- host manifest -------------------------------------------------------
     @staticmethod

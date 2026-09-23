@@ -1,7 +1,7 @@
 // 运维监控：数字大屏 / 工作画布。只渲染页面内容，外框（三级入口）由子系统壳负责。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMaintenancePath } from './base-path'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { EmptyState, ErrorNotice, PageHeader, errorText, formatDate } from '../workbench/ui'
 import { WorkspaceApiError } from '../workspace/api'
@@ -11,6 +11,7 @@ import SyntheticBadge from './SyntheticBadge'
 import type { AttentionKind, DataSource, Graph, Overview, ProjectRow, SourceStatus } from './types'
 import { ATTENTION_LABEL } from './types'
 import RelationCanvas from './RelationCanvas'
+import type { CanvasState } from './RelationCanvas'
 import './monitor.css'
 
 const POLL_INTERVAL_MS = 15000
@@ -57,9 +58,37 @@ function windowLabel(kind: string): string {
 export default function MonitorPage(props: PageProps & { projectId?: string }) {
   const mp = useMaintenancePath()
   const { projectId, onUnauthorized } = props
-  const navigate = useNavigate()
-
-  const [view, setView] = useState<'grid' | 'canvas'>('grid')
+  // View, canvas filter and selection live in the URL, so returning from a
+  // task or repo page lands on the same canvas, project and node.
+  const [params, setParams] = useSearchParams()
+  const view: 'grid' | 'canvas' = params.get('view') === 'canvas' ? 'canvas' : 'grid'
+  const narrow = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(max-width: 720px)').matches
+  const canvasState: CanvasState = {
+    mode: params.get('mode') === 'canvas' ? 'canvas' : params.get('mode') === 'list' || narrow ? 'list' : 'canvas',
+    project: params.get('project') ?? '',
+    node: params.get('node'),
+    collapsed: params.get('collapsed') === '1' ? true : params.get('collapsed') === '0' ? false : null,
+  }
+  const updateParams = useCallback((next: Record<string, string | null>) => {
+    setParams(current => {
+      const merged = new URLSearchParams(current)
+      for (const [key, value] of Object.entries(next)) {
+        if (value === null || value === '') merged.delete(key)
+        else merged.set(key, value)
+      }
+      return merged
+    }, { replace: true })
+  }, [setParams])
+  const setView = (next: 'grid' | 'canvas') => updateParams({ view: next === 'canvas' ? 'canvas' : null })
+  const onCanvasChange = (next: Partial<CanvasState>) => updateParams({
+    ...('mode' in next ? { mode: next.mode ?? null } : {}),
+    ...('project' in next ? { project: next.project ?? null } : {}),
+    ...('node' in next ? { node: next.node ?? null } : {}),
+    ...('collapsed' in next ? { collapsed: next.collapsed === null || next.collapsed === undefined ? null : next.collapsed ? '1' : '0' } : {}),
+  })
+  const [graphReload, setGraphReload] = useState(0)
+  const graphProject = canvasState.project || projectId
   const [overview, setOverview] = useState<Overview | null>(null)
   const [loading, setLoading] = useState(true)
   const [overviewError, setOverviewError] = useState<string | null>(null)
@@ -125,7 +154,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
     const controller = new AbortController()
     setGraphLoading(true)
     setGraphError(null)
-    maintenanceApi.graph(projectId, { onUnauthorized, signal: controller.signal })
+    maintenanceApi.graph(graphProject, { onUnauthorized, signal: controller.signal })
       .then(data => { if (!cancelled) setGraph(data) })
       .catch(err => {
         if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) return
@@ -133,7 +162,7 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
       })
       .finally(() => { if (!cancelled) setGraphLoading(false) })
     return () => { cancelled = true; controller.abort() }
-  }, [view, projectId, onUnauthorized])
+  }, [view, graphProject, onUnauthorized, graphReload])
 
   useEffect(() => {
     function onChange() { setFullscreen(!!document.fullscreenElement) }
@@ -164,7 +193,6 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
   }, [])
 
   const retry = () => setReloadKey(k => k + 1)
-  const openTask = useCallback((taskId: string) => navigate(mp(`/${taskId}`)), [navigate, mp])
 
   if (forbidden) {
     return (
@@ -349,8 +377,14 @@ export default function MonitorPage(props: PageProps & { projectId?: string }) {
               : (
                 <div className="wb-card">
                   {graphLoading && !graph && <div className="wb-loading-card"><span className="wb-spinner" aria-hidden="true" />正在加载工作画布…</div>}
-                  {graphError && !graph && <ErrorNotice message={graphError} />}
-                  {graph && <RelationCanvas graph={graph} onOpenTask={openTask} />}
+                  {graphError && (
+                    <div role="alert">
+                      <ErrorNotice message={`工作画布加载失败：${graphError}`} />
+                      <button type="button" className="wb-button" onClick={() => setGraphReload(k => k + 1)}>重试</button>
+                      {graph && <p className="mn-hint">下方仍显示上一次成功加载的数据。</p>}
+                    </div>
+                  )}
+                  {graph && <RelationCanvas graph={graph} state={canvasState} onStateChange={onCanvasChange} />}
                 </div>
               )}
           </>
