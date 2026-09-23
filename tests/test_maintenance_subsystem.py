@@ -375,7 +375,7 @@ def test_docker_python_probe_does_not_require_host_pytest(app_env, tmp_path, mon
     python3.chmod(0o755)
     monkeypatch.setenv('PATH', f'{fake_bin}:/usr/bin:/bin')
     _, suggestions = detect_stack(repo)
-    assert suggestions[0]['argv'] == ['@dockerfile', 'python3', '-m', 'pytest', '-q']
+    assert suggestions[0]['argv'] == ['@dockerfile', 'python3', '-m', 'pytest', '-q', 'tests']
     view = _register(client, repo, login(client))
     old = store.project(view['project_id'])
     store.update_project(view['project_id'], {'checks': {'pytest': ['python3', '-m', 'pytest', '-q']}},

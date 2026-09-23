@@ -494,9 +494,10 @@ def _run_dockerfile_check(root: Path, name: str, argv: list[str], timeout_s: flo
     """Build the project's test image and run a check without host-tool fallback.
 
     The image build has no network and receives no credentials. The test sees a
-    read-only checkout, no network, and only a disposable /tmp. A project that
-    needs an installed test dependency must provide it in Dockerfile.test (or
-    its Dockerfile); we never install it on the execution host.
+    read-only checkout, no network, and only a disposable /tmp. Tests run from
+    a writable copy inside that tmpfs so they cannot mutate the host checkout.
+    A project that needs an installed test dependency must provide it in
+    Dockerfile.test (or its Dockerfile); we never install it on the execution host.
     """
     started = time.monotonic()
     dockerfile = 'Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile'
@@ -519,11 +520,15 @@ def _run_dockerfile_check(root: Path, name: str, argv: list[str], timeout_s: flo
         command = ['docker', 'run', '--rm', '--network=none', '--read-only',
                    '--cap-drop=ALL', '--security-opt=no-new-privileges',
                    '--pids-limit=256', '--memory=2g', '--cpus=2',
-                   '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m',
+                   '--tmpfs', '/tmp:rw,nosuid,nodev,size=512m',
                    '--mount', f'type=bind,src={root.resolve()},dst=/workspace,readonly',
-                   '--workdir', '/workspace', '--user', '65534:65534',
+                   '--workdir', '/tmp', '--user', '65534:65534',
                    '--env', 'HOME=/tmp', '--env', 'PYTHONDONTWRITEBYTECODE=1',
-                   '--entrypoint', argv[1], tag, *argv[2:]]
+                   '--entrypoint', '/bin/sh', tag, '-euc',
+                   'mkdir -p /tmp/webuddy-workspace && '
+                   'cp -R /workspace/. /tmp/webuddy-workspace/ && '
+                   'cd /tmp/webuddy-workspace && exec "$@"',
+                   'webuddy-check', *argv[1:]]
         check = _run_check_unlimited(root, f'{name}:container', command,
                                      remaining, emit, task_id, cancel)
         return _docker_check_result(name, argv, check, started, '容器检查未通过', emit, task_id)

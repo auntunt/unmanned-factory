@@ -622,8 +622,11 @@ def test_dockerfile_check_builds_and_runs_in_container(tmp_path, monkeypatch):
     run = commands[1]
     assert '--network=none' in run and '--read-only' in run
     assert '--user' in run and '65534:65534' in run
-    assert run[run.index('--entrypoint') + 1] == 'python3'
-    assert run[-3:] == ['-m', 'pytest', '-q']
+    assert run[run.index('--entrypoint') + 1] == '/bin/sh'
+    assert '--mount' in run and ',readonly' in run[run.index('--mount') + 1]
+    assert any('cp -R /workspace/. /tmp/webuddy-workspace/' in part and 'exec "$@"' in part
+               for part in run)
+    assert run[-4:] == ['python3', '-m', 'pytest', '-q']
 
 
 def test_dockerfile_check_never_falls_back_to_host(tmp_path, monkeypatch):

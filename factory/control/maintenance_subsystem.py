@@ -225,13 +225,15 @@ def detect_stack(root: Path) -> tuple[list[dict], list[dict]]:
     if any((root / f).is_file() for f in ('pyproject.toml', 'setup.py', 'requirements.txt')):
         marker = next(f for f in ('pyproject.toml', 'setup.py', 'requirements.txt') if (root / f).is_file())
         stack.append({'name': 'Python', 'evidence': marker})
-        if (root / 'tests').is_dir() or (root / 'test').is_dir():
+        test_dir = 'tests' if (root / 'tests').is_dir() else ('test' if (root / 'test').is_dir() else None)
+        if test_dir:
             uses_uv = (root / 'uv.lock').is_file()
-            pytest_argv = ['uv', 'run', 'pytest', '-q'] if uses_uv else ['python3', '-m', 'pytest', '-q']
+            pytest_argv = (['uv', 'run', 'pytest', '-q', test_dir] if uses_uv else
+                           ['python3', '-m', 'pytest', '-q', test_dir])
             dockerfile = 'Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile'
             in_docker = (root / dockerfile).is_file()
             check('pytest', ['@dockerfile', *pytest_argv] if in_docker else pytest_argv,
-                  'tests/ 目录' + ('，uv.lock' if uses_uv else '') +
+                  f'{test_dir}/ 目录' + ('，uv.lock' if uses_uv else '') +
                   (f'，{dockerfile}（容器内执行）' if in_docker else ''))
     if (root / 'go.mod').is_file():
         stack.append({'name': 'Go', 'evidence': 'go.mod'})
