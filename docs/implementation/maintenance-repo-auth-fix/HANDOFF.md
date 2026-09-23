@@ -20,6 +20,11 @@
 - 前端：`tsc` 通过，`vitest src/maintenance` 5 个文件 40 条通过（新增 1 条：失败原因、下一步、重新接入），`npm run build` 通过。
 - 编写过程中，并发测试抓到一个真实问题：克隆进行中再次探测会走本地探测，把状态改写成 failed。已修复。
 
+## 复核修正：重试丢分支（Codex 读 064f297）
+- 问题：首次克隆把 `branch` 传给了 `_start_clone`，但重试不传，于是拉默认分支并覆盖 `base_branch`。
+- 修法：登记时保存 `requested_branch`（`null` = 未指定）；每次重试从记录读取；克隆完成后 `base_branch` 取实际克隆到的分支。克隆尚未成功时，重新登记可以纠正分支；已有工作区时，指定不同分支返回 422，不切换。旧记录没有这个字段：`base_branch` 不是 `main` 就视为显式选择，是 `main` 就视为未指定。
+- 回归：FakeClone 现在原样保留 `--single-branch --branch` 等参数，只把 URL 换成本地仓库，所以克隆到哪个分支是真实结果。新增两条：非默认分支首次失败后重试，HEAD 和 SHA 都在 release 上；分支纠正只在尚未克隆成功时生效，已有工作区拒绝切换。`test_maintenance_repo_auth.py` 与 `test_maintenance_subsystem.py` 共 24 passed。
+
 ## 上线后在现场怎么验
 1. 在列表里对 group-risk 点“重新接入”（或调用 `POST /api/v2/maintenance/repos/<原 project_id>/probe`）。预期：沿用同一个 project_id，状态变为分析中，然后是待补充或可开始维护。
 2. 如果仍然失败：列表会直接显示 reason 和下一步。`auth` 且 `credential=github` 表示平台账号对该仓库没有权限。

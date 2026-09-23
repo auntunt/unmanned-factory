@@ -402,13 +402,22 @@ class MaintenanceSubsystem:
                 return project
         return None
 
-    def _reuse(self, project, actor, credential_ref, background=True):
+    def _reuse(self, project, actor, credential_ref, background=True, branch=None):
         self._require(actor, project['id'])
         record = self._probe_record(project['id']) or {'state': 'pending'}
+        needs_clone = self._needs_clone(project, record)
+        if branch and branch != project['base_branch']:
+            if not needs_clone:
+                # A working checkout is never switched behind the user's back.
+                raise ValueError(f"该仓库已接入，基线分支为 {project['base_branch']}；不会自动切换到 {branch}。"
+                                 '如需改用该分支，请在项目设置里修改基线分支')
+        if branch and needs_clone:
+            # The checkout never arrived: the corrected choice is the one to clone.
+            record['requested_branch'] = branch
         if credential_ref:
             record['credential_ref'] = credential_ref
         self._save_probe(project['id'], record)
-        if self._needs_clone(project, record):
+        if needs_clone:
             self._start_clone(project['id'], background=background)
         elif record.get('state') in (None, 'pending'):
             self.probe(project['id'], actor=actor)
@@ -418,7 +427,7 @@ class MaintenanceSubsystem:
         root = Path(source).expanduser().resolve()
         existing = self._existing(workspace=root)
         if existing:
-            return self._reuse(existing, actor, credential_ref)
+            return self._reuse(existing, actor, credential_ref, branch=branch)
         if not root.is_relative_to(self.workspace_root) or root == self.workspace_root:
             raise ValueError(f'本地目录必须位于执行主机的工作区根目录（FACTORY_WORKSPACE_ROOT={self.workspace_root}）'
                              '下的独立子目录；网页不能读取你电脑上的文件')
@@ -437,7 +446,7 @@ class MaintenanceSubsystem:
         repository = repository or f'local/{_SLUG.sub("-", root.name).strip("-.") or "repo"}'
         existing = self._existing(repository=repository)
         if existing:
-            return self._reuse(existing, actor, credential_ref)
+            return self._reuse(existing, actor, credential_ref, branch=branch)
         base = branch or (_git(['symbolic-ref', '--short', 'HEAD'], root).stdout.strip()
                           if _ok(_git(['symbolic-ref', '--short', 'HEAD'], root)) else 'main')
         if not _ok(_git(['rev-parse', '--verify', f'refs/heads/{base}'], root)):
@@ -452,16 +461,18 @@ class MaintenanceSubsystem:
         repository = _repository_from_url(url)
         existing = self._existing(repository=repository)
         if existing:
-            return self._reuse(existing, actor, credential_ref, background)
+            return self._reuse(existing, actor, credential_ref, background, branch=branch)
         target = self.workspace_root / 'maintained' / repository.replace('/', '__')
         if target.exists() and any(target.iterdir()):
             raise ValueError(f'执行主机上的目标目录已存在且非空：{target}；请改用本地目录方式登记')
         target.parent.mkdir(parents=True, exist_ok=True)
         project = self._add_project(name, repository, target, branch or 'main', actor)
         self._save_probe(project['id'], {'state': 'analyzing', 'source': url,
-                                         'credential_ref': credential_ref, 'started_at': now()})
+                                         'credential_ref': credential_ref, 'started_at': now(),
+                                         # None = not specified (follow the remote default); kept for every retry.
+                                         'requested_branch': branch or None})
 
-        self._start_clone(project['id'], background=background, branch=branch)
+        self._start_clone(project['id'], background=background)
         return self.repo_view(project['id'], actor=actor)
 
     def _add_project(self, name, repository, root, base, actor):
@@ -489,7 +500,7 @@ class MaintenanceSubsystem:
         root = Path(project['workspace']).expanduser()
         return not (root.is_dir() and _ok(_git(['rev-parse', '--git-dir'], root)))
 
-    def _start_clone(self, project_id, *, background, branch=None) -> bool:
+    def _start_clone(self, project_id, *, background) -> bool:
         """Clone (again) into the project's own workspace; one clone per project at a time."""
         with self._analysis_lock:
             if project_id in self._cloning:
@@ -501,7 +512,14 @@ class MaintenanceSubsystem:
 
         def work():
             try:
-                self._clone_and_probe(project_id, record['source'], Path(self.store.project(project_id)['workspace']), branch)
+                project = self.store.project(project_id)
+                if 'requested_branch' in record:
+                    requested = record['requested_branch']
+                else:
+                    # Registered before the choice was recorded: an explicit branch
+                    # was stored as base_branch; 'main' was also the unspecified default.
+                    requested = None if project['base_branch'] == 'main' else project['base_branch']
+                self._clone_and_probe(project_id, record['source'], Path(project['workspace']), requested)
             finally:
                 with self._analysis_lock:
                     self._cloning.discard(project_id)
@@ -584,13 +602,15 @@ class MaintenanceSubsystem:
         record = self._probe_record(project_id) or {}
         record['credential_used'] = credential
         self._save_probe(project_id, record)
-        if not branch:
-            head = _git(['symbolic-ref', '--short', 'HEAD'], target)
-            if _ok(head) and head.stdout.strip():
-                project = self.store.project(project_id)
-                if project['base_branch'] != head.stdout.strip():
-                    self.store.update_project(project_id, {'base_branch': head.stdout.strip()},
-                                              project['revision'], 'maintenance-subsystem')
+        # The baseline is what was actually cloned: the requested branch, or the
+        # remote default when none was requested.
+        head = _git(['symbolic-ref', '--short', 'HEAD'], target)
+        cloned = head.stdout.strip() if _ok(head) and head.stdout.strip() else branch
+        if cloned:
+            project = self.store.project(project_id)
+            if project['base_branch'] != cloned:
+                self.store.update_project(project_id, {'base_branch': cloned},
+                                          project['revision'], 'maintenance-subsystem')
         self.probe(project_id, actor=None)
 
     def probe(self, project_id, *, actor, background=True) -> dict:

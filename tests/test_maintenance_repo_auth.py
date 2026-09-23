@@ -29,7 +29,10 @@ class FakeClone:
                     self.gate.wait(5)
                 if self.fail:
                     return subprocess.CompletedProcess(argv, 128, '', self.fail)
-                return real(['git', 'clone', '-q', str(self.fixture), argv[-1]], capture_output=True, text=True)
+                # Same clone options (--single-branch, --branch …) and env; only the
+                # remote is the local fixture, so the branch actually cloned is real.
+                return real([*argv[:-2], str(self.fixture), argv[-1]], capture_output=True, text=True,
+                            env=kw.get('env'))
             return real(argv, *a, **kw)
         monkeypatch.setattr(ms.subprocess, 'run', run)
 
@@ -190,3 +193,56 @@ def test_failure_detail_is_redacted():
         credential='github', github=True, hidden=(TOKEN, header))
     assert TOKEN not in failure['detail'] and header not in failure['detail']
     assert failure['reason'] == 'auth' and '平台 GitHub 凭据' in failure['message']
+
+
+def _release_branch(repo):
+    for args in (['checkout', '-qb', 'release'], ['commit', '-q', '--allow-empty', '-m', 'release-only'],
+                 ['checkout', '-q', '-']):
+        subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True)
+    return subprocess.run(['git', 'rev-parse', 'release'], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+
+def _checkout(store, pid):
+    ws = store.project(pid)['workspace']
+    head = subprocess.run(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=ws, capture_output=True, text=True).stdout.strip()
+    sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ws, capture_output=True, text=True).stdout.strip()
+    return head, sha
+
+
+def test_a_requested_branch_survives_a_failed_first_clone_and_the_retry(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    release = _release_branch(repo)
+    monkeypatch.setenv('FACTORY_GITHUB_TOKEN', TOKEN)
+    fake = FakeClone(repo, monkeypatch, fail=NO_AUTH)
+    headers = login(client)
+    pid = _register(client, headers, branch='release').json()['project_id']
+    assert _settled(client, pid)['state'] == 'failed'
+    fake.fail = None
+    client.post(f'/api/v2/maintenance/repos/{pid}/probe', headers=headers)
+    view = _settled(client, pid)
+    assert view['state'] in ('needs_input', 'ready'), view
+    assert fake.calls[-1]['argv'][fake.calls[-1]['argv'].index('--branch') + 1] == 'release'
+    assert _checkout(store, pid) == ('release', release)
+    assert store.project(pid)['base_branch'] == 'release' and view['probe']['head_sha'] == release
+
+
+def test_reregistering_corrects_the_branch_only_while_nothing_was_cloned(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    release = _release_branch(repo)
+    monkeypatch.setenv('FACTORY_GITHUB_TOKEN', TOKEN)
+    fake = FakeClone(repo, monkeypatch, fail=NO_AUTH)
+    headers = login(client)
+    pid = _register(client, headers, branch='relase').json()['project_id']  # typo on first try
+    assert _settled(client, pid)['state'] == 'failed'
+    fake.fail = None
+    again = _register(client, headers, branch='release')
+    assert again.status_code == 201 and again.json()['project_id'] == pid
+    _settled(client, pid)
+    assert _checkout(store, pid) == ('release', release) and store.project(pid)['base_branch'] == 'release'
+    # A working checkout is not switched silently: an explicit different branch is refused.
+    calls = len(fake.calls)
+    refused = _register(client, headers, branch='main')
+    assert refused.status_code == 422 and '不会自动切换' in refused.text
+    assert _checkout(store, pid) == ('release', release) and len(fake.calls) == calls
+    # Unspecified on re-registration keeps the stored choice.
+    assert _register(client, headers).status_code == 201 and _checkout(store, pid)[0] == 'release'

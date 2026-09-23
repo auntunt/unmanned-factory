@@ -62,6 +62,7 @@ CLI、HTTP、页面操作的是同一组对象；业务状态全部由后端派�
   - 凭据：`https://github.com/<所有者>/<仓库>` 在 `credential_ref` 为空或为 `github` 时，使用服务端已有的 `FACTORY_GITHUB_TOKEN`。认证方式与 PR 发布同一套（`github.github_git_env`）：只作用于 github.com 的 HTTP 头，通过环境级 git 配置传入；不进 URL、argv、日志或持久 git 配置，并关闭宿主的全局和系统 git 配置。其他主机与 SSH 地址沿用执行主机自己的 git 配置。未知的 `credential_ref`，或把 `github` 用在非 github.com 地址上，登记时直接 422；旧记录里存了未知引用的，重试时失败并给出原因，**不会**退回无凭据克隆。
   - 失败：`probe.access = {ok:false, reason, message, next_step, detail, credential}`。`reason` ∈ `auth | network | branch | timeout | target_occupied | credential_unknown | credential_host | credential_missing | workspace_missing | unknown`；`detail` 是脱敏后的 git 输出末尾。
   - 重试：URL 登记但克隆失败的仓库，对 `POST …/probe` 或重新登记同一 URL 都会**重新克隆**，沿用原 `project_id` 和原工作区。先克隆到旁边的临时目录，成功后再移入；目标目录非空时一律不覆盖（`target_occupied`）。同一进程内同一项目同时只允许一次克隆，重复点击只返回当前状态。
+  - 分支：登记时的选择原样保存为 `requested_branch`（`null` 表示未指定，跟随远端默认分支；与显式写 `main` 不同）。每次重试都沿用它；克隆完成后 `base_branch` 等于实际克隆到的分支。克隆尚未成功时，重新登记指定的新分支会生效；已经有可用工作区时，重新登记指定不同分支返回 422，工作区不会自动切换。
 - `GET /api/v2/maintenance/repos/{project_id}` → `RepoView` + `requirements`、`tasks`
 - `POST /api/v2/maintenance/repos/{project_id}/probe` → 重新分析
 - `POST /api/v2/maintenance/repos/{project_id}/checks` `{"adopt": ["<建议检查名>"]}` → 采纳探测建议的检查命令（管理员）
