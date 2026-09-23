@@ -1,0 +1,18 @@
+{
+  "actor": "demo-member（合成账号，仅分配 report-web）",
+  "projects": [
+    {
+      "id": "635b9f5c9d514eba88c1ad39f83d9b0a",
+      "name": "report-web（演练）"
+    }
+  ],
+  "node_ids": [
+    "repo:635b9f5c9d514eba88c1ad39f83d9b0a"
+  ],
+  "node_labels": [
+    "report-web（演练）"
+  ],
+  "leaks_orders_or_broken": false,
+  "other_project_graph_status": 403,
+  "other_project_graph_body": "{\"detail\":\"你没有该项目的访问权限\"}"
+}

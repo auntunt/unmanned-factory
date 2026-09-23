@@ -1,0 +1,12 @@
+{
+ "orders": "b6fccf6779134279aad31816776ecc6d",
+ "report": "635b9f5c9d514eba88c1ad39f83d9b0a",
+ "broken": "4f90d57c63584a5cb201ba6ff0e276b0",
+ "task_delivered": "9b43454a6cff41e0a250f9e8e0d1d533",
+ "task_pending": "08ac98017eb4433f88e3189445f42461",
+ "repo_states": {
+  "4f90d57c63584a5cb201ba6ff0e276b0": "failed",
+  "635b9f5c9d514eba88c1ad39f83d9b0a": "needs_input",
+  "b6fccf6779134279aad31816776ecc6d": "ready"
+ }
+}
