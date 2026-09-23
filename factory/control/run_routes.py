@@ -78,9 +78,10 @@ def router(store, svc, operations):
     api = APIRouter()
 
     @api.get('/api/v2/runs')
-    def runs(project_id: str | None = None):
+    def runs(request: Request, project_id: str | None = None):
+        governance = svc.governance
         if project_id is None:
-            return {'runs': store.runs()}
+            return {'runs': [run for run in store.runs() if governance.can_read_run(request.state.user, run)]}
         store.project(project_id)
         return {'runs': [run for run in store.all_runs() if run.get('project_id') == project_id]}
 

@@ -213,3 +213,49 @@ def test_usage_unknown_is_not_zero(env):
     store.append(w['runs']['sales_secret']['id'], 'usage.recorded', {'call_id': 'c3', 'cost_usd': 99})
     usage = client.get('/api/v5/management/overview').json()['usage']
     assert usage['known_cost_usd'] == 0.5 and usage['unknown_cost_calls'] == 1 and usage['calls'] == 2
+
+
+def test_old_endpoints_do_not_leak_other_departments(env):
+    """负责人 A 通过旧 /v2 /v3 /v4 入口读 B 部门：列表过滤、直接 ID 拒绝；已分配成员照常。"""
+    client, store, _ = env
+    w = _world(client, store)
+    _grant(client, w, w['rnd'])
+    sales_run = w['runs']['sales_secret']['id']
+    rnd_run = w['runs']['rnd_ready']['id']
+    _login(client, 'leader-a', PW)
+    direct = [f"/api/v2/projects/{w['p_sales']}/readiness", f"/api/v2/projects/{w['p_sales']}/agent",
+              f"/api/v3/projects/{w['p_sales']}/policy", f"/api/v4/projects/{w['p_sales']}/assistant",
+              f'/api/v2/runs/{sales_run}', f'/api/v2/runs/{sales_run}/events',
+              f'/api/v2/runs/{sales_run}/conversation', f'/api/v2/runs/{sales_run}/export',
+              f'/api/v3/runs/{sales_run}/plans', f'/api/v3/runs/{sales_run}/deliverables/download',
+              f"/api/v2/runs?project_id={w['p_sales']}", f"/api/v3/overview?project_id={w['p_sales']}",
+              # 管理范围内的项目：管理摘要可见，但原始运行/对话仍不因此可读
+              f'/api/v2/runs/{rnd_run}/conversation', f'/api/v2/runs/{rnd_run}/events']
+    for path in direct:
+        r = client.get(path)
+        assert r.status_code == 403, (path, r.status_code, r.text[:200])
+        assert '机密' not in r.text
+    for path in ('/api/v2/projects', '/api/v2/runs', '/api/v3/overview', '/api/v3/team'):
+        r = client.get(path)
+        assert r.status_code == 200, (path, r.text[:200])
+        assert '销售' not in r.text and w['p_sales'] not in r.text and sales_run not in r.text, path
+
+    _login(client, 'member-b', PW)
+    assert [p['id'] for p in client.get('/api/v2/projects').json()['projects']] == [w['p_sales']]
+    # 自己发起的运行（前端组那条）按既有「发起人」规则仍可读
+    assert {r['id'] for r in client.get('/api/v2/runs').json()['runs']} == {sales_run, w['runs']['fe_pending']['id']}
+    for path in (f'/api/v2/runs/{sales_run}', f'/api/v2/runs/{sales_run}/events',
+                 f'/api/v2/runs/{sales_run}/conversation', f"/api/v3/overview?project_id={w['p_sales']}"):
+        assert client.get(path).status_code == 200, path
+    assert client.get(f'/api/v2/runs/{rnd_run}').status_code == 403
+
+
+def test_management_summary_never_echoes_request_text(env):
+    client, store, _ = env
+    w = _world(client, store)
+    run, _ = store.create_run(w['p_rnd'], '请处理：客户身份证号 110101XXXX 与合同全文……',
+                              source={'type': 'web', 'actor': 'admin1', 'actor_id': 1})
+    store.update(run['id'], {'status': 'needs_clarification'})
+    _login(client)
+    body = client.get('/api/v5/management/overview').text + client.get(f"/api/v5/management/projects/{w['p_rnd']}").text
+    assert '身份证' not in body and f"任务 {run['id'][:8]}（尚无方案标题）" in body

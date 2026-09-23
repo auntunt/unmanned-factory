@@ -1,0 +1,46 @@
+/* 管理视图（负责人只读管理）最小样式，复用 workbench 的 wb- 变量与基础组件类。 */
+.mg-topbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.mg-topbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mg-back-link { color: var(--wb-teal-dark); font-size: 12px; font-weight: 650; }
+.mg-scope-label { color: var(--wb-muted); font-size: 12px; }
+.mg-note { color: var(--wb-faint); font-size: 11px; line-height: 1.5; margin: 0 0 18px; }
+.mg-window-tabs { display: inline-flex; gap: 6px; }
+.mg-window-tab { border: 1px solid var(--wb-border-strong); border-radius: 7px; background: var(--color-surface); color: var(--wb-ink); padding: 5px 11px; font-size: 12px; font-weight: 600; }
+.mg-window-tab.is-active { border-color: var(--wb-teal); background: var(--wb-teal); color: var(--color-on-accent); }
+.mg-units { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 20px; }
+.mg-unit-chip { border: 1px solid var(--wb-border-strong); border-radius: 20px; background: var(--color-surface); color: var(--wb-ink); padding: 5px 12px; font-size: 12px; }
+.mg-unit-chip.is-active { border-color: var(--wb-teal); background: var(--wb-teal-soft); color: var(--wb-teal-dark); font-weight: 650; }
+.mg-generated { color: var(--wb-faint); font-size: 11px; margin: 0 0 12px; }
+.mg-stat-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+@media (max-width: 900px) { .mg-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .mg-stat-grid > :last-child { grid-column: span 2; } }
+.mg-project-row, .mg-pending-row, .mg-audit-row { border-top: 1px solid var(--color-border); padding: 12px 0; }
+.mg-project-row:first-child, .mg-pending-row:first-child, .mg-audit-row:first-child { border-top: 0; padding-top: 0; }
+.mg-project-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.mg-project-head a { font-size: 13px; font-weight: 650; color: var(--wb-teal-dark); }
+.mg-project-meta { color: var(--wb-faint); font-size: 11px; margin: 3px 0 6px; }
+.mg-project-counts { display: flex; flex-wrap: wrap; gap: 10px; color: var(--wb-muted); font-size: 11px; }
+.mg-pending-row strong { font-size: 12px; }
+.mg-pending-meta { color: var(--wb-faint); font-size: 11px; margin: 3px 0 6px; }
+.mg-hint { color: var(--wb-muted); font-size: 11px; }
+.mg-usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.mg-usage-grid > div { display: flex; flex-direction: column; gap: 4px; }
+.mg-usage-grid span { color: var(--wb-muted); font-size: 11px; }
+.mg-usage-grid strong { font-size: 16px; }
+.mg-source { color: var(--wb-faint); font-size: 10px; margin-top: 10px; }
+.mg-audit-row span { display: block; font-size: 12px; }
+.mg-audit-row small { color: var(--wb-faint); font-size: 10px; }
+.mg-unassigned { list-style: none; margin: 0; padding: 0; }
+.mg-unassigned li { padding: 5px 0; font-size: 12px; }
+
+/* org admin page */
+.mg-org-columns { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) { .mg-org-columns { grid-template-columns: 1fr; } }
+.mg-tree-node { padding: 6px 0 6px 0; border-top: 1px solid var(--color-border); }
+.mg-tree-node:first-child { border-top: 0; }
+.mg-tree-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.mg-tree-row strong { font-size: 13px; }
+.mg-tree-row small { color: var(--wb-faint); font-size: 11px; }
+.mg-inline-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.mg-inline-form input, .mg-inline-form select { border: 1px solid var(--wb-border-strong); border-radius: 6px; background: var(--color-surface); color: var(--wb-ink); padding: 6px 8px; font-size: 12px; }
+.mg-field-row { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.mg-field-row label { font-size: 11px; color: var(--wb-muted); }

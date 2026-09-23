@@ -155,17 +155,19 @@ def _attention(run, events, latest_inspections=None):
     }
 
 
-def overview(store, project_id=None):
+def overview(store, project_id=None, allowed=None):
+    """``allowed``: project ids a non-admin may read; None means everything (admin)."""
     from factory.control.capabilities import CapabilityStore
     from factory.control.cost_policy import CostPolicy
     policy = CostPolicy(store)
-    projects = store.projects()
+    projects = [p for p in store.projects() if allowed is None or p['id'] in allowed]
     project_by_id = {project['id']: project for project in projects}
     if project_id is not None and project_id not in project_by_id:
         raise KeyError(project_id)
     names = {project['id']: project['name'] for project in projects}
     from factory.control.engineering_overview import current_evidence
-    all_runs = [{**run, 'progress': current_evidence(run)} for run in store.all_runs()]
+    all_runs = [{**run, 'progress': current_evidence(run)} for run in store.all_runs()
+                if allowed is None or run.get('project_id') in allowed]
     latest_inspections = {}
     # all_runs is newest-inserted first; superseding an old record must not make it latest.
     for run in all_runs:
@@ -178,7 +180,7 @@ def overview(store, project_id=None):
         return [run for run in all_runs if pid is None or run.get('project_id') == pid]
 
     def scope_capabilities(pid, runs):
-        if pid is None:
+        if pid is None and allowed is None:
             return all_capabilities
         source_runs = {str(run['id']) for run in runs}
         return [capability for capability in all_capabilities
@@ -380,9 +382,10 @@ def router(store, service):
             raise HTTPException(422, str(exc)) from None
 
     @api.get('/overview')
-    def get_overview(project_id: str | None = None):
+    def get_overview(request: Request, project_id: str | None = None):
         try:
-            return overview(store, project_id=project_id)
+            return overview(store, project_id=project_id,
+                            allowed=service.governance.readable_projects(request.state.user))
         except KeyError:
             raise HTTPException(404, '项目不存在') from None
 

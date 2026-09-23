@@ -19,6 +19,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [workTitle, setWorkTitle] = useState<string | null>(null)
   const [env, setEnv] = useState<{ mode?: string; label?: string } | null>(null)
+  const [management, setManagement] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
   const hamburgerRef = useRef<HTMLButtonElement>(null)
@@ -39,6 +40,8 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
     return () => mq.removeEventListener('change', onChange)
   }, [])
   useEffect(() => { const c = new AbortController(); request<{ mode?: string; label?: string }>('/api/v3/environment', { onUnauthorized: onLogout, signal: c.signal }).then(v => { if (!c.signal.aborted) setEnv(v) }).catch(() => undefined); return () => c.abort() }, [onLogout])
+  // 决定是否显示"管理"入口：企业治理 v1 的负责人/管理员管理视图，普通成员看不到。
+  useEffect(() => { const c = new AbortController(); request<{ management?: boolean }>('/api/v5/me/workspaces', { onUnauthorized: onLogout, signal: c.signal }).then(v => { if (!c.signal.aborted) setManagement(Boolean(v.management)) }).catch(() => undefined); return () => c.abort() }, [onLogout])
 
   // account popover: outside click + Esc
   useEffect(() => {
@@ -84,6 +87,9 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
       <span className="as-nav-icon"><Icon name={item.icon} /></span><span className="as-nav-text">{item.label}</span>
     </Link>
   }
+  // 企业治理 v1：管理入口不在 nav-config 里（只读管理视图，非工作台业务插件），
+  // 有管理查看范围（管理员或获授权成员）时才显示，普通成员导航保持不变。
+  const managementActive = location.pathname === '/management' || location.pathname.startsWith('/management/')
   const renderNav = (onNavigate?: () => void) => (
     <div className="as-nav-scroll">
       <nav className="as-nav" aria-label="主导航">{navItems.map(item => navLink(item, onNavigate))}</nav>
@@ -91,6 +97,12 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
         <span className="as-plugin-heading" aria-hidden="true">业务插件</span>
         {BUSINESS_PLUGIN_NAV.map(item => navLink(item, onNavigate))}
       </nav>
+      {management && <nav className="as-nav" aria-label="管理">
+        <Link to="/management" onClick={onNavigate} className={`as-nav-item ${managementActive ? 'is-active' : ''}`}
+          aria-current={managementActive ? 'page' : undefined} aria-label="管理" title={collapsed ? '管理' : undefined}>
+          <span className="as-nav-icon"><Icon name="settings" /></span><span className="as-nav-text">管理</span>
+        </Link>
+      </nav>}
     </div>
   )
 

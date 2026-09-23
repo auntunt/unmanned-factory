@@ -231,6 +231,33 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     async def missing(req, exc):
         return JSONResponse({'detail': '记录不存在'}, status_code=404)
 
+    # Registered before `boundary`, so it runs after it: by then the request is
+    # authenticated (or already answered 401). Non-admin reads of a project- or
+    # run-addressed resource go through the same assignment Governance uses for
+    # execution; list endpoints filter in their handlers. Kept apart from
+    # `boundary` so that reviewed block stays unchanged.
+    project_read = re.compile(r'/api/v\d/projects/([^/]+)(?:/.*)?')
+    run_read = re.compile(r'/api/v\d/runs/([^/]+)(?:/.*)?')
+
+    @app.middleware('http')
+    async def member_read_scope(request: Request, call_next):
+        path = request.url.path
+        if request.method in ('GET', 'HEAD') and path.startswith('/api/') and not path.startswith('/api/v5/'):
+            user = auth.authenticate(request.cookies.get(COOKIE, ''))
+            if user and user['role'] != 'admin':
+                try:
+                    if (m := project_read.fullmatch(path)):
+                        governance.require_read_project(user, m[1])
+                    elif (m := run_read.fullmatch(path)):
+                        governance.require_read_run(user, m[1])
+                    if 'project_id' in request.query_params:
+                        governance.require_read_project(user, request.query_params['project_id'])
+                except AuthError as exc:
+                    return JSONResponse({'detail': str(exc)}, status_code=exc.status)
+                except KeyError:
+                    return JSONResponse({'detail': '记录不存在'}, status_code=404)
+        return await call_next(request)
+
     @app.middleware('http')
     async def boundary(request: Request, call_next):
         path = request.url.path
@@ -363,8 +390,9 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         return response
 
     @app.get('/api/v2/projects')
-    def projects():
-        return {'projects': store.projects()}
+    def projects(request: Request):
+        allowed = governance.readable_projects(request.state.user)
+        return {'projects': [p for p in store.projects() if allowed is None or p['id'] in allowed]}
 
     @app.post('/api/v2/projects', status_code=201)
     def create_project(body: Project):

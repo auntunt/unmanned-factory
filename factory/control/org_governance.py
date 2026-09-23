@@ -297,12 +297,14 @@ class OrgGovernance:
 
     @staticmethod
     def _title(run):
+        """Plan title only. Request text can carry pasted material, so it never
+        backs a management summary; without a plan the task gets a neutral id."""
         plan = run.get('plan')
         title = plan.get('title') if isinstance(plan, dict) else None
-        if not isinstance(title, str) or not title.strip():
-            title = run.get('source', {}).get('original_request') or run.get('request') or '未命名任务'
-        title = ' '.join(str(title).split())
-        return title if len(title) <= 80 else title[:80] + '…'
+        if isinstance(title, str) and title.strip():
+            title = ' '.join(title.split())
+            return title if len(title) <= 80 else title[:80] + '…'
+        return f"任务 {str(run.get('id', ''))[:8]}（尚无方案标题）"
 
     def _cost(self, runs):
         if self.usage is None:

@@ -41,6 +41,9 @@ const ReposPage = lazy(() => import('./maintenance/ReposPage'))
 const IntakePage = lazy(() => import('./maintenance/IntakePage'))
 const AboutPage = lazy(() => import('./maintenance/AboutPage'))
 const EmbeddedMaintenance = lazy(() => import('./maintenance/EmbeddedMaintenance'))
+const ManagementOverviewPage = lazy(() => import('./management/ManagementOverviewPage'))
+const ManagementProjectDetailPage = lazy(() => import('./management/ProjectDetailPage'))
+const ManagementOrgPage = lazy(() => import('./management/OrgPage'))
 
 interface AuthResponse {
   user: User
@@ -134,6 +137,9 @@ export function RoutedWorkbench({ session, logout }: { session: AuthResponse; lo
       <Route path="modernization/:sliceId" element={<ModernizationSliceDetail {...pageProps} />} />
       <Route path="costs" element={<CostsPage {...pageProps} />} />
       <Route path="team" element={<TeamPage {...pageProps} />} />
+      <Route path="management" element={<ManagementOverviewPage {...pageProps} />} />
+      <Route path="management/projects/:projectId" element={<ManagementProjectDetailPage {...pageProps} />} />
+      <Route path="management/org" element={<ManagementOrgPage {...pageProps} />} />
       <Route path="settings" element={<SettingsPage {...shell} />} />
       {isAdmin
         ? <Route path="settings/runtime" element={<RuntimePage {...pageProps} />} />

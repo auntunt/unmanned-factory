@@ -87,6 +87,33 @@ class Governance:
             if not self._can_run(db, user_id, project_id):
                 raise AuthError('你没有该项目的执行权限，请联系管理员分配项目', 403)
 
+    # Reads reuse the execution assignment: a member reads the projects they are
+    # assigned to, plus runs they started themselves. An organisation
+    # management grant adds nothing here; it is served only by /api/v5/management.
+    def readable_projects(self, user):
+        """None for an admin (everything), else the member's assigned project ids."""
+        with self.connect() as db:
+            row = db.execute('SELECT role,active FROM users WHERE id=?', (user['id'],)).fetchone()
+            if row and row['active'] and row['role'] == 'admin':
+                return None
+            if not row or not row['active']:
+                return set()
+            return {r['project_id'] for r in db.execute('SELECT project_id FROM team_projects WHERE user_id=?', (user['id'],))}
+
+    def can_read_run(self, user, run):
+        allowed = self.readable_projects(user)
+        return allowed is None or run.get('project_id') in allowed or run.get('source', {}).get('actor_id') == user['id']
+
+    def require_read_project(self, user, project_id):
+        self.store.project(project_id)
+        allowed = self.readable_projects(user)
+        if allowed is not None and project_id not in allowed:
+            raise AuthError('你没有该项目的访问权限', 403)
+
+    def require_read_run(self, user, run_id):
+        if not self.can_read_run(user, self.store.get(run_id)):
+            raise AuthError('你没有该运行的访问权限', 403)
+
     def assign(self, user_id, project_ids, actor):
         for pid in project_ids:
             self.store.project(pid)
@@ -214,9 +241,11 @@ class Governance:
                 member['active'] = bool(member['active'])
                 member['project_ids'] = [p['id'] for p in projects] if member['role'] == 'admin' else [a['project_id'] for a in assignments if a['user_id'] == member['id']]
                 member['quota'] = self._quota(db, 'member', member['id'], month)
+            readable = None if admin else {a['project_id'] for a in assignments if a['user_id'] == user['id']}
             project_views = [{'id': p['id'], 'name': p['name'],
                 'member_ids': [a['user_id'] for a in assignments if a['project_id'] == p['id'] and (admin or a['user_id'] == user['id'])],
-                'quota': self._quota(db, 'project', p['id'], month)} for p in projects]
+                'quota': self._quota(db, 'project', p['id'], month)} for p in projects
+                if readable is None or p['id'] in readable]
             clause, args = ('', []) if admin else (' WHERE actor_id=?', [user['id']])
             calls = [dict(row) for row in db.execute('SELECT * FROM token_calls' + clause + " ORDER BY CASE WHEN status='unknown' THEN 0 WHEN status='reserved' THEN 1 ELSE 2 END,created_at DESC LIMIT 100", args)]
             audit = [{**dict(row), 'data': json.loads(row['data'])} for row in db.execute('SELECT * FROM team_audit ORDER BY id DESC LIMIT 50')] if admin else []
