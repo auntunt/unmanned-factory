@@ -4,8 +4,12 @@
 - 基线：`de4df07`（远端 main，与已上线版本一致）。不合并 main，不部署。
 - 工作树：`/Users/auntlee/workspace/.factory-worktrees/enterprise-governance-v1`，状态干净。frontend/node_modules 是本地 `npm ci` 装的（不再软链到其他工作树），`dist` 不入库。
 
+## 复核修正（REVIEW-3fd815f）
+审计泄露已修，见 STATUS“复核修正”和 CONTRACT 中 `audit[]` 的规则。新增或收录的测试：`tests/test_codex_gov_review.py`（原样）、`test_project_moved_across_departments_hides_its_past_in_leader_audit`、`test_unit_moved_across_departments_hides_its_past_in_leader_audit`。
+复跑：`uv run pytest tests/test_org_governance.py tests/test_codex_gov_review.py -q` → 12 passed。截图拍摄于修正之前；审计卡片上显示的字段（unit_path / target_username / project_name / result）在修正后仍然保留。
+
 ## 请独立验收
-1. `uv run pytest tests/test_org_governance.py -q`（9 条）。
+1. `uv run pytest tests/test_org_governance.py tests/test_codex_gov_review.py -q`（12 条）。
 2. 通读 `factory/control/app.py` 里的 `member_read_scope`，以及 `governance.py` 的 `readable_projects` / `can_read_run`。核对 CONTRACT 里“旧入口读取收窄”的覆盖表和例外清单是否完整。
 3. 截图与回执在 `evidence/`；可以用 `evidence/seed-synthetic-data.py` 加一个空的隔离数据目录重放（账号需要自己在隔离库里用 `AuthStore.create_user` 创建，脚本里没有密码）。
 

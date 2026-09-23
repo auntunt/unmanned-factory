@@ -259,3 +259,46 @@ def test_management_summary_never_echoes_request_text(env):
     _login(client)
     body = client.get('/api/v5/management/overview').text + client.get(f"/api/v5/management/projects/{w['p_rnd']}").text
     assert '身份证' not in body and f"任务 {run['id'][:8]}（尚无方案标题）" in body
+
+
+def _admin_audit(client):
+    _login(client)
+    return client.get('/api/v5/management/overview').json()['audit']
+
+
+def test_project_moved_across_departments_hides_its_past_in_leader_audit(env):
+    client, store, _ = env
+    w = _world(client, store)
+    _grant(client, w, w['rnd'])
+    assert client.put(f"/api/v5/org/projects/{w['p_sales']}", headers=w['admin'], json={'unit_id': w['rnd']}).status_code == 200
+    _login(client, 'leader-a', PW)
+    audit = client.get('/api/v5/management/overview').json()['audit']
+    assert not [r for r in audit if w['sales'] in str(r) or '销售部' in str(r)]
+    moved = [r for r in audit if r['action'] == 'org.project.bound' and r['data']['project_id'] == w['p_sales']]
+    assert len(moved) == 1  # 只有移入研发部这一条；绑定到销售部的旧记录不出现
+    assert moved[0]['data']['unit_path'] == '示例公司 / 研发部' and moved[0]['data']['previous_unit_path'] == '范围外组织'
+    assert set(moved[0]['data']) <= {'result', 'unit_id', 'unit_path', 'project_id', 'project_name', 'previous_unit_path'}
+    # 管理员的原始追加审计完整保留：两次绑定、旧组织 ID 与路径都在
+    raw = [r for r in _admin_audit(client) if r['action'] == 'org.project.bound' and r['data']['project_id'] == w['p_sales']]
+    assert [r['data']['unit_id'] for r in raw] == [w['rnd'], w['sales']]
+    assert raw[0]['data']['previous_unit_id'] == w['sales'] and raw[0]['data']['previous_unit_path'] == '示例公司 / 销售部'
+
+
+def test_unit_moved_across_departments_hides_its_past_in_leader_audit(env):
+    client, store, _ = env
+    w = _world(client, store)
+    key = _unit(client, w['admin'], '大客户组', 'group', w['sales'])
+    _grant(client, w, w['rnd'])
+    assert client.patch(f'/api/v5/org/units/{key}', headers=w['admin'], json={'parent_id': w['rnd']}).status_code == 200
+    _login(client, 'leader-a', PW)
+    audit = client.get('/api/v5/management/overview').json()['audit']
+    assert not [r for r in audit if w['sales'] in str(r) or '销售部' in str(r)]
+    rows = {r['action']: r['data'] for r in audit if r['data'].get('unit_id') == key}
+    # 节点现在在范围内：它的建立与移动可见，但路径按今天的树计算，来处不暴露
+    assert rows['org.unit.created']['unit_path'] == '示例公司 / 研发部 / 大客户组'
+    assert rows['org.unit.updated']['parent_path_before'] == '范围外组织'
+    assert 'unit_path_before' not in rows['org.unit.updated'] and 'parent_id' not in rows['org.unit.created']
+    raw = {r['action']: r['data'] for r in _admin_audit(client) if r['data'].get('unit_id') == key}
+    assert raw['org.unit.created']['unit_path'] == '示例公司 / 销售部 / 大客户组'
+    assert raw['org.unit.updated']['unit_path_before'] == '示例公司 / 销售部 / 大客户组'
+    assert raw['org.unit.updated']['parent_id_before'] == w['sales']

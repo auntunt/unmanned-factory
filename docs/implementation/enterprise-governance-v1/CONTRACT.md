@@ -60,7 +60,9 @@
 - `projects[]`：`name`、`unit_path`、`counts`、`initiators`（任务记录里的发起人；项目本身没有负责人字段，不推断）、`last_activity_at`。
 - `pending[]`：真实任务的状态和原因，外加 `can_act`，其判定与既有中间件相同（admin，或者是发起人且有项目执行权）。不能操作时的提示是“需要发起人或管理员处理”。**不存在**预算审批或发布审批队列。
 - `usage`：费用来自运行事件 `usage.recorded`。没有记录时 `recorded=false`、`known_cost_usd=null`（显示“未记录”，不显示 0）；另外单独给出未知费用的调用数。token 数取本月 `token_calls` 台账。
-- `audit[]`：只包含触及范围内节点或项目的 `org.*` 记录，字段有操作者、动作、时间、`data.unit_path`/`target_username`/`result`。
+- `audit[]`：组织审计（`org.*`）。
+  - **admin**：原样返回只追加表里的记录（包含 `unit_path_before`、`previous_unit_id/path`、`parent_id_before` 等全部字段）；指定 unit 时只按范围挑选记录，字段不删。
+  - **非 admin**：按记录**发生在哪个组织**挑选（`unit_id` 当前在范围内；没有 unit 的记录看 `project_id` 当前是否在范围内），然后只保留白名单字段：`result, kind, grant, target_username, unit_id, unit_path, project_id, project_name, previous_unit_path, parent_path_before`。组织和项目只有在**当前**范围内才显示名字和 ID，路径按今天的树重新计算（不用记录里的旧路径）；否则显示 `范围外组织` / `范围外项目`，ID 置空。“来自哪里”的字段也按同一规则处理；旧记录没存来源 ID 的，一律显示 `范围外组织`。因此项目或节点从别的部门迁入后，负责人看得到迁入这件事，看不到它原来在哪个部门。
 - admin 在不指定 unit 时，额外返回 `unassigned_projects`。
 - 管理视图**不返回**对话、原始请求全文、日志或凭据。任务标题只取方案标题（截到 80 字）；没有方案标题时显示 `任务 <id 前 8 位>（尚无方案标题）`，**不回退请求原文**。
 

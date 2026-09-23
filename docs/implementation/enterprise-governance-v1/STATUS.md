@@ -10,6 +10,11 @@
 | `bdf4876` | 成员读取按项目分配收窄（旧 /v2 /v3 /v4 的项目与运行入口）；管理摘要不再回退到请求原文；管理首页、项目下钻、组织与授权页（页面由 Sonnet 子代理编写） |
 | `ad5ef07` | 管理面的导航和面包屑修正；契约写明收窄范围与例外；截图和回执 |
 
+## 复核修正（Codex REVIEW-3fd815f）
+- 问题：负责人的审计视图按“项目当前可见”放行历史记录，而且原样返回 data。项目从销售部迁入研发部后，研发负责人能读到销售部的 unit_id、路径和 previous_unit_path；节点迁移时 unit_path_before 有同样的问题。
+- 修法：非 admin 的审计改为“按记录发生的组织挑选 + 字段白名单 + 只显示当前范围内的名字（路径按当前树重算）”；admin 原样返回。原始审计表不改写。新记录额外存 `previous_unit_id`、`parent_id_before`、`parent_id`，以便按 ID 判断。
+- 验证：Codex 的复现 `tests/test_codex_gov_review.py`（原样收录，断言未改）+ 项目跨部门迁移、节点跨部门迁移两条（都断言管理员原始审计保留旧 ID 和路径）。`pytest tests/test_org_governance.py tests/test_codex_gov_review.py`：12 passed。前端没有读取这些字段，未重建。
+
 ## 已做
 - 后端：`factory/control/org_governance.py`、`org_routes.py`；在 `governance.py` 增加读取规则；新增独立中间件 `member_read_scope`（`app.py`）；`/api/v2/projects`、`/api/v2/runs`、`/api/v3/overview`、`/api/v3/team` 过滤可读项目。`boundary` 中间件没有改。
 - 前端：`frontend/src/management/*`（管理首页、项目下钻、组织与授权），AppShell 在有管理范围时显示“管理”入口，nav-config 增加 management 路由解析。

@@ -168,7 +168,7 @@ class OrgGovernance:
             if _uid(unit_id) not in units:
                 raise AuthError('组织不存在', 404)
             unit = units[unit_id]
-            before = self._path(units, unit_id)
+            before, parent_before = self._path(units, unit_id), unit['parent_id']
             if name is not None:
                 name = name.strip()
                 if not 1 <= len(name) <= 80:
@@ -184,6 +184,7 @@ class OrgGovernance:
                 unit['parent_id'] = parent_id
             db.execute('UPDATE org_units SET name=?,parent_id=? WHERE id=?', (unit['name'], unit['parent_id'], unit_id))
             self._audit(db, actor, 'org.unit.updated', {'unit_id': unit_id, 'unit_path_before': before,
+                                                         'parent_id_before': parent_before, 'parent_id': unit['parent_id'],
                                                          'unit_path': self._path(units, unit_id)})
             return unit
 
@@ -214,6 +215,7 @@ class OrgGovernance:
             self._audit(db, actor, 'org.project.bound', {
                 'project_id': project_id, 'project_name': project.get('name'), 'unit_id': unit_id,
                 'unit_path': self._path(units, unit_id),
+                'previous_unit_id': prior['unit_id'] if prior else None,
                 'previous_unit_path': self._path(units, prior['unit_id']) if prior else None})
 
     def unbind_project(self, project_id, actor):
@@ -400,16 +402,57 @@ class OrgGovernance:
         return view
 
     def _audit_view(self, scope, filtered):
-        """Org audit rows touching the scope; an admin's unscoped view sees all."""
+        """Org audit rows for the management view.
+
+        An admin gets the append-only rows verbatim. Everyone else gets a
+        projection: a row is chosen by the unit it happened in (or, for rows
+        without a unit, by a project now in scope), and only whitelisted fields
+        survive. Units and projects are named only if they are in scope *now*,
+        with the path recomputed from today's tree, because recorded paths and
+        "previous" fields describe where things used to be, which may be
+        another department.
+        """
         out = []
         for row in scope['audit_rows']:
             data = json.loads(row['data'])
-            if filtered and data.get('unit_id') not in scope['in_units'] and data.get('project_id') not in scope['project_ids']:
-                continue
+            unit, project = data.get('unit_id'), data.get('project_id')
+            if filtered:
+                chosen = unit in scope['in_units'] if unit else project in scope['project_ids']
+                if not chosen:
+                    continue
+            if not scope['admin']:
+                data = self._redacted(data, scope)
             out.append({'id': row['id'], 'actor': row['actor'], 'action': row['action'], 'at': row['at'], 'data': data})
             if len(out) >= 50:
                 break
         return out
+
+    def _redacted(self, data, scope):
+        units, in_units, projects = scope['units'], scope['in_units'], scope['project_ids']
+
+        def unit_ref(uid):
+            return self._path(units, uid) if uid in in_units else '范围外组织'
+
+        view = {'result': data.get('result')}
+        for key in ('kind', 'grant', 'target_username'):
+            if key in data:
+                view[key] = data[key]
+        if data.get('unit_id'):
+            view['unit_id'] = data['unit_id'] if data['unit_id'] in in_units else None
+            view['unit_path'] = unit_ref(data['unit_id'])
+        if data.get('project_id'):
+            visible = data['project_id'] in projects
+            view['project_id'] = data['project_id'] if visible else None
+            view['project_name'] = data.get('project_name') if visible else '范围外项目'
+        # Where a project or unit came from: shown only when that place is in
+        # scope now; older rows recorded no id, so they cannot be shown at all.
+        if 'previous_unit_path' in data:
+            prev = data.get('previous_unit_id')
+            view['previous_unit_path'] = unit_ref(prev) if prev else ('范围外组织' if data['previous_unit_path'] else None)
+        if 'unit_path_before' in data:
+            prev = data.get('parent_id_before')
+            view['parent_path_before'] = unit_ref(prev) if prev else '范围外组织'
+        return view
 
     def project_detail(self, user, project_id):
         scope = self._scope(user, None)
