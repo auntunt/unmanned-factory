@@ -130,7 +130,8 @@ export interface RepoView {
     head_sha: string | null
     branch: string | null
     remote: string | null
-    access: { ok: boolean; message: string }
+    /** 接入失败时带脱敏后的原因与下一步；detail 是已脱敏的 git 输出末尾。 */
+    access: { ok: boolean; message: string; reason?: string; next_step?: string; detail?: string; credential?: string | null }
     stack: { name: string; evidence: string }[]
     suggested_checks: SuggestedCheck[]
     findings: Finding[]

@@ -82,8 +82,8 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
               </label>
               <label>
                 凭据引用名
-                <input value={credentialRef} onChange={e => setCredentialRef(e.target.value)} placeholder="例如 github-readonly" />
-                <small>只填平台已配置的凭据名称，不要粘贴密钥。</small>
+                <input value={credentialRef} onChange={e => setCredentialRef(e.target.value)} placeholder="github" />
+                <small>GitHub 仓库留空即使用平台 GitHub 凭据；只能填平台已配置的名称（目前为 github），不要粘贴密钥。</small>
               </label>
             </div>
             <label className="wb-checkbox">
@@ -103,9 +103,20 @@ function RegisterForm({ csrfToken, onUnauthorized, onRegistered }: PageProps & {
 
 // --- List ---
 
+function FailureNote({ access }: { access: NonNullable<RepoView['probe']>['access'] }) {
+  return <div className="ms-repo-failure" role="note">
+    <strong>{access.message}</strong>
+    {access.next_step && <span>下一步：{access.next_step}</span>}
+    {access.detail && <details><summary>技术详情（已脱敏）</summary><code>{access.detail}</code></details>}
+  </div>
+}
+
 function RepoList(props: PageProps) {
   const mp = useMaintenancePath()
-  const { onUnauthorized } = props
+  const { onUnauthorized, csrfToken, user } = props
+  const isAdmin = user?.role !== 'member'
+  const [retrying, setRetrying] = useState<string | null>(null)
+  const [retryError, setRetryError] = useState<string | null>(null)
   const [repos, setRepos] = useState<RepoView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [forbidden, setForbidden] = useState(false)
@@ -127,6 +138,14 @@ function RepoList(props: PageProps) {
 
   useEffect(() => { load(); return () => controllerRef.current?.abort() }, [load])
 
+  const retry = async (projectId: string) => {
+    setRetrying(projectId); setRetryError(null)
+    try {
+      const next = await maintenanceApi.probeRepo(projectId, { csrfToken, onUnauthorized })
+      setRepos(current => (current ?? []).map(r => (r.project_id === projectId ? next : r)))
+    } catch (cause) { setRetryError(errorText(cause)) } finally { setRetrying(null) }
+  }
+
   // 有仓库在分析中时才轮询，避免空转请求。
   useEffect(() => {
     const busy = (repos ?? []).some(r => r.state === 'analyzing' || r.state === 'pending')
@@ -147,6 +166,7 @@ function RepoList(props: PageProps) {
 
       {forbidden && <ErrorNotice message="没有权限查看代码库列表。" />}
       {error && <ErrorNotice message={error} />}
+      {retryError && <ErrorNotice message={retryError} />}
 
       {!forbidden && !error && repos === null && (
         <div className="wb-card"><div className="wb-list-placeholder"><span /><span /><span /></div></div>
@@ -166,7 +186,14 @@ function RepoList(props: PageProps) {
                 <Link className="wb-table-link" to={mp(`/repos/${encodeURIComponent(repo.project_id)}`)}>{repo.name}</Link> <SyntheticBadge synthetic={repo.synthetic} />
                 <small>{repo.repository}{repo.probe?.branch ? `　分支 ${repo.probe.branch}` : ''}{repo.probe?.head_sha ? `　${repo.probe.head_sha.slice(0, 8)}` : ''}</small>
               </div>
-              <StateBadge state={repo.state} label={repo.state_label || REPO_STATE_LABEL[repo.state]} />
+              <div className="ms-repo-state">
+                <StateBadge state={repo.state} label={repo.state_label || REPO_STATE_LABEL[repo.state]} />
+                {repo.state === 'failed' && isAdmin && (
+                  <button className="wb-button wb-button-secondary" disabled={retrying === repo.project_id}
+                    onClick={() => void retry(repo.project_id)}>{retrying === repo.project_id ? '处理中…' : '重新接入'}</button>
+                )}
+              </div>
+              {repo.state === 'failed' && repo.probe?.access && !repo.probe.access.ok && <FailureNote access={repo.probe.access} />}
             </div>
           ))}
         </section>
@@ -245,7 +272,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
         description={repo.repository}
         actions={<>
           <button className="wb-button wb-button-secondary" onClick={() => navigate(mp('/repos'))}>返回列表</button>
-          <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void reprobe()}>{busy ? '处理中…' : '重新分析'}</button>
+          <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void reprobe()}>{busy ? '处理中…' : repo.state === 'failed' ? '重新接入' : '重新分析'}</button>
           <button className="wb-button wb-button-secondary" disabled={busy} onClick={() => void toggleSynthetic()}
             title="只影响此后接收的需求；已创建的任务与回执保持当时的标注">
             {repo.synthetic ? '取消合成标记' : '标记为合成仓库'}</button>
@@ -275,7 +302,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId }: PageProps & { proj
               <div className="wb-form-grid wb-form-grid-two" style={{ marginBottom: 16 }}>
                 <div><span className="wb-eyebrow">基线 SHA</span><p>{probe.head_sha ? probe.head_sha.slice(0, 12) : '—'}</p></div>
                 <div><span className="wb-eyebrow">分支</span><p>{probe.branch ?? '—'}</p></div>
-                <div><span className="wb-eyebrow">访问</span><p><span className={`wb-status ${probe.access.ok ? 'wb-status-success' : 'wb-status-danger'}`}><i aria-hidden="true" />{probe.access.ok ? '可访问' : '不可访问'}</span>{probe.access.message && <small style={{ display: 'block', marginTop: 4 }}>{probe.access.message}</small>}</p></div>
+                <div><span className="wb-eyebrow">访问</span><p><span className={`wb-status ${probe.access.ok ? 'wb-status-success' : 'wb-status-danger'}`}><i aria-hidden="true" />{probe.access.ok ? '可访问' : '不可访问'}</span>{probe.access.message && <small style={{ display: 'block', marginTop: 4 }}>{probe.access.message}</small>}{!probe.access.ok && probe.access.next_step && <small style={{ display: 'block', marginTop: 4 }}>下一步：{probe.access.next_step}</small>}</p></div>
                 <div><span className="wb-eyebrow">分析时间</span><p>{probe.at ?? '—'}</p></div>
               </div>
 

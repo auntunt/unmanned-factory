@@ -14,6 +14,7 @@ HTTP、CLI 和页面操作的是这里的同一组对象。这个模块只拥有
 """
 from __future__ import annotations
 
+import base64
 import datetime as _dt
 import fcntl
 import hashlib
@@ -120,6 +121,51 @@ def _parse(ts):
     except ValueError:
         return None
     return value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+
+
+# Credentials a registration may name. Only names the platform actually holds;
+# anything else is refused rather than stored and silently ignored.
+PLATFORM_CREDENTIALS = {'github': '平台 GitHub 凭据（服务端 FACTORY_GITHUB_TOKEN）'}
+_GITHUB_HTTPS = re.compile(r'^https://github\.com/[^/\s@]+/[^/\s@]+?(?:\.git)?/?$', re.I)
+_AUTH_MARKERS = ('could not read username', 'terminal prompts disabled', 'authentication failed',
+                 'invalid username or password', 'repository not found', 'permission denied (publickey)',
+                 'requested url returned error: 403', 'requested url returned error: 401')
+_NETWORK_MARKERS = ('could not resolve host', 'failed to connect', 'connection timed out',
+                    'network is unreachable', 'connection refused')
+
+
+def _redact_git_output(text, hidden=()):
+    text = str(text or '')
+    for secret in hidden:
+        if secret:
+            text = text.replace(secret, '***')
+    text = re.sub(r'(?i)(authorization:\s*\w+\s+)\S+', r'\1***', text)
+    return re.sub(r'//[^/@\s]+@', '//***@', text)
+
+
+def _clone_failure(stderr, *, credential=None, github=False, timed_out=False, hidden=()):
+    """A failed clone as (reason, message, next step, redacted detail)."""
+    detail = _redact_git_output(stderr, hidden).strip()[-300:]
+    text = detail.lower()
+    if timed_out:
+        return {'reason': 'timeout', 'message': '克隆超时',
+                'next_step': '检查执行主机到代码托管的网络，然后点“重新接入”', 'detail': detail}
+    if any(m in text for m in _AUTH_MARKERS):
+        if credential:
+            return {'reason': 'auth', 'message': f'{PLATFORM_CREDENTIALS[credential]}无权访问该仓库或已失效',
+                    'next_step': '确认平台 GitHub 账号能访问该仓库（私有仓库需被加入协作者或获得组织授权），然后点“重新接入”',
+                    'detail': detail}
+        return {'reason': 'auth', 'message': '执行主机没有访问该仓库的凭据',
+                'next_step': ('管理员在服务端配置 FACTORY_GITHUB_TOKEN 后点“重新接入”' if github else
+                              '在执行主机上为该代码托管配置 SSH 或凭据后点“重新接入”，或改用本地目录登记'),
+                'detail': detail}
+    if 'remote branch' in text and 'not found' in text:
+        return {'reason': 'branch', 'message': '指定的分支在远端不存在',
+                'next_step': '用正确的分支名重新登记该仓库', 'detail': detail}
+    if any(m in text for m in _NETWORK_MARKERS):
+        return {'reason': 'network', 'message': '执行主机无法连接代码托管',
+                'next_step': '检查执行主机网络或代理后点“重新接入”', 'detail': detail}
+    return {'reason': 'unknown', 'message': '克隆失败', 'next_step': '查看详情，修正后点“重新接入”', 'detail': detail}
 
 
 def _repository_from_url(url: str) -> str:
@@ -250,6 +296,8 @@ class MaintenanceSubsystem:
                                    ).expanduser().resolve()
         self._analysis = {}
         self._analysis_lock = threading.Lock()
+        # Project ids with a clone in flight in this process: one clone per project.
+        self._cloning = set()
         _ensure_tables(self.store)
 
     # -- authorization -------------------------------------------------------
@@ -312,6 +360,11 @@ class MaintenanceSubsystem:
             raise ValueError('请填写 1-120 个字符的项目名称')
         if credential_ref and not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', str(credential_ref)):
             raise ValueError('凭据引用只能是平台已配置的凭据名称，不能粘贴密钥本身')
+        if credential_ref and credential_ref not in PLATFORM_CREDENTIALS:
+            raise ValueError(f'凭据引用 {credential_ref} 未在平台配置；可用：' + '、'.join(PLATFORM_CREDENTIALS)
+                             + '（GitHub 仓库留空即使用平台 GitHub 凭据）')
+        if credential_ref == 'github' and not _GITHUB_HTTPS.match(source):
+            raise ValueError('平台 GitHub 凭据只用于 https://github.com/<所有者>/<仓库> 形式的地址')
         if branch and not re.fullmatch(r'[A-Za-z0-9._/-]{1,200}', str(branch)):
             raise ValueError('分支名格式无效')
         if _URL.match(source):
@@ -349,13 +402,15 @@ class MaintenanceSubsystem:
                 return project
         return None
 
-    def _reuse(self, project, actor, credential_ref):
+    def _reuse(self, project, actor, credential_ref, background=True):
         self._require(actor, project['id'])
         record = self._probe_record(project['id']) or {'state': 'pending'}
         if credential_ref:
             record['credential_ref'] = credential_ref
         self._save_probe(project['id'], record)
-        if record.get('state') in (None, 'pending'):
+        if self._needs_clone(project, record):
+            self._start_clone(project['id'], background=background)
+        elif record.get('state') in (None, 'pending'):
             self.probe(project['id'], actor=actor)
         return {**self.repo_view(project['id'], actor=actor), 'reused': True}
 
@@ -397,7 +452,7 @@ class MaintenanceSubsystem:
         repository = _repository_from_url(url)
         existing = self._existing(repository=repository)
         if existing:
-            return self._reuse(existing, actor, credential_ref)
+            return self._reuse(existing, actor, credential_ref, background)
         target = self.workspace_root / 'maintained' / repository.replace('/', '__')
         if target.exists() and any(target.iterdir()):
             raise ValueError(f'执行主机上的目标目录已存在且非空：{target}；请改用本地目录方式登记')
@@ -406,13 +461,7 @@ class MaintenanceSubsystem:
         self._save_probe(project['id'], {'state': 'analyzing', 'source': url,
                                          'credential_ref': credential_ref, 'started_at': now()})
 
-        def work():
-            self._clone_and_probe(project['id'], url, target, branch)
-
-        if background:
-            threading.Thread(target=work, daemon=True, name=f'maintenance-clone-{project["id"][:8]}').start()
-        else:
-            work()
+        self._start_clone(project['id'], background=background, branch=branch)
         return self.repo_view(project['id'], actor=actor)
 
     def _add_project(self, name, repository, root, base, actor):
@@ -422,25 +471,119 @@ class MaintenanceSubsystem:
             'budget_usd': None, 'budget_source': 'inherit',
             'actor': actor.get('username', 'system'), 'registered_by': 'maintenance-subsystem'})
 
+    def _github_token(self):
+        publisher = getattr(self.svc, 'publisher', None)
+        return getattr(publisher, 'token', '') or os.environ.get('FACTORY_GITHUB_TOKEN', '')
+
+    def _needs_clone(self, project, record) -> bool:
+        """A URL-registered repository whose checkout never arrived.
+
+        'analyzing' left behind by a process that died mid-clone is not a clone
+        in flight; only this process's own set says one is running.
+        """
+        if not _URL.match(str(record.get('source') or '')):
+            return False
+        with self._analysis_lock:
+            if project['id'] in self._cloning:
+                return False
+        root = Path(project['workspace']).expanduser()
+        return not (root.is_dir() and _ok(_git(['rev-parse', '--git-dir'], root)))
+
+    def _start_clone(self, project_id, *, background, branch=None) -> bool:
+        """Clone (again) into the project's own workspace; one clone per project at a time."""
+        with self._analysis_lock:
+            if project_id in self._cloning:
+                return False
+            self._cloning.add(project_id)
+        record = self._probe_record(project_id) or {}
+        record.update({'state': 'analyzing', 'started_at': now(), 'access': None})
+        self._save_probe(project_id, record)
+
+        def work():
+            try:
+                self._clone_and_probe(project_id, record['source'], Path(self.store.project(project_id)['workspace']), branch)
+            finally:
+                with self._analysis_lock:
+                    self._cloning.discard(project_id)
+
+        if background:
+            threading.Thread(target=work, daemon=True, name=f'maintenance-clone-{project_id[:8]}').start()
+        else:
+            work()
+        return True
+
+    def _clone_env(self, url, credential_ref):
+        """(env, credential used, secrets to redact) or a refusal dict. Never falls back silently."""
+        github = bool(_GITHUB_HTTPS.match(url))
+        if credential_ref and credential_ref not in PLATFORM_CREDENTIALS:
+            return {'reason': 'credential_unknown', 'message': f'凭据引用 {credential_ref} 未在平台配置',
+                    'next_step': '重新登记该仓库：GitHub 仓库留空凭据即使用平台 GitHub 凭据', 'detail': ''}
+        if credential_ref == 'github' and not github:
+            return {'reason': 'credential_host', 'message': '平台 GitHub 凭据只用于 github.com 的 HTTPS 地址',
+                    'next_step': '改用 https://github.com/<所有者>/<仓库> 地址重新登记', 'detail': ''}
+        if github:
+            token = self._github_token()
+            if token:
+                from factory.control.github import github_git_env
+                header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+                return github_git_env(token), 'github', (token, header)
+            if credential_ref == 'github':
+                return {'reason': 'credential_missing', 'message': '服务端尚未配置 FACTORY_GITHUB_TOKEN',
+                        'next_step': '管理员在服务端配置 FACTORY_GITHUB_TOKEN 后点“重新接入”', 'detail': ''}
+        # Other hosts and SSH: the execution host's own git setup authorises the clone.
+        return {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, None, ()
+
+    def _fail_clone(self, project_id, failure, credential=None):
+        record = self._probe_record(project_id) or {}
+        record.update({'state': 'failed', 'at': now(),
+                       'access': {'ok': False, 'credential': credential, **failure}})
+        self._save_probe(project_id, record)
+
     def _clone_and_probe(self, project_id, url, target, branch):
+        record = self._probe_record(project_id) or {}
+        resolved = self._clone_env(url, record.get('credential_ref'))
+        if isinstance(resolved, dict):
+            return self._fail_clone(project_id, resolved)
+        env, credential, hidden = resolved
+        target = Path(target)
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            # Never overwrite: whatever is there is someone's checkout or data.
+            return self._fail_clone(project_id, {
+                'reason': 'target_occupied', 'message': '执行主机上的目标目录已存在且非空，未覆盖',
+                'next_step': '管理员核对并清理该目录后点“重新接入”，或改用本地目录方式登记',
+                'detail': str(target)}, credential)
         args = ['clone', '--no-tags', '--single-branch']
         if branch:
             args += ['--branch', branch]
-        # No credential material is passed here: the host's own git configuration
-        # (SSH agent, credential helper) is what authorises the clone.
-        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Clone beside the target and move it in only when complete, so a failed
+        # or interrupted clone never leaves a half-filled workspace behind.
+        staging = target.parent / f'.clone-{target.name}-{uuid.uuid4().hex[:8]}'
+        failure = None
         try:
-            done = subprocess.run(['git', *args, url, str(target)], capture_output=True, text=True,
+            done = subprocess.run(['git', *args, url, str(staging)], capture_output=True, text=True,
                                   timeout=int(os.getenv('FACTORY_CLONE_TIMEOUT', '600')), env=env)
-            error = None if done.returncode == 0 else (done.stderr or '').strip()[-400:]
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            error = f'克隆失败：{type(exc).__name__}'
+            if done.returncode != 0:
+                failure = _clone_failure(done.stderr, credential=credential,
+                                         github=bool(_GITHUB_HTTPS.match(url)), hidden=hidden)
+        except subprocess.TimeoutExpired:
+            failure = _clone_failure('', timed_out=True)
+        except OSError as exc:
+            failure = _clone_failure(f'{type(exc).__name__}', hidden=hidden)
+        if failure is None:
+            try:
+                if target.is_dir():
+                    target.rmdir()  # empty (checked above); rmdir refuses anything else
+                staging.rename(target)
+            except OSError as exc:
+                failure = {'reason': 'target_occupied', 'message': '克隆完成但无法放入目标目录，未覆盖',
+                           'next_step': '管理员核对该目录后点“重新接入”', 'detail': type(exc).__name__}
+        if failure is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+            return self._fail_clone(project_id, failure, credential)
         record = self._probe_record(project_id) or {}
-        if error:
-            record.update({'state': 'failed', 'at': now(),
-                           'access': {'ok': False, 'message': f'无法访问仓库：{error}'}})
-            self._save_probe(project_id, record)
-            return
+        record['credential_used'] = credential
+        self._save_probe(project_id, record)
         if not branch:
             head = _git(['symbolic-ref', '--short', 'HEAD'], target)
             if _ok(head) and head.stdout.strip():
@@ -450,12 +593,25 @@ class MaintenanceSubsystem:
                                               project['revision'], 'maintenance-subsystem')
         self.probe(project_id, actor=None)
 
-    def probe(self, project_id, *, actor) -> dict:
-        """Inspect the checkout the executor will use. Nothing here runs project code."""
+    def probe(self, project_id, *, actor, background=True) -> dict:
+        """Inspect the checkout the executor will use. Nothing here runs project code.
+
+        A URL-registered repository whose clone failed is cloned again (same
+        project id, same workspace) when a person asks for a new probe.
+        """
         if actor is not None:
             self._require(actor, project_id)
         project = self.store.project(project_id)
         record = self._probe_record(project_id) or {}
+        with self._analysis_lock:
+            cloning = project_id in self._cloning
+        if cloning and actor is not None:
+            # A clone in flight owns the record; a person's probe reports it
+            # instead of racing it. The clone's own final probe (actor=None) runs.
+            return self.repo_view(project_id, actor=actor)
+        if actor is not None and self._needs_clone(project, record):
+            self._start_clone(project_id, background=background)
+            return self.repo_view(project_id, actor=actor)
         root = Path(project['workspace']).expanduser()
         findings = []
 
@@ -517,7 +673,10 @@ class MaintenanceSubsystem:
         record.update({
             'state': state, 'at': now(), 'head_sha': head_sha, 'branch': project['base_branch'],
             'base_sha': branch_sha, 'remote': remote,
-            'access': {'ok': access_ok, 'message': '可访问' if access_ok else '执行主机无法访问该仓库'},
+            'access': {'ok': True, 'message': '可访问'} if access_ok else (
+                record.get('access') if (record.get('access') or {}).get('reason') else
+                {'ok': False, 'reason': 'workspace_missing', 'message': '执行主机上的工作区不存在或不是 Git 仓库',
+                 'next_step': '点“重新接入”重新拉取，或核对本地目录'}),
             'stack': stack, 'suggested_checks': suggested, 'findings': findings, 'needs': needs})
         self._save_probe(project_id, record)
         return self.repo_view(project_id, actor=actor) if actor is not None else record

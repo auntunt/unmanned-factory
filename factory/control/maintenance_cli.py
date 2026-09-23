@@ -542,7 +542,7 @@ def _dispatch_repo(args, subsystem, actor) -> dict:
     if rc == 'show':
         return subsystem.repo_view(args.project_id, actor=actor, detail=True)
     if rc == 'probe':
-        return subsystem.probe(args.project_id, actor=actor)
+        return subsystem.probe(args.project_id, actor=actor, background=False)
     if rc == 'adopt-checks':
         return subsystem.adopt_checks(args.project_id, args.names, actor=actor)
     return {'error': f'未知子命令 repo {rc}'}

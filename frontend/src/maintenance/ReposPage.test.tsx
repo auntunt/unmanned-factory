@@ -183,3 +183,25 @@ describe('维护代码库 · 合成标记', () => {
     expect(screen.queryByText('合成')).toBeNull()
   })
 })
+
+describe('接入失败的仓库', () => {
+  const failed: RepoView = {
+    ...readyRepo, project_id: 'proj-private', name: 'group-risk', repository: 'auntunt/group-risk-data-system',
+    state: 'failed', state_label: '接入失败',
+    probe: { ...readyRepo.probe!, head_sha: null, access: {
+      ok: false, reason: 'auth', message: '执行主机没有访问该仓库的凭据',
+      next_step: '管理员在服务端配置 FACTORY_GITHUB_TOKEN 后点“重新接入”',
+      detail: "fatal: could not read Username for 'https://github.com': terminal prompts disabled", credential: null } },
+  }
+
+  it('列表直接显示原因、下一步，并能重新接入', async () => {
+    api.repos.mockResolvedValue({ repos: [failed] })
+    api.probeRepo.mockResolvedValue({ ...failed, state: 'analyzing', state_label: '分析中', probe: null })
+    renderList()
+    expect(await screen.findByText('执行主机没有访问该仓库的凭据')).toBeTruthy()
+    expect(screen.getByText(/下一步：管理员在服务端配置 FACTORY_GITHUB_TOKEN/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '重新接入' }))
+    await waitFor(() => expect(api.probeRepo).toHaveBeenCalledWith('proj-private', expect.objectContaining({ csrfToken: 'csrf' })))
+    expect(await screen.findByText('分析中')).toBeTruthy()
+  })
+})

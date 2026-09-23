@@ -86,6 +86,23 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def github_git_env(token: str) -> dict:
+    """Environment for a git command authorised against github.com only.
+
+    The token travels as an HTTP header scoped to https://github.com/ through
+    environment-level config: never in the URL, argv, a log line or any
+    persisted git config, and the host's system/global config (credential
+    helpers, rewrites) is switched off for the command.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+    env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+        GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {header}',
+        GIT_CONFIG_KEY_1='core.hooksPath', GIT_CONFIG_VALUE_1='/dev/null')
+    return env
+
+
 class GitHubDelivery:
     def __init__(self, token: str, client=None):
         self.token = token
@@ -172,13 +189,7 @@ class GitHubDelivery:
         return result
 
     def _git_env(self):
-        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-        header = base64.b64encode(f'x-access-token:{self.token}'.encode()).decode()
-        env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
-            GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
-            GIT_CONFIG_VALUE_0=f'AUTHORIZATION: basic {header}',
-            GIT_CONFIG_KEY_1='core.hooksPath', GIT_CONFIG_VALUE_1='/dev/null')
-        return env
+        return github_git_env(self.token)
 
     @staticmethod
     def _git(root, args, env, *, timeout=120):
