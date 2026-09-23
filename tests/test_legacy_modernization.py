@@ -521,12 +521,30 @@ def _replace_mount(client, router_obj):
     """
     routes = client.app.router.routes
     prefix = '/api/v2/modernization'
-    keep = [r for r in routes if not str(getattr(r, 'path', '')).startswith(prefix)]
-    assert len(keep) < len(routes), 'app.py 应当已经接线了信创路由，这里却一条都没找到'
-    index = next(i for i, r in enumerate(keep)
-                 if getattr(r, 'path', None) == '/api/{path:path}')
-    keep[index:index] = router_obj.routes
+
+    def serves_prefix(route):
+        # FastAPI >= 0.141 keeps each include_router() as one lazy _IncludedRouter
+        # entry wrapping the original router; older versions copied flat routes.
+        original = getattr(route, 'original_router', None)
+        paths = [str(getattr(r, 'path', '')) for r in original.routes] if original is not None \
+            else [str(getattr(route, 'path', ''))]
+        return any(path.startswith(prefix) for path in paths)
+
+    positions = [i for i, r in enumerate(routes) if serves_prefix(r)]
+    assert positions, 'app.py 应当已经接线了信创路由，这里却一条都没找到'
+    catch_all = next(i for i, r in enumerate(routes) if getattr(r, 'path', None) == '/api/{path:path}')
+    assert all(i < catch_all for i in positions), '信创路由必须排在 /api 兜底之前'
+    before = len(routes)
+    # Mount the replacement the way production does, then move exactly what that
+    # added into the old entries' place, so ordering against the catch-all holds.
+    client.app.router.include_router(router_obj)
+    added = routes[before:]
+    del routes[before:]
+    keep = [r for i, r in enumerate(routes) if i not in positions]
+    index = positions[0]
+    keep[index:index] = added
     routes[:] = keep
+    assert not any(serves_prefix(r) for r in routes if r not in added)
 
 
 def _login(client):

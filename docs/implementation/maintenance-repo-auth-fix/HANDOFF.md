@@ -33,3 +33,20 @@
 - 没有对真实 GitHub 做过克隆（按要求不读凭据、不访问服务器）；真实结果以 Codex 上线后的验收为准。
 - 并发去重只在单个进程内有效（服务本身是单进程部署）。
 - 只支持 `github` 这一个凭据名；其他托管平台的凭据需要另行设计。
+
+## CI 收口（CI-FOLLOWUP.md 的 5 项）
+复现（修复前，本机）：`pytest tests/test_app_route_contract.py tests/test_legacy_modernization.py` → 5 failed, 19 passed，失败项与清单一致。
+
+1. `route_parameters_and_decorators_unchanged`：快照只有两行漂移，`GET /api/v2/projects` 与 `GET /api/v2/runs` 的处理器新增了 `request: Request`。这是企业治理 v1 按项目分配收窄成员读取的已验收改动（`test_org_governance.py::test_old_endpoints_do_not_leak_other_departments` 覆盖）。fixture 只改了这两行的 `args`，装饰器和其余路由保持冻结。
+2–3. `middleware_remains_byte_identical_in_app`、`pack_upload_extension_…`：定位到快照最后一次匹配是 `30f987e`，之后 `f2ee5b6` 和 `7b6d684`（运维维护子系统）对 `boundary` 做了 4 处改动。逐处核对授权边界：
+   - 机器接入免会话：只对 `POST /api/v2/maintenance/intake` 这一个精确路径生效，路由自己校验 Bearer（无效返回 401），并按来源的项目列表判定（越界返回 403）；
+   - 成员维护任务动作：要求是执行的发起人，并且有项目分配（`require_project`）；
+   - 成员人工需求提交：由路由里的身份端口校验项目；
+   - 嵌入：只在配置了 `FACTORY_EMBED_ORIGINS` 且路径是 `/embed/` 时开放 frame-ancestors，其余页面和 API 仍然是 `X-Frame-Options: DENY`。
+
+   做法沿用本文件已有的“已审查增量归一化”写法，新增 `_normalize_maintenance_boundary`：精确还原这 4 处（每处 `assert count == 1`，对不上立即失败），**两条 SHA 基线都没改**。其中两项原先没有行为测试，已补上：`test_machine_intake_exemption_is_exact_and_token_checked`、`test_embed_framing_is_opt_in_and_never_reaches_the_api`；另外两项由 `test_maintenance_subsystem.py` 里已有的成员测试覆盖。
+4–5. modernization 两条：锁定的 FastAPI 0.141.1 把每次 `include_router` 保存为惰性的 `_IncludedRouter(original_router=…)`，测试辅助函数按平铺路由去找，所以找不到。`_replace_mount` 改为按 `original_router` 识别旧入口，用真实的 `include_router` 挂载替身后再放回原来的位置（保持在 `/api` 兜底路由之前），同时兼容平铺路由。产品路由没改，断言没删。临时探针验证过：替换后请求确实由替身响应（`actor='test'`，可以反复替换），而生产侧的可用性默认是 disabled，所以用例里的 201 证明走的是替身。
+
+修复后：上述两个文件 26 passed（含新增 2 条）；相关授权与维护测试（org、codex_gov_review、maintenance_subsystem、maintenance_repo_auth、control_auth、team_governance）58 passed。没有跑全量。
+
+另外发现一处没有修的：中间件提前返回的 401/403 JSON 响应不带 `X-Frame-Options` 等安全头，基线上就是这样，与嵌入改动无关，这轮不在范围内。

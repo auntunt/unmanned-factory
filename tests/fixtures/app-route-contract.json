@@ -33,7 +33,7 @@
     {
       "name": "projects",
       "method": "get",
-      "args": "arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[])",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load()))], kwonlyargs=[], kw_defaults=[], defaults=[])",
       "decorator_args": [
         "Constant(value='/api/v2/projects')"
       ],
@@ -131,7 +131,7 @@
     {
       "name": "runs",
       "method": "get",
-      "args": "arguments(posonlyargs=[], args=[arg(arg='project_id', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kwonlyargs=[], kw_defaults=[], defaults=[Constant(value=None)])",
+      "args": "arguments(posonlyargs=[], args=[arg(arg='request', annotation=Name(id='Request', ctx=Load())), arg(arg='project_id', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kwonlyargs=[], kw_defaults=[], defaults=[Constant(value=None)])",
       "decorator_args": [
         "Constant(value='/api/v2/runs')"
       ],

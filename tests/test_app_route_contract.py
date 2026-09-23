@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from tests.test_control_app import app_env  # noqa: F401
+
 ROOT=Path(__file__).resolve().parents[1]
 
 
@@ -27,6 +29,63 @@ def test_route_parameters_and_decorators_unchanged():
                         rows.append({'name':n.name,'method':d.func.attr,'args':dump(n.args),'decorator_args':[dump(a) for a in d.args],'decorator_keywords':[dump(k) for k in d.keywords],'async':isinstance(n,ast.AsyncFunctionDef)})
     frozen = [r for r in baseline['routes'] if r['name'] != 'import_workspace']
     assert sorted(rows,key=lambda r:json.dumps(r,sort_keys=True))==sorted(frozen,key=lambda r:json.dumps(r,sort_keys=True))
+
+
+def _normalize_maintenance_boundary(block):
+    """Undo the four reviewed maintenance-subsystem additions (f2ee5b6, 7b6d684).
+
+    Each one is pinned by a behaviour test, so the byte comparison keeps guarding
+    everything around them:
+    - machine intake bypasses the session only for POST on that exact path and
+      authenticates its own bearer token: test_machine_intake_exemption_is_exact_and_token_checked;
+    - member task actions need the execution's owner plus project assignment:
+      test_maintenance_subsystem.py::test_member_cannot_act_on_someone_elses_task_and_is_not_offered_to;
+    - member requirement submission is project-checked in the route:
+      test_maintenance_subsystem.py::test_member_without_the_project_cannot_submit_or_act;
+    - framing is opened only for /embed/ and only when configured:
+      test_embed_framing_is_opt_in_and_never_reaches_the_api.
+    Must run BEFORE _normalize_member_chat_whitelist, whose anchors predate these.
+    """
+    pairs = [
+        ("        # The maintenance machine-intake route authenticates its own bearer token\n"
+         "        # (an intake source, scoped to its projects); it has no browser session.\n"
+         "        machine_intake = request.method == 'POST' and path == '/api/v2/maintenance/intake'\n"
+         "        public_api = path in ('/api/auth/login', '/api/v2/github/webhook') or machine_intake\n",
+         "        public_api = path in ('/api/auth/login', '/api/v2/github/webhook')\n"),
+        ("if path != '/api/v2/github/webhook' and not machine_intake and request.headers.get('origin') != origin:",
+         "if path != '/api/v2/github/webhook' and request.headers.get('origin') != origin:"),
+        ("                    # 运维维护任务上的同一组「自己发起的运行」动作；授权规则与 run_action\n"
+         "                    # 完全相同（执行的发起人 + 项目授权），只是先从任务找到它的执行。\n"
+         "                    maintenance_action = re.fullmatch(\n"
+         "                        r'/api/v2/maintenance/tasks/([^/]+)/(clarify|approve|follow-up|resume|cancel|feedback)', path)\n",
+         ""),
+        ("                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path)\n"
+         "                        # 运维维护子系统的人工需求提交：项目授权由路由内的身份端口校验。\n"
+         "                        or path == '/api/v2/maintenance/requirements')\n",
+         "                        or re.fullmatch(r'/api/v4/maintenance-jobs/[^/]+/cancel', path))\n"),
+        ("                        elif request.method == 'POST' and (run_action or creation or maintenance_action):\n"
+         "                            if maintenance_action:\n"
+         "                                from factory.control.maintenance_subsystem import task_execution_owner\n"
+         "                                owner_id, project_id = task_execution_owner(store, maintenance_action[1])\n"
+         "                                if owner_id != user['id']:\n"
+         "                                    raise AuthError('成员只能操作自己发起的维护任务', 403)\n"
+         "                            elif run_action:\n",
+         "                        elif request.method == 'POST' and (run_action or creation):\n"
+         "                            if run_action:\n"),
+        ("        if embed_origins and path.startswith('/embed/'):\n"
+         "            # Opt-in host embedding of the maintenance subsystem pages only; every\n"
+         "            # other page and the whole API stay unframeable.\n"
+         "            response.headers['Content-Security-Policy'] = 'frame-ancestors ' + ' '.join(embed_origins)\n"
+         "        else:\n"
+         "            response.headers['X-Frame-Options'] = 'DENY'\n",
+         "        response.headers['X-Frame-Options'] = 'DENY'\n"),
+    ]
+    for new, old in pairs:
+        # A reviewed hunk that no longer matches is a middleware change nobody
+        # reviewed here: fail loudly instead of hashing around it.
+        assert block.count(new) == 1, new
+        block = block.replace(new, old)
+    return block
 
 
 def _normalize_member_chat_whitelist(block):
@@ -109,7 +168,7 @@ def test_middleware_remains_byte_identical_in_app():
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = _normalize_resume_budget_removal(block)
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
-    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
+    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(_normalize_maintenance_boundary(block)))
     assert hashlib.sha256(block.encode()).hexdigest()==baseline['middleware_sha256']
 
 
@@ -125,7 +184,7 @@ def test_pack_upload_extension_preserves_the_original_authorization_boundary():
     block = block.replace("path in ('/api/v2/projects/import-zip', '/api/v2/projects/import-files')", "path == '/api/v2/projects/import-zip'")
     block = _normalize_resume_budget_removal(block)
     block = block.replace('|retry|confirm-spec|resume-budget|follow-up)', '|retry)')
-    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(block))
+    block = _normalize_session_skill_whitelist(_normalize_member_chat_whitelist(_normalize_maintenance_boundary(block)))
     original=block.replace(extension,'        bounded_upload = skill_upload or project_upload')
     # Reviewed 1 GiB project-upload limits and explicit 413 handling; auth order retained.
     assert hashlib.sha256(original.encode()).hexdigest()=='6437d9ef8a4912dae455da64b31254dcc5e9689279b19d666b95544b279467a9'
@@ -153,3 +212,41 @@ def test_followup_is_an_exact_run_action_addition_not_a_broader_member_permissio
     call = assignments[0].value
     assert isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
     assert call.func.attr == 'fullmatch' and call.args[0].value == pattern
+
+
+
+def test_machine_intake_exemption_is_exact_and_token_checked(app_env):
+    """The only session-less write: POST on the exact intake path, with its own token."""
+    client, store, svc, repo = app_env
+    body = {'project_id': 'x', 'content': 'hello', 'external_id': 'ext-1'}  # structurally valid
+    no_token = client.post('/api/v2/maintenance/intake', json=body)
+    assert no_token.status_code == 401
+    assert client.post('/api/v2/maintenance/intake', json=body, headers={'Authorization': 'Bearer wbm_forged'}).status_code == 401
+    # Neighbouring paths and other methods keep session + origin rules.
+    assert client.get('/api/v2/maintenance/intake').status_code == 401
+    assert client.post('/api/v2/maintenance/intake/x', json=body).status_code == 403  # origin check still applies
+    assert client.post('/api/v2/maintenance/intake-sources', json={}, headers={'Origin': 'http://testserver'}).status_code == 401
+
+
+def test_embed_framing_is_opt_in_and_never_reaches_the_api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from factory.control.app import create_app
+    for origins, embed_header in ((None, None), ('https://host.example', 'frame-ancestors https://host.example')):
+        if origins:
+            monkeypatch.setenv('FACTORY_EMBED_ORIGINS', origins)
+        else:
+            monkeypatch.delenv('FACTORY_EMBED_ORIGINS', raising=False)
+        app = create_app(data_dir=tmp_path / f'd{bool(origins)}', workspace_root=tmp_path,
+                         public_origin='http://testserver', webhook_secret='s', static_dir=tmp_path / 'nostatic')
+        app.state.auth.create_user('frame-admin', 'a-long-test-password')
+        with TestClient(app) as client:
+            # Signed in, so the API answer goes through the normal response path
+            # (early 401s are answered before any security header is added).
+            assert client.post('/api/auth/login', json={'username': 'frame-admin', 'password': 'a-long-test-password'},
+                               headers={'Origin': 'http://testserver'}).status_code == 200
+            embed = client.get('/embed/maintenance/')
+            assert embed.headers.get('content-security-policy') == embed_header
+            assert (embed.headers.get('x-frame-options') == 'DENY') == (embed_header is None)
+            for path in ('/api/auth/me', '/', '/maintenance'):
+                r = client.get(path)
+                assert r.headers.get('x-frame-options') == 'DENY' and 'content-security-policy' not in r.headers, path
