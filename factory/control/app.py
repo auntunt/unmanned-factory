@@ -179,6 +179,10 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     app.include_router(capability_router(store, svc))
     from factory.control.team_routes import router as team_router
     app.include_router(team_router(auth, governance))
+    from factory.control.org_governance import OrgGovernance
+    from factory.control.org_routes import router as org_router
+    org = OrgGovernance(governance, store, usage=getattr(svc, '_usage', None))
+    app.include_router(org_router(org))
     from factory.control.deliverables import router as deliverables_router
     app.include_router(deliverables_router(store, svc))
     from factory.control.agent_routes import router as agent_router
