@@ -601,7 +601,20 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
         else:
             for name, argv in project['checks'].items():
                 executable = argv[0] if argv else ''
-                if Path(executable).is_absolute():
+                if executable == '@dockerfile':
+                    from factory.harness.checkenv import check_env
+                    env = check_env()
+                    docker = shutil.which('docker', path=env.get('PATH', ''))
+                    found = bool(len(argv) > 1 and docker and
+                                 ((root / 'Dockerfile.test').is_file() or (root / 'Dockerfile').is_file()))
+                    if found:
+                        try:
+                            daemon = subprocess.run([docker, 'info', '--format', '{{.ServerVersion}}'],
+                                                    capture_output=True, text=True, timeout=5, env=env)
+                            found = daemon.returncode == 0
+                        except (OSError, subprocess.TimeoutExpired):
+                            found = False
+                elif Path(executable).is_absolute():
                     path = Path(executable)
                     found = path.is_file() and os.access(path, os.X_OK)
                 elif '/' in executable or '\\' in executable:
@@ -612,7 +625,10 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
                 else:
                     found = bool(shutil.which(executable))
                 add_check(f'check:{name}', f'检查 {name}', 'ok' if found else 'blocked',
-                          '检查可执行文件存在' if found else f'找不到检查可执行文件：{executable}')
+                          ('Docker CLI 和 Dockerfile 已发现，尚未构建或运行检查' if executable == '@dockerfile'
+                           and found else '检查可执行文件存在' if found else
+                           'Docker CLI、Dockerfile 或 daemon 不可用' if executable == '@dockerfile' else
+                           f'找不到检查可执行文件：{executable}'))
         return {'project_id': pid, 'ready': all(item['status'] == 'ok' for item in checks),
                 'checks': checks, 'checked_at': now()}
 

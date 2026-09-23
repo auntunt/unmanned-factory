@@ -10,6 +10,8 @@ webuddy 是可定制的 AI 工作伙伴：员工在工作台用自然语言描�
 
 最新增量：[持续托管编码](docs/continuous-coding.md)：普通自主任务默认一个工作区和会话，保留六环展示，连接恢复与验收修复直接接续。[项目 ZIP 导入和反馈接续](docs/implementation-2026-09-10.md)继续保留。
 
+运维维护的 Python 仓库若有 `Dockerfile.test`（优先）或 `Dockerfile`，探测会建议容器内 `pytest`。采纳后，执行主机需要可访问的 Docker daemon；系统以 `docker build --network=none` 构建项目镜像，再在无网络、只读源代码挂载、非 root 用户的容器里执行测试，**不会退回宿主机 Python**。镜像必须预装测试依赖；生产镜像不含 pytest 时，请在仓库提供 `Dockerfile.test`。构建时也禁用网络，因此基础镜像与依赖须已缓存或在镜像中备齐。仓库中原有的宿主机 `pytest` 配置不会被静默改写；在“运维维护 → 代码库 → 建议检查”采纳容器建议后才切换。
+
 运行时挂载：[架构核对与优化](docs/runtime-mounting-review-2026-09-12.md)说明职能体、方法模块、数据源与工具的边界；[资料接入说明](docs/reference-source-operations.md)提供 CLI／MCP 文本资源导入、项目槽位绑定和 Claude 按需读取路径。
 
 主动验收：[独立验证现场与逐项证据](docs/active-verification-2026-09-12.md)说明验证工具、源码保护、证据补齐和看板展示。

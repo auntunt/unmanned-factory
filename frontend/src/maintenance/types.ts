@@ -128,7 +128,7 @@ export interface SuggestedCheck {
   name: string
   argv: string[]
   evidence: string
-  /** 命令能否在执行主机上启动（未运行）；false 时采纳后检查会失败。 */
+  /** 执行后端能否启动（未构建镜像或运行检查）；false 时采纳后检查会失败。 */
   available?: boolean
 }
 

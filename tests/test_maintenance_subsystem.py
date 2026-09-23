@@ -357,6 +357,61 @@ def test_probe_flags_a_python3_that_cannot_import_pytest(tmp_path, monkeypatch):
     assert ok is False and '没有安装 pytest' in note
 
 
+def test_docker_python_probe_does_not_require_host_pytest(app_env, tmp_path, monkeypatch):
+    from factory.control.maintenance_subsystem import detect_stack
+    client, store, svc, repo = app_env
+    (repo / 'requirements.txt').write_text('pytest\n')
+    (repo / 'Dockerfile').write_text('FROM python:3.12\n')
+    (repo / 'tests').mkdir()
+    subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'docker test fixtures'], cwd=repo, check=True)
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    docker = fake_bin / 'docker'
+    docker.write_text('#!/bin/sh\n[ "$1" = info ]\n')
+    docker.chmod(0o755)
+    python3 = fake_bin / 'python3'
+    python3.write_text('#!/bin/sh\nexit 1\n')
+    python3.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{fake_bin}:/usr/bin:/bin')
+    _, suggestions = detect_stack(repo)
+    assert suggestions[0]['argv'] == ['@dockerfile', 'python3', '-m', 'pytest', '-q']
+    view = _register(client, repo, login(client))
+    old = store.project(view['project_id'])
+    store.update_project(view['project_id'], {'checks': {'pytest': ['python3', '-m', 'pytest', '-q']}},
+                         old['revision'], 'test')
+    view = client.post(f"/api/v2/maintenance/repos/{view['project_id']}/probe",
+                       headers=login(client)).json()
+    assert view['state'] == 'needs_input'
+    assert '将 pytest 检查切换到 Docker 容器' in view['needs']
+    pytest_suggestion = next(c for c in view['probe']['suggested_checks'] if c['name'] == 'pytest')
+    assert pytest_suggestion['available'] is True
+    assert 'Docker 容器内' in next(f['message'] for f in view['probe']['findings']
+                                  if f['id'] == 'suggest:pytest')
+    adopted = client.post(f"/api/v2/maintenance/repos/{view['project_id']}/checks",
+                          json={'adopt': ['pytest']}, headers=login(client))
+    assert adopted.status_code == 200, adopted.text
+    assert store.project(view['project_id'])['checks']['pytest'][0] == '@dockerfile'
+    assert adopted.json()['state'] == 'ready'
+    readiness = client.get(f"/api/v2/projects/{view['project_id']}/readiness",
+                           headers=login(client)).json()
+    assert any(c['id'] == 'check:pytest' and c['status'] == 'ok' for c in readiness['checks'])
+    docker.write_text('#!/bin/sh\nexit 1\n')
+    readiness = client.get(f"/api/v2/projects/{view['project_id']}/readiness",
+                           headers=login(client)).json()
+    assert any(c['id'] == 'check:pytest' and c['status'] == 'blocked' for c in readiness['checks'])
+
+
+def test_docker_python_probe_fails_closed_without_docker(tmp_path, monkeypatch):
+    from factory.control.maintenance_subsystem import _check_runnable
+    (tmp_path / 'Dockerfile').write_text('FROM python:3.12\n')
+    empty = tmp_path / 'empty-bin'
+    empty.mkdir()
+    monkeypatch.setenv('PATH', str(empty))
+    ok, note = _check_runnable(['@dockerfile', 'python3', '-m', 'pytest', '-q'], tmp_path)
+    assert ok is False and '不会退回宿主机' in note
+
+
 def _member(client, pid, name):
     user = client.app.state.auth.create_user(name, 'long-member-password', role='member')
     if pid:

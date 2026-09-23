@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -593,3 +594,60 @@ class TestCheckArgvRealSubprocess:
         )
         task_checks = out["tasks"][0]["checks"]
         assert any(c["exit"] == 0 for c in task_checks)
+
+
+def test_dockerfile_check_builds_and_runs_in_container(tmp_path, monkeypatch):
+    from factory.control.execution import _run_check_unlimited
+    root = tmp_path / 'repo'
+    root.mkdir()
+    (root / 'Dockerfile').write_text('FROM python:3.12\n')
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    calls = tmp_path / 'docker-calls.jsonl'
+    docker = fake_bin / 'docker'
+    docker.write_text(
+        f'#!{sys.executable}\n'
+        'import json, pathlib, sys\n'
+        f'with pathlib.Path({str(calls)!r}).open("a") as log:\n'
+        '    log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{fake_bin}:/usr/bin:/bin')
+    record = _run_check_unlimited(root, 'pytest', ['@dockerfile', 'python3', '-m', 'pytest', '-q'],
+                                  10, lambda *_: None, None)
+    assert record['exit'] == 0 and record['backend'] == 'dockerfile'
+    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [command[0] for command in commands] == ['build', 'run', 'image']
+    assert '--network=none' in commands[0]
+    run = commands[1]
+    assert '--network=none' in run and '--read-only' in run
+    assert '--user' in run and '65534:65534' in run
+    assert run[run.index('--entrypoint') + 1] == 'python3'
+    assert run[-3:] == ['-m', 'pytest', '-q']
+
+
+def test_dockerfile_check_never_falls_back_to_host(tmp_path, monkeypatch):
+    from factory.control.execution import _check_launch_error, _run_check_unlimited
+    (tmp_path / 'Dockerfile').write_text('FROM python:3.12\n')
+    empty = tmp_path / 'empty-bin'
+    empty.mkdir()
+    monkeypatch.setenv('PATH', str(empty))
+    assert 'Docker CLI 不可用' in _check_launch_error(tmp_path,
+                                                     ['@dockerfile', 'python3', '-m', 'pytest', '-q'])
+    record = _run_check_unlimited(tmp_path, 'pytest', ['@dockerfile', 'python3', '-m', 'pytest', '-q'],
+                                  10, lambda *_: None, None)
+    assert record['exit'] == 127 and '不会退回宿主机' in record['stderr']
+
+
+def test_dockerfile_check_stops_when_image_build_fails(tmp_path, monkeypatch):
+    from factory.control.execution import _run_check_unlimited
+    (tmp_path / 'Dockerfile').write_text('FROM python:3.12\n')
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    docker = fake_bin / 'docker'
+    docker.write_text('#!/bin/sh\n[ "$1" = build ] && exit 42\nexit 0\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{fake_bin}:/usr/bin:/bin')
+    record = _run_check_unlimited(tmp_path, 'pytest', ['@dockerfile', 'python3', '-m', 'pytest', '-q'],
+                                  10, lambda *_: None, None)
+    assert record['exit'] == 42 and '容器镜像构建失败' in record['stderr']

@@ -21,6 +21,7 @@ import shutil
 import tomllib
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar, copy_context
@@ -401,6 +402,13 @@ def _check_argv(project: Mapping[str, Any], names: Iterable[Any], *, root: Path 
 
 
 def _check_launch_error(root: Path, argv: list[str]) -> str | None:
+    if argv and argv[0] == '@dockerfile':
+        dockerfile = root / ('Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile')
+        if len(argv) < 2 or not dockerfile.is_file():
+            return 'Dockerfile 容器检查缺少镜像定义或命令'
+        if shutil.which('docker', path=check_env().get('PATH', '')) is None:
+            return 'Docker CLI 不可用；不会退回宿主机执行'
+        return None
     executable = argv[0]
     target = str(root / executable) if '/' in executable and not Path(executable).is_absolute() else executable
     if shutil.which(target, path=check_env().get('PATH', '')) is None:
@@ -410,6 +418,9 @@ def _check_launch_error(root: Path, argv: list[str]) -> str | None:
 
 def _check_failure_kind(record: dict) -> str:
     text = (str(record.get('stdout', '')) + '\n' + str(record.get('stderr', ''))).lower()
+    if ('cannot connect to the docker daemon' in text or
+            ('docker daemon' in text and 'permission denied' in text)):
+        return 'check_environment'
     if record.get('exit') in (126, 127) or 'unrecognized arguments:' in text:
         return 'check_configuration'
     if 'modulenotfounderror:' in text or 'no module named ' in text:
@@ -433,6 +444,8 @@ def _run_check(root, name, argv, timeout_s, emit, task_id, cancel=None):
 
 
 def _run_check_unlimited(root: Path, name: str, argv: list[str], timeout_s: float, emit: Callable, task_id: str | None, cancel: threading.Event | None = None) -> dict:
+    if argv and argv[0] == '@dockerfile':
+        return _run_dockerfile_check(root, name, argv, timeout_s, emit, task_id, cancel)
     _emit(emit, "tool/check", {"name": name, "argv": argv}, task_id)
     started = time.monotonic()
     proc = subprocess.Popen(argv, cwd=root, env=check_env(), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -472,6 +485,64 @@ def _run_check_unlimited(root: Path, name: str, argv: list[str], timeout_s: floa
     else:
         record = {"name": name, "argv": argv, "exit": proc.returncode, "stdout": _clip(out), "stderr": _clip(err), "duration_s": round(time.monotonic() - started, 3)}
     _emit(emit, "check.result", record, task_id)
+    return record
+
+
+def _run_dockerfile_check(root: Path, name: str, argv: list[str], timeout_s: float,
+                          emit: Callable, task_id: str | None,
+                          cancel: threading.Event | None) -> dict:
+    """Build the project's test image and run a check without host-tool fallback.
+
+    The image build has no network and receives no credentials. The test sees a
+    read-only checkout, no network, and only a disposable /tmp. A project that
+    needs an installed test dependency must provide it in Dockerfile.test (or
+    its Dockerfile); we never install it on the execution host.
+    """
+    started = time.monotonic()
+    dockerfile = 'Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile'
+    if len(argv) < 2 or not (root / dockerfile).is_file() or not shutil.which('docker', path=check_env()['PATH']):
+        record = {'name': name, 'argv': argv, 'exit': 127,
+                  'stderr': 'Dockerfile 或 Docker CLI 不可用；不会退回宿主机执行',
+                  'duration_s': round(time.monotonic() - started, 3)}
+        _emit(emit, 'check.result', record, task_id)
+        return record
+    tag = f'webuddy-check-{uuid.uuid4().hex}'
+    image_built = False
+    try:
+        build = _run_check_unlimited(root, f'{name}:image',
+                                     ['docker', 'build', '--network=none', '--file', dockerfile,
+                                      '--tag', tag, '.'], timeout_s, emit, task_id, cancel)
+        if build.get('exit') != 0:
+            return _docker_check_result(name, argv, build, started, '容器镜像构建失败', emit, task_id)
+        image_built = True
+        remaining = max(.001, timeout_s - (time.monotonic() - started))
+        command = ['docker', 'run', '--rm', '--network=none', '--read-only',
+                   '--cap-drop=ALL', '--security-opt=no-new-privileges',
+                   '--pids-limit=256', '--memory=2g', '--cpus=2',
+                   '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m',
+                   '--mount', f'type=bind,src={root.resolve()},dst=/workspace,readonly',
+                   '--workdir', '/workspace', '--user', '65534:65534',
+                   '--env', 'HOME=/tmp', '--env', 'PYTHONDONTWRITEBYTECODE=1',
+                   '--entrypoint', argv[1], tag, *argv[2:]]
+        check = _run_check_unlimited(root, f'{name}:container', command,
+                                     remaining, emit, task_id, cancel)
+        return _docker_check_result(name, argv, check, started, '容器检查未通过', emit, task_id)
+    finally:
+        if image_built:
+            # This tag was created solely for this check; never remove a shared image.
+            try:
+                subprocess.run(['docker', 'image', 'rm', tag], cwd=root, env=check_env(),
+                               capture_output=True, text=True, timeout=10, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
+def _docker_check_result(name, argv, step, started, failure_prefix, emit, task_id):
+    record = {**step, 'name': name, 'argv': argv,
+              'duration_s': round(time.monotonic() - started, 3), 'backend': 'dockerfile'}
+    if step.get('exit') != 0 and not step.get('cancelled') and not step.get('timeout'):
+        record['stderr'] = _clip(f"{failure_prefix}：{step.get('stderr', '')}")
+    _emit(emit, 'check.result', record, task_id)
     return record
 
 

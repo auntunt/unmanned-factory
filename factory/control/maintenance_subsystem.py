@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 
 from factory.control.store import Conflict, now
+from factory.harness.checkenv import check_env
 
 VERSION = '0.1.0'
 CONTRACT_VERSION = 'maintenance-subsystem/1'
@@ -226,8 +227,12 @@ def detect_stack(root: Path) -> tuple[list[dict], list[dict]]:
         stack.append({'name': 'Python', 'evidence': marker})
         if (root / 'tests').is_dir() or (root / 'test').is_dir():
             uses_uv = (root / 'uv.lock').is_file()
-            check('pytest', ['uv', 'run', 'pytest', '-q'] if uses_uv else ['python3', '-m', 'pytest', '-q'],
-                  'tests/ 目录' + ('，uv.lock' if uses_uv else ''))
+            pytest_argv = ['uv', 'run', 'pytest', '-q'] if uses_uv else ['python3', '-m', 'pytest', '-q']
+            dockerfile = 'Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile'
+            in_docker = (root / dockerfile).is_file()
+            check('pytest', ['@dockerfile', *pytest_argv] if in_docker else pytest_argv,
+                  'tests/ 目录' + ('，uv.lock' if uses_uv else '') +
+                  (f'，{dockerfile}（容器内执行）' if in_docker else ''))
     if (root / 'go.mod').is_file():
         stack.append({'name': 'Go', 'evidence': 'go.mod'})
         check('go-test', ['go', 'test', './...'], 'go.mod')
@@ -249,19 +254,34 @@ def detect_stack(root: Path) -> tuple[list[dict], list[dict]]:
                 check('make-test', ['make', 'test'], 'Makefile test 目标')
         except OSError:
             pass
-    if (root / 'Dockerfile').is_file():
-        stack.append({'name': 'Docker 镜像', 'evidence': 'Dockerfile'})
+    if (root / 'Dockerfile').is_file() or (root / 'Dockerfile.test').is_file():
+        stack.append({'name': 'Docker 镜像', 'evidence':
+                      'Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile'})
     return stack, checks
 
 
 def _check_runnable(argv, root) -> tuple[bool, str]:
-    """Whether a suggested check can start on this host -- not whether it passes.
+    """Whether a suggested check's execution backend can start, not whether it passes.
 
-    ``python3 -m pytest`` needs more than a ``python3`` on PATH: the interpreter
-    the executor will find must also import pytest, or every check fails with
-    "No module named pytest" after the model has already done its work. Only the
-    host toolchain is asked; nothing from the repository is imported or run.
+    Docker checks only probe the daemon; no image is built and no repository
+    code is run here. Host ``python3 -m pytest`` still needs an importable pytest.
     """
+    if argv and argv[0] == '@dockerfile':
+        dockerfile = root / ('Dockerfile.test' if (root / 'Dockerfile.test').is_file() else 'Dockerfile')
+        if not dockerfile.is_file():
+            return False, '找不到 Dockerfile，不能执行容器检查'
+        env = check_env()
+        docker = shutil.which('docker', path=env.get('PATH', ''))
+        if not docker:
+            return False, '执行主机上找不到 Docker CLI；容器检查不会退回宿主机'
+        try:
+            done = subprocess.run([docker, 'info', '--format', '{{.ServerVersion}}'],
+                                  capture_output=True, text=True, timeout=5, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, '无法连接 Docker daemon；容器检查不会退回宿主机'
+        if done.returncode != 0:
+            return False, '无法连接 Docker daemon；容器检查不会退回宿主机'
+        return True, 'Docker daemon 可连接；镜像尚未构建，容器内检查尚未运行'
     exe = argv[0]
     if not (shutil.which(exe) or (root / exe).is_file()):
         return False, '执行主机上找不到该命令'
@@ -674,10 +694,15 @@ class MaintenanceSubsystem:
             for check in suggested:
                 available, note = _check_runnable(check['argv'], root)
                 check['available'] = available
+                display_argv = ('Docker 容器内：' + ' '.join(check['argv'][1:])
+                                if check['argv'][0] == '@dockerfile' else ' '.join(check['argv']))
                 finding(f'suggest:{check["name"]}', f'建议检查 {check["name"]}',
                         'found' if available else 'failed',
-                        f"{' '.join(check['argv'])}（{check['evidence']}）；{note}")
+                        f"{display_argv}（{check['evidence']}）；{note}")
         configured = sorted((project.get('checks') or {}).keys())
+        host_pytest = ((project.get('checks') or {}).get('pytest') in
+                       (['python3', '-m', 'pytest', '-q'], ['uv', 'run', 'pytest', '-q']))
+        docker_pytest = any(c['name'] == 'pytest' and c['argv'][0] == '@dockerfile' for c in suggested)
         if configured:
             finding('checks', '项目检查', 'found', f"已配置 {len(configured)} 条：{'、'.join(configured)}（尚未在本次探测中运行）")
         else:
@@ -689,6 +714,10 @@ class MaintenanceSubsystem:
             needs.append('指定存在的基线分支')
         if not configured:
             needs.append('确认检查命令' + ('（可采纳系统建议）' if suggested else ''))
+        if docker_pytest and host_pytest:
+            finding('check-backend', '检查执行环境', 'failed',
+                    '已配置的 pytest 仍在宿主机运行；请采纳 Docker 容器建议检查以切换，不能仅凭 Dockerfile 认定已切换')
+            needs.append('将 pytest 检查切换到 Docker 容器')
         state = 'failed' if not access_ok else ('needs_input' if needs else 'ready')
         record.update({
             'state': state, 'at': now(), 'head_sha': head_sha, 'branch': project['base_branch'],

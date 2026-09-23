@@ -132,6 +132,16 @@ describe('维护代码库 · 详情', () => {
     await waitFor(() => expect(api.adoptChecks).toHaveBeenCalledWith('proj-1', ['pytest'], { csrfToken: 'csrf', onUnauthorized: noop }))
   })
 
+  it('Docker 检查显示容器内命令而不是内部执行标记', async () => {
+    api.repo.mockResolvedValue({ ...readyRepo, probe: { ...readyRepo.probe!, suggested_checks: [
+      { name: 'pytest', argv: ['@dockerfile', 'python3', '-m', 'pytest', '-q'],
+        evidence: 'Dockerfile', available: true },
+    ] } })
+    renderDetail('proj-1')
+    await waitFor(() => expect(screen.getByText('Docker 容器内：python3 -m pytest -q')).toBeTruthy())
+    expect(screen.queryByText(/@dockerfile/)).toBeNull()
+  })
+
   it('建议检查为空时不显示采纳按钮', async () => {
     api.repo.mockResolvedValue({ ...readyRepo, probe: { ...readyRepo.probe!, suggested_checks: [] } })
     renderDetail('proj-1')

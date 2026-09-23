@@ -340,8 +340,8 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId, user }: PageProps & 
                   </div>
                   <ul className="ms-check-list">
                     {probe.suggested_checks.map((c, i) => (
-                      <li key={i}><strong>{c.name}</strong><div className="ms-check-argv">{c.argv.join(' ')}</div><span>{c.evidence}</span>
-                        {c.available === false && <span className="ms-check-warn">执行主机上无法启动这条命令，采纳后检查会失败</span>}</li>
+                      <li key={i}><strong>{c.name}</strong><div className="ms-check-argv">{c.argv[0] === '@dockerfile' ? `Docker 容器内：${c.argv.slice(1).join(' ')}` : c.argv.join(' ')}</div><span>{c.evidence}</span>
+                        {c.available === false && <span className="ms-check-warn">{c.argv[0] === '@dockerfile' ? 'Docker 不可用；请先连接执行主机的 Docker daemon' : '执行主机上无法启动这条命令，采纳后检查会失败'}</span>}</li>
                     ))}
                   </ul>
                 </div>
