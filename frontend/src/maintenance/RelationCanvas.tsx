@@ -134,7 +134,7 @@ function NodeLinks({ links }: { links: GraphLink[] }) {
 function NodeDetail({ node }: { node: GraphNode }) {
   return (
     <div className="mn-detail wb-card" aria-live="polite">
-      <span className="wb-eyebrow">{TYPE_LABEL[node.type]} · {TONE_LABEL[node.tone ?? 'pending']}</span>
+      <span className={`mn-detail-kind mn-tone-${node.tone ?? 'pending'}`}><i aria-hidden="true" />{TYPE_LABEL[node.type]} · {TONE_LABEL[node.tone ?? 'pending']}</span>
       <h2>{node.full_label ?? node.label}</h2>
       <p className="mn-hint">{node.sublabel}</p>
       <dl>
@@ -266,7 +266,14 @@ export default function RelationCanvas({ graph, state, onStateChange }: {
     else if (e.key === '0') fitView()
   }
 
-  const select = (id: string) => onStateChange({ node: id })
+  const sideRef = useRef<HTMLElement | null>(null)
+  const select = (id: string) => {
+    onStateChange({ node: id })
+    // Stacked layout (narrow screens): the details sit below the list, so bring them into view.
+    if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 920px)').matches) {
+      window.setTimeout(() => sideRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }), 0)
+    }
+  }
 
   return (
     <div className="mn-canvas-wrap">
@@ -334,7 +341,7 @@ export default function RelationCanvas({ graph, state, onStateChange }: {
               </div>
             )}
       </div>
-      <aside className="mn-canvas-side" aria-label="节点详情">
+      <aside className="mn-canvas-side" aria-label="节点详情" ref={sideRef}>
         {selected
           ? <NodeDetail node={selected} />
           : <EmptyState title="选择一个节点" description="这里会显示它的事实、来源 ID 和可进入的真实详情页。缺少的事实会写明“未记录”。" />}

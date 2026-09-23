@@ -82,3 +82,24 @@ def test_projection_never_names_a_project_the_caller_cannot_read(app_env, tmp_pa
     assert all(n['project_id'] == mine for n in nodes.values())
     assert '销售机密仓库' not in str(body) and theirs not in str(body)
     assert client.get('/api/v2/maintenance/graph', params={'project_id': theirs}).status_code in (403, 404)
+
+
+def test_a_failed_repo_node_says_why_and_what_next(app_env, monkeypatch):
+    client, store, svc, repo = app_env
+    headers = login(client)
+    from factory.control import maintenance_subsystem as ms
+    real = subprocess.run
+    monkeypatch.setattr(ms.subprocess, 'run', lambda argv, *a, **k: subprocess.CompletedProcess(
+        argv, 128, '', 'fatal: unable to access: Could not resolve host: example.invalid') if argv[:2] == ['git', 'clone'] else real(argv, *a, **k))
+    res = client.post('/api/v2/maintenance/repos', json={'source': 'https://example.invalid/a/b.git', 'name': 'broken'},
+                      headers=headers)
+    pid = res.json()['project_id']
+    import time
+    for _ in range(100):
+        if client.get(f'/api/v2/maintenance/repos/{pid}').json()['state'] == 'failed':
+            break
+        time.sleep(0.05)
+    _, nodes, _ = _graph(client)
+    facts = _facts(nodes[f'repo:{pid}'])
+    assert nodes[f'repo:{pid}']['tone'] == 'blocked'
+    assert facts['失败原因'] == '执行主机无法连接代码托管' and '重新接入' in facts['下一步']

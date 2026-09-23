@@ -104,6 +104,8 @@
 .mn-list-node:focus-visible { outline: 2px solid var(--wb-teal); outline-offset: 2px; }
 
 .mn-canvas-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; position: sticky; top: 12px; }
+.mn-detail-kind { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--wb-muted); }
+.mn-detail-kind i { width: 9px; height: 9px; border-radius: 2px; background: var(--mn-tone, var(--wb-faint)); }
 .mn-detail h2 { margin: 4px 0; font-size: 15px; overflow-wrap: anywhere; }
 .mn-detail dl { margin: 10px 0 0; }
 .mn-detail dt { color: var(--wb-faint); font-size: 10px; margin: 10px 0 2px; }

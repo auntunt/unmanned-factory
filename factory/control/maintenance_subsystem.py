@@ -1300,6 +1300,9 @@ class MaintenanceSubsystem:
                            {'label': '基线版本', 'value': base[:12] if base else '尚未分析'},
                            {'label': '接入状态', 'value': REPO_STATE_LABEL.get(state, state)},
                            {'label': '待补充', 'value': '、'.join(record.get('needs') or []) or '无'},
+                           *([{'label': '失败原因', 'value': access.get('message') or '未记录'},
+                              {'label': '下一步', 'value': access.get('next_step') or '查看仓库详情'}]
+                             if state == 'failed' and (access := record.get('access') or {}) and not access.get('ok') else []),
                            {'label': '负责人', 'value': unrecorded},
                            {'label': '登记人', 'value': project.get('actor') or '未记录'}],
                  'links': [{'kind': 'repo', 'id': pid, 'label': '仓库详情'}]})
@@ -1431,7 +1434,7 @@ class MaintenanceSubsystem:
                 reason = self._reason(row, kind)
                 add({'id': f'blocker:{tid}', 'type': 'blocker',
                      'label': {'answer': '等待业务回答', 'approval': '等待批准', 'blocked': '执行受阻'}[kind],
-                     'sublabel': reason[:60], 'full_label': reason, 'status': kind, 'task_id': tid, 'project_id': pid,
+                     'sublabel': reason[:60], 'status': kind, 'task_id': tid, 'project_id': pid,
                      'tone': 'blocked' if kind == 'blocked' else 'attention',
                      'facts': [{'label': '原因', 'value': reason},
                                {'label': '可处理', 'value': (f'发起人 {initiator} 或管理员' if initiator else '管理员')}],
