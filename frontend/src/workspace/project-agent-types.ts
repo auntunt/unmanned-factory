@@ -62,6 +62,19 @@ export interface CodeIndexMeta {
   warnings?: string[]
   stale?: boolean
   indexed?: boolean
+  /** Independent multi-language index; it may fail even when the fixed-commit index succeeds. */
+  shared_layer?: {
+    indexed?: boolean
+    outcome?: string
+    reason?: string | null
+    last_indexed?: string | null
+    languages?: string[]
+    file_count?: number
+    node_count?: number
+    edge_count?: number
+    stale?: boolean
+    reindex_recommended?: boolean
+  }
 }
 
 export interface CodeSearchResult {

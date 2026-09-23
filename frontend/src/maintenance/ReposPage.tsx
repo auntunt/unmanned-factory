@@ -4,6 +4,7 @@ import type { FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { WorkspaceApiError } from '../workspace/api'
+import ProjectAgent from '../workspace/ProjectAgent'
 import { EmptyState, ErrorNotice, PageHeader, errorText } from '../workbench/ui'
 import SyntheticBadge from './SyntheticBadge'
 import type { PageProps } from '../workbench/ui'
@@ -215,6 +216,7 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId, user }: PageProps & 
   const [forbidden, setForbidden] = useState(false)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [showProjectAgent, setShowProjectAgent] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
 
   const load = useCallback(() => {
@@ -369,12 +371,20 @@ function RepoDetail({ csrfToken, onUnauthorized, projectId, user }: PageProps & 
           )}
 
           <section className="wb-card" aria-label="项目记忆" style={{ marginTop: 18 }}>
-            <div className="wb-card-head"><div><span className="wb-eyebrow">项目记忆</span><h2>记忆与代码索引</h2></div></div>
+            <div className="wb-card-head"><div><span className="wb-eyebrow">项目记忆</span><h2>已记录的维护知识</h2></div></div>
             <div className="wb-form-grid wb-form-grid-two">
               <div><span className="wb-eyebrow">条目</span><p>{repo.memory.entries ?? '—'}</p></div>
               <div><span className="wb-eyebrow">已确认</span><p>{repo.memory.confirmed ?? '—'}</p></div>
-              <div className="wb-span-two"><span className="wb-eyebrow">代码索引</span><p>{repo.memory.code_index === 'on_demand' ? '执行时现场检索，未预建索引' : repo.memory.code_index}</p></div>
             </div>
+          </section>
+
+          <section className="wb-card" aria-label="项目档案与代码索引" style={{ marginTop: 18 }}>
+            <div className="wb-card-head"><div><span className="wb-eyebrow">项目能力</span><h2>项目档案与代码索引</h2><p>查看真实索引状态，按需构建、搜索代码和检查关系；也可管理项目知识。</p></div>
+              {isAdmin && !embedded && <button className="wb-button wb-button-primary" type="button" aria-expanded={showProjectAgent} onClick={() => setShowProjectAgent(open => !open)}>{showProjectAgent ? '收起代码索引' : '打开代码索引'}</button>}
+            </div>
+            {showProjectAgent && isAdmin && !embedded && <ProjectAgent key={repo.project_id} projectId={repo.project_id} repository={repo.repository} csrfToken={csrfToken} onUnauthorized={onUnauthorized} initialTab="code" />}
+            {!isAdmin && <p className="ms-note">构建索引和编辑知识需要管理员权限。</p>}
+            {embedded && <p className="ms-note">当前嵌入宿主尚未接入项目索引接口，请在 webuddy 项目工作区操作。</p>}
           </section>
 
           {(repo.requirements?.length || repo.tasks?.length) ? (

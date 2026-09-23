@@ -154,7 +154,7 @@ export interface RepoView {
   } | null
   needs: string[]
   checks_configured: string[]
-  memory: { entries: number | null; confirmed: number | null; code_index: string }
+  memory: { entries: number | null; confirmed: number | null }
   credential_ref: string | null
   synthetic?: boolean
   requirements?: Requirement[]

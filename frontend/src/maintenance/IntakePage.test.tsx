@@ -30,7 +30,7 @@ beforeEach(() => {
 const project: RepoView = {
   project_id: 'proj-1', name: '订单服务', repository: 'org/orders', workspace: '/data/orders',
   base_branch: 'main', state: 'ready', state_label: '可开始维护', probe: null, needs: [],
-  checks_configured: [], memory: { entries: 0, confirmed: 0, code_index: 'on_demand' }, credential_ref: null,
+  checks_configured: [], memory: { entries: 0, confirmed: 0 }, credential_ref: null,
 }
 
 const requirement: Requirement = {

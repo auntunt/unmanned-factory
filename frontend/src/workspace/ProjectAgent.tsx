@@ -25,6 +25,7 @@ interface ProjectAgentProps {
   csrfToken: string
   onUnauthorized: () => void
   repository?: string
+  initialTab?: AgentTab
 }
 
 const tabs: Array<{ id: AgentTab; label: string }> = [
@@ -217,6 +218,7 @@ function CodePanel({ projectId, csrfToken, onUnauthorized, repository }: Project
     {error && <div className="pa-error" role="alert">{error}</div>}
     {meta?.stale && <div className="pa-warning">索引已过期：当前基线 SHA 与索引 SHA 不同，请刷新索引。</div>}
     {meta?.indexed === false || !meta ? <div className="pa-empty">{meta ? '尚未建立代码索引。' : '正在读取索引状态…'}</div> : <div className="pa-index-meta"><span>索引 SHA：{meta.commit_sha ?? '—'}</span><span>当前 SHA：{meta.current_sha ?? '—'}</span><span>构建时间：{dateText(meta.indexed_at ?? undefined)}</span>{meta.warnings?.map((warning) => <span className="pa-warning" key={warning}>{warning}</span>)}</div>}
+    {meta?.shared_layer && <div className="pa-index-meta" aria-label="多语言共享索引状态"><span>多语言共享索引：{meta.shared_layer.indexed ? (meta.shared_layer.stale ? '已过期' : '已建立') : '未建立'}</span>{meta.shared_layer.languages?.length ? <span>覆盖语言：{meta.shared_layer.languages.join('、')}</span> : null}{meta.shared_layer.reason && <span className="pa-warning">{meta.shared_layer.reason}</span>}{meta.shared_layer.reindex_recommended && <span className="pa-warning">建议刷新多语言索引</span>}</div>}
     <form className="pa-search" onSubmit={search}><label htmlFor="code-search">搜索代码节点</label><input id="code-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="文件名、符号或中文文档" /><button className="wf-button" disabled={busy !== null}>搜索</button></form>
     {results.length > 0 && <div className="pa-search-results"><strong>搜索结果</strong>{results.map((result) => { const sourceUrl = githubSourceUrl(repository, searchResultSha, result.path, result.line); return <div className="pa-search-result-row" key={result.node_id}><button className="pa-search-result" onClick={() => void selectNode(result.node_id)}><span>{result.name}</span><span>{result.path}:{result.line}–{result.end_line}</span><small>{result.resolution === 'heuristic' ? '启发式' : '语法'} · {result.snippet}</small></button>{sourceUrl && <a className="pa-source-link" href={sourceUrl} target="_blank" rel="noreferrer">查看该版本源码</a>}</div> })}</div>}
     {graph && <div className="pa-graph-section"><div className="pa-graph-legend"><span>节点：{graph.nodes.length}</span><span>边：{graph.edges.length}</span><span>图 SHA：{graph.commit_sha ?? '—'}</span>{graph.stale && <span className="pa-warning">图已过期</span>}{graph.truncated && <span className="pa-warning">图已截断</span>}<span>虚线 = 启发式</span></div><GraphView graph={graph} onSelect={(node) => void selectNode(node)} /></div>}
@@ -265,7 +267,7 @@ function ImportPanel({ projectId, csrfToken, onUnauthorized, repository }: Proje
 }
 
 export default function ProjectAgent(props: ProjectAgentProps) {
-  const [tab, setTab] = useState<AgentTab>('profile')
+  const [tab, setTab] = useState<AgentTab>(props.initialTab ?? 'profile')
   const [profile, setProfile] = useState<ProjectAgentProfile | null>(null)
   const [draft, setDraft] = useState(profileDefaults)
   const [saving, setSaving] = useState(false)

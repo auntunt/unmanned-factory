@@ -38,6 +38,8 @@ def test_register_local_repo_probes_and_reuses_project(app_env):
     statuses = {f['id']: f['status'] for f in view['probe']['findings']}
     assert statuses['access'] == 'verified' and statuses['checks'] == 'missing'
     assert statuses['stack:Node.js'] == 'found'  # discovered is not verified
+    assert view['memory'] == {'entries': 0, 'confirmed': 0}
+    assert 'code_index' not in view['memory']  # index status is sourced from the project index API
     # Same directory again: the existing project id comes back, no second project.
     again = _register(client, repo, headers, name='Other name')
     assert again['project_id'] == view['project_id'] and again['reused'] is True

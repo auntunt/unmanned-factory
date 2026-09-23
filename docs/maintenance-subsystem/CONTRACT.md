@@ -77,11 +77,12 @@ RepoView = {
             "suggested_checks": [{"name", "argv", "evidence", "available"}],  // available=false：执行主机无法启动
             "findings": [{"id", "label", "status": "found|verified|missing|failed", "message"}]},
   "needs": ["确认检查命令", ...],                            // 待补充项
-  "memory": {"entries": 0, "confirmed": 0, "code_index": "on_demand"},
+  "memory": {"entries": 0, "confirmed": 0},
   "credential_ref": null
 }
 ```
 「可开始维护」只表示工作区可用、基线可解析、至少一条检查已配置；不代表构建、部署与业务检查通过。
+代码索引不属于 `memory` 统计；在 webuddy 内置宿主中，维护仓库详情直接打开已有的项目档案/代码索引面板。状态来自 `GET /api/v2/projects/{project_id}/code-index`，构建使用同路径的 `POST`，搜索与关系图使用 `code-search`、`code-graph`。固定提交索引与多语言共享索引分别报告，不能把一层成功当作另一层成功。外部嵌入宿主未适配这些接口时，页面明确提示不可用。
 
 ## 需求接入（人工与机器共用 `Intake.submit`）
 - 人工（会话登录）：`POST /api/v2/maintenance/requirements` `{"project_id", "content", "attachments": [{"name","ref"}]?}`

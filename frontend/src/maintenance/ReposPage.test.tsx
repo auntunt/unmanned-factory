@@ -19,7 +19,7 @@ vi.mock('./api', () => ({
 }))
 const api = vi.mocked(maintenanceApi)
 const noop = vi.fn()
-afterEach(() => { cleanup(); vi.clearAllMocks() })
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals() })
 
 const readyRepo: RepoView = {
   project_id: 'proj-1',
@@ -44,7 +44,7 @@ const readyRepo: RepoView = {
   },
   needs: [],
   checks_configured: [],
-  memory: { entries: 3, confirmed: 1, code_index: 'on_demand' },
+  memory: { entries: 3, confirmed: 1 },
   credential_ref: null,
 }
 
@@ -155,10 +155,41 @@ describe('维护代码库 · 详情', () => {
     await waitFor(() => expect(screen.getByText(/不代表构建、部署与业务检查通过/)).toBeTruthy())
   })
 
-  it('记忆信息 on_demand 显示为「执行时现场检索，未预建索引」', async () => {
+  it('不把项目记忆误报成代码索引状态，并提供真实入口', async () => {
     api.repo.mockResolvedValue(readyRepo)
     renderDetail('proj-1')
-    await waitFor(() => expect(screen.getByText('执行时现场检索，未预建索引')).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('button', { name: '打开代码索引' })).toBeTruthy())
+    expect(screen.getByText('已记录的维护知识')).toBeTruthy()
+    expect(screen.queryByText('执行时现场检索，未预建索引')).toBeNull()
+  })
+
+  it('管理员从维护仓库打开索引，查看独立层状态并真正触发构建和搜索', async () => {
+    api.repo.mockResolvedValue(readyRepo)
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      const data = path.endsWith('/agent')
+        ? { id: 'agent', project_id: 'proj-1', revision: 1, name: '订单服务', mission: '', architecture_summary: '', constraints: [] }
+        : path.endsWith('/code-index') && init?.method === 'POST'
+          ? { indexed: true, commit_sha: 'a'.repeat(40), current_sha: 'a'.repeat(40), indexed_at: '2026-09-23T12:00:00Z', shared_layer: { indexed: false, reason: '共享索引工具不可用' } }
+          : path.endsWith('/code-index')
+            ? { indexed: false, shared_layer: { indexed: false, reason: '尚未构建' } }
+            : path.includes('/code-search?')
+              ? { results: [{ node_id: 'f:app.py', path: 'app.py', name: 'render', kind: 'function', line: 1, end_line: 2, score: 1, snippet: 'def render', resolution: 'syntax' }], commit_sha: 'a'.repeat(40), current_sha: 'a'.repeat(40), stale: false, warnings: [] }
+              : {}
+      return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    renderDetail('proj-1')
+    fireEvent.click(await screen.findByRole('button', { name: '打开代码索引' }))
+    expect(await screen.findByText('尚未建立代码索引。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '构建 / 刷新索引' }))
+    expect(await screen.findByText('索引 SHA：' + 'a'.repeat(40))).toBeTruthy()
+    expect(screen.getByText('共享索引工具不可用')).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText('文件名、符号或中文文档'), { target: { value: 'render' } })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    expect(await screen.findByText('app.py:1–2')).toBeTruthy()
+    expect(fetcher).toHaveBeenCalledWith('/api/v2/projects/proj-1/code-index', expect.objectContaining({ method: 'POST' }))
+    expect(fetcher).toHaveBeenCalledWith('/api/v2/projects/proj-1/code-search?q=render', expect.objectContaining({ method: 'GET' }))
   })
 
   it('点击重新分析调用 probeRepo', async () => {

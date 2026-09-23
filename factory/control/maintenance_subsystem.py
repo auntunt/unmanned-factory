@@ -750,9 +750,9 @@ class MaintenanceSubsystem:
             from factory.control import scenario_memory
             entries = scenario_memory.recall(self.store, project_id, plugin_id=PLUGIN_ID)
             confirmed = sum(1 for e in entries if scenario_memory.role_of(e) == 'constraint')
-            return {'entries': len(entries), 'confirmed': confirmed, 'code_index': 'on_demand'}
+            return {'entries': len(entries), 'confirmed': confirmed}
         except Exception:  # noqa: BLE001 - memory unreadable is reported, not fatal
-            return {'entries': None, 'confirmed': None, 'code_index': 'on_demand'}
+            return {'entries': None, 'confirmed': None}
 
     def repo_view(self, project_id, *, actor, detail=False) -> dict:
         if actor is not None:
