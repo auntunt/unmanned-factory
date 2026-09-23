@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import Icon from '../workbench/Icon'
+import BrandMark from '../workbench/BrandMark'
 import { request } from '../workspace/api'
 import type { WorkbenchProps } from '../workbench/ui'
 import { PRIMARY_NAV, BUSINESS_PLUGIN_NAV, SETTINGS_NAV, GROUP_TABS, resolveRoute, type NavItem } from './nav-config'
@@ -125,7 +126,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
 
   const brand = (
     <div className="as-brand">
-      <Link to="/" className="as-brand-mark" aria-label="webuddy 首页">webuddy</Link>
+      <Link to="/" className="as-brand-mark" aria-label="webuddy 首页"><BrandMark className="as-brand-icon" /><span className="as-brand-wordmark">webuddy</span></Link>
       <button className="as-collapse" onClick={() => setCollapsed(c => !c)} aria-label={collapsed ? '展开导航' : '收起导航'} title={collapsed ? '展开导航' : '收起导航'}>
         <Icon name={collapsed ? 'arrow' : 'back'} width={16} height={16} />
       </button>
@@ -144,6 +145,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
       <div className="as-body">
         <header className="as-topbar">
           <button className="as-hamburger" ref={hamburgerRef} aria-label="打开导航" aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}><Icon name="menu" width={20} height={20} /></button>
+          <BrandMark className="as-mobile-brand" />
           <nav className="as-crumbs" aria-label="面包屑">
             {resolved.breadcrumb.map((c, i) => <span className="as-crumb" key={`${c.label}-${i}`}>
               {i > 0 && <span className="as-crumb-sep" aria-hidden="true"><Icon name="arrow" width={13} height={13} /></span>}
@@ -189,7 +191,7 @@ export default function AppShell({ user, onLogout }: WorkbenchProps) {
       {drawerOpen && <>
         <button className="as-scrim" aria-label="关闭导航" onClick={() => setDrawerOpen(false)} />
         <aside className="as-drawer" ref={drawerRef} aria-label="工作区导航" role="dialog" aria-modal="true">
-          <div className="as-drawer-head"><span className="as-brand-mark">webuddy</span>
+          <div className="as-drawer-head"><span className="as-brand-mark"><BrandMark className="as-brand-icon" /><span className="as-brand-wordmark">webuddy</span></span>
             <button className="as-drawer-close" aria-label="关闭导航" onClick={() => setDrawerOpen(false)}><Icon name="plus" width={18} height={18} style={{ transform: 'rotate(45deg)' }} /></button></div>
           {renderNav(() => setDrawerOpen(false))}
           {footer(() => setDrawerOpen(false))}

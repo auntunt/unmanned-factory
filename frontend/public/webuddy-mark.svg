@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="title">
+  <title id="title">webuddy</title>
+  <rect width="40" height="40" rx="9" fill="#14231C"/>
+  <path d="M9 9h9v4h-5v14h5v4H9l-3-3V12l3-3Z" fill="#F3F7F4"/>
+  <path d="M22 9h9l3 3v16l-3 3h-9v-4h5V13h-5V9Z" fill="#F3F7F4"/>
+  <path d="m16 16 4-4 8 8-4 4-8-8Z" fill="#9EE4CB"/>
+</svg>

@@ -1,4 +1,5 @@
 import Icon from './Icon'
+import BrandMark from './BrandMark'
 import ThemeSwitch from './ThemeSwitch'
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -39,8 +40,8 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
       <button className={`wb-mobile-scrim ${navOpen ? 'is-visible' : ''}`} aria-label="关闭导航" onClick={() => setNavOpen(false)} />
       <aside className={`wb-sidebar ${navOpen ? 'is-open' : ''}`} aria-label="工作台导航">
         <div className="wb-brand-lockup">
-          <span className="wb-brand-mark" aria-hidden="true">w</span>
-          <span><strong>webuddy</strong><small>团队工作伙伴</small></span>
+          <BrandMark className="wb-brand-mark" />
+          <span><strong>webuddy</strong><small>团队控制平面</small></span>
         </div>
         <nav className="wb-nav" aria-label="主导航">
           <span className="wb-nav-label">工作区</span>
@@ -61,7 +62,7 @@ export default function Workbench({ user, onLogout, children }: WorkbenchProps &
       <div className="wb-main">
         <header className="wb-mobile-header">
           <button className="wb-menu-button" aria-label="打开导航" aria-expanded={navOpen} onClick={() => setNavOpen(true)}><Icon name="menu" /></button>
-          <span className="wb-mobile-title">webuddy <em>/</em> {currentPage?.label ?? '工作区'}</span>
+          <span className="wb-mobile-title"><BrandMark className="wb-mobile-brand-mark" />webuddy <em>/</em> {currentPage?.label ?? '工作区'}</span>
           <span className="wb-avatar wb-avatar-small" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
         </header>
         {environment?.mode === 'preview' && <div className="wb-preview-banner" role="status"><span aria-hidden="true"><Icon name="preview" /></span><strong>本地演练</strong><span>{environment.label || '使用脚本执行，不调用模型或外部服务'}</span></div>}

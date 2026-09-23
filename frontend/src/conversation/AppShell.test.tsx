@@ -36,10 +36,15 @@ it('shows the same five-item global nav on every route, marking the active one',
 
 it('persists the collapse preference across a remount', () => {
   shell('/overview')
+  const home = screen.getByRole('link', { name: 'webuddy 首页' })
+  expect(home.querySelector('img')?.getAttribute('src')).toBe('/webuddy-mark.svg')
   fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
+  expect(screen.getByRole('link', { name: 'webuddy 首页' })).toBe(home)
+  expect(home.querySelector('.as-brand-icon')).toBeTruthy()
   expect(localStorage.getItem('webuddy:nav:collapsed')).toBe('1')
   cleanup(); shell('/overview')
   expect(screen.getByRole('button', { name: '展开导航' })).toBeTruthy()
+  expect(screen.getByRole('link', { name: 'webuddy 首页' }).querySelector('.as-brand-icon')).toBeTruthy()
 })
 
 it('renders engineering group tabs only on engineering routes', () => {
