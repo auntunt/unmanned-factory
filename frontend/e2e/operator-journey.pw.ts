@@ -141,7 +141,9 @@ test('homepage submission survives a lost response and delivers one independentl
     }
     responseLossInjected = true
     const response = await route.fetch()
-    await page.unroute('**/api/v2/runs', loseCreateResponse)
+    // Keep interception registered until this test's context is disposed.
+    // Removing the last route here can resume the pending request before abort.
+    // The guard above continues all later GETs/POSTs without injecting another loss.
     expect(response.status()).toBe(201)
     first.value = await response.json() as EntryRun
     await route.abort('failed')
