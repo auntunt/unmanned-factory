@@ -149,7 +149,15 @@ test('homepage submission survives a lost response and delivers one independentl
   await page.route('**/api/v2/runs', loseCreateResponse)
   await page.getByLabel('需求', { exact: true }).fill(goal)
   await page.getByRole('button', { name: '开始制作', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('没有开始成功')
+  // The actual router asks for the mode for this wording. Choose through the
+  // real UI; do not stub routing or silently rewrite the user's fixed goal.
+  const routeChoice = page.getByRole('group', { name: '选择处理方式', exact: true })
+  await expect(routeChoice).toBeVisible()
+  expect(workspaceCreates).toBe(0)
+  expect(submissions).toHaveLength(0)
+  await capture(page, info, 'homepage-routing-choice')
+  await routeChoice.getByRole('button', { name: '按开发处理', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('未能确认启动状态')
   expect(first.value?.id).toBeTruthy()
   await expect(page.getByLabel('需求', { exact: true })).toHaveValue(goal)
   await capture(page, info, 'homepage-lost-response')

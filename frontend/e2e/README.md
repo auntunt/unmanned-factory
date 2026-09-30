@@ -29,6 +29,8 @@ the one fixed goal supported by the bounded synthetic entry fixture:
 
 创建一个命令行工具，运行 python hello.py 输出：工单服务已就绪
 
+The real router asks for a processing mode for this wording; the test explicitly
+clicks the existing “按开发处理” choice and verifies no task exists before that choice.
 It verifies automatic specification confirmation follows the submission policy,
 one project/run survives response loss and reload, a persisted project-policy
 execution authorization precedes execution (without inventing a human approval),

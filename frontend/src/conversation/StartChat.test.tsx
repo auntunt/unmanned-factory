@@ -133,15 +133,20 @@ it('does not inherit another account\'s in-flight project (per-actor state)', as
   expect(body(2)).toMatchObject({ project_id: 'p-new' }) // not p-other
 })
 
-it('keeps the created workspace after a failed run and continues without re-routing', async () => {
+it('does not claim a lost response means no task was created, and retries the same submission', async () => {
   api.mockResolvedValueOnce({ kind: 'development' } as never)
     .mockResolvedValueOnce({ id: 'p1' } as never).mockRejectedValueOnce(new Error('网络中断'))
     .mockResolvedValueOnce({ id: 'r1' } as never)
   show(); type('做一个预约管理工具'); go()
   await screen.findByText('网络中断')
+  expect(screen.getByText('未能确认启动状态')).toBeTruthy()
+  expect(screen.queryByText('没有开始成功')).toBeNull()
+  expect(screen.getByText('请保持需求和材料不变后重试，系统会复用本次提交。')).toBeTruthy()
+  expect(screen.getByText('工作区已保留，可打开查看').closest('a')?.getAttribute('href')).toBe('/projects/p1')
   go()
   await screen.findByText('工作区已打开')
   expect(api.mock.calls.map(([url]) => url)).toEqual(['/api/v4/route', '/api/v2/projects/create-workspace', '/api/v2/runs', '/api/v2/runs'])
+  expect(body(3).idempotency_key).toBe(body(2).idempotency_key)
 })
 
 it('uploads two same-named files with different content as distinct materials (by content)', async () => {

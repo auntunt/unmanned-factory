@@ -248,7 +248,7 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
         </div>
       )}
 
-      {error && <div className="cv-error" role="alert"><strong>没有开始成功</strong><span>{error}</span>{attempt.current.project && <Link className="cv-verify-link" to={`/projects/${encodeURIComponent(String(attempt.current.project.id))}`}>工作区已保留，可打开查看</Link>}</div>}
+      {error && <div className="cv-error" role="alert"><strong>未能确认启动状态</strong><span>{error}</span><span>请保持需求和材料不变后重试，系统会复用本次提交。</span>{attempt.current.project && <Link className="cv-verify-link" to={`/projects/${encodeURIComponent(String(attempt.current.project.id))}`}>工作区已保留，可打开查看</Link>}</div>}
       <nav className="ew-start-paths" aria-label="工作台快捷入口">
         <Link to="/projects"><Icon name="project" width={22} height={22} /><strong>继续现有项目</strong><span>使用已有上下文，查看项目任务与材料</span></Link>
         <Link to="/history"><Icon name="history" width={22} height={22} /><strong>查看执行与成果</strong><span>处理等待事项，追溯运行与交付记录</span></Link>
