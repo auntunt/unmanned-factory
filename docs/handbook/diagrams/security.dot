@@ -1,0 +1,14 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="维护操作跨越多层权限"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="浏览器入口\n同源 HTTPS + 会话 + CSRF"];
+  b [label="控制面\n角色 · 项目授权 · revision"];
+  c [label="任务执行\nworktree · 最小环境 · 沙箱"];
+  d [label="外部目标\n单独授权 · 主机指纹 · 专用密钥"];
+  e [label="OS 服务账户\n能访问数据域的高权限入口"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label="仅授权动作"];
+  e -> b [label="另受主机权限保护"];
+}

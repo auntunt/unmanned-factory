@@ -33,11 +33,6 @@ from pathlib import Path
 
 from factory.control.store import now
 
-# Environment variables that decide which tool runs and what it imports. A
-# change to any of them makes the same argv a different check.
-ENV_KEYS = ('PATH', 'PYTHONPATH', 'VIRTUAL_ENV', 'PYTHONHOME', 'NODE_PATH',
-            'CARGO_HOME', 'GOPATH', 'JAVA_HOME')
-
 #: How long a remote health observation stays current. Beyond this it is a
 #: record of the past, not evidence about the deployment as it is now.
 HEALTH_TTL_S = 900
@@ -99,8 +94,14 @@ def _tool_fingerprint(root, argv, env):
         # which tool this is" is not an identity; saying so keeps the result from
         # being reused across a swap we would not have seen.
         return None
+    # Every variable actually forwarded to the check can affect its outcome,
+    # including CI, locale, timezone and interpreter flags. A second allowlist
+    # here would silently reuse passes across changes to those inputs. Keep only
+    # a digest so checkpoint identities do not expose raw environment values.
+    environment_digest = hashlib.sha256(json.dumps(
+        dict(env), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return {'argv0': argv[0], 'resolved': fingerprint,
-            'env': {key: env.get(key) for key in ENV_KEYS}}
+            'environment_digest': environment_digest}
 
 
 def _input_fingerprint(root: Path, argv):
@@ -145,7 +146,7 @@ def check_identity(root, name, argv, *, code_signature, paths,
     tool = _tool_fingerprint(root, argv, environment)
     if tool is None:
         return None
-    return {'version': 1, 'name': name, 'argv': argv, 'tool': tool,
+    return {'version': 2, 'name': name, 'argv': argv, 'tool': tool,
             'inputs': _input_fingerprint(root, argv),
             'code': {'signature': code_signature, 'paths': sorted(paths or ())},
             'requirement': {'revision': revision, 'digest': digest}}

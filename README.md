@@ -28,7 +28,9 @@ webuddy 是可定制的 AI 工作伙伴：员工在工作台用自然语言描�
 
 本地体验：安装依赖并构建前端后，运行 `.venv/bin/python scripts/preview_v3.py`，打开 `http://127.0.0.1:8790`，使用 `preview / factory-preview-only`。这是明确标记的隔离演练：执行真实的 Git 工作区和项目检查，模型响应由脚本提供，不调用模型或外部服务。真实工作使用下方 `factory-web` 入口和独立数据目录。
 
-Token 计费和额度由中转站统一管理，webuddy 不再因本地费用记录或配额中断任务。详见 [计费边界](docs/gateway-billing.md)。
+账户 Token 计费、余额和账户级额度由中转站统一管理；webuddy 的有限项目单次运行预算仍会在达到上限时停止后续付费调用，未知费用也需保留对账。并行在途调用不构成全局原子硬封顶。详见 [计费边界](docs/gateway-billing.md)。
+
+维护入口：[维护人员手册](docs/handbook/README.md)，含架构与恢复图解、故障树、备份恢复、升级回滚及可离线阅读的 GitBook 文档源。
 
 ## 工程 Harness 重写（v2）
 

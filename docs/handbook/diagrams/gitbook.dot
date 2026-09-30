@@ -1,0 +1,16 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="文档与图像随代码维护"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="Markdown + SUMMARY.md"];
+  b [label="Graphviz DOT 可编辑图源"];
+  c [label="PNG / SVG 渲染资产"];
+  d [label="本地 check + build\n桌面与手机视觉 QA"];
+  e [label="离线 HTML 包\n无需外部脚本"];
+  f [label="获授权后接 GitBook Git Sync\n平台预览与链接复核"];
+  b -> c [label="Graphviz"];
+  a -> d [label=""];
+  c -> d [label=""];
+  d -> e [label=""];
+  d -> f [label="不自动发布"];
+}

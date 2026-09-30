@@ -5,3 +5,7 @@ dist-ssr
 *.local
 .vite
 npm-debug.log*
+
+# Disposable browser evidence is retained by CI artifacts, never committed.
+playwright-report/
+test-results/

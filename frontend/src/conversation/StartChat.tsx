@@ -4,6 +4,7 @@ import { request } from '../workspace/api'
 import type { Run } from '../workspace/types'
 import { errorText, type PageProps } from '../workbench/ui'
 import Icon from '../workbench/Icon'
+import './enterprise-workbench.css'
 import { validateProjectFiles, validateProjectZip, type ProjectRecord } from '../workbench/ProjectsPage'
 import { readOp, writeOp, clearOp, readDraft, writeDraft, clearDraft, hashFile, type OpAttachment } from './entry-recovery'
 
@@ -193,15 +194,16 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
 
   const locked = busy || Boolean(attempt.current.project)
   return (
-    <div className="cv-start">
+    <div className="cv-start ew-start">
+      <span className="ew-eyebrow">webuddy · 团队工作台</span>
       <h1>你想做什么？</h1>
-      <p className="cv-sub">说清目标，剩下的交给我。开发、报价、会议总结都可以直接说。</p>
-      <form onSubmit={submit} onKeyDown={event => { if (!event.shiftKey && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.requestSubmit() } }}>
+      <p className="cv-sub">描述业务目标、使用对象和验收要求。从真实任务开始，持续查看进度与交付证据。</p>
+      <form aria-busy={busy} onSubmit={submit} onKeyDown={event => { if (event.target instanceof HTMLTextAreaElement && !event.shiftKey && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.requestSubmit() } }}>
         <div className={`cv-composer${focused ? ' is-focused' : ''}`}>
           <textarea required maxLength={50000} rows={3} disabled={locked}
             value={goal} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
             onChange={event => onGoalChange(event.target.value)}
-            placeholder="描述你想做的产品，或让某个助手处理日常事务…" aria-label="需求" />
+            placeholder="描述你想做的产品，或让某个助手处理日常事务…" aria-label="需求" aria-describedby="start-input-help" />
           {files.length > 0 && (
             <div className="cv-filechips">
               {files.map((file, index) => (
@@ -211,7 +213,7 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
             </div>
           )}
           <div className="cv-composer-foot">
-            <label className="cv-attach"><Icon name="delivery" width={17} height={17} /> 添加材料
+            <label className="cv-attach" tabIndex={locked ? -1 : 0} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); if (!locked) event.currentTarget.querySelector('input')?.click() } }}><Icon name="delivery" width={17} height={17} /> 添加材料
               <input type="file" multiple disabled={locked} onChange={event => { filesTouched.current = true; setFiles(Array.from(event.target.files || [])); setError(null) }} /></label>
             <button className="cv-send" type="submit" disabled={busy || !goal.trim()} aria-label="开始制作">
               {busy ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}
@@ -219,7 +221,8 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
           </div>
         </div>
       </form>
-      {busy && <p className="cv-hint">{stage}</p>}
+      {busy && <p className="cv-hint" role="status">{stage}</p>}
+      <p className="cv-hint" id="start-input-help">Enter 发送，Shift + Enter 换行。草稿保存在当前标签页。</p>
       {!busy && !decision && <p className="cv-hint">支持 ZIP、文档与样例，项目材料最大 1 GB。只有缺少必要信息时才会问你。</p>}
 
       {decision?.kind === 'clarify' && (
@@ -245,7 +248,12 @@ export default function StartChat({ csrfToken, onUnauthorized, user }: PageProps
         </div>
       )}
 
-      {error && <div className="cv-error" role="alert"><strong>没有开始成功</strong><span>{error}</span>{attempt.current.project && <Link className="cv-verify-link" to={`/projects/${encodeURIComponent(String(attempt.current.project.id))}`}>工作区已保留，可打开查看</Link>}</div>}
+      {error && <div className="cv-error" role="alert"><strong>未能确认启动状态</strong><span>{error}</span><span>请保持需求和材料不变后重试，系统会复用本次提交。</span>{attempt.current.project && <Link className="cv-verify-link" to={`/projects/${encodeURIComponent(String(attempt.current.project.id))}`}>工作区已保留，可打开查看</Link>}</div>}
+      <nav className="ew-start-paths" aria-label="工作台快捷入口">
+        <Link to="/projects"><Icon name="project" width={22} height={22} /><strong>继续现有项目</strong><span>使用已有上下文，查看项目任务与材料</span></Link>
+        <Link to="/history"><Icon name="history" width={22} height={22} /><strong>查看执行与成果</strong><span>处理等待事项，追溯运行与交付记录</span></Link>
+        <Link to="/settings/runtime"><Icon name="settings" width={22} height={22} /><strong>检查运行配置</strong><span>首次使用先核对模型、执行环境与可用性</span></Link>
+      </nav>
       <p className="cv-example">例如：<b>做一个能预约、改期和导出记录的管理工具</b>，或 <b>帮客户算一批设备的报价</b></p>
     </div>
   )

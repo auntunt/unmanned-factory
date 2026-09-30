@@ -552,7 +552,8 @@ def _docker_check_result(name, argv, step, started, failure_prefix, emit, task_i
 
 
 @_deadline_checked
-def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: float) -> str:
+def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: float,
+                 *, before_commit: Callable | None = None) -> str:
     if not paths:
         raise ExecutionError("worker produced no changes")
     rc, _, err = _git(root, "add", "-A", "--", *paths, timeout_s=timeout_s)
@@ -562,6 +563,29 @@ def _commit_tree(root: Path, paths: tuple[str, ...], message: str, timeout_s: fl
     if set(staged) != set(paths):
         raise ExecutionError("git staging included paths outside the verified change")
     staged_tree = _git_ok(root, "write-tree", timeout_s=timeout_s)
+    if before_commit is not None:
+        # Create the exact object before moving the branch. The callback must
+        # persist this intent; update-ref cannot run after a failed checkpoint.
+        parent = _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s)
+        branch = _git_ok(root, 'symbolic-ref', 'HEAD', timeout_s=timeout_s)
+        sign_rc, sign, sign_error = _git(root, 'config', '--bool', '--get',
+                                       'commit.gpgSign', timeout_s=timeout_s)
+        if sign_rc not in (0, 1):
+            raise ExecutionError('cannot determine commit signing policy: ' + _clip(sign_error))
+        signing = ['-S'] if sign.strip() == 'true' else []
+        commit = _git_ok(root, '-c', 'core.hooksPath=/dev/null',
+            '-c', 'user.name=Factory', '-c', 'user.email=factory@localhost',
+            'commit-tree', staged_tree, '-p', parent, *signing, '-m',
+            message + '\n\nFactory-Commit-Intent: ' + uuid.uuid4().hex,
+            timeout_s=timeout_s)
+        before_commit({'version': 1, 'expected_commit': commit, 'parent': parent,
+                       'tree': staged_tree, 'branch': branch})
+        _git_ok(root, 'update-ref', '-m', 'factory: finalize verified work',
+                branch, commit, parent, timeout_s=timeout_s)
+        if (_git_ok(root, 'symbolic-ref', 'HEAD', timeout_s=timeout_s) != branch
+                or _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s) != commit):
+            raise ExecutionError('HEAD changed during intended commit')
+        return commit
     rc, _, err = _git(root, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Factory", "-c", "user.email=factory@localhost", "commit", "-m", message, "--no-edit", timeout_s=timeout_s)
     if rc != 0:
         raise ExecutionError(f"git commit failed: {_clip(err)}")

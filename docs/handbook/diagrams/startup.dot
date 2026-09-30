@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="演练与生产保持隔离"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="锁定源码与依赖"];
+  b [label="本地演练\nscripts/preview_v3.py"];
+  c [label="真实服务\nfactory-web serve"];
+  d [label=".factory-preview\n8790 · 脚本模型"];
+  e [label="独立持久数据与工作区\n8788 · 真实 Provider"];
+  f [label="流程与页面验证\n不证明模型连接"];
+  g [label="同源 HTTPS + 正式账户\n探针 + 小任务 + 成果"];
+  a -> b [label=""];
+  a -> c [label=""];
+  b -> d [label=""];
+  c -> e [label=""];
+  d -> f [label=""];
+  e -> g [label=""];
+}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 import ModernizationPage from './ModernizationPage'
@@ -21,6 +21,7 @@ vi.mock('../workspace/api', async original => ({
 }))
 const api = vi.mocked(request)
 const noop = vi.fn()
+beforeEach(() => { api.mockReset() })
 afterEach(cleanup)
 
 const sampleSlice: ModernizationSliceView = {
@@ -70,11 +71,15 @@ describe('信创化改造切片列表页', () => {
   it('加载并显示切片列表', async () => {
     api.mockImplementation(defaultRoutes())
     renderPage()
-    await waitFor(() => expect(screen.getByText('数据库/版本')).toBeTruthy())
-    expect(screen.getAllByText('测试项目').length).toBeGreaterThan(0)
-    // 改造切片按项目授权，列表请求必须带上项目
-    const asked = api.mock.calls.map(c => String(c[0]))
-    expect(asked.some(u => u.startsWith('/api/v2/modernization/slices?project_id=proj-1'))).toBe(true)
+    // The same dimension label exists in the target form before the slices
+    // effect runs. Wait for this response's actual row, not that static label.
+    const link = await screen.findByRole('link', { name: sampleSlice.slice_id.slice(0, 8) })
+    const row = within(link.closest('tr')!)
+    expect(row.getByText('数据库/版本')).toBeTruthy()
+    expect(row.getByText('测试项目')).toBeTruthy()
+    expect(link.getAttribute('href')).toBe('/modernization/' + sampleSlice.slice_id)
+    // 改造切片按项目授权，当前测试的列表请求必须带上精确项目。
+    expect(api).toHaveBeenCalledWith('/api/v2/modernization/slices?project_id=proj-1', expect.objectContaining({ onUnauthorized: noop }))
   })
 
   it('API 失败时显示错误消息而不是假成功', async () => {

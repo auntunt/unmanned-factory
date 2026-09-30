@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="重启后的安全恢复顺序"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="取得协调器排他锁"];
+  b [label="读取策略与最新检查点"];
+  c [label="worker 仍活跃或证据不明？"];
+  d [label="暂停接续\n避免第二个写者"];
+  e [label="核对原合同和工作区\n源码 · Git · 配置"];
+  f [label="身份一致\n选择已保存子阶段"];
+  g [label="身份冲突\n保留现场人工核对"];
+  h [label="checks / finalization / verification\n继续取证，不跳过验收"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label="是"];
+  c -> e [label="已证实退出"];
+  e -> f [label="一致"];
+  e -> g [label="不一致"];
+  f -> h [label=""];
+}

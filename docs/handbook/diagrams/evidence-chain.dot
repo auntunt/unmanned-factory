@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="完成必须沿证据链前进"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="编码模型修改工作区\n自述不是验收"];
+  b [label="平台配置检查\n逐项退出码与输出"];
+  c [label="源码与 Git 守卫\n检查不能偷改源码"];
+  d [label="整组检查成功\nfinalization_checkpoint"];
+  e [label="本地提交"];
+  f [label="独立验收\n结合合同与运行证据"];
+  g [label="归档与交付待审\n发布另有结果"];
+  a -> b [label=""];
+  b -> c [label="每项完成后"];
+  c -> d [label="全通过"];
+  d -> e [label=""];
+  e -> f [label=""];
+  f -> g [label="通过"];
+}

@@ -19,6 +19,7 @@ from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from factory.control.auth import AuthError, AuthStore
+from factory.control.deployment_paths import data_directory, workspace_directory, static_directory
 from factory.control.github import GitHubDelivery
 from factory.control.service import Service
 from factory.control.store import Conflict, Store, now, scrub
@@ -98,8 +99,8 @@ def create_app(**kwargs):
 
 def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, service=None,
                webhook_secret=None, static_dir=None, _claimed=None):
-    data = Path(data_dir or os.getenv('FACTORY_CONTROL_DATA', '~/.factory/control')).expanduser().resolve()
-    allowed_root = Path(workspace_root or os.getenv('FACTORY_WORKSPACE_ROOT', '~/projects')).expanduser().resolve()
+    data = data_directory(data_dir)
+    allowed_root = workspace_directory(workspace_root)
     origin = (public_origin or os.getenv('FACTORY_PUBLIC_ORIGIN', 'http://127.0.0.1:8788')).rstrip('/')
     parsed_origin = urlparse(origin)
     if parsed_origin.scheme not in ('http', 'https') or not parsed_origin.hostname or parsed_origin.path:
@@ -142,7 +143,7 @@ def _build_app(*, data_dir=None, workspace_root=None, public_origin=None, servic
     # Hosts allowed to frame /embed/* (space separated https origins). Empty = none.
     embed_origins = [o for o in os.getenv('FACTORY_EMBED_ORIGINS', '').split()
                      if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::\d+)?|http://(?:127\.0\.0\.1|localhost)(?::\d+)?', o)]
-    static = Path(static_dir or os.getenv('FACTORY_STATIC_DIR') or Path(__file__).resolve().parents[2] / 'frontend' / 'dist').expanduser().resolve()
+    static = static_directory(static_dir)
 
     @asynccontextmanager
     async def lifespan(app):

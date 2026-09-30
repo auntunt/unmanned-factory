@@ -13,13 +13,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from factory.redact import redact_text
+from factory.redact import redact_text, is_sensitive_key
+from factory.private_files import prepare_private_database
 
 ACTIVE = ('requirement_analysis', 'received', 'planning', 'queued', 'running', 'verifying', 'publishing')
 PROJECT_EDIT_BLOCKING = frozenset((*ACTIVE, 'awaiting_spec_confirmation', 'awaiting_approval', 'needs_clarification', 'ready_for_review'))
 PROJECT_BUDGET_INCREASE_BLOCKING = PROJECT_EDIT_BLOCKING - {'ready_for_review'}
 PROJECT_BUDGET_DECREASE_BLOCKING = PROJECT_EDIT_BLOCKING | {'needs_human'}
-SECRET_KEY = re.compile(r'(?i)^(password|passwd|secret|api[_-]?key|access[_-]?token|authorization|cookie|token|csrf_token|credential|private_key|webhook)$')
 
 
 def now():
@@ -28,7 +28,7 @@ def now():
 
 def scrub(value, *, max_chars=100_000):
     if isinstance(value, dict):
-        return {str(k): '***REDACTED***' if SECRET_KEY.match(str(k)) else scrub(v, max_chars=max_chars)
+        return {str(k): '***REDACTED***' if is_sensitive_key(k, value=v) else scrub(v, max_chars=max_chars)
                 for k, v in value.items() if str(k) not in {'thinking', 'reasoning', 'chain_of_thought'}}
     if isinstance(value, (list, tuple)):
         return [scrub(v, max_chars=max_chars) for v in value]
@@ -50,7 +50,7 @@ class Conflict(ValueError):
 class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        prepare_private_database(path)
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''

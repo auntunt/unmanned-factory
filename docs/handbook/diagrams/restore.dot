@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="先隔离验证，再决定切换"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="恢复到隔离环境\n阻止生产网络与外部写入"];
+  b [label="恢复匹配代码和文件\n优先保持原绝对路径"];
+  c [label="不开应用先核对\n数据库完整性 · 哈希 · Git"];
+  d [label="doctor 本地诊断\n临时数据库快照"];
+  e [label="受控启动与业务验收\n登录 · run ID · 成果"];
+  f [label="记录耗时与缺失\n达到企业恢复目标"];
+  g [label="另行批准正式切换\n旧写者退出 · 外部动作对账"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label=""];
+  d -> e [label=""];
+  e -> f [label=""];
+  f -> g [label=""];
+}

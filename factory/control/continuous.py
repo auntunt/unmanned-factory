@@ -6,6 +6,7 @@ Legacy DAG runs keep their original executor and recovery format.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import subprocess
@@ -37,6 +38,58 @@ def _guard_snapshot(value):
     if isinstance(value, (tuple, list)):
         return [_guard_snapshot(item) for item in value]
     return value
+
+
+def _reconcile_commit_intent(root, artifacts, actual_guard, timeout_s):
+    """Accept only the exact platform commit whose intent was durable first.
+
+    This is not permission to ignore a changed HEAD. All other metadata stays
+    identical, and parent/tree are read from the raw object, without replacements
+    or ancestry rewriting. No Git state is modified by reconciliation.
+    """
+    intent = artifacts.get('commit_intent')
+    prior = artifacts.get('workspace_guard')
+    pending = artifacts.get('finalization_checkpoint')
+    code = artifacts.get('checks_identity_code')
+    if not all(isinstance(item, dict) for item in (intent, prior, pending, code)):
+        return False
+    if type(intent.get('version')) is not int or intent['version'] != 1:
+        return False
+    if any(not isinstance(intent.get(key), str) or not intent[key]
+           for key in ('expected_commit', 'parent', 'tree', 'branch')):
+        return False
+    if (intent['branch'] != 'refs/heads/' + artifacts['branch']
+            or prior.get('head') != [intent['parent'], intent['branch']]
+            or actual_guard.get('head') != [intent['expected_commit'], intent['branch']]
+            or {key: value for key, value in actual_guard.items() if key != 'head'}
+               != {key: value for key, value in prior.items() if key != 'head'}):
+        return False
+    if (not isinstance(pending.get('paths'), list) or not pending['paths']
+            or not isinstance(pending.get('signature'), str) or not pending['signature']
+            or code != {'signature': pending['signature'], 'paths': pending['paths']}
+            or intent.get('signature') != pending['signature']
+            or intent.get('paths') != pending['paths']):
+        return False
+    records = pending.get('checks')
+    if (not isinstance(records, list) or not records
+            or records != artifacts.get('checks')
+            or any(not isinstance(record, dict) or record.get('exit') != 0
+                   or record.get('cancelled') or record.get('timeout')
+                   for record in records)
+            or sorted(record.get('name', '') for record in records)
+               != sorted((artifacts.get('execution_checks') or {}).keys())):
+        return False
+    raw = _git_ok(root, '--no-replace-objects', 'cat-file', '-p',
+                  intent['expected_commit'], timeout_s=timeout_s)
+    headers = raw.split('\n\n', 1)[0].splitlines()
+    if ([line[7:] for line in headers if line.startswith('parent ')] != [intent['parent']]
+            or [line[5:] for line in headers if line.startswith('tree ')] != [intent['tree']]
+            or _status_paths(root, timeout_s=timeout_s)):
+        return False
+    artifacts['commit'] = intent['expected_commit']
+    # Keep the old guard until revalidation completes. An intermediate crash
+    # must still recognize the same durable intent on the next restart.
+    return True
 
 
 _INSTRUCTIONS = """
@@ -92,6 +145,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
     if not checks:
         raise ExecutionError('continuous execution requires configured final checks')
     route = select_profile(task, profiles, attempt=1, auto_escalate=False)
+    reconciled_commit = False
     if resume_artifacts:
         # Only a durable platform artifact can nominate a session/worktree.
         artifacts = json.loads(json.dumps(resume_artifacts))
@@ -109,8 +163,11 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         actual_common = _git_ok(root, 'rev-parse', '--path-format=absolute', '--git-common-dir', timeout_s=timeout_s)
         if expected_common != actual_common or _git_ok(root, 'symbolic-ref', '--short', 'HEAD', timeout_s=timeout_s) != artifacts.get('branch'):
             raise ExecutionError('continuous recovery repository or branch mismatch')
-        if _guard_snapshot(_baseline(root)) != artifacts.get('workspace_guard'):
-            raise ExecutionError('continuous recovery Git metadata changed')
+        actual_guard = _guard_snapshot(_baseline(root))
+        if actual_guard != artifacts.get('workspace_guard'):
+            reconciled_commit = _reconcile_commit_intent(root, artifacts, actual_guard, timeout_s)
+            if not reconciled_commit:
+                raise ExecutionError('continuous recovery Git metadata changed')
         # A second writer against a live one corrupts the site this recovery is
         # trying to return to. The previous worker's own OS lock is the only
         # evidence here that it is gone; a pid or a durable status row is not.
@@ -121,9 +178,35 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         old_route = artifacts.get('session_profile') or {}
         if any(old_route.get(key) != route.get(key) for key in ('provider', 'model')):
             raise ExecutionError('continuous recovery model changed')
+        # An interruption before CAS leaves HEAD at its parent but files staged.
+        # Staging changes the old hash representation of previously untracked
+        # files. Accept only the exact staged image recorded in the durable
+        # intent, then rerun checks under its current identity before committing.
+        intent = artifacts.get('commit_intent') or {}
+        pending = artifacts.get('finalization_checkpoint')
+        if (not reconciled_commit and isinstance(intent, dict) and intent
+                and task.get('resume_stage') == 'finalization' and isinstance(pending, dict)
+                and intent.get('parent') == actual_guard['head'][0]
+                and intent.get('branch') == actual_guard['head'][1]
+                and intent.get('paths') == pending.get('paths')
+                and intent.get('signature') == pending.get('signature')):
+            staged_signature = _working_hash(root, pending['paths'], timeout_s=timeout_s)
+            if (staged_signature == intent.get('staged_signature')
+                    and _git_ok(root, 'write-tree', timeout_s=timeout_s) == intent.get('tree')):
+                pending['signature'] = staged_signature
         state = artifacts['tasks'][0]
         if state.get('id') != task_id:
             raise ExecutionError('continuous recovery task changed')
+        if reconciled_commit and task.get('resume_stage') is None:
+            # A new explicit instruction intentionally resumes coding. Accept the
+            # exact old commit as its baseline, but never consume the new request
+            # by taking the verification-only shortcut.
+            artifacts['workspace_guard'] = actual_guard
+            state['commit'] = artifacts['commit']
+            artifacts.pop('commit_intent', None)
+            artifacts.pop('finalization_checkpoint', None)
+            artifacts.pop('checks_checkpoint', None)
+            reconciled_commit = False
         artifacts.pop('verification', None)
         artifacts.pop('error', None)
         # The site now runs the configuration in front of it. Each saved result is
@@ -235,13 +318,32 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         # Results this run already recorded, from either durable place. Identity
         # decides whether any of them is evidence about the tree in front of us;
         # being present is not by itself a reason to trust one.
-        prior = [*((artifacts.get('finalization_checkpoint') or {}).get('checks') or ()),
+        prior = [*((artifacts.get('checks_checkpoint') or {}).get('checks') or ()),
+                 *((artifacts.get('finalization_checkpoint') or {}).get('checks') or ()),
                  *(artifacts.get('checks') or ())]
         reuse, _owed = evidence_identity.partition(prior, identities)
         reusable = {item['name'] for item in reuse}
         saved = {record['name']: record for record in prior or ()
                  if isinstance(record, dict) and record.get('name')}
         records = []
+
+        def save_check_progress():
+            # Check commands can mutate source. Never make a pass durable for a
+            # different tree, including when the coordinator exits mid-suite.
+            after = guard()
+            if after != changed or _working_hash(root, after, timeout_s=timeout_s) != signature:
+                raise ExecutionError('verification changed source files')
+            state['checks'] = list(records)
+            artifacts['checks'] = list(records)
+            attempt['checks'] = list(records)
+            artifacts['checks_checkpoint'] = {
+                'paths': list(changed), 'signature': signature, 'checks': list(records)}
+            checkpoint()
+
+        # Coding has already returned. Even a crash in the first check should
+        # resume checking, not dispatch the coding model again.
+        if not artifacts.get('checks_checkpoint'):
+            save_check_progress()
         for name, argv in checks:
             # A result already recorded against this exact identity is evidence
             # for this tree; running it again buys nothing. Anything else --
@@ -251,10 +353,12 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                 _emit(emit, 'execution.reused', {'stage': 'check', 'check': name,
                     'identity_fingerprint': saved[name].get('identity_fingerprint'),
                     'message': '该检查的代码、命令、工具环境与要求身份均未变化，沿用已记录结果'}, task_id)
+                save_check_progress()
                 continue
             record = _run_check(root, name, argv, _remaining_budget(), emit, task_id, cancel)
             records.append({**record,
                             'identity_fingerprint': evidence_identity.fingerprint(identities.get(name))})
+            save_check_progress()
             if record.get('cancelled') or record.get('timeout') or record.get('exit') != 0:
                 break
         state['checks'] = records
@@ -348,21 +452,72 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
         def restore_uncommitted_tree():
             if prior_head is None:
                 return
+            # Cleanup must still work after the execution deadline expired.
+            # Never reset a different branch or an external writer's commit.
+            position = []
+            for argv in (['rev-parse', 'HEAD'], ['symbolic-ref', 'HEAD']):
+                probe = subprocess.run(['git', *argv], cwd=root, capture_output=True,
+                    text=True, timeout=max(1.0, min(float(timeout_s), 30.0)),
+                    env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+                if probe.returncode != 0:
+                    raise ExecutionError('cannot establish HEAD before finalization rollback')
+                position.append(probe.stdout.strip())
+            intended = (artifacts.get('commit_intent') or {}).get('expected_commit')
+            if (position[0] not in (prior_head, intended)
+                    or position[1] != 'refs/heads/' + artifacts['branch']):
+                raise ExecutionError('HEAD changed externally; refusing to roll back another writer')
             proc = subprocess.run(['git', 'reset', '--mixed', prior_head], cwd=root,
                 capture_output=True, text=True, timeout=max(1.0, min(float(timeout_s), 30.0)),
                 env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
             if proc.returncode != 0:
                 raise ExecutionError('could not restore uncommitted work after cancelled finalization')
+            artifacts.pop('commit_intent', None)
 
         try:
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
             prior_head = _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s)
+            pending = artifacts.get('finalization_checkpoint') or {}
+            checked_paths = guard()
+            if (list(checked_paths) != pending.get('paths')
+                    or _working_hash(root, checked_paths, timeout_s=timeout_s) != pending.get('signature')):
+                raise ExecutionError('source changed before commit intent')
+
+            def source_snapshot():
+                # git add changes the old working hash's representation of new
+                # files. Bind bytes + modes independently across that staging step.
+                return [(path, (root / path).stat().st_mode,
+                         hashlib.sha256((root / path).read_bytes()).hexdigest())
+                        if (root / path).is_file() else (path, None, None)
+                        for path in checked_paths]
+
+            verified_source = source_snapshot()
+
+            def persist_commit_intent(intent):
+                after = guard()
+                if list(after) != pending['paths'] or source_snapshot() != verified_source:
+                    raise ExecutionError('source changed before commit intent')
+                if cancel.is_set():
+                    raise ExecutionError('execution cancelled')
+                artifacts['commit_intent'] = {**intent, 'paths': pending['paths'],
+                    'signature': pending['signature'],
+                    'staged_signature': _working_hash(root, after, timeout_s=timeout_s)}
+                checkpoint()
+                if cancel.is_set():
+                    raise ExecutionError('execution cancelled')
+
             try:
                 commit_started = bool(changed)
                 commit = (_commit_tree(root, changed,
-                    'webuddy: ' + task.get('title', task_id), timeout_s)
+                    'webuddy: ' + task.get('title', task_id), timeout_s,
+                    before_commit=persist_commit_intent)
                     if changed else prior_head)
+                committed_guard = _guard_snapshot(_baseline(root))
+                original_guard = _guard_snapshot(before)
+                if (committed_guard['head'] != [commit, 'refs/heads/' + artifacts['branch']]
+                        or {key: value for key, value in committed_guard.items() if key != 'head'}
+                           != {key: value for key, value in original_guard.items() if key != 'head'}):
+                    raise ExecutionError('Git metadata changed during finalization')
             except Exception:
                 if commit_started:
                     restore_uncommitted_tree()
@@ -381,6 +536,8 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             if _status_paths(root, timeout_s=timeout_s):
                 raise ExecutionError('worktree dirty after commit')
             artifacts.pop('finalization_checkpoint', None)
+            artifacts.pop('checks_checkpoint', None)
+            artifacts.pop('commit_intent', None)
             _emit(emit, 'git.commit', {'commit': commit, 'branch': artifacts['branch']}, task_id)
             _emit(emit, 'attempt.completed', dict(attempt), task_id)
             _emit(emit, 'task.completed', {'status': 'verified', 'commit': commit}, task_id)
@@ -425,7 +582,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             raise ExecutionError(str(exc), artifacts=artifacts) from None
 
     try:
-        if resume_artifacts and task.get('resume_stage') == 'verification':
+        if resume_artifacts and (task.get('resume_stage') == 'verification' or reconciled_commit):
             if artifacts.get('commit') != _git_ok(root, 'rev-parse', 'HEAD', timeout_s=timeout_s) or guard():
                 raise ExecutionError('source changed after successful execution; cannot resume verification only')
             if checks_changed:
@@ -436,12 +593,23 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             if not artifacts.get('checks') or any(c.get('exit') != 0 for c in artifacts['checks']):
                 raise ExecutionError('successful checks missing for verification-only recovery')
             revalidate_recorded_checks()
-            state['status'] = 'verified'
+            state.update(status='verified', commit=artifacts['commit'])
+            if reconciled_commit:
+                artifacts['workspace_guard'] = _guard_snapshot(_baseline(root))
+                state['attempts'][-1].update(status='verified', commit=artifacts['commit'])
+                artifacts.pop('commit_intent', None)
+                artifacts.pop('finalization_checkpoint', None)
+                artifacts.pop('checks_checkpoint', None)
+                _emit(emit, 'execution.commit_reconciled', {'commit': artifacts['commit'],
+                    'message': '已核对持久提交意图，接续独立验收，不重复提交'}, task_id)
             _emit(emit, 'execution.reused', {'stage': 'verification', 'message': '源码与已验证提交一致，检查身份已逐项核对，恢复独立验收'}, task_id)
             checkpoint()
             return artifacts
-        pending = artifacts.get('finalization_checkpoint')
-        if resume_artifacts and task.get('resume_stage') == 'finalization' and pending:
+        recovery_stage = task.get('resume_stage')
+        pending = artifacts.get('checks_checkpoint' if recovery_stage == 'checks' else 'finalization_checkpoint')
+        if resume_artifacts and recovery_stage == 'checks' and not pending:
+            raise ExecutionError('saved checks checkpoint missing; cannot resume checks only')
+        if resume_artifacts and recovery_stage in ('checks', 'finalization') and pending:
             if any(record.get('cancelled') or record.get('timeout')
                    or record.get('exit') != 0 for record in pending.get('checks') or []):
                 raise ExecutionError(
@@ -450,7 +618,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             if list(changed) != pending['paths'] or _working_hash(root, changed, timeout_s=timeout_s) != pending['signature']:
                 raise ExecutionError('source changed after checks; cannot resume finalization only')
             attempt = state['attempts'][-1]
-            _emit(emit, 'execution.reused', {'stage': 'finalization', 'message': '已通过检查的源码未变化，直接恢复提交与归档'}, task_id)
+            _emit(emit, 'execution.reused', {'stage': recovery_stage, 'message': '已保存的源码未变化，核对检查证据并继续验证与归档'}, task_id)
             # Not a blanket adoption of the saved results: each one is reused only
             # where its identity still covers this tree, this command, this tool
             # environment and this requirement. Whatever it no longer covers runs
@@ -497,6 +665,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
             checkpoint()
             return finalize(changed, attempt)
         artifacts.pop('finalization_checkpoint', None)
+        artifacts.pop('checks_checkpoint', None)
         while True:
             if cancel.is_set():
                 raise ExecutionError('execution cancelled')
@@ -674,6 +843,7 @@ def execute_continuous(*, run_id, plan, project, profiles, runner, emit,
                 if repairs >= max_repairs:
                     raise ExecutionError(attempt['error'])
                 repairs += 1
+                artifacts.pop('checks_checkpoint', None)
                 from factory.control.acceptance_ledger import repair_guidance
                 prompt = ('Continue this same task and repair the actual failing check in the existing workspace. '
                           + repair_guidance(json.dumps(scrub(failed), ensure_ascii=False)) + '\n' + _INSTRUCTIONS)

@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="完整恢复需要三组资产"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="控制数据目录"];
+  b [label="control.db\n项目 · 运行 · 事件 · 队列"];
+  c [label="users.db\n用户 · 会话 · 授权"];
+  d [label="deliverables 与其他资产\n文件成果 · manifest"];
+  e [label="项目与任务现场"];
+  f [label="主 Git 仓库 + linked worktree\n含未提交文件与活动证据"];
+  g [label="外部受控配置"];
+  h [label="服务/代理配置 + 凭据恢复\n部署私钥单独隔离"];
+  a -> b [label=""];
+  a -> c [label=""];
+  a -> d [label=""];
+  e -> f [label=""];
+  g -> h [label=""];
+  c -> e [style=invis];
+  f -> g [style=invis];
+}

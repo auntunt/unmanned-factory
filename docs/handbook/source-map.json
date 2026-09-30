@@ -1,0 +1,170 @@
+[
+  {
+    "topic": "启动与认证",
+    "path": "factory/control/app.py",
+    "symbol": "def _build_app",
+    "line": 99
+  },
+  {
+    "topic": "服务调度",
+    "path": "factory/control/service.py",
+    "symbol": "def _dispatch",
+    "line": 114
+  },
+  {
+    "topic": "单写者锁",
+    "path": "factory/control/autonomy.py",
+    "symbol": "class DurableQueue",
+    "line": 84
+  },
+  {
+    "topic": "恢复阶段选择",
+    "path": "factory/control/recovery.py",
+    "symbol": "def _continuous_resume_stage",
+    "line": 42
+  },
+  {
+    "topic": "持续执行和检查点",
+    "path": "factory/control/continuous.py",
+    "symbol": "def execute_continuous",
+    "line": 123
+  },
+  {
+    "topic": "精确提交意图",
+    "path": "factory/control/execution.py",
+    "symbol": "def _commit_tree",
+    "line": 555
+  },
+  {
+    "topic": "检查身份",
+    "path": "factory/control/evidence_identity.py",
+    "symbol": "environment",
+    "line": 12
+  },
+  {
+    "topic": "最小执行环境",
+    "path": "factory/harness/checkenv.py",
+    "symbol": "def check_env",
+    "line": 46
+  },
+  {
+    "topic": "活动进程组证据",
+    "path": "factory/control/provider_activity.py",
+    "symbol": "def group_alive",
+    "line": 74
+  },
+  {
+    "topic": "数据库与事件",
+    "path": "factory/control/store.py",
+    "symbol": "class Store",
+    "line": 50
+  },
+  {
+    "topic": "用户与会话",
+    "path": "factory/control/auth.py",
+    "symbol": "class AuthStore",
+    "line": 113
+  },
+  {
+    "topic": "团队授权与账本",
+    "path": "factory/control/governance.py",
+    "symbol": "class Governance",
+    "line": 32
+  },
+  {
+    "topic": "持久运行配置",
+    "path": "factory/control/runtime.py",
+    "symbol": "class RuntimeSettings",
+    "line": 153
+  },
+  {
+    "topic": "本地诊断快照",
+    "path": "factory/control/runtime_cli.py",
+    "symbol": "def _make_settings",
+    "line": 66
+  },
+  {
+    "topic": "真实只读探针",
+    "path": "factory/control/runtime_routes.py",
+    "symbol": "def probe",
+    "line": 121
+  },
+  {
+    "topic": "Provider 错误分类",
+    "path": "factory/control/providers.py",
+    "symbol": "def failure_metadata",
+    "line": 98
+  },
+  {
+    "topic": "部署私钥边界",
+    "path": "factory/control/deploy_targets.py",
+    "symbol": "def key_dir",
+    "line": 47
+  },
+  {
+    "topic": "成果归档",
+    "path": "factory/control/deliverables.py",
+    "symbol": "def snapshot",
+    "line": 42
+  },
+  {
+    "topic": "项目预算边界",
+    "path": "factory/control/run_billing.py",
+    "symbol": "def _remaining_dollar_budget",
+    "line": 154
+  },
+  {
+    "topic": "维护 CLI 的 OS 身份",
+    "path": "factory/control/maintenance_cli.py",
+    "symbol": "class LocalOperatorIdentity",
+    "line": 56
+  },
+  {
+    "topic": "隔离演练",
+    "path": "scripts/preview_v3.py",
+    "symbol": "def rehearsal_app",
+    "line": 73
+  },
+  {
+    "topic": "开发代理",
+    "path": "frontend/vite.config.ts",
+    "symbol": "proxy",
+    "line": 4
+  },
+  {
+    "topic": "前端命令",
+    "path": "frontend/package.json",
+    "symbol": "\"scripts\"",
+    "line": 6
+  },
+  {
+    "topic": "更新脚本",
+    "path": "deploy/install-control.sh",
+    "symbol": "--dry-run",
+    "line": 12
+  },
+  {
+    "topic": "正式入口配置示例",
+    "path": "deploy/factory-control.service",
+    "symbol": "ExecStart",
+    "line": 17
+  },
+  {
+    "topic": "现有 CI",
+    "path": ".github/workflows/ci.yml",
+    "symbol": "isolation_canary",
+    "line": 78
+  },
+  {
+    "topic": "恢复专项测试",
+    "path": "tests/test_continuous_check_recovery.py",
+    "symbol": "def test_",
+    "line": 41
+  },
+  {
+    "topic": "提交恢复专项测试",
+    "path": "tests/test_continuous_commit_recovery.py",
+    "symbol": "def test_",
+    "line": 35
+  }
+]

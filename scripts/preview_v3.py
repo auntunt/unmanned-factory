@@ -70,7 +70,7 @@ class RehearsalRunner:
             cost_usd=0.0, tokens_in=0, tokens_out=0)
 
 
-def rehearsal_app(port=8790):
+def rehearsal_app(port=8790, *, runner=None):
     data = ROOT / ".factory-preview"
     repo = data / "workspaces" / "ticket-service"
     if not repo.exists():
@@ -85,7 +85,7 @@ def rehearsal_app(port=8790):
     store = Store(data / "control.db")
     profiles = {role: {"provider": "codex", "model": f"preview-{role}"}
                 for role in ("planner", "cheap", "standard", "strong")}
-    service = Service(store, runner=RehearsalRunner(), profiles=profiles, timeout_s=60)
+    service = Service(store, runner=runner if runner is not None else RehearsalRunner(), profiles=profiles, timeout_s=60)
     service.preview_mode = True
     app = create_app(data_dir=data, workspace_root=repo.parent,
                      public_origin=f"http://127.0.0.1:{port}", service=service)

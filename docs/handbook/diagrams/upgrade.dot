@@ -1,0 +1,19 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="升级每一步都有退出条件"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="明确目标 SHA\n保存当前现场与恢复点"];
+  b [label="dry-run\n核对原 unit 与外部配置"];
+  c [label="服务账户 apply\n锁定依赖 + 前端构建"];
+  d [label="必要测试与隔离恢复验证"];
+  e [label="原服务激活\n禁止第二个监听器"];
+  f [label="登录 + 运行配置 + 小任务\n核对实际版本与成果"];
+  g [label="异常时停止扩散\n兼容性验证或成套恢复"];
+  a -> b [label=""];
+  b -> c [label="审核通过"];
+  c -> d [label="构建通过"];
+  d -> e [label="验证通过"];
+  e -> f [label=""];
+  c -> g [label="失败"];
+  f -> g [label="失败"];
+}

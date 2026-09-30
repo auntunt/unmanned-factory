@@ -13,6 +13,21 @@ import re
 
 MASK = "***REDACTED***"
 
+
+def is_sensitive_key(key, *, value=None) -> bool:
+    """Classify structured credential fields, not usage counters or references."""
+    name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', str(key))
+    name = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name)
+    name = re.sub(r'[^a-z0-9]+', '_', name.casefold()).strip('_')
+    # This is a capability contract flag, not an Authorization header. Preserve
+    # only its actual boolean shape; credential-like strings still redact.
+    if name == 'requires_authorization' and type(value) is bool:
+        return False
+    return bool(re.search(
+        r'(?:^|_)(?:password|passwd|passphrase|secret|token|authorization|cookie|'
+        r'credentials?|webhook|api_?key|access_?token|(?:access|secret|private|signing|encryption)_key)'
+        r'(?:_hash|_value)?$', name) or name in ('webhook_url', 'hook_url'))
+
 # 每条都保留 key 名，只吃掉值 —— 审计要能看出"这里有个密钥"，只是看不到它
 _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"https://open\.feishu\.cn/open-apis/bot/v2/hook/[^\s\"\'<>()]+", re.I),
@@ -64,7 +79,7 @@ def redact(value):
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, dict):
-        return {k: redact(v) for k, v in value.items()}
+        return {k: MASK if is_sensitive_key(k, value=v) else redact(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact(v) for v in value]
     return value
