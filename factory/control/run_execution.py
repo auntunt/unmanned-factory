@@ -274,7 +274,7 @@ def _run(self, rid):
         total_budget = project['budget_usd']
         resume = run.get('execution_resume')
         resume_stage = ((resume or {}).get('resume_stage') if continuous else None)
-        local_only_resume = resume_stage in ('finalization', 'budget_finalization')
+        local_only_resume = resume_stage in ('checks', 'finalization', 'budget_finalization')
         try:
             budget = self._remaining_dollar_budget(rid, project)
         except Conflict as exc:
@@ -291,7 +291,7 @@ def _run(self, rid):
                 raise ExecutionError(str(exc), artifacts=progress['artifacts']) from exc
         prior_usage = self._usage(rid)
         paid_coding_stage = (continuous and resume_stage not in
-                             ('verification', 'finalization', 'budget_finalization'))
+                             ('verification', 'checks', 'finalization', 'budget_finalization'))
         if paid_coding_stage:
             verification_reserve = _verification_reserve_usd(budget.remaining_usd)
             saved_artifacts = ((run.get('execution_resume') or {}).get('artifacts')

@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="测试层次与证据边界"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="文档和静态检查\n链接 · 类型 · diff"];
+  b [label="专项单元与恢复回归\n临时 Git + 故障注入"];
+  c [label="隔离 canary\n失败则不降低安全边界"];
+  d [label="完整后端 + 前端测试"];
+  e [label="真实浏览器 / 容器 smoke"];
+  f [label="真实 Provider 和生产配置\n需账号、授权与现场条件"];
+  g [label="验收记录\n通过 / 失败 / 阻塞 / 未测"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label="前提通过"];
+  d -> e [label=""];
+  e -> f [label=""];
+  f -> g [label=""];
+}

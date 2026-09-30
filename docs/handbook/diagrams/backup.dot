@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="备份是一组同一恢复点的资产"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="批准维护窗口\n停止接收新写入"];
+  b [label="协调器与其它写者静止\n核对 SDK 进程组"];
+  c [label="两库 SQLite backup\nquick_check + 哈希"];
+  d [label="文件资产与完整 Git 现场\n隐藏目录 · 未提交内容"];
+  e [label="受控配置与秘密恢复方案\n单独保护"];
+  f [label="同一恢复点清单\n版本 · 时间 · 路径 · 限制"];
+  a -> b [label=""];
+  b -> c [label=""];
+  b -> d [label=""];
+  b -> e [label=""];
+  c -> f [label=""];
+  d -> f [label=""];
+  e -> f [label=""];
+}

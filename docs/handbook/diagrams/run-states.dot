@@ -1,0 +1,23 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="运行状态与内部子阶段"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="received / planning\n接收与规划"];
+  b [label="需要澄清 / 规格确认 / 审批"];
+  c [label="queued\n持久队列"];
+  d [label="running\n编码 → 检查 → 提交"];
+  e [label="verifying\n独立验收"];
+  f [label="ready_for_review\n成果待审"];
+  g [label="publishing → published\n外部发布记录"];
+  h [label="needs_human\n保留现场等待处理"];
+  a -> b [label="信息或权限不足"];
+  b -> c [label="明确处理"];
+  a -> c [label="可执行"];
+  c -> d [label="认领"];
+  d -> e [label="检查通过"];
+  e -> d [label="有限修复"];
+  e -> f [label="验收通过"];
+  f -> g [label="另有发布授权"];
+  d -> h [label="阻塞"];
+  e -> h [label="阻塞"];
+}

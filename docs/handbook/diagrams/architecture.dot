@@ -1,0 +1,21 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="从请求到可核验成果"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="维护人员浏览器"];
+  b [label="同源 HTTPS 入口\n反向代理"];
+  c [label="FastAPI 控制面\n认证 · 授权 · CSRF"];
+  d [label="Service 单协调器\n持久队列 · 阶段 · 恢复"];
+  e [label="SQLite\ncontrol.db + users.db"];
+  f [label="SDK 子进程\nClaude / Codex / DSH"];
+  g [label="项目与任务 worktree\n修改 · 检查 · 提交"];
+  h [label="独立验收与成果\n证据 · 归档 · 发布回执"];
+  a -> b [label=""];
+  b -> c [label="127.0.0.1"];
+  c -> d [label="合法请求"];
+  d -> e [label="保存事实"];
+  d -> f [label="有界调用"];
+  f -> g [label="工作现场"];
+  g -> h [label="通过检查"];
+  h -> e [label="持久记录"];
+}

@@ -1,0 +1,17 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="三个入口的维护范围"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="webuddy 当前代码库"];
+  b [label="Web 工作台\ncontrol.db + users.db"];
+  c [label="维护子系统 CLI/API\n可接入同一控制数据域"];
+  d [label="旧 factory CLI\nrun / loop / replay"];
+  e [label="当前 Service 与持久队列"];
+  f [label="旧审计与四道监工\n通常使用 audit.db"];
+  a -> b [label=""];
+  a -> c [label=""];
+  a -> d [label=""];
+  b -> e [label=""];
+  c -> e [label=""];
+  d -> f [label="保留兼容"];
+}

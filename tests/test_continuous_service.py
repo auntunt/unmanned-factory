@@ -208,6 +208,7 @@ def test_continuous_restart_queues_same_session_but_never_replays_publish(app_en
 
 
 @pytest.mark.parametrize(('changes', 'expected_stage'), [
+    ({'checks_checkpoint': {'paths': ['greeting.txt'], 'checks': []}}, 'checks'),
     ({'finalization_checkpoint': {'paths': ['greeting.txt'], 'checks': []}},
      'finalization'),
     ({'budget_exhausted': True, 'tasks': [{'id': 'coding', 'status': 'failed',
@@ -226,7 +227,7 @@ def test_continuous_restart_queues_same_session_but_never_replays_publish(app_en
      None),
     ({'budget_exhausted': True,
       'tasks': [{'id': 'coding', 'status': 'failed', 'attempts': []}]}, None),
-], ids=['finalization', 'budget-finalization', 'verification',
+], ids=['checks', 'finalization', 'budget-finalization', 'verification',
         'failed-check', 'insufficient-evidence'])
 def test_continuous_restart_derives_safe_resume_stage(
         app_env, monkeypatch, changes, expected_stage):
@@ -780,14 +781,14 @@ def test_unknown_cost_hold_is_replaced_by_later_call_reconciliation(app_env, mon
         'known_cost_usd': pytest.approx(.10), 'unknown_cost_calls': 1, 'calls': 2}
 
 
-@pytest.mark.parametrize('stage', ['finalization', 'verification'])
+@pytest.mark.parametrize('stage', ['checks', 'finalization', 'verification'])
 def test_plain_continue_resumes_failed_platform_stage_but_new_feedback_runs_model(app_env, monkeypatch, stage):
     store, svc, p, rid, _ = prepared(app_env, monkeypatch)
     svc._plan(rid)
     run = store.get(rid)
     artifacts = {'base_sha':run['context']['commit_sha'], 'commit':run['context']['commit_sha'],
                  'tasks':[{'id':'coding','status':'verified'}]}
-    if stage=='finalization':artifacts['finalization_checkpoint']={'paths':[]}
+    if stage in ('checks', 'finalization'):artifacts[stage+'_checkpoint']={'paths':[]}
     store.update(rid, {'status':'needs_human','artifacts':artifacts})
     svc.continue_run(rid, '', run['revision'], 0, 'owner')
     assert store.get(rid)['execution_resume']['resume_stage']==stage
@@ -822,3 +823,27 @@ def test_monitoring_continuous_coding_and_review_have_no_provider_ceiling(app_en
     assert svc._usage(rid)['known_cost_usd'] == 200
     assert run['artifacts']['session_id'] == 'persistent-session'
     assert Path(p['workspace'], 'greeting.txt').read_text() == 'hello'
+
+
+@pytest.mark.parametrize('spent', [8.0, 10.0])
+def test_partial_check_resume_enters_local_executor_without_new_coding_allocation(app_env, monkeypatch, spent):
+    store, svc, p, rid, _ = prepared(app_env, monkeypatch)
+    svc._plan(rid)
+    planned = store.get(rid)
+    saved = {'base_sha': planned['context']['commit_sha'], 'commit': None,
+             'tasks': [{'id': 'coding', 'status': 'running'}],
+             'checks_checkpoint': {'paths': [], 'checks': []},
+             'verification_budget_reserved_usd': 2.0}
+    store.append(rid, 'usage.recorded', {'profile': 'standard', 'cost_usd': spent})
+    store.update(rid, {'status': 'needs_human', 'artifacts': saved})
+    svc.continue_run(rid, '', planned['revision'], 0, 'owner')
+    assert store.get(rid)['execution_resume']['resume_stage'] == 'checks'
+    calls = []
+    def execute(**kwargs):
+        calls.append(kwargs)
+        raise ExecutionError('local executor reached', artifacts=saved)
+    svc.continuous_execute = execute
+    svc._run(rid)
+    assert len(calls) == 1
+    assert calls[0]['plan']['tasks'][0]['resume_stage'] == 'checks'
+    assert calls[0]['project']['budget_usd'] == pytest.approx(10.0 - spent)

@@ -1,0 +1,14 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="让下一班能继续处理"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="环境事实\n版本 · 路径 · 负责人"];
+  b [label="当前未闭环事项\nrun ID · 等待谁 · 风险"];
+  c [label="恢复能力\n备份 · 演练 · 回退"];
+  d [label="交接记录\n事实 + 已做操作 + 证据"];
+  e [label="明确下一步\n责任人 · 时间 · 验收条件"];
+  a -> d [label=""];
+  b -> d [label=""];
+  c -> d [label=""];
+  d -> e [label=""];
+}

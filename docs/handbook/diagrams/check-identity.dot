@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="旧检查结果何时仍可信"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="已通过且未超时/取消的结果"];
+  b [label="源码内容与路径"];
+  c [label="命令与工具身份"];
+  d [label="实际脱敏环境摘要\n含 CI / TZ / locale"];
+  e [label="工作区与需求身份"];
+  f [label="所有身份仍匹配？"];
+  g [label="复用已通过证据"];
+  h [label="重跑失效或缺失检查\n源码/Git 冲突需阻止恢复"];
+  a -> b [label="逐项核对"];
+  b -> c [label=""];
+  c -> d [label=""];
+  d -> e [label=""];
+  e -> f [label=""];
+  f -> g [label="是"];
+  f -> h [label="否"];
+}

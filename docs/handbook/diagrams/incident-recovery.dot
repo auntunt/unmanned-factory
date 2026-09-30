@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="中断现场三条处理路径"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="运行中断\n先保留 run ID 与检查点"];
+  b [label="仍有写者 / 无法证实退出"];
+  c [label="本地现场可证明一致"];
+  d [label="外部发布结果不明"];
+  e [label="阻止第二个写者\n核对活动锁与进程组"];
+  f [label="按恢复协议继续\n补齐检查与独立验收"];
+  g [label="查远端回执\n明确授权后处理"];
+  a -> b [label=""];
+  a -> c [label=""];
+  a -> d [label=""];
+  b -> e [label=""];
+  c -> f [label=""];
+  d -> g [label=""];
+}

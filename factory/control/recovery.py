@@ -30,9 +30,10 @@ def _failed_platform_checks(artifacts):
     if not isinstance(artifacts, dict):
         return []
     records = list(artifacts.get('checks') or [])
-    checkpoint = artifacts.get('finalization_checkpoint')
-    if isinstance(checkpoint, dict):
-        records.extend(checkpoint.get('checks') or [])
+    for key in ('finalization_checkpoint', 'checks_checkpoint'):
+        checkpoint = artifacts.get(key)
+        if isinstance(checkpoint, dict):
+            records.extend(checkpoint.get('checks') or [])
     return [record for record in records
             if isinstance(record, dict) and (record.get('cancelled')
             or record.get('timeout') or record.get('exit') != 0)]
@@ -45,6 +46,8 @@ def _continuous_resume_stage(artifacts, *, budget_stop=False):
     failed_checks = _failed_platform_checks(artifacts)
     if artifacts.get('finalization_checkpoint') and not failed_checks:
         return 'finalization'
+    if artifacts.get('checks_checkpoint') and not failed_checks:
+        return 'checks'
     if ((artifacts.get('budget_exhausted') or budget_stop)
             and not artifacts.get('commit')
             and _has_successful_command_evidence(artifacts)

@@ -1,0 +1,16 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="维护人员的第一条路线"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="确认现场\n版本 · 数据 · 负责人"];
+  b [label="分清环境\n演练与生产"];
+  c [label="判断症状\n页面 / 模型 / 任务"];
+  d [label="保留证据\nrun ID · 检查点 · SHA"];
+  e [label="执行获授权处置\n恢复 / 升级 / 回退"];
+  f [label="验收并交班\n结果 · 缺口 · 下一步"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label=""];
+  d -> e [label=""];
+  e -> f [label=""];
+}

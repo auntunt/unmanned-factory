@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="一个数据域只允许一个协调器"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="网页服务\nfactory-web serve"];
+  b [label="最小执行器\nmaintenance runtime"];
+  c [label="同一 control.db 的\n排他 OS 文件锁"];
+  d [label="持锁协调器\n最多 4 个活动任务"];
+  e [label="任务 A\nSDK 进程组"];
+  f [label="任务 B\nSDK 进程组"];
+  g [label="CLI 查询 / 入队\n不持执行器锁"];
+  a -> c [label="二选一"];
+  b -> c [label="二选一"];
+  c -> d [label="唯一持有者"];
+  d -> e [label=""];
+  d -> f [label=""];
+  g -> d [label="入队后由协调器认领"];
+}

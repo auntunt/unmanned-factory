@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="四角色与实际模型调用"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="planner / cheap\nstandard / strong"];
+  b [label="持久运行配置\nProvider + 实际模型 ID"];
+  c [label="SDKRunner"];
+  d [label="独立 SDK 子进程"];
+  e [label="供应商 / 中转网关\n账户额度与最终扣费"];
+  f [label="结构化事件与会话 ID\n用量可为未知"];
+  g [label="持久任务与后续派发判断"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label="隔离 SDK"];
+  d -> e [label="受控请求"];
+  e -> f [label="响应/错误"];
+  f -> g [label="保存事实"];
+}

@@ -1,0 +1,19 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="以同一次运行串联现场"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="run ID + UTC 窗口\n提交 + 配置 revision"];
+  b [label="系统日志\n服务 · 端口 · 资源"];
+  c [label="持久事件\n队列 · 检查点 · 调用"];
+  d [label="结果证据\n检查 · 验收 · 提交"];
+  e [label="外部回执\nPR / 部署 / 其他动作"];
+  f [label="最小脱敏故障包\n事实 · 已做操作 · 下一步"];
+  a -> b [label=""];
+  a -> c [label=""];
+  a -> d [label=""];
+  a -> e [label=""];
+  b -> f [label=""];
+  c -> f [label=""];
+  d -> f [label=""];
+  e -> f [label=""];
+}

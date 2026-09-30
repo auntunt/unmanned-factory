@@ -1,0 +1,24 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="从入口逐层排查"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="页面可达？"];
+  b [label="服务 / 代理 / 静态产物"];
+  c [label="登录和写请求可用？"];
+  d [label="origin / 会话 / CSRF"];
+  e [label="任务是否等待人工？"];
+  f [label="澄清 / 规格 / 授权 / 预算"];
+  g [label="执行器与运行时就绪？"];
+  h [label="锁 / SDK / 模型 / 沙箱"];
+  i [label="检查或验收失败？"];
+  j [label="看原始有界证据\n修代码或环境，再验证"];
+  a -> b [label="否"];
+  a -> c [label="是"];
+  c -> d [label="否"];
+  c -> e [label="是"];
+  e -> f [label="是"];
+  e -> g [label="否"];
+  g -> h [label="否"];
+  g -> i [label="是"];
+  i -> j [label="是"];
+}

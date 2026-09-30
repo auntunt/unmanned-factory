@@ -1,0 +1,14 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="配置有不同生命周期"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="服务进程环境\n目录 · origin · 秘密"];
+  b [label="首次 seed\n角色与执行限额"];
+  c [label="数据库版本化运行配置\n管理员保存 revision"];
+  d [label="单次运行快照\n合同 · 模型 · 授权"];
+  e [label="继续任务\n核对原边界与新指令"];
+  a -> b [label="仅未初始化时"];
+  b -> c [label=""];
+  c -> d [label="创建/合法更新"];
+  d -> e [label="恢复时再核对"];
+}

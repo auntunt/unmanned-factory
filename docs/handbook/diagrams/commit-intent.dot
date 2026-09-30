@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="#ffffff", pad="0.24", nodesep="0.34", ranksep="0.46", fontname="Noto Sans CJK SC", fontsize=19, fontcolor="#102b46", labelloc=t, label="精确提交意图协议"];
+  node [shape=box, style="rounded,filled", color="#a7bfd3", fillcolor="#edf4f9", fontcolor="#17324d", fontname="Noto Sans CJK SC", fontsize=15, penwidth=1.2, margin="0.18,0.13"];
+  edge [color="#617c94", fontcolor="#4a6379", fontname="Noto Sans CJK SC", fontsize=11, arrowsize=0.75, penwidth=1.2];
+  a [label="整组检查通过\nfinalization_checkpoint"];
+  b [label="核对源码 → stage 已审路径\nwrite-tree"];
+  c [label="commit-tree 创建对象\n分支尚未推进"];
+  d [label="持久 commit_intent\nexpected SHA · parent · tree\nbranch · 源码指纹"];
+  e [label="update-ref 比较并交换\n只从原 parent 推进"];
+  f [label="核对 HEAD 与 Git 边界\n保存最终检查点"];
+  g [label="重启仅接纳精确 expected SHA\n或符合 staged 意图的原 parent"];
+  h [label="重核检查身份 → 独立验收\n不跳过证据"];
+  a -> b [label=""];
+  b -> c [label=""];
+  c -> d [label=""];
+  d -> e [label="持久化成功"];
+  e -> f [label=""];
+  d -> g [label="中断恢复"];
+  g -> h [label="严格匹配"];
+}
