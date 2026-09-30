@@ -28,7 +28,7 @@ def now():
 
 def scrub(value, *, max_chars=100_000):
     if isinstance(value, dict):
-        return {str(k): '***REDACTED***' if is_sensitive_key(k) else scrub(v, max_chars=max_chars)
+        return {str(k): '***REDACTED***' if is_sensitive_key(k, value=v) else scrub(v, max_chars=max_chars)
                 for k, v in value.items() if str(k) not in {'thinking', 'reasoning', 'chain_of_thought'}}
     if isinstance(value, (list, tuple)):
         return [scrub(v, max_chars=max_chars) for v in value]

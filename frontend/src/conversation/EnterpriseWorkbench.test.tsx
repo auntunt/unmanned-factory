@@ -125,3 +125,20 @@ it('refreshes visible pages, skips overlapping reads, and stops polling on unmou
   await act(async () => { vi.advanceTimersByTime(5000) })
   expect(api).toHaveBeenCalledTimes(3)
 })
+
+it('shows acceptance-ledger counters only from an explicit structured ledger', async () => {
+  api.mockImplementation(async url => {
+    if (url.endsWith('/conversation')) return { messages: [] } as never
+    if (url.endsWith('/deliverables')) return { items: [] } as never
+    return run('ledger', 'ready_for_review', { artifacts: { acceptance_ledger: {
+      counts: { pass: 2, fail: 1, unverified: 3 },
+      items: [{ id: 'criterion', text: '已记录的验收条件', status: 'fail' }],
+    } } }) as never
+  })
+  render(<MemoryRouter initialEntries={['/runs/ledger']}><Routes><Route path="/runs/:runId" element={<RunWorkspace {...props} pollMs={0} />} /></Routes></MemoryRouter>)
+  await screen.findByText('查看验证记录')
+  expect(screen.getByText('通过 2')).toBeTruthy()
+  expect(screen.getByText('未通过 1')).toBeTruthy()
+  expect(screen.getByText('未验证 3')).toBeTruthy()
+  expect(screen.getByText('已记录的验收条件')).toBeTruthy()
+})

@@ -53,3 +53,11 @@
 }
 .ew-history .ew-refresh a { color: var(--cv-accent); margin: 0 4px; }
 .ew-history .cv-li-body strong { white-space: normal; }
+
+.cv-recorded-checks { margin: 12px 0; }
+.cv-recorded-check { border-top: 1px solid var(--cv-border); padding: 10px 0; }
+.cv-recorded-check summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; cursor: pointer; font-size: 13px; }
+.cv-recorded-check summary span { min-width: 0; overflow-wrap: anywhere; }
+.cv-recorded-check summary strong { flex-shrink: 0; }
+.cv-recorded-check pre { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--cv-raised); padding: 10px; border-radius: 8px; margin: 8px 0; }
+.ew-check-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--cv-muted); }

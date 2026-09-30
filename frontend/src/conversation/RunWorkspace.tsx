@@ -13,6 +13,7 @@ import { BudgetResume } from '../workbench/RequirementConfirmation'
 import PackFromDeliverables from '../workbench/PackFromDeliverables'
 import './conversation.css'
 import './enterprise-workbench.css'
+import RecordedChecks, { recordedChecks } from './RecordedChecks'
 
 type Deliverable = { id: string | number; name: string; kind?: string; size?: number; preview?: boolean }
 type DeliverList = { items?: Deliverable[]; saved?: boolean; collection_error?: string; recommended_preview_id?: string | number | null; can_collect?: boolean; repository_url?: string | null; delivery_type?: DeliveryType; installer_targets?: string[] | null }
@@ -360,7 +361,8 @@ function VerificationDrawer({ run, ledger }: { run: Run; ledger: Ledger | null }
   const commit = typeof run.artifacts?.commit === 'string' ? run.artifacts.commit as string : null
   const failure = typeof run.error === 'string' ? run.error : typeof run.artifacts?.failure_reason === 'string' ? run.artifacts.failure_reason as string : null
   const hasLedger = Boolean(ledger?.items?.length || ledger?.counts)
-  if (!hasLedger && cost == null && !failure) return null
+  const checks = recordedChecks(run)
+  if (!hasLedger && !checks.length && cost == null && !failure) return null
   return (
     <details className="cv-collapse">
       <summary><Icon name="triangle" className="cv-disclosure" width={13} height={13} /> 查看验证记录</summary>
@@ -370,6 +372,7 @@ function VerificationDrawer({ run, ledger }: { run: Run; ledger: Ledger | null }
         {(ledger?.items || []).map(item => <div className="cv-verify-row" key={item.id}><span>{item.text}</span>
           <span className={`cv-verify-status ${item.status === 'pass' ? 'cv-verify-pass' : item.status === 'fail' ? 'cv-verify-fail' : 'cv-verify-unv'}`}>
             {item.status === 'pass' ? '通过' : item.status === 'fail' ? '未通过' : '未验证'}</span></div>)}
+        <RecordedChecks rows={checks} />
         {failure && <div className="cv-verify-row"><span>失败原因</span><span className="cv-verify-status cv-verify-fail">见下</span></div>}
         {failure && <p style={{ color: 'var(--cv-muted)', fontSize: 13, marginTop: 6 }}>{failure}</p>}
         {commit && <p style={{ color: 'var(--cv-faint)', fontSize: 12, marginTop: 8 }}>验收版本 {commit.slice(0, 8)} · 结果来自真实检查记录。</p>}

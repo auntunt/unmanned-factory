@@ -104,3 +104,29 @@ def test_legacy_audit_persists_no_structured_secret_values(tmp_path):
     assert 'SYNTHETIC-legacy-secret' not in json.dumps(recorded)
     assert recorded[0]['input_tokens'] == 12
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('fn', [redact, scrub])
+@pytest.mark.parametrize('flag', [True, False])
+def test_authorization_requirement_remains_a_boolean_contract_flag(fn, flag):
+    value = {'capability': {'requires_authorization': flag,
+                           'Authorization': 'Bearer SYNTHETIC-credential'}}
+    result = fn(value)
+    assert result['capability']['requires_authorization'] is flag
+    assert result['capability']['Authorization'] == MASK
+
+
+@pytest.mark.parametrize('fn', [redact, scrub])
+def test_authorization_flag_name_cannot_hide_credential_strings(fn):
+    assert fn({'requires_authorization': 'SYNTHETIC-credential'})['requires_authorization'] == MASK
+
+
+def test_authorization_contract_flag_survives_persistent_audit_roundtrip(tmp_path):
+    store = Store(tmp_path / 'control.db')
+    project = store.add_project({'repository': 'synthetic/auth-contract', 'name': 'Synthetic'})
+    run, _ = store.create_run(project['id'], 'Synthetic contract audit')
+    store.append(run['id'], 'capability.updated', {'manifest': {
+        'requires_authorization': True, 'Authorization': 'Bearer SYNTHETIC-credential'}})
+    payload = store.events(run['id'])[-1]['payload']['manifest']
+    assert payload['requires_authorization'] is True
+    assert payload['Authorization'] == MASK

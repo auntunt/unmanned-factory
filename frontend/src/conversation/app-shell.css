@@ -99,7 +99,13 @@
   .as-side { display: none; }
   .as-hamburger { display: inline-grid; place-items: center; }
   .as-mobile-brand { display: block; }
-  .as-topbar { height: 56px; padding: 0 14px; }
+  .as-topbar { height: 56px; padding: 0 14px; gap: 8px; }
+  /* A long environment warning must remain readable without making the shell
+     wider than the viewport. Keep its full text, wrapping instead of clipping. */
+  .as-topbar-right { min-width: 0; max-width: 45%; flex-shrink: 1; }
+  .as-topbar-right .as-avatar-sm { display: none; }
+  .as-env { min-width: 0; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+  .as-env svg { flex-shrink: 0; }
   .as-subnav { padding: 0 14px; }
   .as-content .wb-shell > :is(.wb-page, .wb-detail-page, .cl-page, .tm-page, .ov3-page) { padding: 20px 16px 48px; }
   .as-scrim { display: block; position: fixed; inset: 0; z-index: 45; border: 0; background: var(--cv-overlay, rgba(15,25,20,.5)); }
