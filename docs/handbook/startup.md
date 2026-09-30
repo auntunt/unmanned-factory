@@ -79,3 +79,19 @@ systemctl is-active factoryweb.service
 5. 若要求真实模型，必须记录真实探针或任务回执；演练不能代替
 
 代码：`app.py::_build_app/main`、`scripts/preview_v3.py`、`frontend/vite.config.ts`、`pyproject.toml`、`.github/workflows/ci.yml`。
+
+## 本机部署预检
+
+新增 `factory-runtime preflight --json` 用于服务账户下的只读部署前提核对，仓库的 deploy/README.md 同步记录此流程。默认数据目录、工作区和前端路径与服务共用解析逻辑，避免从其他目录启动工具时检查错现场。
+
+它检查 HTTPS origin、数据库及已有 SQLite 边车文件权限、前端脚本/样式引用、真实隔离金丝雀。退出码 0 仅代表本地前提通过，1 是已确认阻断，2 是仍有未知项；不能据此宣称真实模型、浏览器、备份恢复或生产 TLS 已验收。工具不会创建、迁移或 chmod 现有数据路径。
+
+```sh
+.venv/bin/factory-runtime preflight --json \
+  --data-dir "$FACTORY_CONTROL_DATA" \
+  --workspace "$FACTORY_WORKSPACE_ROOT" \
+  --static-dir "$FACTORY_STATIC_DIR" \
+  --public-origin "$FACTORY_PUBLIC_ORIGIN"
+```
+
+由维护人员在服务账户环境中确认这些变量指向实际配置；不要将含凭据的环境文件打印到支持记录。

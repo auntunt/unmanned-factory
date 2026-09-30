@@ -180,11 +180,35 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--db", default=None, metavar="PATH", help="control-plane SQLite database")
     doctor.add_argument("--workspace", default=None, metavar="PATH", help="checkout to inspect")
     doctor.add_argument("--static-dir", default=None, metavar="PATH", help="built frontend directory")
+    preflight = sub.add_parser("preflight", help="read-only production prerequisites; no model or deployment calls")
+    preflight.add_argument("--json", action="store_true")
+    preflight.add_argument("--data-dir", default=None)
+    preflight.add_argument("--workspace", default=None)
+    preflight.add_argument("--static-dir", default=None)
+    preflight.add_argument("--public-origin", default=os.getenv("FACTORY_PUBLIC_ORIGIN"))
+    preflight.add_argument("--env-file", default=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "preflight":
+        from factory.control.readiness import inspect_deployment
+        from factory.control.deployment_paths import data_directory, workspace_directory, static_directory
+        report = inspect_deployment(
+            data_dir=data_directory(args.data_dir), workspace=workspace_directory(args.workspace),
+            static_dir=static_directory(args.static_dir), public_origin=args.public_origin,
+            env_file=Path(args.env_file).expanduser() if args.env_file else None)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        else:
+            print("webuddy deployment preflight: " + report['status'])
+            for item in report['checks']:
+                print(f"  {item['status']:<7} {item['id']}: {item['detail']}")
+                if item.get('action'):
+                    print('          ' + item['action'])
+            print(report['note'])
+        return {'passed': 0, 'blocked': 1, 'unknown': 2}[report['status']]
     if args.command != "doctor":  # pragma: no cover - argparse enforces this
         return 2
     try:

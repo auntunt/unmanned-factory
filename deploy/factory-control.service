@@ -6,6 +6,8 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
+# New database, audit and artifact files must not be world-readable.
+UMask=0077
 Type=simple
 User=ubuntu
 Group=ubuntu

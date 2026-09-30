@@ -12,6 +12,7 @@ import RequirementConfirmation from '../workbench/RequirementConfirmation'
 import { BudgetResume } from '../workbench/RequirementConfirmation'
 import PackFromDeliverables from '../workbench/PackFromDeliverables'
 import './conversation.css'
+import './enterprise-workbench.css'
 
 type Deliverable = { id: string | number; name: string; kind?: string; size?: number; preview?: boolean }
 type DeliverList = { items?: Deliverable[]; saved?: boolean; collection_error?: string; recommended_preview_id?: string | number | null; can_collect?: boolean; repository_url?: string | null; delivery_type?: DeliveryType; installer_targets?: string[] | null }
@@ -137,7 +138,8 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
   }
 
   const stop = async () => {
-    if (!run || sending || !canAct) return
+    if (!run || sending || sendLock.current || !canAct) return
+    sendLock.current = true
     setSending(true); setActionError(null)
     try { await request(`/api/v2/runs/${rid}/cancel`, { method: 'POST', csrfToken, onUnauthorized, body: {} }); await load() }
     catch (cause) { setActionError(errorText(cause)) } finally { sendLock.current = false; setSending(false) }
@@ -160,11 +162,20 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
     <div className="cv-run">
       <div className="cv-run-scroll" ref={scrollRef}>
         <div className="cv-run-inner">
-          {loadError && <div className="cv-error" role="alert">刷新失败，保留上次记录：{loadError}</div>}
+          <header className="ew-run-context">
+            <div><span className="ew-eyebrow">任务 #{run.id}</span><h1>{title}</h1></div>
+            <div className="ew-run-meta">
+              {run.project_id != null && <Link to={`/projects/${encodeURIComponent(String(run.project_id))}`}>项目 #{run.project_id}</Link>}
+              <span>更新于 {formatDate(run.updated_at)}</span>
+              <span>{run.revision ? `计划版本 ${run.revision}` : '尚无计划版本'}</span>
+              {run.resume_count ? <span>已接续 {run.resume_count} 次</span> : null}
+            </div>
+          </header>
+          {loadError && <div className="cv-error" role="alert">刷新失败，保留上次记录：{loadError}<button className="cv-btn cv-btn-secondary" onClick={() => void load()}>重新同步</button></div>}
           {typeof run.source?.retry_of === 'string' && <p><Link to={`/runs/${encodeURIComponent(run.source.retry_of)}`}>查看上一次运行与证据</Link></p>}
           {run.retry_run_id && <p><Link to={`/runs/${encodeURIComponent(run.retry_run_id)}`}>查看接手此任务的后续运行</Link></p>}
           <section className="cv-progress" aria-label="任务进度">
-            <div className="cv-progress-head">
+            <div className="cv-progress-head" role="status">
               <span className={`cv-progress-dot ${head === 'active' ? 'is-active' : head === 'fail' ? 'is-fail' : head === 'wait' || head === 'paused' ? 'is-wait' : ''}`} />
               {run.status === 'inspection_completed' ? '巡检已完成' : String(run.status) === 'interrupted' ? '任务已中断' : HEAD_LABEL[head]}
             </div>
@@ -172,7 +183,7 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
               {STAGES.map((s, index) => {
                 const state = head === 'unknown' ? '' : head === 'done' && run.status !== 'inspection_completed' ? 'is-done' : head === 'fail' && index === current ? 'is-fail'
                   : index < current ? 'is-done' : index === current ? 'is-current' : ''
-                return <div className={`cv-stage ${state}`} key={s.key}>
+                return <div className={`cv-stage ${state}`} key={s.key} aria-current={state === 'is-current' ? 'step' : undefined}>
                   <span className="cv-stage-mark">{state === 'is-done' ? <Icon name="triangle" width={13} height={13} style={{ transform: 'rotate(0deg)' }} /> : null}</span>
                   {s.label}
                 </div>
@@ -219,8 +230,8 @@ export default function RunWorkspace({ csrfToken, onUnauthorized, user, pollMs =
                 onKeyDown={e => { if (!e.shiftKey && e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }} />
               <div className="cv-composer-foot">
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  {mode?.approve && !draft.trim() && <button type="submit" className="cv-btn cv-btn-primary" disabled={sending}>{mode.approve}</button>}
-                  {head === 'active' && <button type="button" className="cv-attach" disabled={sending} onClick={stop} aria-label="停止任务"><Icon name="preview" width={16} height={16} /> 停止</button>}
+                  {mode?.approve && !draft.trim() && <button type="submit" className="cv-btn cv-btn-primary" disabled={sending || !canAct}>{mode.approve}</button>}
+                  {head === 'active' && <button type="button" className="cv-attach" disabled={sending || !canAct} onClick={stop} aria-label="停止任务"><Icon name="preview" width={16} height={16} /> 停止</button>}
                 </div>
                 <button className="cv-send" type="submit" disabled={!canAct || sending || (mode?.needsText && !draft.trim())} aria-label={mode?.send || '发送'}>
                   {sending ? <span className="cv-spinner" style={{ borderTopColor: 'var(--cv-on-accent)' }} /> : <Icon name="arrow" width={20} height={20} />}

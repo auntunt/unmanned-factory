@@ -106,3 +106,48 @@ jobs:
       - uses: actions/checkout@v5
       - run: docker build -f runtime/project-browser/Dockerfile.smoke -t webuddy-browser-smoke .
       - run: docker run --rm --privileged webuddy-browser-smoke
+
+  application-e2e:
+    # Real frontend + HTTP/auth/store; only model output is scripted and labelled.
+    # Keep this independent so a backend unit-test failure cannot hide UI status.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install supported isolation dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          /usr/bin/bwrap --unshare-user --ro-bind / / true
+      - run: uv sync --frozen --all-extras
+      - name: Verify isolation before synthetic task execution
+        run: uv run --no-sync python .github/scripts/isolation_canary.py
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run typecheck:e2e
+        working-directory: frontend
+      - name: Real application operator journey (synthetic model only)
+        run: npm run test:e2e
+        working-directory: frontend
+      - name: Retain browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-e2e-synthetic-rehearsal
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 14

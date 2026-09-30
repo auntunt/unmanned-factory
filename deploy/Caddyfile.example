@@ -1,17 +1,21 @@
-# 看板的公网入口示例。把 HOST 换成你的 IP 或域名。
+# webuddy 控制工作台的 HTTPS 公网入口示例。将 factory.example.com
+# 替换为你的真实域名，并与 FACTORY_PUBLIC_ORIGIN=https://该域名 保持一致。
+# 让 DNS 指向此主机并允许 ACME 验证；Caddy 自动获取/续期 TLS 证书。
+# 不要改成 http://：浏览器会话与任何入口认证都必须经过 HTTPS。
 #
 # 控制服务自己的登录会话、Cookie 和 CSRF 是应用认证边界；Caddy 的
 # basic_auth（如保留）只是额外的网络入口门槛，不能替代应用登录。生成哈希：
 # caddy hash-password
 #
-# dashboard 固定绑 127.0.0.1（它刻意不提供 --host），只能从本机连上，
-# 全部暴露面都由这份配置决定。
+# 当前 factory-web serve 仅绑定 127.0.0.1（默认端口8788），
+# Caddy 是公网入口；如改服务端口，需同步修改下方 upstream。
 
-http://HOST {
-	basic_auth {
-		# caddy hash-password --plaintext '你的密码'
-		admin PASTE_BCRYPT_HASH_HERE
-	}
+factory.example.com {
+	# 可选的额外网络入口限制；不能替代应用自身登录/角色/CSRF。
+	# 如需启用，使用 caddy hash-password 的交互输入，不将密码写到shell历史。
+	# basic_auth {
+	#     admin PASTE_BCRYPT_HASH_HERE
+	# }
 
 	# 如果你曾经把看板挂在某个前缀下（如 /factory），保留这两行让旧书签不 404。
 	# 308 而不是 302 —— 保留请求方法，否则老书签发的 POST 会被降级成 GET，
@@ -24,5 +28,5 @@ http://HOST {
 	@factory path_regexp fx ^/factory(/.*)$
 	redir @factory {http.regexp.fx.1} 308
 
-	reverse_proxy localhost:8788
+	reverse_proxy 127.0.0.1:8788
 }

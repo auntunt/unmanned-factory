@@ -107,3 +107,34 @@ chosen SDK before enabling a new service. SDK sandboxing and a web login do
 not provide separate OS identities for the control plane and workers.
 
 See [HERMES-HANDOFF.md](HERMES-HANDOFF.md) for local operator assistance.
+
+## Read-only deployment prerequisites
+
+Before a release, run the local preflight as the actual service account. It
+inspects private database paths, the HTTPS origin, built asset references and
+the real execution-isolation canary. It makes no model or deployment call and
+does not chmod, create, migrate or restore the live data paths.
+
+```sh
+.venv/bin/factory-runtime preflight --json \
+  --data-dir '<existing FACTORY_CONTROL_DATA directory>' \
+  --workspace '<existing FACTORY_WORKSPACE_ROOT directory>' \
+  --static-dir '<reviewed frontend build directory>' \
+  --public-origin 'https://<actual service domain>' \
+  --env-file '<existing EnvironmentFile path>'
+```
+
+Exit status is 0 for passing **local prerequisites**, 1 for a verified blocker,
+and 2 when a local prerequisite remains unknown. This does not certify the
+release: exact-commit CI, real provider acceptance, browser workflows, external
+TLS and a quiesced restore drill are listed separately as unverified by this
+command. Installing bubblewrap alone is insufficient; do not disable isolation
+when the real canary fails.
+
+New databases are created owner-only (0600), and newly required directories
+owner-only (0700), without changing the process umask. The new-host systemd
+example uses `UMask=0077`. Existing database/directory permissions are preserved
+rather than silently changing a shared deployment. If preflight reports older
+permissive files, an authorized operator must review their ownership and
+restrict them in the existing deployment. Database backups also contain
+password hashes, sessions and business data; never attach them to public issues.

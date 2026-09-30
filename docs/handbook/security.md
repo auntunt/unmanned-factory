@@ -35,3 +35,9 @@
 关闭 TLS/来源校验、取消沙箱、共享管理员密码、复制真实密钥进示例、删除审计记录、强行放开工作区范围、把审批等待状态改为可执行。这些操作改变安全边界，应进入单独审查流程。
 
 代码：`app.py::boundary`、`auth.py`、`auth_routes.py`、`governance.py`、`maintenance_cli.py::LocalOperatorIdentity`、`deploy_targets.py::key_dir/key_path`、`remote_targets.py`。
+
+## 本地文件与审计值
+
+新建认证、控制及旧审计数据库使用 0600，新建必要目录使用 0700；新主机服务模板还设置 `UMask=0077`。既有目录和文件权限不会被代码擅自修改。升级时由获授权维护人员检查主数据库、`-wal`/`-shm`/`-journal` 及备份的所有者和访问权限；只收紧主文件不能证明边车文件也安全。
+
+结构化审计会按敏感键遮蔽密码、API key、访问 token、私钥等值，包括常见带前缀和 camelCase 字段；保留 token 用量计数和会话引用。脱敏降低误记录风险，不能取代最小权限，也不能保证任意自由文本秘密都会被识别。

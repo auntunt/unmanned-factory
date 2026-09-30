@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from factory.private_files import prepare_private_database
+
 
 # PBKDF2 is available in every supported Python build.  The encoded format keeps
 # the parameters with the hash so a future iteration increase can be introduced
@@ -115,7 +117,7 @@ class AuthStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        prepare_private_database(self.path)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:

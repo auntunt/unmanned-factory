@@ -35,6 +35,7 @@ from factory.audit.models import (
     utc_now,
 )
 from factory.redact import redact, redact_text
+from factory.private_files import prepare_private_database
 
 # 建表跨实例串行化。同一进程内多个 AuditStore 指向同一文件是并行派发的常态。
 _SCHEMA_LOCK = threading.Lock()
@@ -45,6 +46,7 @@ _INSERT_RETRIES = 8
 
 class AuditStore:
     def __init__(self, db_path: str | Path) -> None:
+        prepare_private_database(db_path)
         memory = str(db_path) == ":memory:"
         url = "sqlite://" if memory else f"sqlite:///{db_path}"
         # in-memory 时同一个 engine 内的连接池会复用同一条连接，
