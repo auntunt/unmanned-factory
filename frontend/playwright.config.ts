@@ -21,7 +21,7 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: '../.venv/bin/python ../scripts/preview_v3.py --port 8790',
+    command: '../.venv/bin/python ../scripts/preview_enterprise.py --port 8790',
     url: 'http://127.0.0.1:8790/',
     reuseExistingServer: false,
     timeout: 60_000,
